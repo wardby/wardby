@@ -271,19 +271,22 @@ export function outcomeBody(
     packageRefusals: refusals,
     noChanges: opts.noChanges,
   });
-  const warned = warningRefusals(refusals);
+  const blockedBy = blocked ? blockingRefusals({ pullRequests, failedChildren, packageRefusals: refusals }) : [];
+  // The ⚠️ line: on a no-changes run it keeps listing-only refusals (see LISTING_REFUSAL_FILENAME), and
+  // when blocked it holds only those the ⛔ list leaves out.
+  const noChangesRun = opts.noChanges === true && pullRequests.length === 0;
+  const warned = blocked
+    ? refusals.filter((refusal) => !blockedBy.includes(refusal))
+    : noChangesRun
+      ? refusals
+      : warningRefusals(refusals);
   const warning =
-    !blocked && (links.length > 0 || run.status === "succeeded") && warned.length > 0
+    (links.length > 0 || run.status === "succeeded") && warned.length > 0
       ? packageRefusalWording(warned, { blocked: false })
       : "";
   const audit = opts.packageAudit ? packageAuditWording(opts.packageAudit.mode, opts.packageAudit.summary) : "";
   const footer = warning + (warning ? "\n\n" : "") + audit + (audit ? "\n\n" : "") + runLine(run.id);
-  if (blocked)
-    return (
-      packageRefusalWording(blockingRefusals({ pullRequests, failedChildren, packageRefusals: refusals })) +
-      "\n\n" +
-      footer
-    );
+  if (blocked) return packageRefusalWording(blockedBy) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -472,6 +475,7 @@ export async function collectRunOutcome(
           reason: true,
           sizeBytes: true,
           filename: true,
+          runId: true,
         },
         orderBy: { createdAt: "asc" },
       });

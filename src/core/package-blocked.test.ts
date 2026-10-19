@@ -310,7 +310,7 @@ describe("package blocked status", () => {
       setWorkflowEventSink(null);
     }
   });
-  it("counts a listing-only refusal only for a failed child, and never warns a pull request with it", () => {
+  it("counts a listing-only refusal only for a failed child, warns a no-changes run, and never a pull request", () => {
     const listing = [
       { ecosystem: "pypi", name: "looked-at", reason: "wardby_file_not_allowed", listingOnly: true as const },
     ];
@@ -321,21 +321,25 @@ describe("package blocked status", () => {
       pullRequestNumber: 1,
       codeProvider: "github",
     };
-    // No changes: the installer may only have looked at the project.
+    // No changes and nothing of that name served: it may be why, so a ⚠️ line, but not ⛔.
     expect(
       isBlockedByRefusals(run, { pullRequests: [], failedChildren: [], packageRefusals: listing, noChanges: true }),
     ).toBe(false);
     const noChanges = outcomeBody(run, "repo", [], [], { packageRefusals: listing, noChanges: true });
     expect(noChanges).not.toContain("⛔");
-    expect(noChanges).not.toContain("⚠️");
-    // A failed child with nothing of that name served: it may be why.
+    expect(noChanges).toContain("⚠️ **Dependency install incomplete.**");
+    expect(noChanges).toContain("`looked-at`");
+    // A failed child: it counts toward ⛔.
     expect(isBlockedByRefusals(run, { pullRequests: [], failedChildren, packageRefusals: listing })).toBe(true);
-    expect(outcomeBody(run, "repo", [], failedChildren, { packageRefusals: listing })).toContain("`looked-at`");
-    // Blocked by a real refusal on a no-changes run: the listing-only one is not listed with it.
+    const failed = outcomeBody(run, "repo", [], failedChildren, { packageRefusals: listing });
+    expect(failed).toMatch(/^⛔/);
+    expect(failed).toContain("`looked-at`");
+    // Blocked by a real refusal on a no-changes run: the listing-only one is a ⚠️ line, not in the ⛔ list.
     const both = [...listing, ...refusals("wardby_graph_limit")];
     const blocked = outcomeBody(run, "repo", [], [], { packageRefusals: both, noChanges: true });
     expect(blocked).toMatch(/^⛔/);
-    expect(blocked).not.toContain("looked-at");
+    expect(blocked.slice(0, blocked.indexOf("⚠️"))).not.toContain("looked-at");
+    expect(blocked.slice(blocked.indexOf("⚠️"))).toContain("`looked-at`");
     expect(blockingRefusals({ pullRequests: [], failedChildren: [], packageRefusals: both })).toEqual(
       refusals("wardby_graph_limit"),
     );
@@ -343,7 +347,58 @@ describe("package blocked status", () => {
     const opened = outcomeBody(run, "repo", [pr], [], { packageRefusals: listing });
     expect(opened).toContain("Opened #1");
     expect(opened).not.toContain("⚠️");
-    expect(outcomeBody(run, "repo", [pr], [], { packageRefusals: both })).not.toContain("looked-at");
+    const openedBoth = outcomeBody(run, "repo", [pr], [], { packageRefusals: both });
+    expect(openedBoth).toContain("⚠️");
+    expect(openedBoth).not.toContain("looked-at");
+  });
+  it("keeps ⛔ and run_blocked when a sibling sub-run was served the package another one was refused", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = {
+        agent: { findUnique: async () => ({ name: "lead" }) },
+        runHostCheck: { findUnique: async () => null },
+        run: {
+          findMany: async () => [
+            { id: "a", status: "failed", codingRun: { result: null } },
+            { id: "b", status: "succeeded", codingRun: { result: { outcome: "no_changes" } } },
+          ],
+        },
+        registryFetch: {
+          findMany: vi.fn(async () => [
+            {
+              runId: "a",
+              ecosystem: "npm",
+              name: "foo",
+              version: null,
+              outcome: "refused",
+              reason: "wardby_package_not_allowed",
+              sizeBytes: null,
+              filename: null,
+            },
+            {
+              runId: "b",
+              ecosystem: "npm",
+              name: "foo",
+              version: "1.0.0",
+              outcome: "served",
+              reason: null,
+              sizeBytes: 10,
+              filename: "1.0.0.tgz",
+            },
+          ]),
+        },
+      };
+      const outcome = await collectRunOutcome(db as never, run);
+      expect(outcome.packageRefusals.map((r) => r.name)).toEqual(["foo"]);
+      expect(outcomeBody(run, "repo", outcome.pullRequests, outcome.failedChildren, outcome)).toMatch(/^⛔/);
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).toHaveBeenCalledWith(
+        expect.objectContaining({ payload: expect.objectContaining({ kind: "run_blocked" }) }),
+      );
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
   it("sends Slack run_blocked without a listing-only refusal that does not count", async () => {
     const sink = vi.fn();

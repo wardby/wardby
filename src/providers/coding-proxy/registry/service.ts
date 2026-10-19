@@ -1014,7 +1014,15 @@ export class RegistryService {
     // (route.filename), since keptFiles holds wheel filenames.
     const agedFile = route.kind === "file-metadata" ? route.filename : file?.filename;
     if (!file || !keep.has(file.version) || !agedFile || !keptFiles.has(agedFile)) {
-      await this.refuse(context, adapter, name, "wardby_version_filtered", file ?? undefined);
+      // A download that does not resolve is still a refusal of the version asked for, not of the whole
+      // name (which any version served later would clear; see summarizeRegistryFetches).
+      await this.refuse(
+        context,
+        adapter,
+        name,
+        "wardby_version_filtered",
+        file ?? (route.kind === "download" ? { version: route.version, filename: route.filename } : undefined),
+      );
       const versionSuffix = route.kind === "download" ? ` ${route.version}` : "";
       throw new RegistryError(404, "wardby_version_filtered", `"${name}"${versionSuffix} is not available to this run`);
     }

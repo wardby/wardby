@@ -15,6 +15,8 @@ export interface RegistryFetchRow {
   sizeBytes: number | null;
   /** `-/plan` for a refusal a lockfile plan recorded (see PLAN_FETCH_FILENAME). */
   filename?: string | null;
+  /** The coding run that recorded it; needed when rows of several runs are summarized together. */
+  runId?: string;
 }
 
 /** The `filename` a lockfile plan records its refusals under. */
@@ -30,12 +32,17 @@ export const PLAN_REFUSAL_FILENAME = "-/plan";
  *
  * The rule, the same for every ecosystem: a listing-only refusal is cleared
  * like any refusal of a whole name, by any version of that name served after
- * it (summarizeRegistryFetches). One left standing is marked `listingOnly`.
- * It is still reported to the agent (`wardby-packages`, GET
- * /registry/-/refusals) and in get_run, but it never adds the pull request's
- * install warning or the status comment's ⚠️ line, and it counts toward ⛔
- * "Blocked by the package registry" only when a coding sub-run failed, not
- * when it made no changes (blockingRefusals in core/host-status.ts).
+ * it in the same run (summarizeRegistryFetches). One left standing (nothing
+ * of that name was served) is marked `listingOnly`. It is reported to the
+ * agent (`wardby-packages`, GET /registry/-/refusals) and in get_run, and:
+ * - a coding sub-run failed: it counts toward ⛔ "Blocked by the package
+ *   registry" and Slack `run_blocked` like any refusal (blockingRefusals in
+ *   core/host-status.ts);
+ * - the run made no changes (and none failed): it is a ⚠️ line on the status,
+ *   never ⛔ or `run_blocked` (a package whose only release has nothing but
+ *   too-new wheels can be why);
+ * - a pull request resulted: it adds nothing, neither to the description's
+ *   install warning and package section nor to the status (warningRefusals).
  */
 export const LISTING_REFUSAL_FILENAME = "-/listing";
 
@@ -101,21 +108,31 @@ export type RegistryRefusalSummary = {
 
 /**
  * Rows must be in the order they were recorded (createdAt ascending): a
- * refusal followed by a served row for the same package no longer counts,
- * since the install went on to get it (npm retrying a temporary
- * `wardby_upstream_error`, an audit that was briefly unavailable). A refusal
+ * refusal followed by a served row for the same package in the same run
+ * (`runId`; rows without one count as one run) no longer counts, since that
+ * run's install went on to get it (npm retrying a temporary
+ * `wardby_upstream_error`, an audit that was briefly unavailable). A package
+ * served to a sibling sub-run never clears another run's refusal. A refusal
  * of one version is cleared only by that version being served; a refusal of
  * the whole name (no version) by any version of it. A refusal recorded after
  * the package was served still counts. Cleared refusals are left out of every
  * surface (get_run, the PR warning, the status comments, Slack), because each
  * of them tells the user the install did not finish, which is then untrue.
+ *
+ * Known limits: order is by record time, and a served row is recorded when
+ * its download finishes (no start time is stored), so a download that started
+ * before a concurrent refusal of the same version in the same run, and
+ * finished after it, clears it; rows in the same millisecond have no
+ * tiebreaker. Matching is per version, not per file, so serving any file of
+ * a PyPI release clears a refused file of that release (another platform's
+ * too-new wheel).
  */
 export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
   packages: RegistryPackageSummary[];
   packageRefusals: RegistryRefusalSummary[];
 } {
   const packages = new Map<string, RegistryPackageSummary>();
-  // Each refusal with the versions it still stands for ("" = the whole name).
+  // Each refusal with the run + version pairs it still stands for (version "" = the whole name).
   const refusals = new Map<string, { summary: RegistryRefusalSummary; versions: Set<string>; listing: boolean }>();
   for (const row of rows) {
     if (row.outcome === "served" && row.version) {
@@ -132,8 +149,8 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
         summary.acceptedAdvisories = [...new Set([...(summary.acceptedAdvisories ?? []), ...accepted])];
       for (const [refusalKey, refusal] of refusals) {
         if (refusal.summary.ecosystem !== row.ecosystem || refusal.summary.name !== row.name) continue;
-        refusal.versions.delete("");
-        refusal.versions.delete(row.version);
+        refusal.versions.delete(`${row.runId ?? ""}\0`);
+        refusal.versions.delete(`${row.runId ?? ""}\0${row.version}`);
         if (refusal.versions.size === 0) refusals.delete(refusalKey);
       }
     } else if (row.outcome === "refused") {
@@ -149,7 +166,7 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
         };
         refusals.set(key, refusal);
       }
-      refusal.versions.add(row.version ?? "");
+      refusal.versions.add(`${row.runId ?? ""}\0${row.version ?? ""}`);
       refusal.listing &&= row.filename === LISTING_REFUSAL_FILENAME;
     }
   }

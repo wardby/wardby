@@ -180,6 +180,17 @@ describe("RegistryService", () => {
     expect(store.fetches[0]).toMatchObject({ name: "stranger", outcome: "refused" });
   });
 
+  it("records a download of a version that does not resolve under that version, not the whole name", async () => {
+    const { registry, store } = service();
+    await expect(registry.handle(request("dl/app/9.9.9"))).resolves.toMatchObject({ status: 404 });
+    expect(store.fetches.at(-1)).toMatchObject({
+      outcome: "refused",
+      name: "app",
+      version: "9.9.9",
+      reason: "wardby_version_filtered",
+    });
+  });
+
   it("serves only versions older than the release age and grows the graph from them", async () => {
     const { registry, store } = service();
     const response = await registry.handle(request("app"));

@@ -75,6 +75,46 @@ describe("summarizeRegistryFetches", () => {
     },
   );
 
+  it("clears a refusal only with a package served in the same run", () => {
+    const row = { sizeBytes: null, filename: null };
+    const { packageRefusals } = summarizeRegistryFetches([
+      {
+        ...row,
+        runId: "a",
+        ecosystem: "npm",
+        name: "foo",
+        version: null,
+        outcome: "refused",
+        reason: "wardby_upstream_error",
+      },
+      {
+        ...row,
+        runId: "b",
+        ecosystem: "npm",
+        name: "foo",
+        version: null,
+        outcome: "refused",
+        reason: "wardby_upstream_error",
+      },
+      { ...row, runId: "b", ecosystem: "npm", name: "foo", version: "1.0.0", outcome: "served", reason: null },
+    ]);
+    // b got past it; a did not, so the refusal stands (once).
+    expect(packageRefusals.map((r) => [r.name, r.reason])).toEqual([["foo", "wardby_upstream_error"]]);
+    const cleared = summarizeRegistryFetches([
+      {
+        ...row,
+        runId: "b",
+        ecosystem: "npm",
+        name: "foo",
+        version: null,
+        outcome: "refused",
+        reason: "wardby_upstream_error",
+      },
+      { ...row, runId: "b", ecosystem: "npm", name: "foo", version: "1.0.0", outcome: "served", reason: null },
+    ]);
+    expect(cleared.packageRefusals).toEqual([]);
+  });
+
   it.each(["npm", "pypi"])(
     "marks a %s refusal recorded only from an index listing, until a real one joins it",
     (eco) => {

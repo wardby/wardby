@@ -1261,13 +1261,18 @@ the client's pin.
 
 An installer often reads an index it doesn't need (a resolver weighing
 candidates, a dependency behind a platform marker), so a refusal recorded
-only from an index weighs less than a refused download. `wardby-packages`
-and `get_run` list it (`get_run` marks it `"listingOnly": true`), but it
-adds no **Dependency install incomplete** warning or ⚠️ line, the pull
-request's package section leaves it out, and it makes
-the status ⛔ blocked only when a coding sub-run failed, not when it made no
-changes. Once any version of that name is served later in the run, it is
-dropped like any other refusal the run got past.
+only from an index weighs less than a refused download. Once any version of
+that name is served later in the same coding run, it is dropped like any
+other refusal the run got past. If nothing of that name was served,
+`wardby-packages` and `get_run` list it (`get_run` marks it
+`"listingOnly": true`), and the status shows it according to the outcome:
+
+- a coding sub-run failed: it counts toward ⛔ blocked, like any refusal;
+- the run made no changes: it is a ⚠️ dependency install line, not ⛔ (for
+  example, a package whose only release has nothing but too-new wheels);
+- a pull request was opened or updated: it adds no **Dependency install
+  incomplete** warning, no ⚠️ line, and no entry in the pull request's
+  package section.
 
 ## Safeguards
 
@@ -1398,9 +1403,11 @@ present for the allowlist codes below and omitted for codes without guidance.
 `size` is the number of bytes served, or `null` if none was recorded.
 A refusal the run got past is left out of `packageRefusals`, and so out of
 the pull request warning, the status comments and Slack: the registry later
-served the same package (for a refusal of one version, that version), for
-example after npm retried a temporary `wardby_upstream_error`. A refusal
-recorded after the package was served still counts.
+served the same package to the same coding run (for a refusal of one
+version, that version), for example after npm retried a temporary
+`wardby_upstream_error`. A package served to a different coding sub-run
+does not clear it, and a refusal recorded after the package was served
+still counts.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
 entries they refused (each refusal is also in `packageRefusals`, unless that
