@@ -46,7 +46,7 @@ import { DEPENDENCY_CACHE_ECOSYSTEM, MAX_DEPENDENCY_CACHE_LOCK_HASHES, sha256Hex
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 import { parseLockfileOffThread } from "./lockfile-parse.js";
 import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS, verifyLockfilePlan, type PlanRefusal } from "./plan.js";
-import type { RegistryRunContext, RegistryStore } from "./store.js";
+import { AUDITED_VIA_UNKNOWN, type RegistryRunContext, type RegistryStore } from "./store.js";
 
 const registryLog = logger.child({ module: "coding-registry" });
 
@@ -774,13 +774,14 @@ export class RegistryService {
     // approvals: a name allowance left behind by a failed approval write is
     // only what a walk would conclude.
     // In package audit mode an approval outside the allowlist is an audited
-    // allowance, tagged with the top-level audited package that brought it.
+    // allowance, tagged with the top-level audited package that brought it
+    // (one of unknown relation with AUDITED_VIA_UNKNOWN, never itself).
     const plain = result.approved.filter((v) => !v.audit || v.audit.relation === "allowed");
     await store.addAllowances(context.runId, adapter.id, [...new Set(plain.map((v) => v.name))]);
     const byVia = new Map<string, Set<string>>();
     for (const v of result.approved) {
       if (!v.audit || v.audit.relation === "allowed") continue;
-      const via = v.audit.via ?? v.name;
+      const via = v.audit.relation === "unknown" ? AUDITED_VIA_UNKNOWN : (v.audit.via ?? v.name);
       byVia.set(via, (byVia.get(via) ?? new Set()).add(v.name));
     }
     for (const [via, names] of byVia) await store.addAuditedAllowances(context.runId, adapter.id, [...names], via);
@@ -1107,6 +1108,7 @@ export class RegistryService {
     const allowance = await this.options.store.findAllowance(context.runId, adapter.id, name);
     if (allowance) {
       if (allowance.auditedVia === null) return { root: undefined };
+      if (allowance.auditedVia === AUDITED_VIA_UNKNOWN) return { root: undefined, audit: { relation: "unknown" } };
       return allowance.auditedVia === name
         ? { root: undefined, audit: { relation: "top-level" } }
         : { root: undefined, audit: { relation: "transitive", via: allowance.auditedVia } };
