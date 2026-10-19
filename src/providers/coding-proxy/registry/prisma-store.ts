@@ -203,7 +203,13 @@ export class PrismaRegistryStore implements RegistryStore {
         publishedAt: fact.publishedAt,
         integrity: fact.integrity,
         downloadUrl: fact.downloadUrl,
-        dependencies: fact.dependencies.map(({ key, name, range }) => ({ key, name, range })),
+        dependencies: fact.dependencies.map(({ key, name, range, extras, when }) => ({
+          key,
+          name,
+          range,
+          ...(extras ? { extras: [...extras] } : {}),
+          ...(when ? { when: [...when] } : {}),
+        })),
       })),
       skipDuplicates: true,
     });
