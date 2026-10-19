@@ -120,12 +120,22 @@ and the worker points both at the registry (`PIP_INDEX_URL`, and
 work with either: `pip install -r requirements.txt`, `uv pip install …`.
 
 - **Fully pinned requirements** (`pip-compile`, `pip freeze`) list
-  dependencies as top-level lines, so each one must be allowlisted itself;
-  otherwise it's refused `wardby_package_not_allowed`.
-- **Project installs** (`pip install .`, `uv sync`) need the build backend
-  from `[build-system] requires` (`hatchling`, `setuptools`, …) allowlisted.
-- **`uv sync` from a committed `uv.lock` and Poetry** don't work in the
-  sandbox yet: both download from pypi.org URLs instead of the registry.
+  dependencies as top-level lines, so the file is verified first, like an
+  npm lockfile: `uv pip install -r` does it itself; for pip, run
+  `wardby-packages plan requirements.txt` first. Every pin the allowlist
+  reaches is then allowed; the rest are named with their reason (too new,
+  no wheel, not reachable).
+- **`uv sync`, `uv run`, `uv add` with a committed `uv.lock`** work: the
+  worker's `uv` verifies the lock and points its PyPI URLs at the registry
+  for the command, then puts the file back (a committed lock never names
+  the registry).
+- **Project installs** (`pip install .`, `uv sync`, `uv run`) need the build
+  backend from `[build-system] requires` (`hatchling`, `setuptools`, …)
+  allowlisted, plus what it asks for while building (hatchling: `editables`
+  for an editable install).
+- **Poetry** doesn't work in the sandbox, and a `poetry.lock` or
+  `pylock.toml` can't be verified (`wardby_lockfile_unsupported`): export a
+  pinned requirements file, or use uv.
 
 pip and uv don't print why the registry refused a package (pip says
 `from versions: none`, uv `403 Forbidden`). The agent is told to run

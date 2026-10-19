@@ -275,7 +275,8 @@ A lockfileVersion 1 lockfile can't be planned (`400
 wardby_lockfile_unsupported`), so regenerate it with a current npm before the
 run to avoid that fallback. An npm started by another npm (a lifecycle
 script's) doesn't plan again; its installs also go through the usual
-checks.
+checks. Python lockfiles are verified the same way, with differences listed
+under [Python installers](#python-installers-pip-uv-and-poetry).
 
 The proxy trusts nothing the lockfile claims. For lockfileVersion 2 or 3
 (version 1 is refused with `400 wardby_lockfile_unsupported`; regenerate it
@@ -1181,20 +1182,64 @@ What works, and what doesn't yet:
 - **`pip install <package>`, `pip install -r requirements.txt` with
   top-level requirements, and `uv pip install …`** resolve top-down, so
   every dependency is allowed by the time it is requested.
-- **A fully pinned requirements file** (`pip-compile` or `pip freeze`
-  output, with or without `--hash`) lists transitive packages as top-level
-  lines. pip and uv request one before reading its parent's metadata, so it
-  is refused `wardby_package_not_allowed` unless it is allowlisted itself.
-  Allowlist those packages, or install from the top-level requirements.
-- **`pip install .`, `uv sync` and other project installs** first install
-  the project's build backend (`[build-system] requires`: `hatchling`,
-  `setuptools`, `poetry-core`, …). Allowlist it like any other package.
-- **`uv sync` from a committed `uv.lock`** is not supported in the sandbox:
-  uv downloads from the URLs recorded in the lock (`files.pythonhosted.org`),
-  which the sandbox can't reach, rather than from its index.
+- **A fully pinned requirements file** (`pip-compile`, `uv pip compile` or
+  `pip freeze` output, with or without `--hash`) lists transitive packages
+  as top-level lines, which pip and uv request before reading any parent's
+  metadata. Verify it first, as npm lockfiles are: `uv pip install -r` and
+  `uv pip sync` do this themselves (see below); for pip, run
+  `wardby-packages plan requirements.txt` before `pip install -r
+requirements.txt` (pip has no hook, and in the worker it only exists
+  inside a virtual environment). The worker tells the agent so.
+- **`uv sync`, `uv run`, `uv add`, `uv remove` and `uv lock` with a
+  committed `uv.lock`** work: the worker's `uv` is a small shim
+  (`/opt/wardby/bin/uv`) that verifies the lock first. uv installs a locked
+  project from the file URLs the lock records, never from its index, so for
+  the command the shim also points the lock's PyPI URLs at the registry
+  (without credentials; uv sends the index's), and afterwards puts the file
+  back: exactly as it was when uv left it alone, otherwise with PyPI's URLs
+  (a file the lock already had keeps its URL; a new one gets PyPI's
+  redirecting `files.pythonhosted.org/packages/<tag>/<letter>/<name>/<file>`
+  path). Before the workspace is collected, any registry URL left in a
+  `uv.lock` is rewritten the same way, so a committed lock never names the
+  registry.
+- **`pip install .`, `uv sync`, `uv run` and other project installs** build
+  the project, which installs its build backend (`[build-system] requires`:
+  `hatchling`, `setuptools`, `poetry-core`, …) and whatever the backend asks
+  for while building (hatchling asks for `editables` for an editable install,
+  which `uv sync` and `uv run` do). A lockfile doesn't record these, so
+  allowlist them like any other package.
 - **Poetry** is not supported in the sandbox: it can't be pointed at the
   registry by environment alone (it needs a primary source in
-  `pyproject.toml` plus credentials), and its lock records pypi.org.
+  `pyproject.toml` plus credentials), and a `poetry.lock` (or a
+  `pylock.toml`) is refused by the plan with `wardby_lockfile_unsupported`.
+  Export a pinned requirements file, or use uv.
+
+A Python lockfile plan (`POST /registry/pypi/-/plan`) trusts nothing the
+file claims, like an npm one, with these differences:
+
+- **Entries.** A `uv.lock` (`version = 1`): every package from PyPI (or the
+  registry). Its own projects (editable, virtual and directory sources) are
+  where the lock starts; a package from git, a URL, a path or another index
+  is refused with `wardby_lockfile_entry_unsupported`. A requirements file:
+  every exact `name==version` line (options, `-r`/`-c` includes, local
+  projects and unpinned lines are not entries; pip resolves those the usual
+  way, so plan an included file separately); a `name @ url` line is refused.
+- **Facts.** Each pinned release is read from PyPI's JSON API
+  (`pypi.org/pypi/<name>/<version>/json`, stored for reuse): its dependency
+  lines (`requires_dist`) and its wheels. A release with no wheel is refused
+  with `wardby_file_not_allowed`; its publish time, for the release-age
+  check, is its earliest wheel's. Hashes a lockfile records are not compared
+  (pip and uv check them on install).
+- **Edges and extras.** A dependency line counts when the locked version is
+  inside its specifier (a pinned pre-release included). Extras follow the
+  same rule as the dependency walk: a line gated on an extra (`extra ==
+"test"`) is followed only for an install with that extra, and extras are
+  followed only along a chain that starts at an allowlist entry naming them
+  (`psycopg[binary]`).
+- **Approvals are names.** An approved package is allowed by name for the
+  run; its downloads still go through every usual check (wheels only, each
+  file's own release age, the index's sha256, advisories). A pin refused as
+  too new or with no wheel is named in the plan's output with its reason.
 
 **Why an install was refused.** npm prints the registry's refusal body, so
 the agent sees the code and the hint. pip doesn't (a refused package shows
@@ -1248,6 +1293,9 @@ the client's pin.
   and every waiver is reported in the run's packages and in the pull request.
 - **Wheels only for Python.** PyPI source distributions (sdists), which can
   run arbitrary code at install/build time, are never served — only wheels.
+  The index still lists them, so a `uv.lock` uv writes in a run keeps them
+  as one written against PyPI does, but a download of one is refused with
+  `wardby_file_not_allowed`.
 - **npm install scripts are off, but only by configuration.** The proxy sets
   `npm_config_ignore_scripts=true` in the agent's environment, which disables
   npm's (and pnpm's) install-time script hooks; `YARN_IGNORE_SCRIPTS` and
@@ -1406,7 +1454,7 @@ same codes for the run (see
 | `wardby_audit_unavailable`           | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph.                                                                                                                                                                                                          |
 | `wardby_graph_incomplete`            | 503    | Only for a download the run hasn't resolved (a lockfile install), or a metadata request after a lockfile plan of the run failed or refused an entry: a dependency the walk reached but timed out (`REGISTRY_GRAPH_TIMEOUT_MS`) before checking its versions, usually a slow or failing upstream for that package. Retry shortly; npm retries 5xx on its own. Never means the package is outside the graph.                                                                                                                                  |
 | `wardby_graph_limit`                 | 403    | Only for a download the run hasn't resolved (a lockfile install), or a metadata request after a lockfile plan of the run failed or refused an entry: the dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES` for this run. This run's walk reached the limit before the package, so it may not be in the graph. Permanent for the run, so retrying won't help: the owner can allowlist the package directly, or the operator can raise the limit.                                                                                        |
-| `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't one the plan reads: a `package-lock.json` with lockfileVersion 2 or 3 (and a `packages` section), a `pnpm-lock.yaml` with lockfileVersion 6 or 9, or a yarn classic or yarn 2+ `yarn.lock`. Regenerate it with a current client. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the slower walk.                                                                                                                                              |
+| `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't one the plan reads: a `package-lock.json` with lockfileVersion 2 or 3 (and a `packages` section), a `pnpm-lock.yaml` with lockfileVersion 6 or 9, or a yarn classic or yarn 2+ `yarn.lock`; for PyPI, a `uv.lock` (version 1) or a pinned requirements file (a Poetry `poetry.lock` or a `pylock.toml` is refused). Regenerate it with a current client. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the slower walk.                      |
 | `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                                                                              |
 | `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none, or the lockfile records none; a yarn 2+ `yarn.lock` is never checked this way, see [pnpm and yarn](#pnpm-and-yarn)). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                                                                                                       |
 | `wardby_lockfile_entry_unsupported`  | —      | A plan refusal: the entry is installed from git, a URL or a path, or isn't an exact registry version. Only registry packages can be approved.                                                                                                                                                                                                                                                                                                                                                                                               |

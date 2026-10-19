@@ -784,7 +784,9 @@ export class RegistryService {
       byVia.set(via, (byVia.get(via) ?? new Set()).add(v.name));
     }
     for (const [via, names] of byVia) await store.addAuditedAllowances(context.runId, adapter.id, [...names], via);
-    await store.approveVersions(context.runId, adapter.id, result.approved);
+    // A registry whose approvals are names (PyPI) keeps every download on the
+    // usual per-file path: no exact version is served from an approval.
+    if (support.approves !== "names") await store.approveVersions(context.runId, adapter.id, result.approved);
     // A plan that refused anything leaves some lockfile packages without an
     // allowance: metadata misses walk for the rest of the run.
     if (result.refused.length > 0) (this.tally(context).planFallback ??= new Set()).add(adapter.id);

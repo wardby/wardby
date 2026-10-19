@@ -1103,16 +1103,20 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
   const listed = (refusals: Awaited<ReturnType<RegistryService["refusals"]>>) =>
     JSON.parse(refusals.body) as { refusals: { name: string; code: string; hint?: string }[] };
 
-  it("records an index whose kept versions have no wheel to serve, and still answers it (empty)", async () => {
+  it("records an index whose kept versions have no wheel to serve, and still answers it (sdists listed, never served)", async () => {
     const sdist = { ...file("demo-1.0.tar.gz", 100) };
-    const { get, store } = pypiService(() => [sdist]);
+    const { get, store, urls } = pypiService(() => [sdist]);
     const index = await get("simple/demo/");
     expect(index).toMatchObject({ status: 200 });
     if (!("body" in index)) throw new Error("expected a body");
-    expect((JSON.parse(index.body) as { files: unknown[] }).files).toEqual([]);
+    const listed = JSON.parse(index.body) as { files: { filename: string; "core-metadata"?: unknown }[] };
+    expect(listed.files.map((entry) => entry.filename)).toEqual(["demo-1.0.tar.gz"]);
+    expect(listed.files[0]["core-metadata"]).toBeUndefined();
     expect(store.fetches.map((fetch) => [fetch.outcome, fetch.name, fetch.reason])).toEqual([
       ["refused", "demo", "wardby_file_not_allowed"],
     ]);
+    await expect(get("files/demo/demo-1.0.tar.gz")).resolves.toMatchObject({ status: 403 });
+    expect(urls.some((url) => url.endsWith(".tar.gz"))).toBe(false);
 
     const tooNew = pypiService(() => [file(newWheel, 1)]);
     await tooNew.get("simple/demo/");

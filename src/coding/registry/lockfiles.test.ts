@@ -110,3 +110,30 @@ describe("normalizeRegistryLockfiles", () => {
     }
   });
 });
+
+describe("normalizeRegistryLockfiles for uv", () => {
+  it("rewrites a uv.lock uv wrote through the proxy to PyPI's URLs, outside .venv", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-lockfiles-"));
+    const pypiBase = `${PROXY_BASE}/registry/pypi/`;
+    const written = [
+      "[[package]]",
+      'name = "six"',
+      `source = { registry = "${pypiBase}simple/" }`,
+      `wheels = [{ url = "${pypiBase}files/six/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:47" }]`,
+      "",
+    ].join("\n");
+    await write(workspace, "uv.lock", written);
+    await write(workspace, ".venv/lib/uv.lock", written);
+    expect(await normalizeRegistryLockfiles({ workspace, proxyBaseUrl: PROXY_BASE })).toEqual(["uv.lock"]);
+    expect(await readFile(join(workspace, "uv.lock"), "utf8")).toBe(
+      [
+        "[[package]]",
+        'name = "six"',
+        'source = { registry = "https://pypi.org/simple" }',
+        'wheels = [{ url = "https://files.pythonhosted.org/packages/py2.py3/s/six/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:47" }]',
+        "",
+      ].join("\n"),
+    );
+    expect(await readFile(join(workspace, ".venv/lib/uv.lock"), "utf8")).toBe(written);
+  });
+});
