@@ -12,7 +12,11 @@ import { createHash } from "node:crypto";
 import { logger } from "../../../core/logger.js";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
 import type { AuditAdvisory, AuditRelation, PackageAuditVerdict } from "../../../coding/registry/audit-mode.js";
-import { acceptedAdvisoriesReason, PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
+import {
+  acceptedAdvisoriesReason,
+  LISTING_REFUSAL_FILENAME,
+  PLAN_REFUSAL_FILENAME,
+} from "../../../coding/registry/report.js";
 import {
   GRAPH_INCOMPLETE,
   GRAPH_LIMIT,
@@ -991,9 +995,11 @@ export class RegistryService {
       // Versions kept but no file the client may download: a Python package
       // published only as an sdist, or whose every wheel is newer than the
       // release-age limit. The (empty) index is still served, and pip and uv
-      // only say "no versions", so the refusal is recorded to say why.
+      // only say "no versions", so the refusal is recorded to say why, marked
+      // as a listing's: the installer may not have needed it (see
+      // LISTING_REFUSAL_FILENAME for how it counts).
       const unservable = unservableReason(meta, keep, keptFiles);
-      if (unservable) await this.refuse(context, adapter, name, unservable);
+      if (unservable) await this.refuse(context, adapter, name, unservable, { filename: LISTING_REFUSAL_FILENAME });
       const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
@@ -1655,7 +1661,7 @@ export class RegistryService {
     adapter: RegistryAdapter,
     name: string,
     reason: string,
-    file?: Pick<FileRef, "version" | "filename">,
+    file?: Pick<FileRef, "filename"> & Partial<Pick<FileRef, "version">>,
   ) {
     const tally = this.tally(context);
     if (tally.refused === undefined) {

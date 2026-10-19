@@ -143,7 +143,10 @@ pip and uv don't print why the registry refused a package (pip says
 and hints; a Claude Code agent also gets those lines after any failed
 command. The registry also records packages it hides from the index: one
 with only source distributions (`wardby_file_not_allowed`), or whose every
-wheel is too new (`wardby_version_filtered`).
+wheel is too new (`wardby_version_filtered`). The installer may only have
+looked at that index, so such a refusal adds no pull request warning and
+blocks the status only when a coding sub-run failed; `get_run` marks it
+`listingOnly`.
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,

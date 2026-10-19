@@ -8,7 +8,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import { packageAuditDigest } from "../coding/registry/audit-mode.js";
-import { collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
+import { blockingRefusals, collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent, shortReason } from "./workflow-events.js";
 
@@ -39,7 +39,7 @@ export async function emitRunFinishedEvents(
             dedupeKey: dedupeKeys.runBlocked(run.id),
             runId: run.id,
             agentId: run.agentId,
-            payload: { kind: "run_blocked", agentName, packageRefusals: outcome.packageRefusals },
+            payload: { kind: "run_blocked", agentName, packageRefusals: blockingRefusals(outcome) },
           });
         }
         // Any terminal status: what audit mode let in is worth knowing whether or not the run succeeded.

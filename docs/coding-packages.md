@@ -1259,6 +1259,16 @@ stays unrecorded: a single pinned version withheld while others are listed
 (`jinja2==2.10` with a blocking advisory), since the registry never sees
 the client's pin.
 
+An installer often reads an index it doesn't need (a resolver weighing
+candidates, a dependency behind a platform marker), so a refusal recorded
+only from an index weighs less than a refused download. `wardby-packages`
+and `get_run` list it (`get_run` marks it `"listingOnly": true`), but it
+adds no **Dependency install incomplete** warning or ⚠️ line, the pull
+request's package section leaves it out, and it makes
+the status ⛔ blocked only when a coding sub-run failed, not when it made no
+changes. Once any version of that name is served later in the run, it is
+dropped like any other refusal the run got past.
+
 ## Safeguards
 
 - **Dependency graph only.** Only packages on the allowlist, or reachable

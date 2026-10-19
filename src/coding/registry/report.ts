@@ -20,6 +20,31 @@ export interface RegistryFetchRow {
 /** The `filename` a lockfile plan records its refusals under. */
 export const PLAN_REFUSAL_FILENAME = "-/plan";
 
+/**
+ * The `filename` of a refusal recorded only from an index listing: the
+ * registry answered a metadata request whose kept versions have no file the
+ * client may download (a PyPI project published only as an sdist, or whose
+ * every wheel is too new). The installer may only have looked at the name
+ * (a resolver exploring candidates, a dependency under a marker that does not
+ * apply), so such a refusal is weaker evidence than a refused download.
+ *
+ * The rule, the same for every ecosystem: a listing-only refusal is cleared
+ * like any refusal of a whole name, by any version of that name served after
+ * it (summarizeRegistryFetches). One left standing is marked `listingOnly`.
+ * It is still reported to the agent (`wardby-packages`, GET
+ * /registry/-/refusals) and in get_run, but it never adds the pull request's
+ * install warning or the status comment's ⚠️ line, and it counts toward ⛔
+ * "Blocked by the package registry" only when a coding sub-run failed, not
+ * when it made no changes (blockingRefusals in core/host-status.ts).
+ */
+export const LISTING_REFUSAL_FILENAME = "-/listing";
+
+/** The refusals a pull request description or a not-blocked status warns
+ *  about: all but listing-only ones (see LISTING_REFUSAL_FILENAME). */
+export function warningRefusals<T extends { listingOnly?: boolean }>(refusals: readonly T[]): T[] {
+  return refusals.filter((refusal) => refusal.listingOnly !== true);
+}
+
 /** Distinct refusals lockfile plans recorded (ecosystem + name + version +
  *  reason), however often the lockfile was planned. */
 export function countPlanRefusals(rows: readonly RegistryFetchRow[]): number {
@@ -70,6 +95,8 @@ export type RegistryRefusalSummary = {
   reason: string;
   /** Static guidance for the code (shared with the proxy message and the PR banner); absent for unknown codes. */
   hint?: string;
+  /** Every row behind it was an index listing's (LISTING_REFUSAL_FILENAME); absent otherwise. */
+  listingOnly?: true;
 };
 
 /**
@@ -89,7 +116,7 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
 } {
   const packages = new Map<string, RegistryPackageSummary>();
   // Each refusal with the versions it still stands for ("" = the whole name).
-  const refusals = new Map<string, { summary: RegistryRefusalSummary; versions: Set<string> }>();
+  const refusals = new Map<string, { summary: RegistryRefusalSummary; versions: Set<string>; listing: boolean }>();
   for (const row of rows) {
     if (row.outcome === "served" && row.version) {
       const key = `${row.ecosystem}\0${row.name}\0${row.version}`;
@@ -118,14 +145,18 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
         refusal = {
           summary: { ecosystem: row.ecosystem, name: row.name, reason, ...(hint ? { hint } : {}) },
           versions: new Set(),
+          listing: true,
         };
         refusals.set(key, refusal);
       }
       refusal.versions.add(row.version ?? "");
+      refusal.listing &&= row.filename === LISTING_REFUSAL_FILENAME;
     }
   }
   return {
     packages: [...packages.values()],
-    packageRefusals: [...refusals.values()].map((refusal) => refusal.summary),
+    packageRefusals: [...refusals.values()].map(({ summary, listing }) =>
+      listing ? { ...summary, listingOnly: true as const } : summary,
+    ),
   };
 }

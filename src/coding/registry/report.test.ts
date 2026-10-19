@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { refusalHint } from "./refusal-hints.js";
-import { acceptedAdvisoriesReason, parseAcceptedAdvisories, summarizeRegistryFetches } from "./report.js";
+import {
+  acceptedAdvisoriesReason,
+  LISTING_REFUSAL_FILENAME,
+  parseAcceptedAdvisories,
+  summarizeRegistryFetches,
+} from "./report.js";
 
 describe("summarizeRegistryFetches", () => {
   it("dedupes served packages by ecosystem+name+version and refusals by ecosystem+name+reason", () => {
@@ -66,6 +71,55 @@ describe("summarizeRegistryFetches", () => {
       expect(packageRefusals.map((r) => [r.name, r.reason])).toEqual([
         ["c", "wardby_version_filtered"],
         ["d", "wardby_graph_incomplete"],
+      ]);
+    },
+  );
+
+  it.each(["npm", "pypi"])(
+    "marks a %s refusal recorded only from an index listing, until a real one joins it",
+    (eco) => {
+      const row = { sizeBytes: null, version: null };
+      const listing = { ...row, filename: LISTING_REFUSAL_FILENAME, outcome: "refused" };
+      const { packageRefusals } = summarizeRegistryFetches([
+        { ...listing, ecosystem: eco, name: "looked-at", reason: "wardby_file_not_allowed" },
+        { ...listing, ecosystem: eco, name: "looked-at", reason: "wardby_file_not_allowed" },
+        // Listed, then a version of it served: cleared like any name-level refusal.
+        { ...listing, ecosystem: eco, name: "served-later", reason: "wardby_version_filtered" },
+        {
+          ...row,
+          ecosystem: eco,
+          name: "served-later",
+          version: "1.0",
+          outcome: "served",
+          reason: null,
+          filename: "x",
+        },
+        // Listed, then its download refused: a real refusal.
+        { ...listing, ecosystem: eco, name: "downloaded", reason: "wardby_file_not_allowed" },
+        {
+          ...row,
+          ecosystem: eco,
+          name: "downloaded",
+          version: "1.0",
+          outcome: "refused",
+          reason: "wardby_file_not_allowed",
+          filename: "downloaded-1.0.tar.gz",
+        },
+      ]);
+      expect(packageRefusals).toEqual([
+        {
+          ecosystem: eco,
+          name: "looked-at",
+          reason: "wardby_file_not_allowed",
+          hint: refusalHint("wardby_file_not_allowed"),
+          listingOnly: true,
+        },
+        {
+          ecosystem: eco,
+          name: "downloaded",
+          reason: "wardby_file_not_allowed",
+          hint: refusalHint("wardby_file_not_allowed"),
+        },
       ]);
     },
   );

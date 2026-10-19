@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectRunOutcome, completeHostStatus, isBlockedByRefusals, outcomeBody } from "./host-status.js";
+import { LISTING_REFUSAL_FILENAME } from "../coding/registry/report.js";
+import {
+  blockingRefusals,
+  collectRunOutcome,
+  completeHostStatus,
+  isBlockedByRefusals,
+  outcomeBody,
+} from "./host-status.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { renderEvent, nextStatus } from "./notification-templates.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
@@ -297,6 +304,82 @@ describe("package blocked status", () => {
       const body = outcomeBody(run, "repo", outcome.pullRequests, outcome.failedChildren, outcome);
       expect(body).not.toContain("⛔");
       expect(body).not.toContain("⚠️");
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).not.toHaveBeenCalled();
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+  it("counts a listing-only refusal only for a failed child, and never warns a pull request with it", () => {
+    const listing = [
+      { ecosystem: "pypi", name: "looked-at", reason: "wardby_file_not_allowed", listingOnly: true as const },
+    ];
+    const failedChildren = [{ id: "c", status: "failed" }];
+    const pr = {
+      outcome: "pull_request_opened" as const,
+      repository: "repo",
+      pullRequestNumber: 1,
+      codeProvider: "github",
+    };
+    // No changes: the installer may only have looked at the project.
+    expect(
+      isBlockedByRefusals(run, { pullRequests: [], failedChildren: [], packageRefusals: listing, noChanges: true }),
+    ).toBe(false);
+    const noChanges = outcomeBody(run, "repo", [], [], { packageRefusals: listing, noChanges: true });
+    expect(noChanges).not.toContain("⛔");
+    expect(noChanges).not.toContain("⚠️");
+    // A failed child with nothing of that name served: it may be why.
+    expect(isBlockedByRefusals(run, { pullRequests: [], failedChildren, packageRefusals: listing })).toBe(true);
+    expect(outcomeBody(run, "repo", [], failedChildren, { packageRefusals: listing })).toContain("`looked-at`");
+    // Blocked by a real refusal on a no-changes run: the listing-only one is not listed with it.
+    const both = [...listing, ...refusals("wardby_graph_limit")];
+    const blocked = outcomeBody(run, "repo", [], [], { packageRefusals: both, noChanges: true });
+    expect(blocked).toMatch(/^⛔/);
+    expect(blocked).not.toContain("looked-at");
+    expect(blockingRefusals({ pullRequests: [], failedChildren: [], packageRefusals: both })).toEqual(
+      refusals("wardby_graph_limit"),
+    );
+    // A pull request: no warning for it, but one for a real refusal.
+    const opened = outcomeBody(run, "repo", [pr], [], { packageRefusals: listing });
+    expect(opened).toContain("Opened #1");
+    expect(opened).not.toContain("⚠️");
+    expect(outcomeBody(run, "repo", [pr], [], { packageRefusals: both })).not.toContain("looked-at");
+  });
+  it("sends Slack run_blocked without a listing-only refusal that does not count", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = slackDb({ outcome: "no_changes" });
+      db.registryFetch.findMany.mockResolvedValue([
+        { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null, filename: null },
+        {
+          ecosystem: "pypi",
+          name: "looked-at",
+          reason: "wardby_file_not_allowed",
+          outcome: "refused",
+          version: null,
+          sizeBytes: null,
+          filename: LISTING_REFUSAL_FILENAME,
+        },
+      ] as never);
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).toHaveBeenCalledTimes(1);
+      expect(sink.mock.calls[0]?.[0].payload.packageRefusals).toEqual([
+        expect.objectContaining(refusals("wardby_graph_limit")[0]),
+      ]);
+      // Only the listing-only refusal on a no-changes run: nothing is sent.
+      sink.mockClear();
+      db.registryFetch.findMany.mockResolvedValue([
+        {
+          ecosystem: "pypi",
+          name: "looked-at",
+          reason: "wardby_file_not_allowed",
+          outcome: "refused",
+          version: null,
+          sizeBytes: null,
+          filename: LISTING_REFUSAL_FILENAME,
+        },
+      ] as never);
       await emitRunFinishedEvents(db as never, finished("succeeded"));
       expect(sink).not.toHaveBeenCalled();
     } finally {
