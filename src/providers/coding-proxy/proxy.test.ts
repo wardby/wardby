@@ -1724,6 +1724,58 @@ describe("interrupted replies settle at an estimate", () => {
     expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 40 } });
   });
 
+  describe("the input of a cut reply", () => {
+    const body = (key: string, text: string) =>
+      JSON.stringify({ model: "test-model", prompt_cache_key: key, input: text, max_output_tokens: 10, stream: true });
+    const cut = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"xxx"}\n\n';
+    const done = (input: number, cached: number) =>
+      new Response(
+        completedSse({ input_tokens: input, input_tokens_details: { cached_tokens: cached }, output_tokens: 5 }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    // The nth request the proxy reserved, in order.
+    const requestFor = async (h: Harness, n: number) => {
+      const id = h.events.filter((e) => e.type === "request.reserved")[n]?.requestId;
+      return (await h.ledger.getRequest(id!))!;
+    };
+
+    it("uses the same conversation's previous reply plus the body's growth, not a later sub-agent reply", async () => {
+      const replies = [() => done(1_000, 800), () => done(20, 0), () => new Response(cut)];
+      const h = await harness({ budgetUsd: 10, fetch: async () => replies.shift()!() });
+      await execute(h, "lead-1", new TestSink(), body("lead", "a".repeat(2_000)));
+      await execute(h, "sub-1", new TestSink(), body("sub", "s"));
+      await expect(execute(h, "lead-2", new TestSink(), body("lead", "a".repeat(40_000)))).rejects.toMatchObject({
+        status: 502,
+      });
+      const lead1 = await requestFor(h, 0);
+      const lead2 = await requestFor(h, 2);
+      const growth = lead2.requestBytes! - lead1.requestBytes!;
+      expect(growth).toBe(38_000);
+      // The growth is priced as uncached input; the earlier cached part stays at the cache-read rate.
+      expect(lead2).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        usage: { inputTokens: 1_000 + growth, cachedInputTokens: 800, outputTokens: 1 },
+      });
+      expect(lead2.actualCostUsd!).toBeCloseTo(((200 + growth) * 1 + 800 * 0.1 + 1 * 4) / 1e6, 12);
+    });
+
+    it("keeps the input part of the hold when its conversation has no usable previous reply", async () => {
+      const replies = [() => done(20, 0), () => new Response(cut)];
+      const h = await harness({ budgetUsd: 10, fetch: async () => replies.shift()!() });
+      await execute(h, "sub-1", new TestSink(), body("sub", "s"));
+      await expect(execute(h, "lead-1", new TestSink(), body("lead", "a".repeat(40_000)))).rejects.toMatchObject({
+        status: 502,
+      });
+      const lead = await requestFor(h, 1);
+      expect(lead).toMatchObject({ status: "uncertain", costEstimated: true, usage: { inputTokens: 0 } });
+      // The hold's input part (every body byte as a token at input + cache-write rates) plus 1 output token.
+      const inputPart = lead.reservationUsd - (10 * PRICE.outputPerMTok) / 1e6;
+      expect(inputPart).toBeGreaterThan((40_000 * 3) / 1e6);
+      expect(lead.actualCostUsd!).toBeCloseTo(inputPart + (1 * 4) / 1e6, 12);
+    });
+  });
+
   it("keeps refusing a retry of the same body with duplicate_uncertain", async () => {
     const raw = requestBody(true);
     const h = await harness({

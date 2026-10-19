@@ -421,37 +421,15 @@ export class PrismaProxyLedger implements ProxyLedger {
     });
   }
 
-  async settlementHints(
-    sessionId: string,
-    model: string,
-  ): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }> {
-    const latest = await this.db.$queryRaw<
-      Pick<RequestRow, "inputTokens" | "outputTokens" | "cachedInputTokens" | "cacheWriteTokens" | "reasoningTokens">[]
-    >`
-      SELECT "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens"
-      FROM "CodingProxyRequest"
-      WHERE "sessionId" = ${sessionId} AND "model" = ${model} AND "status" = 'completed' AND NOT "costEstimated"
-      ORDER BY "completedAt" DESC NULLS LAST LIMIT 1
-    `;
+  async settlementHints(sessionId: string, model: string): Promise<{ medianOutputTokens?: number }> {
     const median = await this.db.$queryRaw<{ median: number | null }[]>`
       SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY "outputTokens") AS "median"
       FROM "CodingProxyRequest"
-      WHERE "sessionId" = ${sessionId} AND "status" = 'completed' AND "outputTokens" IS NOT NULL
+      WHERE "sessionId" = ${sessionId} AND "model" = ${model} AND "status" = 'completed'
+        AND "outputTokens" IS NOT NULL
     `;
-    const row = latest[0];
-    const previous: ProxyUsage | undefined =
-      row && row.inputTokens !== null && row.outputTokens !== null
-        ? {
-            inputTokens: row.inputTokens,
-            outputTokens: row.outputTokens,
-            cachedInputTokens: row.cachedInputTokens ?? 0,
-            cacheWriteTokens: row.cacheWriteTokens ?? 0,
-            reasoningTokens: row.reasoningTokens ?? 0,
-          }
-        : undefined;
     const medianOutputTokens = median[0]?.median ?? null;
     return {
-      ...(previous ? { previous } : {}),
       ...(medianOutputTokens !== null ? { medianOutputTokens: Number(medianOutputTokens) } : {}),
     };
   }

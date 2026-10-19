@@ -490,11 +490,14 @@ that request (`refusedHoldCeilingUsd`); see
 When a model reply breaks off before its final usage arrives (a dropped
 connection, a worker that is stopped mid-reply), the proxy settles the request
 at an estimate instead of leaving its whole hold in place. The estimate is the
-input usage the proxy already read; failing that, the input of the run's
-previous completed reply; failing that, the input part of the request's hold.
-It adds the output relayed so far (text, tool-call input, and thinking or
-reasoning text), counted high. If nothing was relayed, it adds the run's median
-reply output, or, on a run with no completed reply, the full output the hold
+input usage the proxy already read; failing that, the input of the previous
+completed reply in the same conversation (the main conversation and each
+sub-agent are tracked apart) on the same model, plus the request body's growth
+since then priced as uncached input at one token per byte; failing that, the
+input part of the request's hold. It adds the output relayed so far (text,
+tool-call input, and thinking or reasoning text), counted high. If nothing was
+relayed, it adds the median output of the run's replies on that model, or, with
+no completed reply on that model, the full output the hold
 reserved for. A provider's placeholder output count at the start of a reply is
 used only as a minimum. The estimate is never more than the request's worst
 case. An estimated request is flagged `costEstimated`, counts in the

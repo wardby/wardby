@@ -92,7 +92,7 @@ describe("MemoryProxyLedger interrupted replies", () => {
     expect(done).toMatchObject({ status: "completed", costEstimated: false, actualCostUsd: 0.2 });
   });
 
-  it("hints the latest completed, non-estimated reply of the model and the lower-middle median output", async () => {
+  it("hints the lower-middle median output of the model's completed replies", async () => {
     const { ledger, reserve } = await setup();
     expect(await ledger.settlementHints("s1", "m")).toEqual({});
     for (const [id, model, output] of [
@@ -106,8 +106,10 @@ describe("MemoryProxyLedger interrupted replies", () => {
     }
     await reserve("cut", 0.01);
     await ledger.markUncertain("cut", 200, { usage: u(5, 1), costUsd: 0.0001 });
-    expect(await ledger.settlementHints("s1", "m")).toEqual({ previous: u(100, 10), medianOutputTokens: 20 });
-    expect(await ledger.settlementHints("s1", "none")).toEqual({ medianOutputTokens: 20 });
+    // Another model's replies don't count: "m" has 40 and 10, "other" 30 and 20.
+    expect(await ledger.settlementHints("s1", "m")).toEqual({ medianOutputTokens: 10 });
+    expect(await ledger.settlementHints("s1", "other")).toEqual({ medianOutputTokens: 20 });
+    expect(await ledger.settlementHints("s1", "none")).toEqual({});
   });
 });
 

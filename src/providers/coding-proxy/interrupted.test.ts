@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ModelPricing } from "../llm/pricing-core.js";
-import { estimateInterrupted, relayedOutputTokens } from "./interrupted.js";
+import { CACHE_WINDOW_MS } from "./hold.js";
+import { estimateInterrupted, previousInput, relayedOutputTokens } from "./interrupted.js";
+import type { PreviousReply } from "./types.js";
 
 // claude-sonnet-5-5 catalog rates.
 const PRICE: ModelPricing = {
@@ -147,5 +149,59 @@ describe("estimateInterrupted", () => {
   it("counts relayed text high: ceil(bytes / 3)", () => {
     expect(relayedOutputTokens(0)).toBe(0);
     expect(relayedOutputTokens(10)).toBe(4);
+  });
+});
+
+describe("previousInput", () => {
+  const NOW = new Date("2026-10-19T12:00:00.000Z");
+  const prev = (over: Partial<PreviousReply> = {}): PreviousReply => ({
+    model: "m",
+    status: "completed",
+    costEstimated: false,
+    usage: { inputTokens: 1_000, cachedInputTokens: 800, cacheWriteTokens: 100, outputTokens: 50, reasoningTokens: 5 },
+    requestBytes: 4_000,
+    startedAt: new Date(NOW.getTime() - 60_000),
+    ...over,
+  });
+  const input = (previous: PreviousReply | null, over: { openai?: boolean; bodyBytes?: number } = {}) => ({
+    protocol: over.openai ? ("openai-responses" as const) : ("anthropic-messages" as const),
+    model: "m",
+    bodyBytes: "bodyBytes" in over ? over.bodyBytes : 10_000,
+    previous,
+    now: NOW,
+  });
+
+  it("adds the body's growth to the previous prompt: a cache write on Anthropic", () => {
+    expect(previousInput(input(prev()))).toEqual({
+      inputTokens: 1_000,
+      cachedInputTokens: 800,
+      cacheWriteTokens: 100 + 6_000,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    });
+  });
+
+  it("adds the body's growth as fresh input on OpenAI", () => {
+    expect(previousInput(input(prev(), { openai: true }))).toEqual({
+      inputTokens: 1_000 + 6_000,
+      cachedInputTokens: 800,
+      cacheWriteTokens: 100,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    });
+  });
+
+  it.each([
+    ["no previous reply", input(null)],
+    ["another model", input(prev({ model: "other" }))],
+    ["an estimated reply", input(prev({ costEstimated: true }))],
+    ["an uncertain reply", input(prev({ status: "uncertain" }))],
+    ["no usage", input(prev({ usage: undefined }))],
+    ["no previous body size", input(prev({ requestBytes: null }))],
+    ["no body size", input(prev(), { bodyBytes: undefined })],
+    ["a shrunk body", input(prev(), { bodyBytes: 3_999 })],
+    ["an expired cache", input(prev({ startedAt: new Date(NOW.getTime() - CACHE_WINDOW_MS - 1) }))],
+  ])("has none for %s", (_name, args) => {
+    expect(previousInput(args)).toBeUndefined();
   });
 });

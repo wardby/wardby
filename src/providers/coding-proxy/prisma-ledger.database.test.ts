@@ -603,15 +603,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect((await reserveOn("over", 0.00087)).outcome).toBe("budget_exhausted");
     });
 
-    it("hints the latest completed, non-estimated reply of the model and the median output", async () => {
+    it("hints the median output of the model's completed replies", async () => {
       await ledger.complete(await reserved("c1", 0.0001), u(100, 20, 5, 8), 0.00001, 200);
       await ledger.complete(await reserved("c2", 0.0001), u(200, 0, 0, 30), 0.00002, 200);
       await ledger.complete(await reserved("c3", 0.0001, otherModel), u(300, 0, 0, 12), 0.00001, 200);
-      expect(await ledger.settlementHints(eSession, model)).toEqual({
-        previous: u(200, 0, 0, 30),
-        medianOutputTokens: 12,
-      });
-      expect(await ledger.settlementHints(eSession, "no-such-model")).toEqual({ medianOutputTokens: 12 });
+      // Another model's replies don't count.
+      expect(await ledger.settlementHints(eSession, model)).toEqual({ medianOutputTokens: 8 });
+      expect(await ledger.settlementHints(eSession, otherModel)).toEqual({ medianOutputTokens: 12 });
+      expect(await ledger.settlementHints(eSession, "no-such-model")).toEqual({});
       expect(await ledger.settlementHints(`missing-${suffix}`, model)).toEqual({});
     });
   });

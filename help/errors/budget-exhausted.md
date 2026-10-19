@@ -127,11 +127,12 @@ is not kept.
 
 When a reply breaks off before its final usage, the proxy settles the request
 at an estimate instead of keeping its whole hold: the usage it already read,
-else the run's previous reply's input, else the input part of the hold, plus
-the output relayed so far (text, tool-call input, and thinking or reasoning
-text) counted high, and never more than the request's worst case. If nothing
-was relayed, the output part is the run's median reply output, or the full
-output the hold reserved for when the run has no completed reply yet. The
+else the input of the same conversation's previous reply on the same model plus
+the body's growth since then as uncached input, else the input part of the
+hold, plus the output relayed so far (text, tool-call input, and thinking or
+reasoning text) counted high, and never more than the request's worst case. If
+nothing was relayed, the output part is the median output of the run's replies
+on that model, or the full output the hold reserved for when there is none. The
 request is flagged as estimated and counted in the run's cost. If the
 estimate cannot be computed or recorded, the request keeps its full hold. A run can exceed its budget by at
 most the gap between the estimate and the real cost.

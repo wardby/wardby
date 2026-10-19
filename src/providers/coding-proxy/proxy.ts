@@ -15,7 +15,7 @@ import {
   terminalUsageFromSseFrame,
 } from "./metering.js";
 import { conversationKey, estimateHold } from "./hold.js";
-import { estimateInterrupted, type InterruptedEstimate } from "./interrupted.js";
+import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import type {
   CredentialResolver,
@@ -1459,11 +1459,19 @@ export class CodingProxy {
   ): Promise<InterruptedEstimate | undefined> {
     try {
       const hints = await this.ledger.settlementHints(session.id, request.model);
+      const previous = previousInput({
+        protocol: session.protocol,
+        model: request.model,
+        bodyBytes: request.requestBytes,
+        previous: request.conversationKey ? await this.ledger.previousReply(session.id, request.conversationKey) : null,
+        now: this.now(),
+      });
       const estimate = estimateInterrupted(
         {
           ...progress.anthropic?.partial(),
           relayedOutputBytes: progress.relayedOutputBytes,
           ...hints,
+          ...(previous ? { previous } : {}),
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
           ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
