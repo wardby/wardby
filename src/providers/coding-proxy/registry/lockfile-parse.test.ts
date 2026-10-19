@@ -39,6 +39,17 @@ describe("parseLockfileOffThread", () => {
           expect(shipped.resolve(entry.path, key), `${entry.path} -> ${key}`).toEqual(direct.resolve(entry.path, key));
         }
       }
+      // Each project's declared dependencies resolve too (package audit
+      // mode labels those top-level), and at least one does in every format.
+      let resolved = 0;
+      for (const project of direct.projects) {
+        for (const { key } of project.dependencies) {
+          const entry = direct.resolve(project.path, key);
+          if (entry) resolved += 1;
+          expect(shipped.resolve(project.path, key), `${project.path} -> ${key}`).toEqual(entry);
+        }
+      }
+      expect(resolved).toBeGreaterThan(0);
       expect(shipped.resolve("nowhere", "ms")).toBeUndefined();
     });
   }

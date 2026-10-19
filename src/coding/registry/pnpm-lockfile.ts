@@ -56,16 +56,31 @@ function referencesOf(entry: Record<string, unknown>): Map<string, string> {
   return references;
 }
 
+const IMPORTER_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"];
+
 /** An importer's declared dependencies (`{ specifier, version }` per name). */
 function importerDeclarations(importer: Record<string, unknown>): DeclaredDependency[] {
   const specs: Record<string, string> = {};
-  for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+  for (const field of IMPORTER_FIELDS) {
     for (const [key, value] of Object.entries(mapOf(importer[field]))) {
       const specifier = stringOf(mapOf(value).specifier) ?? stringOf(value);
       if (specifier !== undefined && !(key in specs)) specs[key] = specifier;
     }
   }
   return registryDependencyEdges(specs);
+}
+
+/** The reference (`version`) an importer records for each dependency it
+ *  declares, which `resolve` follows like a snapshot's. */
+function importerReferences(importer: Record<string, unknown>): Map<string, string> {
+  const references = new Map<string, string>();
+  for (const field of IMPORTER_FIELDS) {
+    for (const [key, value] of Object.entries(mapOf(importer[field]))) {
+      const reference = stringOf(mapOf(value).version);
+      if (reference !== undefined && !references.has(key)) references.set(key, reference);
+    }
+  }
+  return references;
 }
 
 /** The entry for one installed instance: local (null), or registry or
@@ -137,13 +152,15 @@ export function parsePnpmLockfile(
   }
 
   const importers = mapOf(document.importers);
-  const projects =
+  const importerOf: [string, Record<string, unknown>][] =
     Object.keys(importers).length > 0
-      ? Object.entries(importers).map(([path, importer]) => ({
-          path,
-          dependencies: importerDeclarations(mapOf(importer)),
-        }))
-      : [{ path: ".", dependencies: importerDeclarations(document) }];
+      ? Object.entries(importers).map(([path, importer]) => [path, mapOf(importer)])
+      : [[".", document]];
+  const projects = importerOf.map(([path, importer]) => ({ path, dependencies: importerDeclarations(importer) }));
+  // A project resolves what it declares like an instance does (an importer
+  // path that is also an instance key keeps the instance's references).
+  for (const [path, importer] of importerOf)
+    if (!byPath.has(path)) byPath.set(path, { dependencies: importerReferences(importer) });
 
   const candidates = (key: string, reference: string): string[] => {
     if (reference.startsWith("link:")) return [];
