@@ -238,7 +238,7 @@ describe("pypiAdapter protocol", () => {
     });
   });
 
-  it("keeps wheels, refuses sdists, and rewrites file URLs", async () => {
+  it("serves wheels only, lists sdists, and rewrites file URLs", async () => {
     const meta = await pypiAdapter.fetchMetadata("flask", async () => Response.json(await json()));
     const files = [...meta.versions.values()].flatMap((version) => version.files);
     expect(files.filter((file) => file.filename.endsWith(".tar.gz")).every((file) => !file.allowed)).toBe(true);
@@ -247,15 +247,22 @@ describe("pypiAdapter protocol", () => {
     const doc = JSON.parse(
       pypiAdapter.renderMetadata(meta, keep, allFiles, "http://wardby-proxy:8787/registry/pypi/").body,
     );
-    expect(doc.files.every((file: { filename: string }) => file.filename.endsWith(".whl"))).toBe(true);
-    expect(doc.files[0].url.startsWith("http://wardby-proxy:8787/registry/pypi/files/flask/")).toBe(true);
+    const rendered = doc.files as { filename: string; url: string; "core-metadata"?: unknown }[];
+    expect(rendered.some((file) => file.filename.endsWith(".whl"))).toBe(true);
+    // An sdist is listed (a uv.lock written through the proxy keeps it) without a metadata file.
+    const sdists = rendered.filter((file) => file.filename.endsWith(".tar.gz"));
+    expect(sdists.length).toBeGreaterThan(0);
+    expect(sdists.every((file) => file["core-metadata"] === undefined)).toBe(true);
+    expect(rendered.every((file) => file.url.startsWith("http://wardby-proxy:8787/registry/pypi/files/flask/"))).toBe(
+      true,
+    );
   });
 
-  it("keeps only wheels, with the fields it renders, in the cached index", async () => {
+  it("keeps only wheels and sdists, with the fields it renders, in the cached index", async () => {
     const meta = await pypiAdapter.fetchMetadata("flask", async () => Response.json(await json()));
     const raw = meta.raw as { files: Record<string, unknown>[] };
     expect(raw.files.length).toBeGreaterThan(0);
-    expect(raw.files.every((file) => String(file.filename).endsWith(".whl"))).toBe(true);
+    expect(raw.files.every((file) => /\.(?:whl|tar\.gz|zip)$/.test(String(file.filename)))).toBe(true);
   });
 
   it("reads Requires-Dist names and skips extras", async () => {
