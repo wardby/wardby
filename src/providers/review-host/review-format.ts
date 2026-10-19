@@ -43,21 +43,14 @@ export function parseCoveredMarker(body: string, agentMarker: string): string | 
   return matchReviewMarker(body, agentMarker)?.[2] ?? null;
 }
 
-/** wardby's hidden markers (run, review, finding, status, related-section). */
-const WARDBY_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
-const REVIEW_MARKER = /<!--\s*wardby:review:[\s\S]*?-->/g;
-
-/** Model-written text with every wardby hidden marker removed, so it can never pose as one. */
-export function stripWardbyMarkers(text: string): string {
-  return text.replace(WARDBY_MARKER, "");
-}
-
 /**
- * Text the App posts as a comment with any review marker removed: only publishReview writes one,
- * so a marker in any other comment (status, reply, repo_comment) is forged.
+ * Model-written text the App posts, with every HTML comment opener escaped: GitHub shows `<!--` as
+ * text, so no hidden comment (and no wardby marker) can come from it. One pass is enough, since the
+ * replacement removes the opener's characters rather than joining text around it. wardby adds its
+ * own markers after this.
  */
-export function stripReviewMarkers(text: string): string {
-  return text.replace(REVIEW_MARKER, "");
+export function escapeHtmlComments(text: string): string {
+  return text.replaceAll("<!--", "&lt;!--");
 }
 
 export function verdictConclusion(verdict: ReviewVerdict): CheckConclusion {

@@ -12,7 +12,7 @@ import { z } from "zod";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { FAILING_CONCLUSIONS } from "../providers/review-host/ci.js";
 import { MAX_PATCH_CURSOR_CHARS } from "../providers/review-host/patch-pages.js";
-import { stripWardbyMarkers } from "../providers/review-host/review-format.js";
+import { escapeHtmlComments } from "../providers/review-host/review-format.js";
 import {
   REVIEW_HOST_PROVIDERS,
   PatchCursorError,
@@ -616,11 +616,11 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           prNumber: a.prNumber,
           headSha: a.headSha,
           verdict: a.verdict,
-          summary: stripWardbyMarkers(a.summary),
-          body: stripWardbyMarkers(a.body),
+          summary: escapeHtmlComments(a.summary),
+          body: escapeHtmlComments(a.body),
           comments: (a.comments ?? []).map((c) => ({
             ...c,
-            body: stripWardbyMarkers(c.body),
+            body: escapeHtmlComments(c.body),
             side: c.side ?? "RIGHT",
           })),
           agentMarker: ctx.agentId,
@@ -654,8 +654,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
         return JSON.stringify(
           await host.comment(link.repository, {
             number: a.number,
-            // Model text never carries a wardby marker (a forged review marker would vouch for coverage).
-            body: stripWardbyMarkers(a.body),
+            // Model text never carries a hidden comment (a forged review marker would vouch for coverage).
+            body: escapeHtmlComments(a.body),
             replyToReviewCommentId: a.replyToReviewCommentId,
           }),
         );

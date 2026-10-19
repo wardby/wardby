@@ -21,8 +21,7 @@ import {
   parseReviewMarker,
   renderInlineComment,
   renderSummaryComment,
-  stripReviewMarkers,
-  stripWardbyMarkers,
+  escapeHtmlComments,
   verdictConclusion,
 } from "./review-format.js";
 import {
@@ -151,9 +150,12 @@ export function toReviewHostError(err: unknown): ReviewHostError {
   return new ReviewHostError("host_api_error", "github_request_failed");
 }
 
+/** wardby's hidden markers (run, review, finding, status, related-section); never shown to agents. */
+const HIDDEN_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
+
 /** Untrusted issue text for an agent: wardby markers removed, then cut at `limit` characters. */
 function capped(text: string, limit: number): { text: string; truncated: boolean } {
-  const clean = stripWardbyMarkers(text);
+  const clean = text.replace(HIDDEN_MARKER, "");
   return clean.length > limit ? { text: clean.slice(0, limit), truncated: true } : { text: clean, truncated: false };
 }
 
@@ -965,18 +967,23 @@ export class GitHubReviewHost implements CodeReviewHost {
     );
   }
 
+  /**
+   * Bodies here carry model or run text (repo_comment, a mention's status and reply), so every
+   * `<!--` is escaped: no comment posted this way can hold a hidden marker. Only publishReview
+   * writes the review marker, by its own path.
+   */
   async comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }> {
     const base = repoPath(repository);
     return this.withToken(repository, COMMENT_WRITE, async (get) => {
       const response = input.replyToReviewCommentId
         ? await get(
             `${base}/pulls/${input.number}/comments/${encodeURIComponent(input.replyToReviewCommentId)}/replies`,
-            { method: "POST", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) },
+            { method: "POST", body: JSON.stringify({ body: escapeHtmlComments(input.body) }) },
             [201],
           )
         : await get(
             `${base}/issues/${input.number}/comments`,
-            { method: "POST", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) },
+            { method: "POST", body: JSON.stringify({ body: escapeHtmlComments(input.body) }) },
             [201],
           );
       const created = record(await response.json());
@@ -989,7 +996,7 @@ export class GitHubReviewHost implements CodeReviewHost {
     const id = encodeURIComponent(input.id);
     const path = input.kind === "inline" ? `${base}/pulls/comments/${id}` : `${base}/issues/comments/${id}`;
     await this.withToken(repository, COMMENT_WRITE, async (get) => {
-      await get(path, { method: "PATCH", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) }, [200]);
+      await get(path, { method: "PATCH", body: JSON.stringify({ body: escapeHtmlComments(input.body) }) }, [200]);
     });
   }
 
