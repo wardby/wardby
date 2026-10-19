@@ -509,8 +509,24 @@ export const NO_WRITE_ACCESS_BODY =
   "😕 I can't act on this: a mention starts work only for people with write access to this repository. " +
   "Ask someone with write access to mention me instead.";
 
-/** Read and triage can see the repository, so a refusal there is worth explaining; anyone else stays silent. */
-const EXPLAINED_REFUSAL_LEVELS: ReadonlySet<string> = new Set(["read", "triage"]);
+/** Associations that mean the account holds a role on the repository, not just a view of a public one. */
+const ROLE_ASSOCIATIONS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * Whether a refused author should be told why. Triage is granted explicitly, so
+ * it always counts. GitHub reports `read` for every account on a public
+ * repository, so there `read` counts only with a role association; on a private
+ * repository `read` means the account was given access (a private organization
+ * member is labelled CONTRIBUTOR or NONE). Unknown facts stay silent.
+ */
+function explainsRefusal(
+  level: string | undefined,
+  event: { authorAssociation?: string; repositoryPrivate?: boolean },
+) {
+  if (level === "triage") return true;
+  if (level !== "read") return false;
+  return event.repositoryPrivate === true || ROLE_ASSOCIATIONS.has(event.authorAssociation ?? "");
+}
 
 export function unknownPriorRunBody(priorRunId: string): string {
   return (
@@ -1650,8 +1666,8 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           { repository: event.repository, number: event.number, reason: author.reason, level: author.level },
           "mention ignored: its author lacks write access",
         );
-        // Someone who can read the repository gets told why; a stranger learns nothing.
-        if (author.reason !== "insufficient_permission" || !EXPLAINED_REFUSAL_LEVELS.has(author.level ?? "")) {
+        // Someone who can read the repository gets told why; a stranger on a public repository (GitHub reports `read` for everyone) learns nothing.
+        if (author.reason !== "insufficient_permission" || !explainsRefusal(author.level, event)) {
           return none;
         }
         const refuse = async () => {
