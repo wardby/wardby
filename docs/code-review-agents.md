@@ -625,26 +625,29 @@ with:
   endpoint answers 404 until this is set.
 - **Subscribe to events**: Pull request, Issue comment, Pull request review
   comment, Check run, Check suite (re-runs a review that was waiting for CI
-  once CI finishes, and starts a `waitForCi` reviewer's held review once CI
-  finishes), Issues (needed for mentions in a newly opened or
-  edited issue; without it only comment mentions are seen), and Push (needed
+  once CI finishes, starts a `waitForCi` reviewer's held review once CI
+  finishes, and lets [`markReadyWhenPassing`](#mark-ready-when-passing) mark a
+  draft ready once CI goes green; without it, those drafts stay drafts),
+  Issues (needed for mentions in a newly opened or edited issue; without it
+  only comment mentions are seen), and Push (needed
   for the `push` trigger, which starts merge-watcher agents; it is its own
   checkbox, separate from the others, and must be ticked explicitly).
 - **Repository permissions**:
 
-  | Permission      | Access          |
-  | --------------- | --------------- |
-  | Contents        | Read            |
-  | Pull requests   | Read and write  |
-  | Checks          | Read and write  |
-  | Issues          | Read and write  |
-  | Commit statuses | Read (optional) |
+  | Permission      | Access                                             |
+  | --------------- | -------------------------------------------------- |
+  | Contents        | Read and write (Read for an App that only reviews) |
+  | Pull requests   | Read and write                                     |
+  | Checks          | Read and write                                     |
+  | Issues          | Read and write                                     |
+  | Commit statuses | Read (optional)                                    |
 
-  To let review agents resolve their own fixed threads, set **Contents** to
-  **Read and write**: GitHub gates resolving a review thread on that
-  permission, although it changes no repository content. wardby asks for it
-  only for the resolve call itself. An App that also opens coding pull
-  requests already has it.
+  **Contents: Read and write** is required for coding agents, which push a
+  branch for each pull request they open. An App used only for review agents
+  can have **Read**, except that review agents then can't resolve their own
+  fixed threads: GitHub gates resolving a review thread on **Contents: Read
+  and write**, although it changes no repository content. wardby asks for it
+  only for the resolve call itself.
 
   **Issues: Read and write** is also what lets wardby add and remove the
   `wardby-autofix-*` labels used by [automatic review fix
