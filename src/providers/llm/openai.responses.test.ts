@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type OpenAI from "openai";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import { OpenAiLlmProvider, estimateTokens } from "./openai.js";
@@ -53,6 +53,18 @@ const reasoningEntry = (): CatalogEntry => ({
 });
 
 describe("OpenAiLlmProvider (Responses API) stream parsing", () => {
+  it("reports the response started once the request returns, before any output event", async () => {
+    const { client } = fakeResponsesClient([{ type: "response.created", response: {} }, completed(SMALL_USAGE)]);
+    const started = vi.fn();
+    const llm = new OpenAiLlmProvider("k", client);
+    const iterator = llm
+      .stream({ model: "gpt-4o-mini", messages: [] }, undefined, { onResponseStarted: started })
+      [Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.value).toMatchObject({ type: "done" });
+    expect(started).toHaveBeenCalledTimes(1);
+  });
+
   it("maps output_text deltas to text events and completes with stopReason stop", async () => {
     const { client } = fakeResponsesClient([
       { type: "response.created", response: {} },

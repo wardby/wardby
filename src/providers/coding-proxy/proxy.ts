@@ -140,6 +140,10 @@ interface ParsedRequest {
 interface RelayProgress {
   /** The output tokens the request reserved for. */
   maxOutputTokens: number;
+  /** A streaming request: until its response starts, the provider has generated nothing. */
+  stream: boolean;
+  /** Set once the upstream response has started (its headers arrived). */
+  responseStarted?: boolean;
   /** UTF-8 bytes of output text relayed to the client. */
   relayedOutputBytes: number;
   /** The Anthropic stream's usage tracker, once a stream is being relayed. */
@@ -1170,7 +1174,11 @@ export class CodingProxy {
     const deadlineTimer = setTimeout(() => controller.abort(), remainingMs);
     deadlineTimer.unref();
     this.trackActive(session.id, controller);
-    const progress: RelayProgress = { maxOutputTokens: parsed.maxOutputTokens, relayedOutputBytes: 0 };
+    const progress: RelayProgress = {
+      maxOutputTokens: parsed.maxOutputTokens,
+      stream: parsed.stream,
+      relayedOutputBytes: 0,
+    };
     const cleanupActive = () => {
       clearTimeout(deadlineTimer);
       const active = this.activeRequests.get(session.id);
@@ -1201,6 +1209,7 @@ export class CodingProxy {
         redirect: "error",
         signal: controller.signal,
       });
+      progress.responseStarted = true;
     } catch {
       cleanupActive();
       await this.markUncertain(
@@ -1469,6 +1478,7 @@ export class CodingProxy {
       const estimate = estimateInterrupted(
         {
           ...progress.anthropic?.partial(),
+          beforeResponse: progress.stream && !progress.responseStarted,
           relayedOutputBytes: progress.relayedOutputBytes,
           ...hints,
           ...(previous ? { previous } : {}),

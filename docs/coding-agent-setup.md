@@ -497,8 +497,9 @@ since then priced as uncached input at one token per byte; failing that, the
 input part of the request's hold. It adds the output relayed so far (text,
 tool-call input, and thinking or reasoning text), counted high. If nothing was
 relayed, it adds the median output of the run's replies on that model, or, with
-no completed reply on that model, the full output the hold
-reserved for. A provider's placeholder output count at the start of a reply is
+no completed reply on that model, the full output the hold reserved for. A
+streaming request that failed before the provider's response started adds no
+output, because nothing was generated. A provider's placeholder output count at the start of a reply is
 used only as a minimum. The estimate is never more than the request's worst
 case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's

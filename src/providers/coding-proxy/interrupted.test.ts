@@ -146,6 +146,19 @@ describe("estimateInterrupted", () => {
     expect(estimateInterrupted(base, PRICE).costUsd).toBe(2.12);
   });
 
+  it("for a stream that failed before its response started, books no output", () => {
+    const base = { relayedOutputBytes: 0, reservationUsd: 2.12, maxOutputTokens: 32_000, beforeResponse: true };
+    const previous = {
+      inputTokens: 50_000,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 80,
+      reasoningTokens: 0,
+    };
+    expect(estimateInterrupted({ ...base, previous, medianOutputTokens: 700 }, PRICE).usage.outputTokens).toBe(0);
+    expect(usd(estimateInterrupted(base, PRICE).costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6));
+  });
+
   it("counts relayed text high: ceil(bytes / 3)", () => {
     expect(relayedOutputTokens(0)).toBe(0);
     expect(relayedOutputTokens(10)).toBe(4);

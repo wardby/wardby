@@ -306,10 +306,17 @@ export async function* streamModel(
 
   let settled = false;
   let sawEvent = false;
+  // Set once the provider's response starts: it may bill hidden thinking or reasoning before any event.
+  let responseStarted = false;
   // Generated output seen so far (text and tool calls), for an estimate if the stream is cut.
   let streamedText = "";
   try {
-    for await (const event of ctx.llm.stream(req)) {
+    const hooks = {
+      onResponseStarted: () => {
+        responseStarted = true;
+      },
+    };
+    for await (const event of ctx.llm.stream(req, undefined, hooks)) {
       sawEvent = true;
       if (event.type === "text") streamedText += event.delta;
       if (event.type === "tool_call") streamedText += event.name + event.argsJson;
@@ -327,12 +334,14 @@ export async function* streamModel(
     }
   } catch (err) {
     if (!settled) {
-      // Refused before anything streamed: the provider billed nothing. Mid-stream: settle at an estimate.
-      if (sawEvent) {
-        // Bill the input and the output seen so far, never more than the hold. Estimating must
-        // never mask the stream error: on any failure, keep the full hold and rethrow the original.
+      // Failed before the response started: the provider billed nothing. Once started: settle at an estimate.
+      if (sawEvent || responseStarted) {
+        // Bill the input and the output seen so far, never more than the hold. With no output seen
+        // (cut while thinking or reasoning), the output the hold reserved for: an unknown output
+        // fails toward overestimating. Estimating must never mask the stream error: on any
+        // failure, keep the full hold and rethrow the original.
         try {
-          const output = await streamedOutputTokens(ctx.llm, req.model, streamedText);
+          const output = streamedText ? await streamedOutputTokens(ctx.llm, req.model, streamedText) : outputTokens;
           const costUsd = Math.min(reservationUsd, ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }));
           await ledger.markUncertain(ctx.session.id, callId, {
             inputTokens,

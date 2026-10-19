@@ -132,7 +132,11 @@ the body's growth since then as uncached input, else the input part of the
 hold, plus the output relayed so far (text, tool-call input, and thinking or
 reasoning text) counted high, and never more than the request's worst case. If
 nothing was relayed, the output part is the median output of the run's replies
-on that model, or the full output the hold reserved for when there is none. The
+on that model, or the full output the hold reserved for when there is none. A
+streaming request that failed before the provider's response started books no
+output. The native sandbox gateway follows the same rule: a call cut after the
+response started but before any output (for example while the model was
+thinking) is booked at its input plus the output its hold reserved for. The
 request is flagged as estimated and counted in the run's cost. If the
 estimate cannot be computed or recorded, the request keeps its full hold. A run can exceed its budget by at
 most the gap between the estimate and the real cost.
