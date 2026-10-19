@@ -15,7 +15,10 @@
  * A stalled-but-alive owner can overlap an adopted attempt of the same run:
  * whichever records a step second loses ownership, stops at that step
  * without writing the run, and hands the SDK's conflict back so DBOS parks
- * it as a duplicate execution (see dbosStep and runInsideWorkflow).
+ * it as a duplicate execution (see dbosStep and runInsideWorkflow). After a
+ * takeover the fork has its own workflow id, so the two never share a step:
+ * the original stops the same way when it meets the takeover's cancel
+ * (dbosStepFor), and its start() handle writes nothing.
  */
 
 import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
@@ -166,7 +169,30 @@ export async function workflowIdOf(db: Pick<PrismaClient, "run">, runId: string)
  * (runInsideWorkflow does it for a mismatch at the load step, which is outside
  * that backstop).
  */
-export const dbosStep: StepRunner = async (name, fn) => {
+export const dbosStep: StepRunner = (name, fn) => runDbosStep(name, fn);
+
+/**
+ * dbosStep for one run's workflow body. A cancellation of a workflow the run no longer names in
+ * `executionWorkflowId` is not a stop: recover() took the run over (forked it) and cancelled this,
+ * the forked-from workflow, while its owner was still alive. That attempt stops like one that lost
+ * a step's checkpoint (RunOwnershipLostError: no terminal write), so the fork, not a reasonless
+ * "cancelled" from the original, settles the run. takeOver records the fork's id before it
+ * cancels, so the original always reads the new id by the time it sees the cancel.
+ */
+export function dbosStepFor(db: Pick<PrismaClient, "run">, runId: string): StepRunner {
+  const supersedes = async (cancelledWorkflowId: string): Promise<boolean> => {
+    // A failed read falls back to an ordinary cancellation, as before this check existed.
+    const current = await workflowIdOf(db, runId).catch(() => cancelledWorkflowId);
+    return current !== cancelledWorkflowId;
+  };
+  return (name, fn) => runDbosStep(name, fn, supersedes);
+}
+
+async function runDbosStep<T>(
+  name: string,
+  fn: () => Promise<T>,
+  supersededBy?: (cancelledWorkflowId: string) => Promise<boolean>,
+): Promise<T> {
   let ran: { value: unknown } | undefined;
   try {
     return await DBOS.runStep(
@@ -179,6 +205,7 @@ export const dbosStep: StepRunner = async (name, fn) => {
     );
   } catch (err) {
     if (err instanceof DbosErrors.DBOSWorkflowCancelledError) {
+      if (await supersededBy?.(err.workflowID)) throw new RunOwnershipLostError(name, { cause: err });
       const reason = cancellationReasons.get(err.workflowID);
       throw new RunCancelledError(`Run cancelled: ${reason ?? "no reason given"}`);
     }
@@ -189,7 +216,7 @@ export const dbosStep: StepRunner = async (name, fn) => {
     if (err instanceof DbosErrors.DBOSUnexpectedStepError) throw new StepReplayMismatchError(name, { cause: err });
     throw err;
   }
-};
+}
 
 /**
  * The numeric `usage` fields of a step result, if it has any (an LLM turn's
@@ -346,6 +373,15 @@ export class DbosExecutor implements Executor {
       // the same failure — dispatchRun's own `.catch` around `start()` calls
       // it too — which is harmless precisely because it is conditional and
       // idempotent: the second call matches zero rows.
+      //
+      // A workflow that recover() took over (forked, then cancelled) no longer drives the run: the
+      // fork does, and settles it. Its rejection is the takeover's cancel, not the run's failure.
+      if ((await workflowIdOf(this.db, runId).catch(() => runId)) !== runId) {
+        // The error's name only: this path adds no message text to any output.
+        const error = err instanceof Error ? err.name : typeof err;
+        dbosLog.info({ runId, error }, "the run's original workflow ended after a takeover; its fork drives the run");
+        return;
+      }
       await markRunFailedFromExecutorError(this.db, runId, err, this.selfDefects);
       throw err;
     }
@@ -520,14 +556,16 @@ export class DbosExecutor implements Executor {
     await beat();
     const timer = setInterval(() => void beat(), this.heartbeatIntervalMs);
     try {
-      await executeRun(runId, this.providers, this.db, undefined, dbosStep);
+      await executeRun(runId, this.providers, this.db, undefined, dbosStepFor(this.db, runId));
     } catch (err) {
       // An ownership loss leaves the workflow body as the SDK's own conflict error, so DBOS takes
       // its duplicate-execution path: it records nothing and parks this attempt until the winner
       // records the outcome. Any other error escaping here would be recorded as the workflow's
-      // outcome while the winner still runs. The runner already logged the loss.
+      // outcome while the winner still runs. The runner already logged the loss. A forked-from
+      // workflow's own cancellation (dbosStepFor) goes back as itself: DBOS parks that too.
       if (err instanceof RunOwnershipLostError) {
-        throw err.cause instanceof DbosErrors.DBOSWorkflowConflictError
+        throw err.cause instanceof DbosErrors.DBOSWorkflowConflictError ||
+          err.cause instanceof DbosErrors.DBOSWorkflowCancelledError
           ? err.cause
           : new DbosErrors.DBOSWorkflowConflictError(DBOS.workflowID ?? runId);
       }

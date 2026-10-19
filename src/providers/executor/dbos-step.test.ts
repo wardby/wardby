@@ -7,7 +7,7 @@ vi.mock("../../core/runner.js", async (importOriginal) => ({
 }));
 
 import { executeRun, RunCancelledError, RunOwnershipLostError, type NativeRunProviders } from "../../core/runner.js";
-import { dbosStep, DbosExecutor } from "./dbos.js";
+import { dbosStep, dbosStepFor, DbosExecutor } from "./dbos.js";
 
 const executeRunMock = vi.mocked(executeRun);
 
@@ -59,6 +59,46 @@ describe("dbosStep", () => {
   });
 });
 
+describe("dbosStepFor", () => {
+  const dbNaming = (executionWorkflowId: string | null) => ({
+    run: { findUnique: vi.fn(async () => ({ executionWorkflowId })) },
+  });
+
+  it("turns the cancellation of a workflow the run was forked away from into an ownership loss", async () => {
+    const sdkErr = new DbosErrors.DBOSWorkflowCancelledError("r1");
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(sdkErr);
+
+    const err = await dbosStepFor(dbNaming("r1@v2") as never, "r1")("turn:2:llm", async () => "x").catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(RunOwnershipLostError);
+    expect((err as RunOwnershipLostError).cause).toBe(sdkErr);
+  });
+
+  it.each([
+    ["the run's own workflow (never forked)", null, "r1"],
+    ["the fork the run names", "r1@v2", "r1@v2"],
+  ])("keeps a cancellation of %s a RunCancelledError", async (_label, named, cancelled) => {
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(new DbosErrors.DBOSWorkflowCancelledError(cancelled));
+
+    const err = await dbosStepFor(dbNaming(named) as never, "r1")("turn:2:llm", async () => "x").catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+  });
+
+  it("falls back to a RunCancelledError when the run's workflow id cannot be read", async () => {
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(new DbosErrors.DBOSWorkflowCancelledError("r1"));
+    const db = { run: { findUnique: vi.fn(async () => Promise.reject(new Error("db down"))) } };
+
+    const err = await dbosStepFor(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+  });
+});
+
 describe("DbosExecutor.runInsideWorkflow", () => {
   function executor() {
     const db = { run: { update: vi.fn(async () => ({})) } };
@@ -73,6 +113,13 @@ describe("DbosExecutor.runInsideWorkflow", () => {
   it("hands the SDK's own conflict error back to DBOS for an ownership loss", async () => {
     const sdkErr = new DbosErrors.DBOSWorkflowConflictError("r1");
     executeRunMock.mockRejectedValueOnce(new RunOwnershipLostError("turn:1:llm", { cause: sdkErr }));
+
+    await expect(executor().runInsideWorkflow("r1")).rejects.toBe(sdkErr);
+  });
+
+  it("hands a forked-from workflow's own cancellation back to DBOS as itself", async () => {
+    const sdkErr = new DbosErrors.DBOSWorkflowCancelledError("r1");
+    executeRunMock.mockRejectedValueOnce(new RunOwnershipLostError("turn:2:llm", { cause: sdkErr }));
 
     await expect(executor().runInsideWorkflow("r1")).rejects.toBe(sdkErr);
   });
