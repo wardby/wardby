@@ -267,7 +267,8 @@ read the file with `repo_read_file` at `headSha`; if that is not possible,
 publish `CHANGES_REQUESTED` and name the files not reviewed. `APPROVE` is
 also refused with `file_list_truncated` while the head's file list is cut
 (`fileListComplete: false`), and with `full_read_required` when the run read
-the head only with a `sinceSha` other than the `lastReviewedSha` it returned.
+the head only with a `sinceSha` other than the `lastCoveredSha` it returned
+(the latest head this agent reviewed after reading every file).
 
 Add this to a reviewer's system prompt:
 

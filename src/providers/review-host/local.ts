@@ -358,6 +358,12 @@ export class LocalReviewHost implements CodeReviewHost {
       orderBy: { createdAt: "desc" },
       select: { headSha: true },
     });
+    // A review that did not read every file leaves coveredSha null, so the latest covered one counts.
+    const covered = await this.db.localReview.findFirst({
+      where: { pullRequestId: row.id, agentId: opts.agentMarker, coveredSha: { not: null } },
+      orderBy: { createdAt: "desc" },
+      select: { coveredSha: true },
+    });
 
     return {
       number: row.number,
@@ -376,6 +382,7 @@ export class LocalReviewHost implements CodeReviewHost {
       isFork: false,
       htmlUrl: prUrl(row),
       lastReviewedSha: last?.headSha ?? null,
+      lastCoveredSha: covered?.coveredSha ?? null,
       comparedFrom,
       baseMergedSince,
       files: page.files,
@@ -488,6 +495,7 @@ export class LocalReviewHost implements CodeReviewHost {
         pullRequestId: row.id,
         agentId: input.agentMarker,
         headSha: currentHeadSha,
+        coveredSha: input.coveredSha === currentHeadSha ? currentHeadSha : null,
         verdict: input.verdict,
         summary: input.summary,
         body: input.body,

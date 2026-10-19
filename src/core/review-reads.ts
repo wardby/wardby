@@ -14,7 +14,9 @@
  * list of the pull request (no sinceSha) has been seen: files past the cut were never listed.
  * A compare's base is the model's choice (any ancestor of the head), so an APPROVE is refused
  * with full_read_required while the attempt saw no whole list and some compare base is not a
- * head the host vouches for (lastReviewedSha of the same read).
+ * head the host vouches for (lastCoveredSha of the same read: a head this agent reviewed after
+ * reading every file). covered() says whether this attempt read every file of a head, for the
+ * covered head a published review records.
  * Every field only grows, so a merge is a plain union and both modes gate alike.
  */
 import { reviewGroup } from "../providers/review-host/patch-pages.js";
@@ -186,7 +188,7 @@ export class ReviewReadLedger {
       trustedBases: new Set<string>(),
     };
     if (view.comparedFrom) head.bases.add(view.comparedFrom);
-    const trusted = view.lastReviewedSha;
+    const trusted = view.lastCoveredSha;
     if (trusted) head.trustedBases.add(trusted);
     if (!withCursor) head.sawFirstPage = true;
     if (view.fileListComplete === false) head.listCut = true;
@@ -246,5 +248,19 @@ export class ReviewReadLedger {
     const head = this.heads.get(this.headKey(repository, prNumber, headSha));
     if (!head?.sawFirstPage || head.fullListSeen) return false;
     return [...head.bases].some((base) => !head.trustedBases.has(base));
+  }
+
+  /**
+   * This attempt read every file of the head: it saw the first page, no list was left cut, every
+   * compare started from a covered head (or a whole list was seen), and no code file is unread.
+   */
+  covered(repository: string, prNumber: number, headSha: string): boolean {
+    const unread = this.unreadCode(repository, prNumber, headSha);
+    return (
+      unread !== null &&
+      unread.length === 0 &&
+      !this.fileListCut(repository, prNumber, headSha) &&
+      !this.baseUnverified(repository, prNumber, headSha)
+    );
   }
 }

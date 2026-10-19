@@ -17,6 +17,7 @@ import {
   findingMarker,
   hasFindingMarker,
   hasReviewMarker,
+  parseCoveredMarker,
   parseReviewMarker,
   renderInlineComment,
   renderSummaryComment,
@@ -526,13 +527,16 @@ export class GitHubReviewHost implements CodeReviewHost {
 
       const { id: appId } = await this.client.appIdentity();
       let lastReviewedSha: string | null = null;
+      let lastCoveredSha: string | null = null;
       for (let page = 1; page <= MAX_COMMENT_PAGES && !lastReviewedSha; page++) {
         const comments = list(
           await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json(),
         );
         for (const comment of comments) {
-          if (typeof comment.body === "string" && writtenByApp(comment, appId)) {
-            lastReviewedSha ??= parseReviewMarker(comment.body, opts.agentMarker);
+          if (typeof comment.body === "string" && writtenByApp(comment, appId) && !lastReviewedSha) {
+            lastReviewedSha = parseReviewMarker(comment.body, opts.agentMarker);
+            // Only the App's own marker vouches for coverage; an older marker has none.
+            if (lastReviewedSha) lastCoveredSha = parseCoveredMarker(comment.body, opts.agentMarker);
           }
         }
         if (comments.length < 100) break;
@@ -569,6 +573,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         isFork,
         htmlUrl: str(pr.html_url),
         lastReviewedSha,
+        lastCoveredSha,
         comparedFrom,
         baseMergedSince,
         files: page.files,
@@ -848,19 +853,22 @@ export class GitHubReviewHost implements CodeReviewHost {
         reviewUrl = str(review.html_url);
       }
 
+      const { id: appId } = await this.client.appIdentity();
+      const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker, appId);
+      // A review that did not read every file keeps the earlier covered head.
+      const coveredSha = input.coveredSha ?? (existing ? parseCoveredMarker(existing.body, input.agentMarker) : null);
       const summaryBody = renderSummaryComment({
         agentMarker: input.agentMarker,
         headSha: input.headSha,
+        coveredSha,
         verdict: input.verdict,
         summary: input.summary,
         body: input.body,
         outside,
       });
-      const { id: appId } = await this.client.appIdentity();
-      const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker, appId);
       const summaryResponse = existing
         ? await get(
-            `${base}/issues/comments/${existing}`,
+            `${base}/issues/comments/${existing.id}`,
             { method: "PATCH", body: JSON.stringify({ body: summaryBody }) },
             [200],
           )
@@ -922,13 +930,13 @@ export class GitHubReviewHost implements CodeReviewHost {
     prNumber: number,
     agentMarker: string,
     appId: number,
-  ): Promise<number | null> {
+  ): Promise<{ id: number; body: string } | null> {
     for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
       const comments = list(await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json());
       const mine = comments.find(
         (c) => typeof c.body === "string" && writtenByApp(c, appId) && hasReviewMarker(c.body, agentMarker),
       );
-      if (mine) return num(mine.id);
+      if (mine) return { id: num(mine.id), body: str(mine.body) };
       if (comments.length < 100) break;
     }
     return null;

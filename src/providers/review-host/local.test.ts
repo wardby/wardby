@@ -345,4 +345,23 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
     expect(await publish("CHANGES_REQUESTED")).toMatchObject({ published: true });
     expect(await db.localReview.count({ where: { pullRequestId: pr.id, verdict: "APPROVE" } })).toBe(0);
   }, 60_000);
+
+  it("returns the latest covered head as lastCoveredSha; a review that did not read every file keeps it", async () => {
+    const base = { prNumber, headSha, summary: "s", body: "b", comments: [], agentMarker: "agent-cov" };
+    const read = () => host.readPullRequest(repository, prNumber, { maxPatchChars: 100, agentMarker: "agent-cov" });
+    expect(await read()).toMatchObject({ lastReviewedSha: null, lastCoveredSha: null });
+    await host.publishReview(repository, { ...base, verdict: "CHANGES_REQUESTED", coveredSha: null });
+    expect(await read()).toMatchObject({ lastReviewedSha: headSha, lastCoveredSha: null });
+    await host.publishReview(repository, { ...base, verdict: "CHANGES_REQUESTED", coveredSha: headSha });
+    await host.publishReview(repository, { ...base, verdict: "COMMENT" });
+    expect(await read()).toMatchObject({ lastReviewedSha: headSha, lastCoveredSha: headSha });
+    // A covered head other than the current one is never stored.
+    await host.publishReview(repository, { ...base, verdict: "COMMENT", coveredSha: firstSha });
+    const rows = await db.localReview.findMany({
+      where: { pullRequest: { number: prNumber }, agentId: "agent-cov" },
+      orderBy: { createdAt: "asc" },
+      select: { coveredSha: true },
+    });
+    expect(rows.map((r) => r.coveredSha)).toEqual([null, headSha, null, null]);
+  });
 });

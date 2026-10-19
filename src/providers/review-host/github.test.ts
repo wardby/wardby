@@ -783,6 +783,65 @@ describe("GitHubReviewHost writes", () => {
     });
   });
 
+  describe("the covered head in the summary marker", () => {
+    const COVERED = "c".repeat(40);
+    const publishWith = async (existingBody: string | null, coveredSha: string | null | undefined) => {
+      const { client, calls } = fakeGitHub(({ method, path }) => {
+        if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+        if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+        if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) {
+          return json(existingBody ? [{ id: 5, body: existingBody, html_url: "https://x/5", ...BY_APP }] : []);
+        }
+        if (method === "PATCH" && path === `${BASE}/issues/comments/5`) return json({ id: 5, html_url: "https://x/5" });
+        if (method === "POST" && path === `${BASE}/issues/7/comments`)
+          return json({ id: 6, html_url: "https://x/6" }, 201);
+        if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 12 }, 201);
+        return undefined;
+      });
+      await new GitHubReviewHost(client).publishReview(REPO, { ...input, comments: [], coveredSha });
+      const write = calls.find(
+        (c) =>
+          (c.method === "PATCH" && c.path === `${BASE}/issues/comments/5`) || c.path === `${BASE}/issues/7/comments`,
+      );
+      return String((write!.body as { body: string }).body);
+    };
+
+    it("records this head as covered when the review read every file", async () => {
+      expect(await publishWith(null, SHA)).toContain(`sha=${SHA} covered=${SHA} -->`);
+    });
+
+    it("keeps the earlier covered head when this review did not read every file", async () => {
+      const body = await publishWith(`${reviewMarker("agent1", OLD_SHA, COVERED)}\nold`, null);
+      expect(body).toContain(`sha=${SHA} covered=${COVERED} -->`);
+    });
+
+    it("writes no covered head when there is none, as from an older marker", async () => {
+      const body = await publishWith(`${reviewMarker("agent1", OLD_SHA)}\nold`, undefined);
+      expect(body).toContain(`sha=${SHA} -->`);
+      expect(body).not.toContain("covered=");
+    });
+
+    it("returns the marker's covered head from repo_pr_read, and null for an older marker", async () => {
+      const readWith = async (body: string) => {
+        const { client } = fakeGitHub(({ method, path }) => {
+          if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+          if (path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+          if (path.startsWith(`${BASE}/issues/7/comments`)) return json([{ id: 1, body, ...BY_APP }]);
+          return undefined;
+        });
+        return new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 1000, agentMarker: "agent1" });
+      };
+      expect(await readWith(reviewMarker("agent1", OLD_SHA, COVERED))).toMatchObject({
+        lastReviewedSha: OLD_SHA,
+        lastCoveredSha: COVERED,
+      });
+      expect(await readWith(reviewMarker("agent1", OLD_SHA))).toMatchObject({
+        lastReviewedSha: OLD_SHA,
+        lastCoveredSha: null,
+      });
+    });
+  });
+
   it("posts a new summary rather than editing a forged one the App did not write", async () => {
     const { client, calls } = fakeGitHub(({ method, path }) => {
       if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);

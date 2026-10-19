@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   hasReviewMarker,
+  parseCoveredMarker,
   parseReviewMarker,
   renderSummaryComment,
   reviewMarker,
@@ -15,6 +16,19 @@ describe("review markers", () => {
     expect(parseReviewMarker(body, "agent1")).toBe(SHA);
     expect(parseReviewMarker(body, "agent2")).toBeNull();
     expect(hasReviewMarker(body, "agent1")).toBe(true);
+  });
+
+  it("carries the covered head; a marker without one (an older marker) has none", () => {
+    const COVERED = "f".repeat(40);
+    const body = `${reviewMarker("agent1", SHA, COVERED)}\nhello`;
+    expect(body).toContain(`sha=${SHA} covered=${COVERED} -->`);
+    expect(parseReviewMarker(body, "agent1")).toBe(SHA);
+    expect(parseCoveredMarker(body, "agent1")).toBe(COVERED);
+    expect(parseCoveredMarker(body, "agent2")).toBeNull();
+    const old = `<!-- wardby:review:agent1 sha=${SHA} -->\nhello`;
+    expect(parseReviewMarker(old, "agent1")).toBe(SHA);
+    expect(parseCoveredMarker(old, "agent1")).toBeNull();
+    expect(() => reviewMarker("agent1", SHA, "not-a-sha")).toThrow("review_marker_invalid");
   });
 
   it("rejects an unsafe agent marker", () => {

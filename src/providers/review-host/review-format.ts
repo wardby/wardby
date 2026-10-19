@@ -9,10 +9,15 @@ function assertMarker(agentMarker: string): void {
   if (!SAFE_AGENT_MARKER.test(agentMarker)) throw new Error("review_marker_invalid");
 }
 
-export function reviewMarker(agentMarker: string, headSha: string): string {
+/**
+ * `coveredSha`: the latest head this agent reviewed after reading every file. A marker without
+ * it (an older one included) means none.
+ */
+export function reviewMarker(agentMarker: string, headSha: string, coveredSha?: string | null): string {
   assertMarker(agentMarker);
   if (!SAFE_SHA.test(headSha)) throw new Error("review_marker_invalid");
-  return `${MARKER_PREFIX}${agentMarker} sha=${headSha} -->`;
+  if (coveredSha && !SAFE_SHA.test(coveredSha)) throw new Error("review_marker_invalid");
+  return `${MARKER_PREFIX}${agentMarker} sha=${headSha}${coveredSha ? ` covered=${coveredSha}` : ""} -->`;
 }
 
 export function hasReviewMarker(body: string, agentMarker: string): boolean {
@@ -20,10 +25,18 @@ export function hasReviewMarker(body: string, agentMarker: string): boolean {
   return body.includes(`${MARKER_PREFIX}${agentMarker} sha=`);
 }
 
-export function parseReviewMarker(body: string, agentMarker: string): string | null {
+function matchReviewMarker(body: string, agentMarker: string): RegExpExecArray | null {
   assertMarker(agentMarker);
-  const match = new RegExp(`${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40}) -->`).exec(body);
-  return match ? match[1] : null;
+  return new RegExp(`${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40})(?: covered=([0-9a-f]{40}))? -->`).exec(body);
+}
+
+export function parseReviewMarker(body: string, agentMarker: string): string | null {
+  return matchReviewMarker(body, agentMarker)?.[1] ?? null;
+}
+
+/** The marker's covered head; null for a marker without one. */
+export function parseCoveredMarker(body: string, agentMarker: string): string | null {
+  return matchReviewMarker(body, agentMarker)?.[2] ?? null;
 }
 
 export function verdictConclusion(verdict: ReviewVerdict): CheckConclusion {
@@ -57,13 +70,14 @@ export function renderInlineComment(comment: InlineComment, agentMarker: string)
 export function renderSummaryComment(input: {
   agentMarker: string;
   headSha: string;
+  coveredSha?: string | null;
   verdict: ReviewVerdict;
   summary: string;
   body: string;
   outside: InlineComment[];
 }): string {
   const sections = [
-    reviewMarker(input.agentMarker, input.headSha),
+    reviewMarker(input.agentMarker, input.headSha, input.coveredSha),
     `${BADGES[input.verdict]} — reviewed \`${input.headSha.slice(0, 7)}\``,
     input.summary,
     input.body,

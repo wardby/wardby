@@ -260,6 +260,45 @@ describe("ReviewReadLedger state", () => {
     });
   });
 
+  describe("covered(): this attempt read every file of the head", () => {
+    const B1 = "b".repeat(40);
+    const page = (
+      files: PullRequestFileView[],
+      over: { comparedFrom?: string | null; lastCoveredSha?: string | null; fileListComplete?: boolean } = {},
+    ) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: null,
+        lastReviewedSha: null,
+        lastCoveredSha: null,
+        fileListComplete: true,
+        ...over,
+      }) as unknown as PullRequestView;
+
+    it("only for a whole, uncut list with every code file read", () => {
+      const reads = new ReviewReadLedger();
+      expect(reads.covered("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, page([f("src/a.ts", "later_page")]), false);
+      expect(reads.covered("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, page([f("src/a.ts", "complete")]), true);
+      expect(reads.covered("o/r", 1, HEAD)).toBe(true);
+      const cut = new ReviewReadLedger();
+      cut.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { fileListComplete: false }), false);
+      expect(cut.covered("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("for a delta only when it starts from the covered head the read returned", () => {
+      const trusted = new ReviewReadLedger();
+      trusted.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { comparedFrom: B1, lastCoveredSha: B1 }), false);
+      expect(trusted.covered("o/r", 1, HEAD)).toBe(true);
+      const other = new ReviewReadLedger();
+      other.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { comparedFrom: B1, lastCoveredSha: null }), false);
+      expect(other.covered("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
   describe("a file list the host cut", () => {
     const cut = (files: PullRequestFileView[]) =>
       ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: false }) as unknown as PullRequestView;

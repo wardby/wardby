@@ -1,7 +1,7 @@
 ---
 id: errors/file-list-truncated
 title: APPROVE refused on a cut file list (file_list_truncated)
-summary: The pull request has more changed files than repo_pr_read lists, so a review agent cannot approve it; it can still request changes or comment.
+summary: The pull request has more changed files than repo_pr_read lists, so repo_publish_review refuses the agent's APPROVE; it can still request changes or comment.
 audience: operator
 tags: [error, code-review, repo_publish_review, repo_pr_read, file_list_truncated, fileListComplete, large-pull-request]
 appliesTo: ">=0.6.1"
@@ -29,7 +29,9 @@ Nothing is published and nothing else changes. `CHANGES_REQUESTED` and
   is read; see `unread_files`). A complete `sinceSha` read does not lift the
   refusal.
 - Otherwise publish `CHANGES_REQUESTED` on what it read, and say the pull
-  request is too large to review in full. `COMMENT` completes the check as
+  request is too large to review in full. That review does not cover the
+  head, so a later run cannot approve it through a `sinceSha` delta either
+  (see `full_read_required`). `COMMENT` completes the check as
   neutral, which branch protection treats as passing.
 
 ## What the owner does

@@ -391,6 +391,8 @@ describe("handleReviewHostTool", () => {
       agentMarker: "agent1",
       checkName: "wardby review",
       checkId: "11",
+      // No ledger: nothing shows the review read every file.
+      coveredSha: null,
     });
     expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
   });
@@ -1099,6 +1101,47 @@ describe("handleReviewHostTool unread-files publish guard", () => {
       await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), fresh),
     );
     expect(approved.error).toBeUndefined();
+  });
+
+  it("records the head as covered only when the review read every file, so a cut review cannot be approved by a later delta", async () => {
+    const H1 = "b".repeat(40);
+    // Run 1: the whole list is cut; the agent publishes CHANGES_REQUESTED as told.
+    let view: Record<string, unknown> = {
+      number: 7,
+      headSha: SHA,
+      files: [codeFile("src/a.ts", "complete")],
+      nextPatchCursor: null,
+      comparedFrom: null,
+      lastReviewedSha: null,
+      lastCoveredSha: null,
+      fileListComplete: false,
+    };
+    const h = fakeHost();
+    h.readPullRequest = vi.fn(async () => view as never);
+    const run1 = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), run1);
+    await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("CHANGES_REQUESTED")), run1);
+    expect(vi.mocked(h.publishReview).mock.calls.at(-1)![1]).toMatchObject({ coveredSha: null });
+
+    // Run 2: a one-file delta from the last reviewed head (not covered) is complete, yet APPROVE is refused.
+    view = { ...view, comparedFrom: H1, lastReviewedSha: H1, lastCoveredSha: null, fileListComplete: true };
+    const run2 = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool(
+      "repo_pr_read",
+      JSON.stringify({ repository: WRITE.repository, prNumber: 7, sinceSha: H1 }),
+      run2,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), run2),
+    );
+    expect(out).toMatchObject({ error: "full_read_required" });
+
+    // A whole, uncut read with every file read covers the head, whatever the verdict.
+    view = { ...view, comparedFrom: null, fileListComplete: true };
+    const run3 = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), run3);
+    await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("CHANGES_REQUESTED")), run3);
+    expect(vi.mocked(h.publishReview).mock.calls.at(-1)![1]).toMatchObject({ coveredSha: SHA });
   });
 
   it("allows APPROVE once a later read of the head lists every file", async () => {
