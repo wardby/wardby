@@ -33,6 +33,15 @@ RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
 # npm and environment its commands use. main.mjs imports it as ../coding-worker/dependency-cache.mjs.
 COPY src/coding-worker/dependency-cache.mjs /opt/wardby/coding-worker/dependency-cache.mjs
 RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function" || typeof m.sealUploadWindow !== "function") process.exit(1)'
+# `wardby-packages` (src/coding-worker/wardby-packages.mjs): lists the package registry's refusals for
+# the run, which pip and uv don't print. command.mjs imports registry-refusals.mjs as
+# ../coding-worker/registry-refusals.mjs to add them to a failed command's output.
+COPY src/coding-worker/registry-refusals.mjs /opt/wardby/coding-worker/registry-refusals.mjs
+COPY src/coding-worker/wardby-packages.mjs /opt/wardby/coding-worker/wardby-packages.mjs
+RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs \
+    && ln -s ../coding-worker/wardby-packages.mjs /opt/wardby/bin/wardby-packages \
+    && test "$(sh -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages \
+    && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured"
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
@@ -55,7 +64,7 @@ FROM base AS node-python
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
-    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
+    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 uv==0.12.23 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     # Most Python projects (and their own docs) say `python`, not `python3`.
@@ -72,6 +81,7 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/pip3 \
     && python --version \
     && python -m pytest --version \
+    && uv --version \
     && python -m ruff --version \
     # A registry-mode venv must be creatable offline, carry pip, and still see pytest/ruff.
     && python -m venv --system-site-packages /tmp/venv-check \

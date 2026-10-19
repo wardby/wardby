@@ -30,3 +30,12 @@ export declare function runCommand(
   workspacePath?: string,
   setup?: ToolSetup,
 ): Promise<{ code: number; output: string }>;
+export declare function withPackageRefusals(
+  result: { code: number; output: string },
+  env: Record<string, string | undefined>,
+  startedAt: number,
+  lookup?: (
+    access: import("../coding-worker/registry-refusals.mjs").RegistryAccess | undefined,
+    since?: Date,
+  ) => Promise<import("../coding-worker/registry-refusals.mjs").RecentRefusal[]>,
+): Promise<{ code: number; output: string }>;

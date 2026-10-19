@@ -2,7 +2,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
-  dependencyCacheTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -10,6 +9,7 @@ import {
   type CodingWorkerOutput,
   type DependencyCacheReport,
 } from "../coding/protocol.js";
+import { workerTaskNote } from "./task-note.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
@@ -283,7 +283,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     webSearchMode: "disabled",
     approvalPolicy: "never",
   });
-  const note = dependencyCacheTaskNote(dependencyCache);
+  const note = workerTaskNote(dependencyCache);
   const streamed = await thread.runStreamed(boundedPrompt(options.input.task, options.input.runId, note), {
     outputSchema: CODING_OUTPUT_JSON_SCHEMA,
     signal: options.signal,

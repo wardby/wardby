@@ -36,6 +36,7 @@ COPY --from=build /build/dist/coding-worker/artifact.js ./coding-worker/artifact
 COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
 COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug-trace.js
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
+COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-note.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 # The shared secret redactor (debug-trace.js); it imports nothing.
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js

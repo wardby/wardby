@@ -153,18 +153,20 @@ export class PrismaRegistryStore implements RegistryStore {
 
   async listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {
     const rows = await this.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
-    return rows.map((row) => ({
-      runId: row.runId,
-      ecosystem: row.ecosystem,
-      name: row.name,
-      version: row.version ?? undefined,
-      filename: row.filename ?? undefined,
-      integrity: row.integrity ?? undefined,
-      sizeBytes: row.sizeBytes ?? undefined,
-      outcome: row.outcome,
-      reason: row.reason ?? undefined,
-      createdAt: row.createdAt,
-    }));
+    return rows.map(fetchRecordOf);
+  }
+
+  async listRecentRefusals(
+    runId: string,
+    since: Date,
+    limit: number,
+  ): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {
+    const rows = await this.db.registryFetch.findMany({
+      where: { runId, outcome: "refused", createdAt: { gte: since } },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return rows.map(fetchRecordOf);
   }
 
   async getVersionFacts(
@@ -297,4 +299,30 @@ export class PrismaRegistryStore implements RegistryStore {
         AND NOT (${lockHash} = ANY("dependencyCacheLockHashes"))
         AND cardinality("dependencyCacheLockHashes") < ${max}`;
   }
+}
+
+function fetchRecordOf(row: {
+  runId: string;
+  ecosystem: string;
+  name: string;
+  version: string | null;
+  filename: string | null;
+  integrity: string | null;
+  sizeBytes: number | null;
+  outcome: RegistryFetchRecord["outcome"];
+  reason: string | null;
+  createdAt: Date;
+}): RegistryFetchRecord & { createdAt: Date } {
+  return {
+    runId: row.runId,
+    ecosystem: row.ecosystem,
+    name: row.name,
+    version: row.version ?? undefined,
+    filename: row.filename ?? undefined,
+    integrity: row.integrity ?? undefined,
+    sizeBytes: row.sizeBytes ?? undefined,
+    outcome: row.outcome,
+    reason: row.reason ?? undefined,
+    createdAt: row.createdAt,
+  };
 }

@@ -1,6 +1,5 @@
 import {
   CODING_PROTOCOL_VERSION,
-  dependencyCacheTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -12,6 +11,7 @@ import {
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
+import { workerTaskNote } from "../coding-worker/task-note.js";
 import { safeWorkerErrorCode, streamFailureCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 
@@ -283,7 +283,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ? `${CLAUDE_WORKER_SECURITY_INSTRUCTIONS}\n\n${injected}`
     : CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
   const stream = options.createQuery({
-    prompt: boundedPrompt(options.input.task, options.input.runId, dependencyCacheTaskNote(dependencyCache)),
+    prompt: boundedPrompt(options.input.task, options.input.runId, workerTaskNote(dependencyCache)),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,

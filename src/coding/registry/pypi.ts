@@ -2,8 +2,8 @@
  * PyPI registry adapter: parses PyPI allowlist syntax (PEP 503 names, PEP
  * 440 specifiers), routes proxy requests against the PEP 691 JSON Simple
  * API plus PEP 658 metadata files, restricts downloads to wheels, and
- * configures pip for the sandboxed worker to use the proxy as its only
- * index with binary-only installs.
+ * configures pip and uv for the sandboxed worker to use the proxy as their
+ * only index with binary-only installs.
  */
 import { clean as pepClean, compare as pepCompare, satisfies as pepSatisfies, validRange } from "@renovatebot/pep440";
 import { unzipSync, strFromU8 } from "fflate";
@@ -356,6 +356,13 @@ export const pypiAdapter: RegistryAdapter = {
         PIP_CACHE_DIR: cacheDir,
         PIP_DISABLE_PIP_VERSION_CHECK: "1",
         PIP_NO_INPUT: "1",
+        // uv reads none of pip's settings: without these it goes straight to pypi.org,
+        // which the sandbox can't reach. UV_NO_BUILD refuses sdists from the index (the
+        // wheels-only rule) and still builds the project itself.
+        UV_DEFAULT_INDEX: index.toString(),
+        UV_NO_BUILD: "1",
+        UV_CACHE_DIR: `${cacheDir}/uv`,
+        UV_PYTHON_DOWNLOADS: "never",
       },
       files: [],
     };

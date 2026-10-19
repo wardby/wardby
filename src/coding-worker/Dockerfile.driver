@@ -53,9 +53,18 @@ RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
 # dependencies before the agent starts, when the run asks for it. driver.js
 # imports it from next to itself; plain JavaScript, so it is copied, not built.
 COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs
+# `wardby-packages` (wardby-packages.mjs + registry-refusals.mjs): lists the
+# package registry's refusals for the run, which pip and uv don't print.
+COPY src/coding-worker/registry-refusals.mjs ./coding-worker/registry-refusals.mjs
+COPY src/coding-worker/wardby-packages.mjs ./coding-worker/wardby-packages.mjs
+RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs \
+    && ln -s ../coding-worker/wardby-packages.mjs /opt/wardby/bin/wardby-packages \
+    && test "$(bash -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages
 # Fail the build, not every run, when a module the worker imports is missing:
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on
 # import, so this loads everything it imports rather than main.js itself.
 RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))' \
-    && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function") process.exit(1)'
+    && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function") process.exit(1)' \
+    && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/registry-refusals.mjs"); if (typeof m.recentRefusals !== "function") process.exit(1)' \
+    && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured"

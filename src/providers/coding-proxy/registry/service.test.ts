@@ -10,6 +10,7 @@ import {
 } from "../../../coding/registry/types.js";
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
+import { refusalHint } from "../../../coding/registry/refusal-hints.js";
 import { capabilityHash } from "../proxy.js";
 import { auditAdvisoryOf, splitWaived, type WithheldAdvisory } from "./audit.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
@@ -271,6 +272,7 @@ describe("RegistryService", () => {
       usage: (runId) => inner.usage(runId),
       refusalCount: (runId) => inner.refusalCount(runId),
       listFetches: (runId) => inner.listFetches(runId),
+      listRecentRefusals: (runId, since, limit) => inner.listRecentRefusals(runId, since, limit),
       getVersionFacts: (ecosystem, versions) => inner.getVersionFacts(ecosystem, versions),
       putVersionFacts: (ecosystem, facts) => inner.putVersionFacts(ecosystem, facts),
       approveVersions: (runId, ecosystem, versions) => inner.approveVersions(runId, ecosystem, versions),
@@ -1063,7 +1065,7 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
     "core-metadata": true,
   });
 
-  function pypiService() {
+  function pypiService(indexFiles?: () => unknown[]) {
     const store = new MemoryRegistryStore();
     store.contexts.set(capabilityHash("rrg_token"), {
       runId: "run-1",
@@ -1085,7 +1087,7 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
         if (url === "https://pypi.org/simple/demo/")
           // An old release (first uploaded 100 days ago) that gained a
           // brand-new wheel yesterday.
-          return Response.json({ name: "demo", files: [file(oldWheel, 100), file(newWheel, 1)] });
+          return Response.json({ name: "demo", files: indexFiles?.() ?? [file(oldWheel, 100), file(newWheel, 1)] });
         if (url.endsWith(".metadata"))
           return new Response("Metadata-Version: 2.1\nName: demo\nVersion: 1.0\nRequires-Dist: Werkzeug>=3\n");
         return new Response(wheelBytes);
@@ -1095,8 +1097,61 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       now: () => NOW,
     });
     const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "pypi" });
-    return { get, urls, store };
+    return { get, urls, store, registry };
   }
+
+  const listed = (refusals: Awaited<ReturnType<RegistryService["refusals"]>>) =>
+    JSON.parse(refusals.body) as { refusals: { name: string; code: string; hint?: string }[] };
+
+  it("records an index whose kept versions have no wheel to serve, and still answers it (empty)", async () => {
+    const sdist = { ...file("demo-1.0.tar.gz", 100) };
+    const { get, store } = pypiService(() => [sdist]);
+    const index = await get("simple/demo/");
+    expect(index).toMatchObject({ status: 200 });
+    if (!("body" in index)) throw new Error("expected a body");
+    expect((JSON.parse(index.body) as { files: unknown[] }).files).toEqual([]);
+    expect(store.fetches.map((fetch) => [fetch.outcome, fetch.name, fetch.reason])).toEqual([
+      ["refused", "demo", "wardby_file_not_allowed"],
+    ]);
+
+    const tooNew = pypiService(() => [file(newWheel, 1)]);
+    await tooNew.get("simple/demo/");
+    expect(tooNew.store.fetches.map((fetch) => fetch.reason)).toEqual(["wardby_version_filtered"]);
+  });
+
+  it("records nothing for an index that still lists a wheel", async () => {
+    const { get, store } = pypiService();
+    await get("simple/demo/");
+    expect(store.fetches).toEqual([]);
+  });
+
+  it("lists the run's recent refusals once each, with the shared hint, for the run's token only", async () => {
+    const { get, registry } = pypiService(() => [file("demo-1.0.tar.gz", 100)]);
+    await get("simple/demo/");
+    await get("simple/demo/");
+    await get("simple/flask/");
+    const answer = await registry.refusals({ token: "rrg_token" });
+    expect(answer).toMatchObject({ status: 200, contentType: "application/json" });
+    expect(listed(answer).refusals).toEqual([
+      {
+        ecosystem: "pypi",
+        name: "flask",
+        code: "wardby_package_not_allowed",
+        hint: refusalHint("wardby_package_not_allowed"),
+      },
+      {
+        ecosystem: "pypi",
+        name: "demo",
+        code: "wardby_file_not_allowed",
+        hint: refusalHint("wardby_file_not_allowed"),
+      },
+    ]);
+    // Only refusals at or after `since`.
+    expect(
+      listed(await registry.refusals({ token: "rrg_token", since: new Date(Date.now() + 60_000) })).refusals,
+    ).toEqual([]);
+    await expect(registry.refusals({ token: "nope" })).resolves.toMatchObject({ status: 401 });
+  });
 
   it("hides the new wheel from the index and serves the old one", async () => {
     const { get } = pypiService();

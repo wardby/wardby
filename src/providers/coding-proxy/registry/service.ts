@@ -22,6 +22,7 @@ import {
   notAllowedPendingMessage,
   PACKAGE_NOT_ALLOWED,
   PACKAGE_NOT_ALLOWED_PENDING,
+  refusalHint,
   type WalkProgress,
 } from "../../../coding/registry/refusal-hints.js";
 import {
@@ -54,7 +55,7 @@ const registryLog = logger.child({ module: "coding-registry" });
  *  this, a proxy database role missing its grants (permission denied) was
  *  indistinguishable from an upstream outage: an unlogged 502 to npm or pip.
  *  Expected refusals (4xx) stay unlogged here: they are recorded per run. */
-function logRegistryFailure(route: "handle" | "plan", ecosystem: string, error: unknown): void {
+function logRegistryFailure(route: "handle" | "plan" | "refusals", ecosystem: string, error: unknown): void {
   if (error instanceof RegistryError) {
     if (error.status >= 500) {
       registryLog.warn(
@@ -380,6 +381,16 @@ export interface RegistryRequest {
   token: string;
   signal: AbortSignal;
 }
+export interface RegistryRefusalsRequest {
+  token: string;
+  /** Only refusals recorded at or after this time; the last 15 minutes when absent or invalid. */
+  since?: Date;
+}
+
+/** The most refusals `GET /registry/-/refusals` returns (distinct, newest first). */
+export const MAX_LISTED_REFUSALS = 20;
+const DEFAULT_REFUSALS_WINDOW_MS = 15 * 60_000;
+
 export interface RegistryPlanRequest {
   ecosystem: string;
   token: string;
@@ -395,7 +406,28 @@ function contentTypeOf(route: DownloadRoute | FileMetadataRoute): string {
   return route.kind === "file-metadata" ? "text/plain" : "application/octet-stream";
 }
 
-export function errorResponse(error: RegistryError): RegistryResponse {
+/**
+ * Why kept versions leave nothing to download, or null when some file is
+ * servable: every allowed file newer than the release-age limit
+ * (`wardby_version_filtered`), or no allowed file at all, such as a Python
+ * package with only source distributions (`wardby_file_not_allowed`).
+ */
+export function unservableReason(meta: PackageMetadata, keep: ReadonlySet<string>, keptFiles: ReadonlySet<string>) {
+  let anyFile = false;
+  let anyAllowed = false;
+  for (const version of keep) {
+    for (const file of meta.versions.get(version)?.files ?? []) {
+      anyFile = true;
+      if (!file.allowed) continue;
+      if (keptFiles.has(file.filename)) return null;
+      anyAllowed = true;
+    }
+  }
+  if (anyAllowed) return "wardby_version_filtered";
+  return anyFile ? "wardby_file_not_allowed" : null;
+}
+
+export function errorResponse(error: RegistryError): Extract<RegistryResponse, { body: string }> {
   return {
     status: error.status,
     contentType: "application/json",
@@ -567,6 +599,47 @@ export class RegistryService {
       timeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
       maxBytes: MAX_VERSION_DOCUMENT_BYTES,
     });
+  }
+
+  /**
+   * `GET /registry/-/refusals`: the run's recent refusals (package, code and the
+   * shared hint), for a client that does not print the registry's 403 body
+   * (pip, uv). Authenticated with the run's registry token. Names come from the
+   * run's own requests; nothing else (no URL, no token) is returned.
+   */
+  async refusals(request: RegistryRefusalsRequest): Promise<Extract<RegistryResponse, { body: string }>> {
+    try {
+      const context = await this.options.store.findRunByRegistryTokenHash(capabilityHash(request.token), this.now());
+      if (!context)
+        throw new RegistryError(401, "invalid_capability", "the registry token is not valid for a live run");
+      const since =
+        request.since && !Number.isNaN(request.since.getTime())
+          ? request.since
+          : new Date(this.now().getTime() - DEFAULT_REFUSALS_WINDOW_MS);
+      const rows = await this.options.store.listRecentRefusals(context.runId, since, MAX_LISTED_REFUSALS * 5);
+      const seen = new Set<string>();
+      const refusals: { ecosystem: string; name: string; version?: string; code: string; hint?: string }[] = [];
+      for (const row of rows) {
+        const code = row.reason ?? "wardby_refused";
+        const key = `${row.ecosystem}\0${row.name}\0${row.version ?? ""}\0${code}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const hint = refusalHint(code);
+        refusals.push({
+          ecosystem: row.ecosystem,
+          name: row.name,
+          ...(row.version ? { version: row.version } : {}),
+          code,
+          ...(hint ? { hint } : {}),
+        });
+        if (refusals.length >= MAX_LISTED_REFUSALS) break;
+      }
+      return { status: 200, contentType: "application/json", body: JSON.stringify({ refusals }) };
+    } catch (error) {
+      logRegistryFailure("refusals", "-", error);
+      if (error instanceof RegistryError) return errorResponse(error);
+      return errorResponse(new RegistryError(502, "wardby_upstream_error", "the package registry request failed"));
+    }
   }
 
   /** `POST /registry/<ecosystem>/-/plan`: verifies a lockfile against the
@@ -913,6 +986,12 @@ export class RegistryService {
         );
       }
       await this.allowServed(context, adapter, name, keptDependencies(adapter, meta, keep), audit);
+      // Versions kept but no file the client may download: a Python package
+      // published only as an sdist, or whose every wheel is newer than the
+      // release-age limit. The (empty) index is still served, and pip and uv
+      // only say "no versions", so the refusal is recorded to say why.
+      const unservable = unservableReason(meta, keep, keptFiles);
+      if (unservable) await this.refuse(context, adapter, name, unservable);
       const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }

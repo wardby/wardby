@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { formatRefusals, recentRefusals, registryAccess } from "../coding-worker/registry-refusals.mjs";
 
 export const MAX_OUTPUT_BYTES = 64 * 1024;
 export const MAX_COMMAND_BYTES = 16 * 1024;
@@ -141,14 +142,30 @@ async function ensureTmpDir(workspacePath) {
   }
 }
 
+/** How far before a command's start a refusal still counts as its own (the proxy's clock may lag). */
+const REFUSAL_CLOCK_SLACK_MS = 2_000;
+
+/**
+ * A failed command's output, plus a line for each package the registry refused
+ * while it ran: pip and uv don't print why (npm does, so its lines repeat what
+ * it said). Bounded by the lookup's own timeout; never throws.
+ */
+export async function withPackageRefusals(result, env, startedAt, lookup = recentRefusals) {
+  if (result.code === 0) return result;
+  const lines = formatRefusals(await lookup(registryAccess(env), new Date(startedAt - REFUSAL_CLOCK_SLACK_MS)));
+  return lines.length > 0 ? { ...result, output: `${result.output}\n${lines.join("\n")}\n` } : result;
+}
+
 export async function runCommand(command, timeoutMs, workspacePath = "/workspace", setup = EMPTY_SETUP) {
   if (Buffer.byteLength(command) > MAX_COMMAND_BYTES) throw new Error("tool_command_too_large");
   const timeout = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, timeoutMs));
   await prepareCommandWorkspace(setup, workspacePath);
-  return new Promise((resolve) => {
+  const env = commandEnvironment(setup, workspacePath);
+  const startedAt = Date.now();
+  const result = await new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-lc", command], {
       cwd: workspacePath,
-      env: commandEnvironment(setup, workspacePath),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a timeout reaches grandchildren that still hold the pipes.
       detached: true,
@@ -178,6 +195,7 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
       resolve({ code: 1, output: "tool execution failed" });
     });
   });
+  return withPackageRefusals(result, env, startedAt);
 }
 
 function signalGroup(pid, signal) {
