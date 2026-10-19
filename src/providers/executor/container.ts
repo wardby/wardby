@@ -1147,12 +1147,14 @@ export class ContainerExecutor implements Executor {
     const run = await this.options.store.load(runId);
     if (!run) return;
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
-    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
     // False when the run reached a terminal status after the load above: its finisher owns the
-    // cleanup and the continuation comment, so stopping now would overwrite a good outcome.
+    // cleanup and the continuation comment (recover() cleans up any terminal run the reconciler sees
+    // later), so stopping now would overwrite a good outcome. "stopping" is emitted only once this
+    // stop owns the run, so it is always followed by its terminal and cleanup events.
     if (!(await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit))) return;
+    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
