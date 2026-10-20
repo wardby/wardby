@@ -46,7 +46,8 @@ To see exactly which limit stopped a run and with what numbers, read
 `budgetEvents` in `get_run`; see the help article `errors/budget-exhausted`.
 A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once (or its live sub-agent runs' unspent holds, if the lead's overrun
-let them hold more), and `get_budget_group` reports `heldRuns` for each period.
+let them be topped up past it), and `get_budget_group` reports `heldRuns` for
+each period.
 
 A coding run's per-request holds price the cached part of the input at the
 cache-read rate after the first reply of a conversation; see the help article
@@ -57,7 +58,14 @@ cache-read rate after the first reply of a conversation; see the help article
 If coding runs stop just short of finishing, set `allowedOverrunPercent` (0 to
 100, default 0) on the coding agent so a run may spend that percent beyond
 `budgetUsd`. Set it on a lead agent that delegates to raise its run tree's
-ceiling for coding sub-agents; native runs' own model calls are not affected. Budget group and run-tree caps stay hard, and `get_run` shows
-`budgetBaseUsd` next to the limit in `budgetReservedUsd`. A run still stopped
-for budget keeps its work as a draft pull request you can continue. See
+ceiling for coding sub-agents; native runs' own model calls are not affected.
+
+The overrun is not reserved. A run reserves its base budget, and is topped up
+toward its limit while it works, only from room its budget group and run tree
+have at that moment. Budget group and run-tree caps stay hard: in a full group
+the run stops at its base, and its budget sentence says so ("Its 10% allowed
+overrun wasn't available because the "team" group had $0.40 left of its daily
+cap."). `get_run` shows `budgetBaseUsd`, the limit in `budgetLimitUsd`, and what
+has been granted so far in `budgetReservedUsd`. A run still stopped for budget
+keeps its work as a draft pull request you can continue. See
 `errors/budget-exhausted`.
