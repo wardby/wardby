@@ -158,21 +158,15 @@ export class MemoryProxyLedger implements ProxyLedger {
     }
   }
 
-  async settlementHints(
-    sessionId: string,
-    model: string,
-  ): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }> {
-    let previous: ProxyUsage | undefined;
+  async settlementHints(sessionId: string, model: string): Promise<{ medianOutputTokens?: number }> {
     const outputs: number[] = [];
-    // Map iteration follows insertion order, so the last match is the latest completed reply.
     for (const request of this.requests.values()) {
-      if (request.sessionId !== sessionId || request.status !== "completed" || !request.usage) continue;
+      if (request.sessionId !== sessionId || request.model !== model) continue;
+      if (request.status !== "completed" || !request.usage) continue;
       outputs.push(request.usage.outputTokens);
-      if (request.model === model && !request.costEstimated) previous = request.usage;
     }
     outputs.sort((a, b) => a - b);
     return {
-      ...(previous ? { previous: { ...previous } } : {}),
       // The lower middle for an even count, as Postgres's percentile_disc(0.5).
       ...(outputs.length > 0 ? { medianOutputTokens: outputs[Math.ceil(outputs.length / 2) - 1] } : {}),
     };

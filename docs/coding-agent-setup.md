@@ -509,14 +509,20 @@ that request (`refusedHoldCeilingUsd`); see
 When a model reply breaks off before its final usage arrives (a dropped
 connection, a worker that is stopped mid-reply), the proxy settles the request
 at an estimate instead of leaving its whole hold in place. The estimate is the
-input usage the proxy already read; failing that, the input of the run's
-previous completed reply; failing that, the input part of the request's hold.
-It adds the output relayed so far (text, tool-call input, and thinking or
-reasoning text), counted high. With nothing relayed, the run's median
-completed reply is used, or no output if there is none yet. A streaming request
-that failed before the provider's response started adds no output, because
-nothing was generated. A provider's placeholder output count at the start of a
-reply is used only as a minimum. The estimate is never more than the request's worst
+input usage the proxy already read; failing that, the input of the previous
+completed reply in the same conversation (the main conversation and each
+sub-agent are tracked apart) on the same model, plus the request body's growth
+since then. That reply is used only if it started within the 5-minute prompt
+cache window before the request and the body has not shrunk since (as after a
+compaction). Failing that, the whole request body counts as new input. New input
+is counted at one token per 3 bytes, a deliberately high count, and priced at
+the higher of the model's input and cache-write rates. It adds the output
+relayed so far (text, tool-call input, and thinking or reasoning text), counted
+high. With nothing relayed, the run's median completed reply on that model is
+used, or no output if there is none yet. A streaming request that failed before
+the provider's response started adds no output, because nothing was generated.
+A provider's placeholder output count at the start of a reply is used only as a
+minimum. The estimate is never more than the request's worst
 case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's
 request ledger. If the estimate cannot be computed or recorded, the request
