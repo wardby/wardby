@@ -129,22 +129,35 @@ describe("estimateInterrupted", () => {
     expect(estimateInterrupted({ ...facts, outputFloorTokens: 25_000 }, PRICE).usage.outputTokens).toBe(25_000);
   });
 
-  it("with nothing relayed and no run median, settles at the output the hold reserved for", () => {
+  const PREVIOUS = {
+    inputTokens: 50_000,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 80,
+    reasoningTokens: 0,
+  };
+
+  it("with nothing relayed and no completed reply to take a median from, books no output", () => {
     const readUsage = { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0 };
     const base = { relayedOutputBytes: 0, reservationUsd: 2.12, maxOutputTokens: 32_000 };
-    expect(estimateInterrupted({ ...base, readUsage, outputFloorTokens: 1 }, PRICE).usage.outputTokens).toBe(32_000);
-    const withMedian = { ...base, readUsage, outputFloorTokens: 1, medianOutputTokens: 700 };
-    expect(estimateInterrupted(withMedian, PRICE).usage.outputTokens).toBe(700);
-    const previous = {
-      inputTokens: 50_000,
-      cachedInputTokens: 0,
-      cacheWriteTokens: 0,
-      outputTokens: 80,
-      reasoningTokens: 0,
-    };
-    expect(estimateInterrupted({ ...base, previous }, PRICE).usage.outputTokens).toBe(32_000);
-    // A run's first request: the full hold.
-    expect(estimateInterrupted(base, PRICE).costUsd).toBe(2.12);
+    // message_start's placeholder stays a floor.
+    expect(estimateInterrupted({ ...base, readUsage, outputFloorTokens: 1 }, PRICE).usage.outputTokens).toBe(1);
+    expect(estimateInterrupted({ ...base, readUsage }, PRICE).usage.outputTokens).toBe(0);
+    expect(estimateInterrupted({ ...base, previous: PREVIOUS }, PRICE).usage.outputTokens).toBe(0);
+    // A run's first request: the input part of the hold, not the hold's reserved output.
+    const first = estimateInterrupted(base, PRICE);
+    expect(first.usage.outputTokens).toBe(0);
+    expect(usd(first.costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6));
+  });
+
+  it("with nothing relayed, books the run's median output when there is one", () => {
+    const readUsage = { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0 };
+    const base = { relayedOutputBytes: 0, reservationUsd: 2.12, maxOutputTokens: 32_000, medianOutputTokens: 700 };
+    expect(estimateInterrupted({ ...base, readUsage, outputFloorTokens: 1 }, PRICE).usage.outputTokens).toBe(700);
+    expect(estimateInterrupted({ ...base, previous: PREVIOUS }, PRICE).usage.outputTokens).toBe(700);
+    const first = estimateInterrupted(base, PRICE);
+    expect(first.usage.outputTokens).toBe(700);
+    expect(usd(first.costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6 + (700 * 10) / 1e6));
   });
 
   it("for a stream that failed before its response started, books no output", () => {

@@ -73,7 +73,8 @@ describe("loadBudgetSentence", () => {
         })),
       },
       runBudgetEvent: {
-        findFirst: vi.fn(async () => ({
+        findFirst: vi.fn(async ({ where }: { where: { kind: string } }) => ({
+          kind: where.kind,
           limit: "day",
           at: new Date(0),
           details: {
@@ -121,6 +122,18 @@ describe("budgetSentence with an allowed overrun", () => {
   it("names the base budget and the overrun when they differ", () => {
     expect(budgetSentence({ runBudgetUsd: 1.1, baseBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(
       "Out of budget: this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) were used up.",
+    );
+  });
+
+  it("with a recorded limit: names only the part of the overrun the run was topped up with", () => {
+    expect(budgetSentence({ runBudgetUsd: 1.05, baseBudgetUsd: 1, limitUsd: 1.1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget and $0.05 of its 10% allowed overrun ($1.05 in all) were used up.",
+    );
+    expect(budgetSentence({ runBudgetUsd: 1.1, baseBudgetUsd: 1, limitUsd: 1.1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) were used up.",
+    );
+    expect(budgetSentence({ runBudgetUsd: 1, baseBudgetUsd: 1, limitUsd: 1.1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget was used up.",
     );
   });
 

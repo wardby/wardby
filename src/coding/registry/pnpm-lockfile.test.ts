@@ -155,6 +155,45 @@ snapshots:
     expect(failure(() => parse("lockfileVersion: '9.0'\nsnapshots: [\n"))).toEqual([400, "wardby_bad_request"]);
   });
 
+  it("resolves each importer's dependencies by the version it records", () => {
+    const parsed = parse(`lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    devDependencies:
+      a:
+        specifier: ^1.0.0
+        version: 1.0.0
+
+  packages/web:
+    dependencies:
+      a-cjs:
+        specifier: npm:a@^2.0.0
+        version: a@2.0.0
+      shared:
+        specifier: workspace:*
+        version: link:../shared
+
+packages:
+
+  a@1.0.0:
+    resolution: {integrity: sha512-a1}
+
+  a@2.0.0:
+    resolution: {integrity: sha512-a2}
+
+snapshots:
+
+  a@1.0.0: {}
+
+  a@2.0.0: {}
+`);
+    expect(parsed.resolve(".", "a")).toMatchObject({ name: "a", version: "1.0.0" });
+    expect(parsed.resolve("packages/web", "a-cjs")).toMatchObject({ name: "a", version: "2.0.0" });
+    expect(parsed.resolve("packages/web", "shared")).toBeUndefined();
+  });
+
   it("never lets a key reach the object prototype", () => {
     const parsed = parse("lockfileVersion: '9.0'\nsnapshots:\n  __proto__@1.0.0: {}\n  constructor: {}\n");
     expect(parsed.entries.map((entry) => entry.kind)).toEqual(["unsupported", "unsupported"]);

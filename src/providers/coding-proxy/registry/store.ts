@@ -119,13 +119,18 @@ export function extraOfAllowanceName(rowName: string, name: string): string | nu
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(extra) ? extra : null;
 }
 
+/** The `auditedVia` of an audited allowance whose relation a lockfile plan
+ *  could not tell (`unknown`): no package name is empty. */
+export const AUDITED_VIA_UNKNOWN = "";
+
 /** Run-scoped store over the registry-only token session lookup and the
  *  RegistryAllowance/RegistryFetch tables (Task 5). Backs the registry proxy:
  *  it never sees the model capability, only the derived registry token. */
 export interface RegistryStore {
   findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null>;
   isAllowedDependency(runId: string, ecosystem: string, name: string): Promise<boolean>;
-  /** The run's allowance of `name` (null = none): `auditedVia` is the audited package that declared it, or null. */
+  /** The run's allowance of `name` (null = none): `auditedVia` is the audited package that declared it,
+   *  AUDITED_VIA_UNKNOWN when no one is known to, or null. */
   findAllowance(runId: string, ecosystem: string, name: string): Promise<{ auditedVia: string | null } | null>;
   addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void>;
   /** Like addAllowances, each name tagged with the audited package that declared it; existing rows are kept. */

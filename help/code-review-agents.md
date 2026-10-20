@@ -40,9 +40,10 @@ such a pull request automatically, up to a round cap — see
 
 Wardby skips pull requests whose head is in a fork. It also ignores mentions
 from bots and people without write access, checked against the author's real
-repository permission. Someone with `read` or `triage` access gets a 😕
-reaction and a reply saying a mention needs write access; anyone else is
-ignored silently. A private organization member, whom GitHub labels
+repository permission. Someone with `triage` access, or with `read` access on a private repository
+or as an owner, member or collaborator, gets a 😕 reaction and a reply saying
+a mention needs write access; anyone else, including a stranger on a public
+repository, is ignored silently. A private organization member, whom GitHub labels
 `CONTRIBUTOR` or `NONE`, is still checked and can start runs. A mention inside
 Markdown code (an inline code span or a code block) is not a request, so
 quoting `` `@<app-slug>` `` in an issue or comment starts nothing. Repository links require the
@@ -76,7 +77,9 @@ optional for the verdict. A page that includes source, test or config files
 stops before the first doc, help, lockfile or generated file, so those come on
 later pages and a reviewer can skip them. Read every `unavailable` source, test or config file
 with `repo_read_file` at the head. A cursor goes stale when
-the branch moves (`patch_cursor_stale`): call again without it.
+the branch moves (`patch_cursor_stale`): call again without it. A damaged or
+rewritten cursor returns `patch_cursor_malformed`: pass `nextPatchCursor` back exactly
+as returned.
 `repo_publish_review` refuses `APPROVE` with
 `unread_files` while a listed source, test or config file is neither fully
 delivered nor read at `headSha`. A reviewer that cannot read everything should
@@ -84,6 +87,11 @@ publish `CHANGES_REQUESTED` and name what it skipped: `COMMENT` completes the
 check as neutral, which branch protection treats as passing.
 The shipped reviewer prompt does this; see the [full guide](../docs/code-review-agents.md#large-pull-requests).
 The refusal applies in both `control-plane` and `sandbox` mode.
+A pull request with more changed files than the host lists (1,000; 300 for a
+`sinceSha` compare on GitHub) reads with `fileListComplete: false`, and
+`APPROVE` of that head is refused with
+`file_list_truncated`; `CHANGES_REQUESTED`
+and `COMMENT` still publish.
 
 ## Drafts stopped at their budget
 
@@ -259,7 +267,11 @@ A separate guard applies per run: `repo_publish_review` refuses `APPROVE`
 with `unread_files` while a source, test or config file of the head
 was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
 read the file with `repo_read_file` at `headSha`; if that is not possible,
-publish `CHANGES_REQUESTED` and name the files not reviewed.
+publish `CHANGES_REQUESTED` and name the files not reviewed. `APPROVE` is
+also refused with `file_list_truncated` while the head's file list is cut
+(`fileListComplete: false`), and with `full_read_required` when the run read
+the head only with a `sinceSha` other than the `lastCoveredSha` it returned
+(the latest head this agent reviewed after reading every file).
 
 Add this to a reviewer's system prompt:
 

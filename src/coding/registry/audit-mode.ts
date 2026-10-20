@@ -389,7 +389,7 @@ export function packageAuditStatusText(mode: PackageAuditMode, digest: PackageAu
     text =
       `${head} installed outside the allowlist: ${listed}` +
       `${transitive > 0 ? ` (plus ${transitive} ${transitive === 1 ? "dependency" : "dependencies"})` : ""}.` +
-      `${unknownText}${advisoryText} Add them with \`update_agent\` (codingProfile.packageAllowlist) to keep them.`;
+      `${unknownText}${advisoryText} Keep them with \`approve_audited_packages\` (adds them to codingProfile.packageAllowlist).`;
   }
   // Slack's three control characters; codeSpan already removed < and > from names.
   return slack ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : text;

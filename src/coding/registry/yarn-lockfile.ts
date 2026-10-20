@@ -149,7 +149,9 @@ export function parseYarnClassicLockfile(
   const entries: LockfileEntry[] = [];
   const byPath = new Map<string, { dependencies: ReadonlyMap<string, string> }>();
   const byDescriptor = new Map<string, Target>();
+  const referenced = new Set<string>();
   for (const raw of readClassic(body, options.maxEntries)) {
+    for (const [key, range] of raw.dependencies) referenced.add(`${key}@${range}`);
     const path = raw.descriptors[0];
     if (byPath.has(path)) throw badRequest(`yarn.lock lists "${path}" twice`);
     const first = splitDescriptor(path);
@@ -176,11 +178,42 @@ export function parseYarnClassicLockfile(
   }
   return {
     entries,
-    // yarn classic records no project section: the root's declarations
-    // live only in package.json.
-    projects: [],
+    projects: classicProjects(byPath, byDescriptor, referenced),
     ...buildResolve(byPath, byDescriptor, (key, range) => [`${key}@${range}`]),
   };
+}
+
+/**
+ * yarn classic records no project section: the root's and workspaces'
+ * declarations live only in their package.json files. A descriptor no
+ * entry depends on can only come from one of them, so those stand in for
+ * the projects (one declaration per key each, so a name declared at two
+ * ranges gives a second project). A descriptor a project shares with an
+ * entry's dependency is not seen here. The stand-ins are added to `byPath`
+ * under paths no entry uses, for `resolve`.
+ */
+function classicProjects(
+  byPath: Map<string, { dependencies: ReadonlyMap<string, string> }>,
+  byDescriptor: ReadonlyMap<string, Target>,
+  referenced: ReadonlySet<string>,
+): ParsedLockfile["projects"] {
+  const layers: Map<string, string>[] = [];
+  const seen = new Map<string, number>();
+  for (const descriptor of byDescriptor.keys()) {
+    if (referenced.has(descriptor)) continue;
+    const { name: key, range } = splitDescriptor(descriptor);
+    const at = seen.get(key) ?? 0;
+    seen.set(key, at + 1);
+    (layers[at] ??= new Map()).set(key, range);
+  }
+  const projects: { path: string; dependencies: DeclaredDependency[] }[] = [];
+  layers.forEach((dependencies, at) => {
+    const path = at === 0 ? "." : `.#${at}`;
+    if (byPath.has(path)) return;
+    byPath.set(path, { dependencies });
+    projects.push({ path, dependencies: registryDependencyEdges(Object.fromEntries(dependencies)) });
+  });
+  return projects;
 }
 
 // --- yarn Berry ----------------------------------------------------------

@@ -226,6 +226,20 @@ export class PrismaGatewayLedger {
     });
   }
 
+  /**
+   * Median output tokens of the session's completed model calls (all on the run's one model), or
+   * undefined before the first one: the output of a call cut with nothing streamed.
+   */
+  async medianOutputTokens(sessionId: string): Promise<number | undefined> {
+    const rows = await this.db.$queryRaw<{ median: number | null }[]>`
+      SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY "outputTokens") AS "median"
+      FROM "NativeGatewayCall"
+      WHERE "sessionId" = ${sessionId} AND "method" = 'llm.stream' AND "status" = 'completed'
+        AND "outputTokens" IS NOT NULL`;
+    const median = rows[0]?.median ?? null;
+    return median === null ? undefined : Number(median);
+  }
+
   async totals(sessionId: string): Promise<GatewayTotals> {
     const completed = await this.db.nativeGatewayCall.aggregate({
       where: {

@@ -43,8 +43,8 @@ import {
   type StartCheckInput,
 } from "./types.js";
 
-/** GitHub lists at most 3 pages of 100 files; match it. */
-const MAX_PR_FILES = 300;
+/** A pull request's file list is cut at this many files (as GitHub's host bounds its paging). */
+const MAX_PR_FILES = 1000;
 const MAX_LISTED_FILES = 1000;
 const MAX_BODY_CHARS = 8000;
 const MAX_LOGGED_COMMITS = 100;
@@ -186,8 +186,15 @@ export class LocalReviewHost implements CodeReviewHost {
     }
   }
 
-  /** Files changed between two commits (both 40-hex), with rename detection, in git's order. */
-  private async changedFiles(dir: string, from: string, to: string): Promise<ChangedFile[]> {
+  /**
+   * Files changed between two commits (both 40-hex), with rename detection, in git's order, at
+   * most MAX_PR_FILES of them; `complete` is false when the list was cut.
+   */
+  private async changedFiles(
+    dir: string,
+    from: string,
+    to: string,
+  ): Promise<{ files: ChangedFile[]; complete: boolean }> {
     const diff = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-M", "-z"];
     let nameStatus: string;
     let numstat: string;
@@ -232,7 +239,7 @@ export class LocalReviewHost implements CodeReviewHost {
         ...(counts.get(filename) ?? { additions: 0, deletions: 0 }),
       });
     }
-    return files.slice(0, MAX_PR_FILES);
+    return { files: files.slice(0, MAX_PR_FILES), complete: files.length <= MAX_PR_FILES };
   }
 
   /** Pages patches like GitHub (patch-pages.ts); a diff is run only for files on the page. */
@@ -299,12 +306,13 @@ export class LocalReviewHost implements CodeReviewHost {
 
     let from = baseSha;
     let files: ChangedFile[] | null = null;
+    let fileListComplete = true;
     let comparedFrom: string | null = null;
     let baseMergedSince = false;
     const since = opts.sinceSha;
     if (since && SHA.test(since) && since !== headSha && (await this.isAncestor(dir, since, headSha))) {
       comparedFrom = since;
-      files = await this.changedFiles(dir, since, headSha);
+      ({ files, complete: fileListComplete } = await this.changedFiles(dir, since, headSha));
       from = since;
       let merges = "0";
       try {
@@ -316,11 +324,13 @@ export class LocalReviewHost implements CodeReviewHost {
       if (baseMergedSince) {
         // As on GitHub: the PR's own diff against its base, limited to files that changed since.
         const changedSince = new Set(files.map((f) => f.filename));
-        files = (await this.changedFiles(dir, baseSha, headSha)).filter((f) => changedSince.has(f.filename));
+        const all = await this.changedFiles(dir, baseSha, headSha);
+        files = all.files.filter((f) => changedSince.has(f.filename));
+        fileListComplete &&= all.complete;
         from = baseSha;
       }
     }
-    files ??= await this.changedFiles(dir, baseSha, headSha);
+    if (!files) ({ files, complete: fileListComplete } = await this.changedFiles(dir, baseSha, headSha));
 
     let log = "";
     try {
@@ -348,6 +358,12 @@ export class LocalReviewHost implements CodeReviewHost {
       orderBy: { createdAt: "desc" },
       select: { headSha: true },
     });
+    // A review that did not read every file leaves coveredSha null, so the latest covered one counts.
+    const covered = await this.db.localReview.findFirst({
+      where: { pullRequestId: row.id, agentId: opts.agentMarker, coveredSha: { not: null } },
+      orderBy: { createdAt: "desc" },
+      select: { coveredSha: true },
+    });
 
     return {
       number: row.number,
@@ -366,9 +382,11 @@ export class LocalReviewHost implements CodeReviewHost {
       isFork: false,
       htmlUrl: prUrl(row),
       lastReviewedSha: last?.headSha ?? null,
+      lastCoveredSha: covered?.coveredSha ?? null,
       comparedFrom,
       baseMergedSince,
       files: page.files,
+      fileListComplete,
       patchesComplete: page.patchesComplete,
       truncatedFiles: page.truncatedFiles,
       nextPatchCursor: page.nextPatchCursor,
@@ -477,6 +495,7 @@ export class LocalReviewHost implements CodeReviewHost {
         pullRequestId: row.id,
         agentId: input.agentMarker,
         headSha: currentHeadSha,
+        coveredSha: input.coveredSha === currentHeadSha ? currentHeadSha : null,
         verdict: input.verdict,
         summary: input.summary,
         body: input.body,

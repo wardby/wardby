@@ -664,9 +664,13 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
     });
   });
 
-  it.each(["read", "triage"] as const)(
+  it.each([
+    ["read", { authorAssociation: "NONE", repositoryPrivate: true }],
+    ["read", { authorAssociation: "COLLABORATOR", repositoryPrivate: false }],
+    ["triage", { authorAssociation: "NONE", repositoryPrivate: false }],
+  ] as const)(
     "refuses a mention from a %s commenter: no dispatch, a 😕 reaction and a one-line reply",
-    async (level) => {
+    async (level, context) => {
       vi.mocked(dispatchRun).mockClear();
       const repoAccess = gate({ commenter: { ok: false, reason: "insufficient_permission", level } });
       const d = deps(
@@ -678,7 +682,7 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
         repoAccess,
       );
       for (const body of ["@wardby review", "@wardby please fix it"]) {
-        const result = await routeHostEvent(mention(body), d);
+        const result = await routeHostEvent({ ...mention(body), ...context }, d);
         expect(result.runIds).toEqual([]);
         expect(result.followUps).toHaveLength(1);
         for (const followUp of result.followUps) await followUp();
@@ -696,6 +700,22 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
       });
     },
   );
+
+  it.each([
+    ["a stranger on a public repository", { authorAssociation: "NONE", repositoryPrivate: false }],
+    ["a first-time contributor on a public repository", { authorAssociation: "CONTRIBUTOR", repositoryPrivate: false }],
+    ["an author with no association facts", {}],
+  ])("stays silent for a read-only mention from %s", async (_label, context) => {
+    const d = deps(
+      [{ agentId: "a3", triggers: ["mention"], checkName: null }],
+      host(),
+      gate({ commenter: { ok: false, reason: "insufficient_permission", level: "read" } }),
+    );
+    expect(await routeHostEvent({ ...mention("@wardby fix"), ...context }, d)).toEqual({
+      runIds: [],
+      followUps: [],
+    });
+  });
 
   it.each([
     ["no access", { ok: false, reason: "insufficient_permission", level: "none" }],

@@ -135,6 +135,7 @@ describe("normalizeGitHubEvent", () => {
       body: "@wardby review",
       author: "chfields",
       authorId: "1001",
+      authorAssociation: "OWNER",
     });
     expect(normalizeGitHubEvent("issue_comment", comment("no mention"), APP)).toBeNull();
     expect(normalizeGitHubEvent("issue_comment", comment("email me@wardby.com"), APP)).toBeNull();
@@ -145,6 +146,45 @@ describe("normalizeGitHubEvent", () => {
     expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "CONTRIBUTOR"), APP)).toMatchObject({
       kind: "mention",
     });
+    // The association and repository visibility travel with the event, for every source of a mention.
+    const privateRepo = { full_name: "Org/Repo", private: true };
+    expect(
+      normalizeGitHubEvent("issue_comment", { ...comment("@wardby hi", "NONE"), repository: privateRepo }, APP),
+    ).toMatchObject({ authorAssociation: "NONE", repositoryPrivate: true });
+    expect(
+      normalizeGitHubEvent(
+        "pull_request_review_comment",
+        {
+          action: "created",
+          repository: privateRepo,
+          pull_request: { number: 7 },
+          comment: {
+            id: 4,
+            body: "@wardby hi",
+            author_association: "CONTRIBUTOR",
+            user: { id: 1, login: "x", type: "User" },
+          },
+        },
+        APP,
+      ),
+    ).toMatchObject({ authorAssociation: "CONTRIBUTOR", repositoryPrivate: true });
+    expect(
+      normalizeGitHubEvent(
+        "issues",
+        {
+          action: "opened",
+          repository: { full_name: "Org/Repo", private: false },
+          issue: {
+            number: 3,
+            title: "t",
+            body: "@wardby hi",
+            author_association: "NONE",
+            user: { id: 1, login: "x", type: "User" },
+          },
+        },
+        APP,
+      ),
+    ).toMatchObject({ authorAssociation: "NONE", repositoryPrivate: false });
     for (const association of ["FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN"]) {
       expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", association), APP)).toBeNull();
     }
@@ -191,6 +231,7 @@ describe("normalizeGitHubEvent", () => {
       body: "@wardby take this",
       author: "dev",
       authorId: "2002",
+      authorAssociation: "MEMBER",
       subject: { title: "Add a joke", body: "Please add one about cats." },
     });
     const inline = {
@@ -346,6 +387,7 @@ describe("normalizeGitHubEvent", () => {
         body: "@wardby please add a joke",
         author: "chfields",
         authorId: "1001",
+        authorAssociation: "OWNER",
         subject: { title: "Jokes", body: "@wardby please add a joke" },
       });
       expect(normalizeGitHubEvent("issues", issue("opened", "@wardby add a joke", null), APP)).toMatchObject({

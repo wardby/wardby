@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { nativeIsolationNames } from "./docker-isolation.js";
 import {
   DockerNativeWorkerLauncher,
+  processDockerCli,
   WORKER_STDERR_TAIL_CHARS,
   type DockerCli,
   type DockerResult,
@@ -207,7 +208,70 @@ describe("DockerNativeWorkerLauncher warm pool workers", () => {
   });
 });
 
+describe("processDockerCli", () => {
+  it("decodes a multi-byte character split across output chunks", async () => {
+    // "é" is 0xc3 0xa9: written as two separate chunks, it must still come back whole.
+    const script =
+      "process.stderr.write(Buffer.from([0xc3]), () => setTimeout(() => process.stderr.write(Buffer.from([0xa9])), 50))";
+    const result = await processDockerCli(process.execPath).run(["-e", script]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("é");
+  });
+});
+
 describe("DockerNativeWorkerLauncher worker exit logging", () => {
+  const noSecrets = { secretValues: async () => [] };
+  const failing = (stderr: string) =>
+    fakeDocker([
+      [/^container inspect/, no("Error: No such container")],
+      [/^image inspect/, ok("sha256:abc")],
+      [/^run -i/, { code: 1, stdout: "", stderr }],
+      [/^container wait/, ok("1\n")],
+    ]).docker;
+
+  it("masks the run's capability and every secret value the worker may receive, by exact value", async () => {
+    launcherWarn.mockClear();
+    const secret = "fake-secret-value-123";
+    const quoted = 'fake"quoted\\secret';
+    const capability = input.gateway!.capability;
+    const stderr = [
+      "starting",
+      `token ${capability}`,
+      `secret ${secret} and escaped ${JSON.stringify(quoted).slice(1, -1)}`,
+      "Error: boom",
+    ].join("\n");
+    // A value straddling where the tail is cut must not leave its suffix behind.
+    const straddle = `${"z".repeat(5000)}${secret}${"w".repeat(WORKER_STDERR_TAIL_CHARS - 5)}`;
+    const handle = await launcher(failing(stderr)).launch(input, { secretValues: async () => [secret, quoted] });
+    expect(await handle.exited).toBe(1);
+    await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
+    const logged = JSON.stringify(launcherWarn.mock.calls);
+    expect(logged).toContain("Error: boom");
+    expect(logged).toContain("[REDACTED]");
+    expect(logged).not.toContain(capability);
+    expect(logged).not.toContain(secret);
+    expect(logged).not.toContain("quoted");
+
+    launcherWarn.mockClear();
+    const second = await launcher(failing(straddle)).launch(input, { secretValues: async () => [secret] });
+    expect(await second.exited).toBe(1);
+    await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
+    const [fields] = launcherWarn.mock.calls[0];
+    expect(fields.stderrTail).not.toContain(secret.slice(-5));
+    expect(fields.stderrTail.length).toBeLessThanOrEqual(WORKER_STDERR_TAIL_CHARS);
+  });
+
+  it("logs no tail when the secret values cannot be read, or were not given (fail closed)", async () => {
+    for (const options of [{ secretValues: () => Promise.reject(new Error("read failed")) }, undefined]) {
+      launcherWarn.mockClear();
+      const handle = await launcher(failing(`leak ${input.gateway!.capability}`)).launch(input, options);
+      expect(await handle.exited).toBe(1);
+      await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
+      const [fields] = launcherWarn.mock.calls[0];
+      expect(fields).toEqual({ container: names.worker, code: 1, stderrTailOmitted: "secrets_unavailable" });
+    }
+  });
+
   it("logs the tail of a non-zero worker's stderr with the warn", async () => {
     launcherWarn.mockClear();
     const { docker } = fakeDocker([
@@ -216,7 +280,7 @@ describe("DockerNativeWorkerLauncher worker exit logging", () => {
       [/^run -i/, { code: 1, stdout: "", stderr: "x".repeat(2500) + "\nError: boom" }],
       [/^container wait/, ok("1\n")],
     ]);
-    const handle = await launcher(docker).launch(input);
+    const handle = await launcher(docker).launch(input, noSecrets);
     expect(await handle.exited).toBe(1);
     await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
     const [fields, message] = launcherWarn.mock.calls[0];
@@ -234,7 +298,7 @@ describe("DockerNativeWorkerLauncher worker exit logging", () => {
       [/^run -i/, { code: 2, stdout: "", stderr: "   \n  " }],
       [/^container wait/, ok("2\n")],
     ]);
-    const handle = await launcher(docker).launch(input);
+    const handle = await launcher(docker).launch(input, noSecrets);
     expect(await handle.exited).toBe(2);
     await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
     const [fields] = launcherWarn.mock.calls[0];

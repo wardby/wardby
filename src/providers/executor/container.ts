@@ -48,6 +48,7 @@ import {
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
+import { topUpCodingBudget, type TopUpOutcome } from "../../core/budget-topup.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
@@ -80,6 +81,7 @@ import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
+import { warningRefusals } from "../../coding/registry/report.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import {
   hostBudgetSentence,
@@ -320,6 +322,11 @@ export interface ContainerRunSnapshot {
   agentBudgetUsd?: number;
   /** The run's budget before the agent's allowed overrun (CodingRun.budgetBaseUsd); absent for older runs. */
   budgetBaseUsd?: number;
+  /**
+   * The most the run may spend through overrun top-ups (CodingRun.budgetLimitUsd); `budgetUsd` is
+   * what it has been granted so far. Absent for older runs and runs without an allowed overrun.
+   */
+  budgetLimitUsd?: number;
   budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
@@ -441,7 +448,7 @@ export interface ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /**
    * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
    * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
@@ -451,6 +458,11 @@ export interface ContainerExecutionStore {
   recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
   /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
   budgetEvent?(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null>;
+  /**
+   * Grants a run with an overrun limit one top-up when it is close to its grant and its budget group
+   * and run tree have room (budget-topup.ts). Optional: without it a run stops at its base.
+   */
+  topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }>;
 }
 
 export interface CodingFailureAudit {
@@ -516,6 +528,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
       ...(row.codingRun.budgetBaseUsd == null ? {} : { budgetBaseUsd: Number(row.codingRun.budgetBaseUsd) }),
+      ...(row.codingRun.budgetLimitUsd == null ? {} : { budgetLimitUsd: Number(row.codingRun.budgetLimitUsd) }),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -900,19 +913,25 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     return loadBudgetEvent(this.db, runId);
   }
 
+  topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }> {
+    return topUpCodingBudget(this.db, runId);
+  }
+
   async terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const finishedAt = new Date();
+    let changed = false;
     const agentId = await this.db.$transaction(async (tx) => {
       const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
         data: { status, error, finishedAt, heartbeatAt: new Date() },
       });
       if (!updated.count) return null;
+      changed = true;
       if (audit) {
         await tx.codingRun.update({
           where: { runId },
@@ -925,6 +944,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
     // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
     if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
+    return changed;
   }
 }
 
@@ -1042,9 +1062,12 @@ export interface ContainerExecutorOptions {
 }
 
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
+/** The poll interval, at most, while a run with an overrun limit is near its grant. */
+export const TOP_UP_NEAR_POLL_MS = 1_000;
+
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
-  packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  packageRefusals: Array<{ ecosystem: string; name: string; reason: string; listingOnly?: boolean }>;
   /** The run's package audit mode (CodingRun.packageAuditMode); absent when it was off. */
   packageAuditMode?: PackageAuditMode;
   /** What the registry served only because of it (summarizePackageAudit entries). */
@@ -1144,10 +1167,14 @@ export class ContainerExecutor implements Executor {
     const run = await this.options.store.load(runId);
     if (!run) return;
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
-    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
-    await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    // False when the run reached a terminal status after the load above: its finisher owns the
+    // cleanup and the continuation comment (recover() cleans up any terminal run the reconciler sees
+    // later), so stopping now would overwrite a good outcome. "stopping" is emitted only once this
+    // stop owns the run, so it is always followed by its terminal and cleanup events.
+    if (!(await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit))) return;
+    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
@@ -1278,6 +1305,8 @@ export class ContainerExecutor implements Executor {
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
       let observedRunning = false;
+      // Overrun from available room: asked on each poll until it is granted in full or refused once.
+      let asksForTopUps = run.budgetLimitUsd !== undefined && run.budgetLimitUsd > run.budgetUsd;
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
@@ -1289,6 +1318,15 @@ export class ContainerExecutor implements Executor {
           this.emit({ stage: "running", runId, jobId: handle.id });
         }
         await this.options.store.heartbeat(runId);
+        if (asksForTopUps && this.options.store.topUpBudget) {
+          const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
+            containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
+            return { outcome: "not_needed" as const, near: true };
+          });
+          if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
+          // Near its grant: poll often, so the next step lands before a request no longer fits.
+          else if (topUp.near) delay = Math.min(delay, TOP_UP_NEAR_POLL_MS);
+        }
         await this.sleep(delay);
         delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));
         run = (await this.options.store.load(runId)) ?? run;
@@ -2225,7 +2263,8 @@ export class ContainerExecutor implements Executor {
     try {
       const report = await this.options.registryReport?.(runId);
       const packages = Array.isArray(report?.packages) ? report.packages : [];
-      const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      // A listing-only refusal is for get_run and the agent, not the PR (see LISTING_REFUSAL_FILENAME).
+      const packageRefusals = Array.isArray(report?.packageRefusals) ? warningRefusals(report.packageRefusals) : [];
       const packageAudit = isPackageAuditMode(report?.packageAuditMode)
         ? { mode: report.packageAuditMode, entries: Array.isArray(report.packageAudit) ? report.packageAudit : [] }
         : undefined;
@@ -2549,7 +2588,10 @@ export class ContainerExecutor implements Executor {
         headRef: run.headRef,
         task,
         model: run.model,
-        budgetUsd: run.budgetUsd,
+        // The run's limit, not its grant: the proxy enforces the grant, and top-ups raise it while
+        // the job runs. Claude Code's own budget stop (its SDK maxBudgetUsd) is set from this, so it
+        // never stops a run before a top-up can; Codex has no stop of its own.
+        budgetUsd: run.budgetLimitUsd ?? run.budgetUsd,
         deadlineAt: deadlineAt.toISOString(),
         continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
         // Only when true: an untraced run's input stays exactly what older workers expect.
@@ -2768,7 +2810,7 @@ export class ContainerExecutor implements Executor {
   /** The overrun sentence for a finished run that spent past its base budget, as status details. */
   private overrunDetails(run: ContainerRunSnapshot): { overrunSentence?: string } {
     if (run.budgetBaseUsd === undefined) return {};
-    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetUsd);
+    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetLimitUsd ?? run.budgetUsd);
     return sentence ? { overrunSentence: sentence } : {};
   }
 
@@ -2780,6 +2822,7 @@ export class ContainerExecutor implements Executor {
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
       baseBudgetUsd: run.budgetBaseUsd,
+      limitUsd: run.budgetLimitUsd,
       budgetGroupName: run.budgetGroupName,
     });
   }
