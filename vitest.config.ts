@@ -17,6 +17,9 @@ export default defineConfig({
     // API (unlike the *.test.ts database suites, which are free/local/
     // deterministic against docker-compose Postgres and should run by
     // default). Run those explicitly via `npm run test:contract`.
-    exclude: [...configDefaults.exclude, "**/*.contract.test.ts"],
+    // *.release.test.ts is the release regression suite: it needs its own
+    // set-up (every log level, captured for the secret sweep), so it runs
+    // only under `npm run test:release` (vitest.release.config.ts).
+    exclude: [...configDefaults.exclude, "**/*.contract.test.ts", "**/*.release.test.ts"],
   },
 });
