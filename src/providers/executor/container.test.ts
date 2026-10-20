@@ -1664,6 +1664,23 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("leaves a listing-only refusal out of the pull request description", async () => {
+      const report = {
+        packages: [],
+        packageRefusals: [
+          { ecosystem: "pypi", name: "looked-at", reason: "wardby_file_not_allowed", listingOnly: true },
+          { ecosystem: "pypi", name: "needed", reason: "wardby_file_not_allowed" },
+        ],
+      };
+      const created = await fixRound({}, { registryReport: async () => report });
+      created.store.pullRequestRunIds = async () => ["run-1"];
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.packageRefusals).toEqual([
+        { ecosystem: "pypi", name: "needed", reason: "wardby_file_not_allowed" },
+      ]);
+    });
+
     it("merges package audit mode across the pull request's runs, strongest mode first", async () => {
       const entry = (name: string, relation: string) => ({
         ecosystem: "npm",

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectRunOutcome, completeHostStatus, isBlockedByRefusals, outcomeBody } from "./host-status.js";
+import { LISTING_REFUSAL_FILENAME } from "../coding/registry/report.js";
+import {
+  blockingRefusals,
+  collectRunOutcome,
+  completeHostStatus,
+  isBlockedByRefusals,
+  outcomeBody,
+} from "./host-status.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { renderEvent, nextStatus } from "./notification-templates.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
@@ -279,6 +286,157 @@ describe("package blocked status", () => {
           }),
         }),
       );
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+  it("neither blocks nor warns on a refusal the same package was served after a retry", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = slackDb({ outcome: "no_changes" });
+      db.registryFetch.findMany.mockResolvedValue([
+        { ...refusals("wardby_upstream_error")[0], outcome: "refused", version: null, sizeBytes: null },
+        { ecosystem: "npm", name: "pkg", reason: null, outcome: "served", version: "1.0.0", sizeBytes: 10 },
+      ] as never);
+      const outcome = await collectRunOutcome(db as never, run);
+      expect(outcome.packageRefusals).toEqual([]);
+      const body = outcomeBody(run, "repo", outcome.pullRequests, outcome.failedChildren, outcome);
+      expect(body).not.toContain("⛔");
+      expect(body).not.toContain("⚠️");
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).not.toHaveBeenCalled();
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+  it("counts a listing-only refusal only for a failed child, warns a no-changes run, and never a pull request", () => {
+    const listing = [
+      { ecosystem: "pypi", name: "looked-at", reason: "wardby_file_not_allowed", listingOnly: true as const },
+    ];
+    const failedChildren = [{ id: "c", status: "failed" }];
+    const pr = {
+      outcome: "pull_request_opened" as const,
+      repository: "repo",
+      pullRequestNumber: 1,
+      codeProvider: "github",
+    };
+    // No changes and nothing of that name served: it may be why, so a ⚠️ line, but not ⛔.
+    expect(
+      isBlockedByRefusals(run, { pullRequests: [], failedChildren: [], packageRefusals: listing, noChanges: true }),
+    ).toBe(false);
+    const noChanges = outcomeBody(run, "repo", [], [], { packageRefusals: listing, noChanges: true });
+    expect(noChanges).not.toContain("⛔");
+    expect(noChanges).toContain("⚠️ **Dependency install incomplete.**");
+    expect(noChanges).toContain("`looked-at`");
+    // A failed child: it counts toward ⛔.
+    expect(isBlockedByRefusals(run, { pullRequests: [], failedChildren, packageRefusals: listing })).toBe(true);
+    const failed = outcomeBody(run, "repo", [], failedChildren, { packageRefusals: listing });
+    expect(failed).toMatch(/^⛔/);
+    expect(failed).toContain("`looked-at`");
+    // Blocked by a real refusal on a no-changes run: the listing-only one is a ⚠️ line, not in the ⛔ list.
+    const both = [...listing, ...refusals("wardby_graph_limit")];
+    const blocked = outcomeBody(run, "repo", [], [], { packageRefusals: both, noChanges: true });
+    expect(blocked).toMatch(/^⛔/);
+    expect(blocked.slice(0, blocked.indexOf("⚠️"))).not.toContain("looked-at");
+    expect(blocked.slice(blocked.indexOf("⚠️"))).toContain("`looked-at`");
+    expect(blockingRefusals({ pullRequests: [], failedChildren: [], packageRefusals: both })).toEqual(
+      refusals("wardby_graph_limit"),
+    );
+    // A pull request: no warning for it, but one for a real refusal.
+    const opened = outcomeBody(run, "repo", [pr], [], { packageRefusals: listing });
+    expect(opened).toContain("Opened #1");
+    expect(opened).not.toContain("⚠️");
+    const openedBoth = outcomeBody(run, "repo", [pr], [], { packageRefusals: both });
+    expect(openedBoth).toContain("⚠️");
+    expect(openedBoth).not.toContain("looked-at");
+  });
+  it("keeps ⛔ and run_blocked when a sibling sub-run was served the package another one was refused", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = {
+        agent: { findUnique: async () => ({ name: "lead" }) },
+        runHostCheck: { findUnique: async () => null },
+        run: {
+          findMany: async () => [
+            { id: "a", status: "failed", codingRun: { result: null } },
+            { id: "b", status: "succeeded", codingRun: { result: { outcome: "no_changes" } } },
+          ],
+        },
+        registryFetch: {
+          findMany: vi.fn(async () => [
+            {
+              runId: "a",
+              ecosystem: "npm",
+              name: "foo",
+              version: null,
+              outcome: "refused",
+              reason: "wardby_package_not_allowed",
+              sizeBytes: null,
+              filename: null,
+            },
+            {
+              runId: "b",
+              ecosystem: "npm",
+              name: "foo",
+              version: "1.0.0",
+              outcome: "served",
+              reason: null,
+              sizeBytes: 10,
+              filename: "1.0.0.tgz",
+            },
+          ]),
+        },
+      };
+      const outcome = await collectRunOutcome(db as never, run);
+      expect(outcome.packageRefusals.map((r) => r.name)).toEqual(["foo"]);
+      expect(outcomeBody(run, "repo", outcome.pullRequests, outcome.failedChildren, outcome)).toMatch(/^⛔/);
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).toHaveBeenCalledWith(
+        expect.objectContaining({ payload: expect.objectContaining({ kind: "run_blocked" }) }),
+      );
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+  it("sends Slack run_blocked without a listing-only refusal that does not count", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = slackDb({ outcome: "no_changes" });
+      db.registryFetch.findMany.mockResolvedValue([
+        { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null, filename: null },
+        {
+          ecosystem: "pypi",
+          name: "looked-at",
+          reason: "wardby_file_not_allowed",
+          outcome: "refused",
+          version: null,
+          sizeBytes: null,
+          filename: LISTING_REFUSAL_FILENAME,
+        },
+      ] as never);
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).toHaveBeenCalledTimes(1);
+      expect(sink.mock.calls[0]?.[0].payload.packageRefusals).toEqual([
+        expect.objectContaining(refusals("wardby_graph_limit")[0]),
+      ]);
+      // Only the listing-only refusal on a no-changes run: nothing is sent.
+      sink.mockClear();
+      db.registryFetch.findMany.mockResolvedValue([
+        {
+          ecosystem: "pypi",
+          name: "looked-at",
+          reason: "wardby_file_not_allowed",
+          outcome: "refused",
+          version: null,
+          sizeBytes: null,
+          filename: LISTING_REFUSAL_FILENAME,
+        },
+      ] as never);
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).not.toHaveBeenCalled();
     } finally {
       setWorkflowEventSink(null);
     }
