@@ -19,6 +19,7 @@ import { GitHubState, type Permission, type SimApp, type SimRepo } from "./state
 import { SIM_APP_ID, SIM_APP_PUBLIC_KEY_PEM, SIM_APP_SLUG } from "./test-app-key.js";
 import { resetDerivedEvents, wireDerivedEvents } from "./events.js";
 import { WebhookDispatcher, type WebhookOptions } from "./webhooks.js";
+import { createGitService } from "./git.js";
 
 export const GITHUB_API_PREFIX = "/github/api";
 
@@ -53,6 +54,8 @@ function needRepo(gh: GitHubState, args: Record<string, unknown>): SimRepo {
 
 export interface GitHubSim {
   service: SimService;
+  /** Smart HTTP for the same repositories (/github/git). */
+  gitService: SimService;
   state: GitHubState;
   webhooks: WebhookDispatcher;
 }
@@ -452,5 +455,5 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
       }
     },
   };
-  return { service, state: gh, webhooks };
+  return { service, gitService: createGitService(gh), state: gh, webhooks };
 }

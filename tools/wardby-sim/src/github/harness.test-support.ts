@@ -40,7 +40,7 @@ export async function githubHarness(
   options: { files?: Record<string, string>; extra?: SimService[] } = {},
 ): Promise<Harness> {
   const github = createGitHubSim({ app: { ownerLogin: OWNER } });
-  const sim = createSimServer({ services: [github.service, ...(options.extra ?? [])] });
+  const sim = createSimServer({ services: [github.service, github.gitService, ...(options.extra ?? [])] });
   const gh = github.state;
   const script = async (steps: Record<string, unknown>[]): Promise<unknown[]> => {
     const response = await sim.dispatch(simRequest("POST", "/__sim/script", { steps }));

@@ -156,6 +156,23 @@ export const ROUTES: readonly RouteEntry[] = [
     "Only reviewThreads, resolveReviewThread (needs Contents write, per wardby's note) and markPullRequestReadyForReview; " +
       "a Bot author's login without [bot].",
   ),
+
+  // --- GitHub git smart HTTP (github/git.ts), served by git http-backend ---
+  unverified(
+    "github-git",
+    "GET",
+    "/{owner}/{repo}/info/refs",
+    "Ref advertisement by git http-backend (real git); Basic auth with a live installation token, Contents read/write. " +
+      "The 401/403/404 bodies are approximated.",
+  ),
+  unverified("github-git", "POST", "/{owner}/{repo}/git-upload-pack", "Fetch/clone by git http-backend (real git)."),
+  unverified(
+    "github-git",
+    "POST",
+    "/{owner}/{repo}/git-receive-pack",
+    "Push by git http-backend (real git); Contents: write; a protected branch refuses in a pre-receive hook with GH006. " +
+      "Fires push and pull_request.synchronize.",
+  ),
 ];
 
 /** Outbound events (webhooks the simulator sends), with the same verified rule as routes. */

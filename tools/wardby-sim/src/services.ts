@@ -24,7 +24,7 @@ export function buildServices(config: SimConfig): SimService[] {
       ...(env.WARDBY_SIM_GITHUB_APP_OWNER ? { ownerLogin: env.WARDBY_SIM_GITHUB_APP_OWNER } : {}),
     },
   });
-  return [github.service];
+  return [github.service, github.gitService];
 }
 
 /** Every route of every service, for the route table check. */
