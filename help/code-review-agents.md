@@ -84,6 +84,11 @@ publish `CHANGES_REQUESTED` and name what it skipped: `COMMENT` completes the
 check as neutral, which branch protection treats as passing.
 The shipped reviewer prompt does this; see the [full guide](../docs/code-review-agents.md#large-pull-requests).
 The refusal applies in both `control-plane` and `sandbox` mode.
+A pull request with more changed files than the host lists (1,000; 300 for a
+`sinceSha` compare on GitHub) reads with `fileListComplete: false`, and
+`APPROVE` of that head is refused with
+`file_list_truncated`; `CHANGES_REQUESTED`
+and `COMMENT` still publish.
 
 ## Drafts stopped at their budget
 
@@ -259,7 +264,11 @@ A separate guard applies per run: `repo_publish_review` refuses `APPROVE`
 with `unread_files` while a source, test or config file of the head
 was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
 read the file with `repo_read_file` at `headSha`; if that is not possible,
-publish `CHANGES_REQUESTED` and name the files not reviewed.
+publish `CHANGES_REQUESTED` and name the files not reviewed. `APPROVE` is
+also refused with `file_list_truncated` while the head's file list is cut
+(`fileListComplete: false`), and with `full_read_required` when the run read
+the head only with a `sinceSha` other than the `lastCoveredSha` it returned
+(the latest head this agent reviewed after reading every file).
 
 Add this to a reviewer's system prompt:
 

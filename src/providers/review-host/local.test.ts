@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../../core/db.js";
 import { handleReviewHostTool, type RepositoryLink } from "../../core/review-host-tools.js";
+import { ReviewReadLedger } from "../../core/review-reads.js";
 import { LocalReviewHost } from "./local.js";
 import { ReviewHostError } from "./types.js";
 
@@ -298,5 +299,100 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
         where: { pullRequest: { number: prNumber }, agentId: "agent-tool", verdict: "APPROVE" },
       }),
     ).toBe(1);
+  });
+
+  it("cuts a file list over 1,000 files, and repo_publish_review then refuses APPROVE", async () => {
+    // A separate worktree, so the source checkout (with its uncommitted edit) is left alone.
+    const bigDir = join(base, "big");
+    await git(repoPath, "worktree", "add", "-b", "big", bigDir, "main");
+    await mkdir(join(bigDir, "gen"));
+    await Promise.all(
+      Array.from({ length: 1001 }, (_, i) =>
+        writeFile(join(bigDir, "gen", `f${i}.ts`), `export const x${i} = ${i};\n`),
+      ),
+    );
+    await git(bigDir, "add", "gen");
+    await git(bigDir, "commit", "-m", "many files");
+    const bigHead = await git(bigDir, "rev-parse", "HEAD");
+    const pr = await db.localPullRequest.create({ data: { repository, branch: "big", base: "main" } });
+    prIds.push(pr.id);
+
+    const view = await host.readPullRequest(repository, pr.number, { maxPatchChars: 60_000, agentMarker: "agent-x" });
+    expect(view.files).toHaveLength(1000);
+    expect(view.fileListComplete).toBe(false);
+    const small = await host.readPullRequest(repository, prNumber, { maxPatchChars: 60_000, agentMarker: "agent-x" });
+    expect(small.fileListComplete).toBe(true);
+
+    const link: RepositoryLink = { provider: "local", repository, access: "write", checkName: null, waitForCi: false };
+    const ctx = {
+      agentId: "agent-big",
+      links: [link],
+      hosts: { local: host },
+      runCheck: null,
+      markRunCheckCompleted: vi.fn(async () => undefined),
+      authorize: vi.fn(async () => ({ ok: true as const })),
+      db,
+      reads: new ReviewReadLedger(),
+    };
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository, prNumber: pr.number }), ctx);
+    const publish = (verdict: string) =>
+      handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({ repository, prNumber: pr.number, headSha: bigHead, verdict, summary: "s", body: "b" }),
+        ctx,
+      ).then((out) => JSON.parse(out));
+    expect(await publish("APPROVE")).toMatchObject({ error: "file_list_truncated" });
+    expect(await publish("CHANGES_REQUESTED")).toMatchObject({ published: true });
+    expect(await db.localReview.count({ where: { pullRequestId: pr.id, verdict: "APPROVE" } })).toBe(0);
+
+    // A later run reviews a one-file delta from the head the cut review left: it was never covered.
+    await writeFile(join(bigDir, "gen", "late.ts"), "export const late = 1;\n");
+    await git(bigDir, "add", "gen/late.ts");
+    await git(bigDir, "commit", "-m", "one more");
+    const nextHead = await git(bigDir, "rev-parse", "HEAD");
+    const run2 = { ...ctx, reads: new ReviewReadLedger() };
+    const delta = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository, prNumber: pr.number, sinceSha: bigHead }),
+        run2,
+      ),
+    );
+    expect(delta).toMatchObject({ comparedFrom: bigHead, lastReviewedSha: bigHead, lastCoveredSha: null });
+    expect(delta.files).toHaveLength(1);
+    const approve = JSON.parse(
+      await handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({
+          repository,
+          prNumber: pr.number,
+          headSha: nextHead,
+          verdict: "APPROVE",
+          summary: "s",
+          body: "b",
+        }),
+        run2,
+      ),
+    );
+    expect(approve).toMatchObject({ error: "full_read_required" });
+  }, 60_000);
+
+  it("returns the latest covered head as lastCoveredSha; a review that did not read every file keeps it", async () => {
+    const base = { prNumber, headSha, summary: "s", body: "b", comments: [], agentMarker: "agent-cov" };
+    const read = () => host.readPullRequest(repository, prNumber, { maxPatchChars: 100, agentMarker: "agent-cov" });
+    expect(await read()).toMatchObject({ lastReviewedSha: null, lastCoveredSha: null });
+    await host.publishReview(repository, { ...base, verdict: "CHANGES_REQUESTED", coveredSha: null });
+    expect(await read()).toMatchObject({ lastReviewedSha: headSha, lastCoveredSha: null });
+    await host.publishReview(repository, { ...base, verdict: "CHANGES_REQUESTED", coveredSha: headSha });
+    await host.publishReview(repository, { ...base, verdict: "COMMENT" });
+    expect(await read()).toMatchObject({ lastReviewedSha: headSha, lastCoveredSha: headSha });
+    // A covered head other than the current one is never stored.
+    await host.publishReview(repository, { ...base, verdict: "COMMENT", coveredSha: firstSha });
+    const rows = await db.localReview.findMany({
+      where: { pullRequest: { number: prNumber }, agentId: "agent-cov" },
+      orderBy: { createdAt: "asc" },
+      select: { coveredSha: true },
+    });
+    expect(rows.map((r) => r.coveredSha)).toEqual([null, headSha, null, null]);
   });
 });
