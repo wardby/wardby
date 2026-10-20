@@ -158,6 +158,75 @@ export const ROUTES: readonly RouteEntry[] = [
   ),
 ];
 
+/** Outbound events (webhooks the simulator sends), with the same verified rule as routes. */
+export interface EventEntry {
+  service: string;
+  event: string;
+  actions: string[];
+  verified: boolean;
+  recording?: string;
+  note: string;
+}
+
+export const EVENTS: readonly EventEntry[] = [
+  {
+    service: "github",
+    event: "issues",
+    actions: ["opened", "labeled", "closed", "reopened"],
+    verified: false,
+    note: "issue with author_association; repository, sender, installation added. Docs only.",
+  },
+  {
+    service: "github",
+    event: "issue_comment",
+    actions: ["created", "edited"],
+    verified: false,
+    note: "comment.author_association from the repo role (OWNER/COLLABORATOR/NONE; overridable by script). Docs only.",
+  },
+  {
+    service: "github",
+    event: "pull_request",
+    actions: ["opened", "edited", "synchronize", "ready_for_review", "labeled", "closed"],
+    verified: false,
+    note: "closed carries merged; synchronize carries before/after. Docs only.",
+  },
+  {
+    service: "github",
+    event: "pull_request_review",
+    actions: ["submitted"],
+    verified: false,
+    note: "Docs only.",
+  },
+  {
+    service: "github",
+    event: "pull_request_review_comment",
+    actions: ["created"],
+    verified: false,
+    note: "Docs only.",
+  },
+  {
+    service: "github",
+    event: "push",
+    actions: [],
+    verified: false,
+    note: "ref, before/after (zeros for create/delete), commits with added/modified/removed (2,048 max). Docs only.",
+  },
+  {
+    service: "github",
+    event: "check_suite",
+    actions: ["completed"],
+    verified: false,
+    note: "once every run of one App on a head is completed; pull_requests = open PRs at that head. Approximates GitHub's suites.",
+  },
+  {
+    service: "github",
+    event: "check_run",
+    actions: ["rerequested"],
+    verified: false,
+    note: "scripted only (github.check_rerequest). Docs only.",
+  },
+];
+
 export function routeKey(entry: { service: string; method: string; pattern: string }): string {
   return `${entry.service} ${entry.method} ${entry.pattern}`;
 }

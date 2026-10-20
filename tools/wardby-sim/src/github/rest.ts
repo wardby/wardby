@@ -517,7 +517,7 @@ export function githubRestRouter(gh: GitHubState): Router {
       commitId,
     });
     for (const c of comments) {
-      addReviewComment(gh, repo!, pull, {
+      await addReviewComment(gh, repo!, pull, {
         reviewId: review.id,
         path: String(c.path),
         line: c.line as number,
@@ -535,6 +535,7 @@ export function githubRestRouter(gh: GitHubState): Router {
       repo!,
       caller.user,
     );
+    await gh.reviewed(repo!, pull.number);
     return json(reviewJson(gh, review), 200);
   });
 
@@ -562,7 +563,7 @@ export function githubRestRouter(gh: GitHubState): Router {
     return json(page, 200, headers);
   });
 
-  router.on("POST", "/repos/{owner}/{repo}/pulls/{number}/comments/{id}/replies", (req, params, ctx) => {
+  router.on("POST", "/repos/{owner}/{repo}/pulls/{number}/comments/{id}/replies", async (req, params, ctx) => {
     const repo = repoOf(gh, params);
     const caller = installationCaller(gh, req, ctx, repo, WRITE_PR);
     if ("status" in caller) return caller;
@@ -571,7 +572,7 @@ export function githubRestRouter(gh: GitHubState): Router {
     if (!pull || !parent || parent.pull !== pull.number || parent.repo !== repo!.fullName.toLowerCase())
       return notFound();
     const body = record(jsonBody(req));
-    const reply = addReviewComment(gh, repo!, pull, {
+    const reply = await addReviewComment(gh, repo!, pull, {
       reviewId: null,
       path: parent.path,
       line: parent.line,
@@ -858,11 +859,11 @@ export function githubRestRouter(gh: GitHubState): Router {
       completedAt: status === "completed" ? gh.iso() : null,
     } as const;
     gh.checkRuns.set(run.id, { ...run });
-    gh.onCheckChange?.(repo!, run.headSha);
+    await gh.checkChanged(repo!, run.headSha);
     return json(checkRunJson(gh, gh.checkRuns.get(run.id)!), 201);
   });
 
-  router.on("PATCH", "/repos/{owner}/{repo}/check-runs/{id}", (req, params, ctx) => {
+  router.on("PATCH", "/repos/{owner}/{repo}/check-runs/{id}", async (req, params, ctx) => {
     const repo = repoOf(gh, params);
     const caller = installationCaller(gh, req, ctx, repo, { checks: "write" });
     if ("status" in caller) return caller;
@@ -889,7 +890,7 @@ export function githubRestRouter(gh: GitHubState): Router {
       if (typeof output.summary === "string") run.output.summary = output.summary;
       if (typeof output.text === "string") run.output.text = output.text;
     }
-    gh.onCheckChange?.(repo!, run.headSha);
+    await gh.checkChanged(repo!, run.headSha);
     return json(checkRunJson(gh, run));
   });
 
@@ -948,7 +949,7 @@ export function githubRestRouter(gh: GitHubState): Router {
       createdAt: gh.iso(),
     };
     gh.statuses.push(status);
-    gh.onCheckChange?.(repo!, status.sha);
+    await gh.checkChanged(repo!, status.sha);
     return json(
       {
         id: status.id,
@@ -1222,7 +1223,7 @@ export function registerReview(
   return review;
 }
 
-export function addReviewComment(
+export async function addReviewComment(
   gh: GitHubState,
   repo: SimRepo,
   pull: SimPull,
@@ -1237,7 +1238,7 @@ export function addReviewComment(
     commitId: string;
     inReplyTo: number | null;
   },
-): NonNullable<ReturnType<typeof gh.reviewComments.get>> {
+): Promise<NonNullable<ReturnType<typeof gh.reviewComments.get>>> {
   const id = gh.nextId();
   const now = gh.iso();
   const parent = input.inReplyTo ? gh.reviewComments.get(input.inReplyTo) : undefined;
@@ -1275,5 +1276,11 @@ export function addReviewComment(
       commentIds: [id],
     });
   }
+  gh.emit(
+    "pull_request_review_comment",
+    { action: "created", comment: reviewCommentJson(gh, comment), pull_request: await pullBody(gh, pull) },
+    repo,
+    input.user,
+  );
   return comment;
 }

@@ -14,14 +14,17 @@ import {
   pullFiles,
   registerReview,
 } from "./rest.js";
-import { commentJson, issueJson, reviewJson } from "./shapes.js";
+import { checkRunJson, commentJson, issueJson, reviewJson } from "./shapes.js";
 import { GitHubState, type Permission, type SimApp, type SimRepo } from "./state.js";
 import { SIM_APP_ID, SIM_APP_PUBLIC_KEY_PEM, SIM_APP_SLUG } from "./test-app-key.js";
+import { resetDerivedEvents, wireDerivedEvents } from "./events.js";
+import { WebhookDispatcher, type WebhookOptions } from "./webhooks.js";
 
 export const GITHUB_API_PREFIX = "/github/api";
 
 export interface GitHubSimOptions {
   app?: Partial<SimApp>;
+  webhooks?: WebhookOptions;
   /** Where bare repositories live (default: a fresh temp dir). */
   gitRoot?: string;
 }
@@ -51,6 +54,7 @@ function needRepo(gh: GitHubState, args: Record<string, unknown>): SimRepo {
 export interface GitHubSim {
   service: SimService;
   state: GitHubState;
+  webhooks: WebhookDispatcher;
 }
 
 export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
@@ -66,6 +70,8 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
   };
   const gh = new GitHubState(new GitStore(options.gitRoot), { app });
   const router = githubRestRouter(gh);
+  const webhooks = new WebhookDispatcher(gh, options.webhooks);
+  wireDerivedEvents(gh);
 
   const actions: Record<string, ScriptAction> = {
     "github.install": async (args) => {
@@ -122,7 +128,7 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         message: str(args, "message", "Sim commit"),
         parent,
       });
-      await gh.onPush?.(repo, branch, existing, sha, gh.user(str(args, "author", repo.owner)));
+      await gh.pushed(repo, branch, existing, sha, gh.user(str(args, "author", repo.owner)));
       return { sha };
     },
     "github.user": async (args) => {
@@ -238,7 +244,7 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         const file = files.find((f) => f.filename === c.path);
         if (!file || !commentableLines(file.patch, "RIGHT").has(Number(c.line)))
           throw new Error("line not in the diff");
-        addReviewComment(gh, repo, pull, {
+        await addReviewComment(gh, repo, pull, {
           reviewId: review.id,
           path: String(c.path),
           line: Number(c.line),
@@ -256,6 +262,7 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         repo,
         user,
       );
+      await gh.reviewed(repo, pull.number);
       return { id: review.id };
     },
     "github.check": async (args) => {
@@ -278,7 +285,7 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         startedAt: gh.iso(),
         completedAt: status === "completed" ? gh.iso() : null,
       });
-      gh.onCheckChange?.(repo, sha);
+      await gh.checkChanged(repo, sha);
       return { id, sha };
     },
     "github.status": async (args) => {
@@ -296,7 +303,7 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         targetUrl: null,
         createdAt: gh.iso(),
       });
-      gh.onCheckChange?.(repo, sha);
+      await gh.checkChanged(repo, sha);
       return { id, sha };
     },
     "github.clock": async (args) => {
@@ -322,6 +329,68 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
           }),
         },
       });
+    },
+    "github.webhook_subscribe": async (args) => {
+      const url = new URL(str(args, "url"));
+      // A subscription URL never carries credentials: the delivery log records it.
+      if (url.username || url.password || (url.protocol !== "http:" && url.protocol !== "https:")) {
+        throw new Error("webhook url must be http(s) without credentials");
+      }
+      gh.webhooks.push({
+        url: url.toString(),
+        secret: str(args, "secret"),
+        events: Array.isArray(args.events) ? args.events.map(String) : [],
+      });
+      return { subscriptions: gh.webhooks.length };
+    },
+    "github.webhook_flush": async () => {
+      await webhooks.idle();
+      return { deliveries: webhooks.deliveries };
+    },
+    "github.webhook_deliveries": async () => ({ deliveries: webhooks.deliveries }),
+    "github.webhook_redeliver": async (args) => {
+      const copy = webhooks.redeliver(str(args, "id"));
+      if (!copy) throw new Error("no such delivery");
+      return { id: copy.id };
+    },
+    "github.webhook_pause": async () => {
+      webhooks.pause();
+      return {};
+    },
+    "github.webhook_resume": async () => {
+      webhooks.resume();
+      return {};
+    },
+    /** Sends a hand-written event (an outsider variant, a malformed payload) to every subscription. */
+    "github.webhook_send": async (args) => {
+      const repo = gh.repo(str(args, "repo"));
+      const payload = record(args.payload);
+      const sender = gh.user(str(args, "sender", repo?.owner ?? "sim-sender"));
+      const full = repo ? webhooks.payloadFor(payload, repo, sender) : payload;
+      const sent = webhooks.send(
+        str(args, "event"),
+        full,
+        typeof args.deliveryId === "string" ? { deliveryId: args.deliveryId } : {},
+      );
+      return { ids: sent.map((d) => d.id) };
+    },
+    "github.check_rerequest": async (args) => {
+      const run = gh.checkRuns.get(Number(args.id));
+      if (!run) throw new Error("no such check run");
+      const repo = gh.repo(run.repo)!;
+      const prs = [];
+      for (const pull of gh.pulls.values()) {
+        if (pull.repo === run.repo && pull.state === "open" && (await gh.headSha(pull)) === run.headSha) {
+          prs.push({ number: pull.number, head: { ref: pull.headRef, sha: run.headSha } });
+        }
+      }
+      gh.emit(
+        "check_run",
+        { action: "rerequested", check_run: { ...checkRunJson(gh, run), pull_requests: prs } },
+        repo,
+        gh.user(str(args, "author", repo.owner)),
+      );
+      return {};
     },
     "github.inspect": async (args) => {
       const repo = needRepo(gh, args);
@@ -373,7 +442,15 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
     actions,
     init: (state: SimState) => {
       if (!state.part("github")) state.register("github", gh);
+      if (!state.part("github-webhooks")) {
+        state.register("github-webhooks", {
+          reset: () => {
+            webhooks.reset();
+            resetDerivedEvents(gh);
+          },
+        });
+      }
     },
   };
-  return { service, state: gh };
+  return { service, state: gh, webhooks };
 }

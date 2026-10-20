@@ -77,6 +77,8 @@ export interface SimPull {
   updatedAt: string;
   closedAt: string | null;
   autoMerge: { method: "merge" | "squash" } | null;
+  /** Who enabled auto-merge (the merge is theirs). */
+  autoMergeBy?: SimUser;
 }
 
 export interface SimIssue {
@@ -233,16 +235,36 @@ export class GitHubState implements StatePart {
    * the emitter adds.
    */
   emit: (event: string, payload: Record<string, unknown>, repo: SimRepo, sender: SimUser) => void = () => undefined;
-  /** Called when a check run or commit status on `sha` changes (protection.ts: auto-merge). */
-  onCheckChange?: (repo: SimRepo, sha: string) => void;
-  /** Called after a branch moves (a git push, a scripted commit, a merge): webhooks, stale reviews. */
-  onPush?: (
+  /** Run when a check run or commit status on a commit changes (events.ts: check_suite; protection.ts: auto-merge). */
+  readonly checkListeners: ((repo: SimRepo, sha: string) => Promise<void> | void)[] = [];
+  /** Run after a branch moves (a push, a scripted commit, a merge): webhooks, stale reviews, auto-merge. */
+  readonly pushListeners: ((
     repo: SimRepo,
     branch: string,
     before: string | null,
-    after: string,
+    after: string | null,
     pusher: SimUser,
-  ) => Promise<void> | void;
+  ) => Promise<void> | void)[] = [];
+  /** Run after a review is submitted (protection.ts: auto-merge). */
+  readonly reviewListeners: ((repo: SimRepo, pull: number) => Promise<void> | void)[] = [];
+
+  async checkChanged(repo: SimRepo, sha: string): Promise<void> {
+    for (const listener of this.checkListeners) await listener(repo, sha);
+  }
+
+  async pushed(
+    repo: SimRepo,
+    branch: string,
+    before: string | null,
+    after: string | null,
+    pusher: SimUser,
+  ): Promise<void> {
+    for (const listener of this.pushListeners) await listener(repo, branch, before, after, pusher);
+  }
+
+  async reviewed(repo: SimRepo, pull: number): Promise<void> {
+    for (const listener of this.reviewListeners) await listener(repo, pull);
+  }
 
   constructor(
     readonly git: GitStore,
