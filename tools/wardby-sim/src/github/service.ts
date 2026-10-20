@@ -20,6 +20,7 @@ import { SIM_APP_ID, SIM_APP_PUBLIC_KEY_PEM, SIM_APP_SLUG } from "./test-app-key
 import { resetDerivedEvents, wireDerivedEvents } from "./events.js";
 import { WebhookDispatcher, type WebhookOptions } from "./webhooks.js";
 import { createGitService } from "./git.js";
+import { mergePull, mergeRoute, runAutoMerge, setProtection, wireProtection } from "./protection.js";
 
 export const GITHUB_API_PREFIX = "/github/api";
 
@@ -73,8 +74,12 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
   };
   const gh = new GitHubState(new GitStore(options.gitRoot), { app });
   const router = githubRestRouter(gh);
+  router.on("PUT", "/repos/{owner}/{repo}/pulls/{number}/merge", (req, params, ctx) =>
+    mergeRoute(gh, req, params, ctx),
+  );
   const webhooks = new WebhookDispatcher(gh, options.webhooks);
   wireDerivedEvents(gh);
+  wireProtection(gh);
 
   const actions: Record<string, ScriptAction> = {
     "github.install": async (args) => {
@@ -394,6 +399,37 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         gh.user(str(args, "author", repo.owner)),
       );
       return {};
+    },
+    "github.protect": async (args) => {
+      const repo = needRepo(gh, args);
+      setProtection(gh, repo, str(args, "branch", repo.defaultBranch), {
+        requiredChecks: Array.isArray(args.requiredChecks) ? args.requiredChecks.map(String) : [],
+        requiredApprovals: typeof args.requiredApprovals === "number" ? args.requiredApprovals : 0,
+        dismissStaleReviews: args.dismissStaleReviews === true,
+        blockPushes: args.blockPushes === true,
+      });
+      return {};
+    },
+    /** A person presses the merge button (protection applies; no token needed). */
+    "github.merge": async (args) => {
+      const repo = needRepo(gh, args);
+      const pull = gh.pull(repo.fullName, Number(args.number));
+      if (!pull) throw new Error("no such pull request");
+      return mergePull(gh, pull, {
+        method: str(args, "method", "merge"),
+        ...(typeof args.sha === "string" ? { sha: args.sha } : {}),
+        mergedBy: gh.user(str(args, "author", repo.owner)),
+      });
+    },
+    /** A person enables auto-merge: the PR merges as soon as it is green. */
+    "github.auto_merge": async (args) => {
+      const repo = needRepo(gh, args);
+      const pull = gh.pull(repo.fullName, Number(args.number));
+      if (!pull) throw new Error("no such pull request");
+      pull.autoMerge = { method: str(args, "method", "merge") === "squash" ? "squash" : "merge" };
+      pull.autoMergeBy = gh.user(str(args, "author", repo.owner));
+      await runAutoMerge(gh, repo);
+      return { merged: pull.merged };
     },
     "github.inspect": async (args) => {
       const repo = needRepo(gh, args);

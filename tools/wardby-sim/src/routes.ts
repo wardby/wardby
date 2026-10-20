@@ -151,6 +151,13 @@ export const ROUTES: readonly RouteEntry[] = [
     "Recursive listing; never truncated (GitHub truncates very large trees).",
   ),
   github(
+    "PUT",
+    "/repos/{owner}/{repo}/pulls/{number}/merge",
+    "Branch-protection emulator (protection.ts): merge or squash only when required checks/statuses are green and " +
+      "approvals met; 405 with GitHub-style wording otherwise, 409 for a stale sha; rebase unsupported (405). " +
+      "Closing keywords close issues on the default branch. Wording approximated.",
+  ),
+  github(
     "POST",
     "/graphql",
     "Only reviewThreads, resolveReviewThread (needs Contents write, per wardby's note) and markPullRequestReadyForReview; " +
