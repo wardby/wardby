@@ -45,6 +45,28 @@ export interface DispatchRefusalDetails {
   leadAgentName?: string;
 }
 
+/**
+ * A coding run's overrun top-up its budget group or run tree had no room for
+ * (budget-topup.ts). Written by the control plane; the numbers are those of
+ * the limiting cap or tree, and the run's base, grant and limit.
+ */
+export interface TopUpRefusalDetails {
+  source: "top-up";
+  capUsd: number;
+  spentUsd: number;
+  heldUsd: number;
+  /** What the group or tree had left. */
+  leftUsd: number;
+  baseBudgetUsd: number;
+  /** What the run had been granted: its base plus the top-ups so far. */
+  grantedUsd: number;
+  limitUsd: number;
+  /** The group whose cap was full, for a period limit (it can be the lead's group, not the run's). */
+  groupName?: string;
+  /** Filled at read time, for a run-tree limit. */
+  leadAgentName?: string;
+}
+
 export type BudgetEventDetails = ProxyRefusalDetails | DispatchRefusalDetails;
 
 export interface BudgetEventView {

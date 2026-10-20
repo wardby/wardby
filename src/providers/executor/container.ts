@@ -48,6 +48,7 @@ import {
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
+import { topUpCodingBudget, type TopUpOutcome } from "../../core/budget-topup.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
@@ -320,6 +321,11 @@ export interface ContainerRunSnapshot {
   agentBudgetUsd?: number;
   /** The run's budget before the agent's allowed overrun (CodingRun.budgetBaseUsd); absent for older runs. */
   budgetBaseUsd?: number;
+  /**
+   * The most the run may spend through overrun top-ups (CodingRun.budgetLimitUsd); `budgetUsd` is
+   * what it has been granted so far. Absent for older runs and runs without an allowed overrun.
+   */
+  budgetLimitUsd?: number;
   budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
@@ -451,6 +457,11 @@ export interface ContainerExecutionStore {
   recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
   /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
   budgetEvent?(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null>;
+  /**
+   * Grants a run with an overrun limit one top-up when it is close to its grant and its budget group
+   * and run tree have room (budget-topup.ts). Optional: without it a run stops at its base.
+   */
+  topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome }>;
 }
 
 export interface CodingFailureAudit {
@@ -516,6 +527,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
       ...(row.codingRun.budgetBaseUsd == null ? {} : { budgetBaseUsd: Number(row.codingRun.budgetBaseUsd) }),
+      ...(row.codingRun.budgetLimitUsd == null ? {} : { budgetLimitUsd: Number(row.codingRun.budgetLimitUsd) }),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -900,6 +912,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     return loadBudgetEvent(this.db, runId);
   }
 
+  topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome }> {
+    return topUpCodingBudget(this.db, runId);
+  }
+
   async terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -1278,6 +1294,8 @@ export class ContainerExecutor implements Executor {
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
       let observedRunning = false;
+      // Overrun from available room: asked on each poll until it is granted in full or refused once.
+      let asksForTopUps = run.budgetLimitUsd !== undefined && run.budgetLimitUsd > run.budgetUsd;
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
@@ -1289,6 +1307,13 @@ export class ContainerExecutor implements Executor {
           this.emit({ stage: "running", runId, jobId: handle.id });
         }
         await this.options.store.heartbeat(runId);
+        if (asksForTopUps && this.options.store.topUpBudget) {
+          const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
+            containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
+            return { outcome: "not_needed" as const };
+          });
+          if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
+        }
         await this.sleep(delay);
         delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));
         run = (await this.options.store.load(runId)) ?? run;
