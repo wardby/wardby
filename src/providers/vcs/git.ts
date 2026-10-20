@@ -23,6 +23,7 @@ import {
   protectsSomePath,
 } from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
+import { simulatorGitEnvironment } from "../../config/test-simulators.js";
 import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
@@ -159,6 +160,8 @@ export class NodeGitCommandRunner implements GitCommandRunner {
       GIT_ASKPASS: options.authToken ? this.askPassPath : "/bin/false",
       SSH_ASKPASS: "/bin/false",
       GIT_LFS_SKIP_SMUDGE: "1",
+      // WARDBY_TEST_SIMULATORS (test only): the simulator's throwaway CA; empty otherwise.
+      ...simulatorGitEnvironment(),
     };
     const maxBytes = options.maxOutputBytes ?? MAX_GIT_OUTPUT_BYTES;
     const secrets = options.authToken ? [options.authToken] : [];

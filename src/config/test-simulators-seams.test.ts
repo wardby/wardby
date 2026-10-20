@@ -4,12 +4,14 @@
  * construction site refuses (fails closed) rather than falling back to the real service.
  */
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { GitHubAppClient } from "../providers/vcs/github.js";
 import { buildVcsProvider } from "../providers/vcs/index.js";
+import { NodeGitCommandRunner } from "../providers/vcs/git.js";
 import { startConfiguredCodingProxy } from "../providers/coding-proxy/runtime.js";
 import type { CodingProxyServerHandle } from "../providers/coding-proxy/server.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
@@ -151,3 +153,27 @@ async function startProxy(
   const calls = startServer.mock.calls as unknown as [unknown, { registry: unknown }][];
   return { registry: calls[0][1].registry };
 }
+
+describe("wardby's git commands under the switch", () => {
+  it("trust the simulator's CA (GIT_SSL_CAINFO) only with the switch on", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wardby-sim-git-env-"));
+    try {
+      const ca = join(dir, "ca.crt");
+      writeFileSync(ca, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
+      const git = join(dir, "fake-git.mjs");
+      writeFileSync(
+        git,
+        `#!${process.execPath}\nconsole.log(JSON.stringify({ ca: process.env.GIT_SSL_CAINFO ?? null }));\n`,
+      );
+      chmodSync(git, 0o700);
+      const runner = new NodeGitCommandRunner({ gitBinary: git, homeDir: dir });
+      expect(JSON.parse((await runner.run(["status"])).stdout)).toEqual({ ca: null });
+      stubSimulatorProcessEnv(SIM_KEY);
+      expect(JSON.parse((await runner.run(["status"])).stdout)).toEqual({ ca: null });
+      vi.stubEnv("WARDBY_SIM_CA_FILE", ca);
+      expect(JSON.parse((await runner.run(["status"])).stdout)).toEqual({ ca });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
