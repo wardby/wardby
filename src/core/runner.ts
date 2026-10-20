@@ -1942,7 +1942,7 @@ export async function durableDelegate(
     // A replica that died between dispatching the child and recording it left the child row:
     // adopt it rather than refusing this very delegation as a duplicate.
     childRunId = (await findDelegationChild(db, runId, edge.childAgentId, callId))?.id ?? null;
-    // Recorded, so later calls wait on it by id (a legacy child is only found while still drivable).
+    // Recorded, so later calls wait on it by id.
     if (childRunId) {
       await ledger.setDelegation(sessionId, callId, { status: "pending", childAgentId: edge.childAgentId, childRunId });
     }

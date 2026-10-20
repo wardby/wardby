@@ -70,8 +70,25 @@ describe.skipIf(!process.env.DATABASE_URL)("findDelegationChild (database)", () 
     expect(await findDelegationChild(db, parent, childAgent, undefined)).toMatchObject({ id: child.id });
   });
 
-  it("does not adopt a finished legacy child", async () => {
+  it("adopts the single legacy child even once it has finished, so its result is not lost", async () => {
+    const child = await db.run.create({ data: { agentId: childAgent, parentRunId: parent, status: "succeeded" } });
+    expect(await findDelegationChild(db, parent, childAgent, "toolu_9")).toMatchObject({ id: child.id });
+  });
+
+  it("does not adopt a finished unkeyed child when the caller has no call id", async () => {
     await db.run.create({ data: { agentId: childAgent, parentRunId: parent, status: "succeeded" } });
+    expect(await findDelegationChild(db, parent, childAgent, undefined)).toBeNull();
+  });
+
+  it("does not adopt a keyed child through the legacy lookup, finished or not", async () => {
+    await db.run.create({
+      data: { agentId: childAgent, parentRunId: parent, parentCallId: "toolu_1", status: "succeeded" },
+    });
+    expect(await findDelegationChild(db, parent, childAgent, "toolu_2")).toBeNull();
+  });
+
+  it("does not adopt a finished legacy child of another sub-agent", async () => {
+    await db.run.create({ data: { agentId: leadAgent, parentRunId: parent, status: "succeeded" } });
     expect(await findDelegationChild(db, parent, childAgent, "toolu_9")).toBeNull();
   });
 
