@@ -969,8 +969,8 @@ export class GitHubReviewHost implements CodeReviewHost {
 
   /**
    * Bodies here carry model or run text (repo_comment, a mention's status and reply), so every
-   * `<!--` is escaped: no comment posted this way can hold a hidden marker. Only publishReview
-   * writes the review marker, by its own path.
+   * `<!--` that opens a wardby marker is escaped: no comment posted this way can hold one. Only
+   * publishReview writes the review marker, by its own path.
    */
   async comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }> {
     const base = repoPath(repository);

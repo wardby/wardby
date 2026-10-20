@@ -139,13 +139,15 @@ const IssueReadArgs = z
     number: z.number().int().positive(),
   })
   .strict();
+/** Model text the App posts: wardby marker openers escaped first, so the cap holds for what is sent. */
+const postedText = (max: number) => z.string().min(1).transform(escapeHtmlComments).pipe(z.string().max(max));
 const InlineCommentArgs = z
   .object({
     path: z.string().min(1).max(500),
     line: z.number().int().positive(),
     side: z.enum(["LEFT", "RIGHT"]).optional(),
     severity: z.string().min(1).max(20),
-    body: z.string().min(1).max(4000),
+    body: postedText(4000),
   })
   .strict();
 const PublishArgs = z
@@ -154,8 +156,8 @@ const PublishArgs = z
     prNumber: z.number().int().positive(),
     headSha: SHA,
     verdict: z.enum(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]),
-    summary: z.string().min(1).max(140),
-    body: z.string().min(1).max(60_000),
+    summary: postedText(140),
+    body: postedText(60_000),
     comments: z.array(InlineCommentArgs).max(50).optional(),
     resolveThreadIds: z
       .array(z.string().regex(/^[A-Za-z0-9_=-]{1,100}$/))
@@ -167,7 +169,7 @@ const CommentArgs = z
   .object({
     repository: Repository,
     number: z.number().int().positive(),
-    body: z.string().min(1).max(20_000),
+    body: postedText(20_000),
     replyToReviewCommentId: z
       .string()
       .regex(/^\d{1,20}$/)
@@ -616,11 +618,10 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           prNumber: a.prNumber,
           headSha: a.headSha,
           verdict: a.verdict,
-          summary: escapeHtmlComments(a.summary),
-          body: escapeHtmlComments(a.body),
+          summary: a.summary,
+          body: a.body,
           comments: (a.comments ?? []).map((c) => ({
             ...c,
-            body: escapeHtmlComments(c.body),
             side: c.side ?? "RIGHT",
           })),
           agentMarker: ctx.agentId,
@@ -654,8 +655,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
         return JSON.stringify(
           await host.comment(link.repository, {
             number: a.number,
-            // Model text never carries a hidden comment (a forged review marker would vouch for coverage).
-            body: escapeHtmlComments(a.body),
+            // Escaped by CommentArgs: model text never carries a wardby marker (a forged one would vouch for coverage).
+            body: a.body,
             replyToReviewCommentId: a.replyToReviewCommentId,
           }),
         );

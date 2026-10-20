@@ -789,7 +789,7 @@ describe("GitHubReviewHost writes", () => {
     const bodies = {
       plain: `${marker}\nhi`,
       nested: `<!-<!-<!-- wardby:review:x -->- wardby:review:x -->- wardby:review:agent1 sha=${SHA} covered=${COVERED} -->`,
-      "only an opener": "<!--",
+      "an opener before an opener": `<!--<!-- wardby:review:agent1 sha=${SHA} covered=${COVERED} -->`,
       "in a code block": "```\n" + marker + "\n```",
     };
     const posted = async () => {
@@ -820,10 +820,10 @@ describe("GitHubReviewHost writes", () => {
       return new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 1000, agentMarker: "agent1" });
     };
 
-    it("escapes every opener in comment() and editComment(), so no hidden comment reaches GitHub", async () => {
+    it("escapes every wardby marker opener in comment() and editComment(), so no marker reaches GitHub", async () => {
       const sent = await posted();
       expect(sent).toHaveLength(8);
-      for (const body of sent) expect(body).not.toContain("<!--");
+      for (const body of sent) expect(body).not.toMatch(/<!--\s*wardby/i);
       expect(sent[0]).toBe(`&lt;!-- wardby:review:agent1 sha=${SHA} covered=${COVERED} -->\nhi`);
     });
 
@@ -835,6 +835,17 @@ describe("GitHubReviewHost writes", () => {
         lastReviewedSha: OLD_SHA,
         lastCoveredSha: COVERED,
       });
+    });
+
+    it("leaves an ordinary HTML comment in a code block as written", async () => {
+      const { client, calls } = fakeGitHub(({ method, path }) => {
+        if (method === "POST" && path === `${BASE}/issues/7/comments`)
+          return json({ id: 9, html_url: "https://x/9" }, 201);
+        return undefined;
+      });
+      const body = "```html\n<!-- prettier-ignore -->\n<div></div>\n```";
+      await new GitHubReviewHost(client).comment(REPO, { number: 7, body });
+      expect((calls.find((c) => c.method === "POST")!.body as { body: string }).body).toBe(body);
     });
 
     it("never trusts a marker that does not start the comment", async () => {

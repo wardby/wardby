@@ -1086,9 +1086,11 @@ reads the whole pull request); on a local repository it is kept with each
 review. Only a marker at the very start of the App's own summary comment
 counts. In text an agent or a run supplies and the App posts (`repo_comment`,
 the summary, body and inline comments of `repo_publish_review`, and a mention
-run's status and reply), wardby escapes every `<!--` as `&lt;!--`, so it shows
-as plain text and can never form a hidden marker. wardby adds its own markers
-after that. The coding-run status comment and the description comment are
+run's status and reply), wardby escapes `<!--` as `&lt;!--` wherever it comes
+right before a wardby marker name, so such text shows as plain text and can
+never form a wardby marker. Any other HTML comment, such as one in a code
+block or a one-click suggestion, is posted as written. Text is escaped before
+its length limit is checked, and wardby adds its own markers after that. The coding-run status comment and the description comment are
 written by wardby and start with wardby's own marker. So an agent cannot be
 talked into vouching for a head it never read.
 

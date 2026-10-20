@@ -136,16 +136,49 @@ describe("handleReviewHostTool", () => {
         prNumber: 7,
         headSha: SHA,
         verdict: "COMMENT",
-        summary: "<!-<!-- x -->- y -->s",
+        summary: "<!-<!-- wardby:x -->- y -->s",
         body: forged,
         comments: [{ path: "a.py", line: 1, severity: "MINOR", body: forged }],
       }),
       c,
     );
     const published = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
-    expect(published.summary).toBe("<!-&lt;!-- x -->- y -->s");
+    expect(published.summary).toBe("<!-&lt;!-- wardby:x -->- y -->s");
     expect(published.body).toBe(escaped);
     expect(published.comments[0].body).toBe(escaped);
+  });
+
+  it("posts a suggestion that keeps an ordinary HTML comment unchanged", async () => {
+    const c = ctx();
+    const suggestion = "Keep the directive:\n```suggestion\n<!-- prettier-ignore -->\n<div></div>\n```";
+    await handleReviewHostTool(
+      "repo_publish_review",
+      JSON.stringify({
+        repository: WRITE.repository,
+        prNumber: 7,
+        headSha: SHA,
+        verdict: "COMMENT",
+        summary: "s",
+        body: "```suggestion\n<!-- keep -->\n```",
+        comments: [{ path: "a.html", line: 1, severity: "MINOR", body: suggestion }],
+      }),
+      c,
+    );
+    const published = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(published.body).toBe("```suggestion\n<!-- keep -->\n```");
+    expect(published.comments[0].body).toBe(suggestion);
+  });
+
+  it("caps model text after escaping, so the posted text never exceeds the cap", async () => {
+    const c = ctx();
+    // 20,000 characters as written; escaping adds 3 per marker opener.
+    const body = "<!-- wardby".repeat(1_818) + "x".repeat(2);
+    expect(body.length).toBe(20_000);
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_comment", JSON.stringify({ repository: WRITE.repository, number: 7, body }), c),
+    );
+    expect(out.error).toBeDefined();
+    expect(c.hosts.github!.comment).not.toHaveBeenCalled();
   });
 
   it("passes the agent marker to reads and applies the default patch budget", async () => {

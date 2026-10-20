@@ -44,13 +44,20 @@ export function parseCoveredMarker(body: string, agentMarker: string): string | 
 }
 
 /**
- * Model-written text the App posts, with every HTML comment opener escaped: GitHub shows `<!--` as
- * text, so no hidden comment (and no wardby marker) can come from it. One pass is enough, since the
- * replacement removes the opener's characters rather than joining text around it. wardby adds its
- * own markers after this.
+ * An HTML comment opener that starts a wardby marker: every marker wardby writes or ever wrote
+ * names `wardby…` (wardby:review/finding, wardby-status/description/latest/related) or the legacy
+ * `reevo-run…`. Case-insensitive, wider than any parse of them.
+ */
+const MARKER_OPENER = /<!--(?=\s*(?:wardby|reevo-run))/gi;
+
+/**
+ * Model-written text the App posts, with each opener of a wardby marker escaped (`&lt;!--`, shown
+ * as text), so no wardby marker can come from it. Any other `<!--` (in a code block or a
+ * ```suggestion, say) is left as written. One pass is enough: the replacement adds no `<` and no
+ * marker name, so it can never complete a new opener. wardby adds its own markers after this.
  */
 export function escapeHtmlComments(text: string): string {
-  return text.replaceAll("<!--", "&lt;!--");
+  return text.replace(MARKER_OPENER, "&lt;!--");
 }
 
 export function verdictConclusion(verdict: ReviewVerdict): CheckConclusion {
