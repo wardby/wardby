@@ -129,11 +129,14 @@ without access to the repository, are ignored silently (no run, no reaction).
 The server logs an info line for each one, naming the event, repository and
 association, never the text.
 
-Someone with `read` or `triage` access can see the repository but cannot
-start a run. Their mention gets a 😕 reaction and a one-line reply saying a
-mention needs write access, so they know to ask someone who has it. No run
-starts. Everyone else is refused silently, so a stranger on a public
-repository learns nothing about the App.
+Someone who holds a role on the repository but lacks write access can see it
+but cannot start a run. Their mention gets a 😕 reaction and a one-line reply
+saying a mention needs write access, so they know to ask someone who has it.
+No run starts. That applies to anyone with `triage` access, and to anyone with
+`read` access on a private repository, or whose `author_association` is
+`OWNER`, `MEMBER` or `COLLABORATOR`. GitHub reports `read` for every account
+on a public repository, so a stranger there (association `NONE`,
+`CONTRIBUTOR` or unknown) is refused silently and learns nothing about the App.
 
 A mention inside Markdown code is not a request. Text in an inline code span
 (`` `@<app-slug>` ``), a fenced code block, or an indented code block is

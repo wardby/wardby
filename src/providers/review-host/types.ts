@@ -533,6 +533,10 @@ export type HostEvent =
       author: string;
       /** The author's immutable numeric host user id, as text; their permission is checked by it. */
       authorId: string;
+      /** GitHub's `author_association` for the author; a hint only, never a permission. */
+      authorAssociation?: string;
+      /** Whether the repository is private, when the payload says. */
+      repositoryPrivate?: boolean;
       /** The issue or PR the mention is on, when the payload carries it. */
       subject?: { title: string; body: string };
       /** The run that opened this PR, when its description carries a valid run marker. */
