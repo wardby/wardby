@@ -247,6 +247,22 @@ export const ROUTES: readonly RouteEntry[] = [
   ),
   unverified("osv", "POST", "/v1/querybatch", "ids + modified per query, or {}; 1,000 queries max. Docs only."),
   unverified("osv", "GET", "/v1/vulns/{id}", "The advisory, or 404 {code:5}. Docs only."),
+
+  // --- Scripted model (model/service.ts): not a simulation of a provider, a replay of turn scripts ---
+  unverified(
+    "model",
+    "POST",
+    "/openai/v1/responses",
+    "Streams scripted Responses output items. The event set matches what wardby's proxy and the pinned Codex CLI " +
+      "accept (replayed through both in model/script.test.ts), not every event the real API sends.",
+  ),
+  unverified(
+    "model",
+    "POST",
+    "/anthropic/v1/messages",
+    "Streams scripted content blocks (text, tool_use). Accepted and metered by wardby's proxy; not yet replayed " +
+      "through Claude Code itself.",
+  ),
 ];
 
 /** Outbound events (webhooks the simulator sends), with the same verified rule as routes. */
