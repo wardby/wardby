@@ -259,6 +259,20 @@ describe("estimateInterrupted with no usable previous reply", () => {
     expect(usd(noBody.costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6 + (700 * 10) / 1e6));
   });
 
+  it("with no usable previous reply, no median and nothing relayed, books the body's input and no output", () => {
+    const { usage, costUsd } = estimateInterrupted(
+      {
+        relayedOutputBytes: 0,
+        bodyBytes: 30_000,
+        reservationUsd: fullHold(30_000, 32_000, PRICE),
+        maxOutputTokens: 32_000,
+      },
+      PRICE,
+    );
+    expect(usage).toMatchObject({ inputTokens: 0, cacheWriteTokens: 10_000, outputTokens: 0 });
+    expect(usd(costUsd)).toBe(usd((10_000 * 2.5) / 1e6));
+  });
+
   it("books a 600 KB Opus body cut before its response at bytes / 3, between the real cost and 3x it", () => {
     const bytes = 600_000;
     const { usage, costUsd } = estimateInterrupted(
