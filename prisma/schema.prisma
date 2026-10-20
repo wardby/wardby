@@ -941,7 +941,8 @@ model RegistryAllowance {
   ecosystem  String
   name       String
   /// Set only in an audit-mode run: the top-level audited package whose metadata or file declared this
-  /// name (its own name for a top-level audited package). Null = a normal allowance.
+  /// name (its own name for a top-level audited package; empty when a lockfile plan could not tell). Null = a
+  /// normal allowance.
   auditedVia String?
   createdAt  DateTime  @default(now())
   run        CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)

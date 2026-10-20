@@ -49,6 +49,12 @@ function rebuild(shipped: ShippedLockfile): ParsedLockfile {
   shipped.entries.forEach((entry, at) => {
     byPath.set(entry.path, new Map(shipped.edges[at].map(([key, target]) => [key, shipped.entries[target]])));
   });
+  // A project's own dependencies (what package audit mode labels top-level);
+  // a path an entry also uses keeps the entry's, as the parser's resolve does.
+  shipped.projects.forEach((project, at) => {
+    if (byPath.has(project.path)) return;
+    byPath.set(project.path, new Map(shipped.projectEdges[at].map(([key, target]) => [key, shipped.entries[target]])));
+  });
   return {
     entries: shipped.entries,
     projects: shipped.projects,

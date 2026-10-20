@@ -747,7 +747,11 @@ In audit mode a lockfile plan (`POST /registry/<ecosystem>/-/plan`) also
 approves the lockfile entries the allowlist doesn't reach, when they pass
 every other check. An entry a lockfile project declares is `top-level`, one
 an audited top-level entry reaches is `transitive`, and anything else is
-`unknown`. An allowlisted name at a version outside its entry's range is never
+`unknown`. The projects are the root and workspaces a `package-lock.json`,
+`pnpm-lock.yaml` or yarn 2+ `yarn.lock` lists. A yarn classic `yarn.lock`
+lists none, so there a package is `top-level` when no other entry depends on
+it at the same range; one that another package also requires at that range
+shows as `transitive` (or `unknown` when nothing audited reaches it). An allowlisted name at a version outside its entry's range is never
 approved this way. The plan's response adds `audited`, the number of
 approvals carrying an audit record, and each download of such an approval is
 recorded like any other audited package.
