@@ -50,7 +50,7 @@ The easiest way to try it is the optional coding step of
   machine cannot see the folder: it ignores a trusted folder that does not
   exist, so the repository fails with `local_repo_not_allowed`, and `doctor`
   reports the folder as missing.
-- **git 2.24 or newer** on the machine that runs the wardby server.
+- **git 2.38 or newer** on the machine that runs the wardby server.
 - **Worker images from this release or later.** An older worker image rejects
   a `local:` repository and the run fails with `worker_input_failed`. That
   includes a bring-your-own `workerImageRef` image: rebuild it on a current
