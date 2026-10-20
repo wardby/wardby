@@ -7,7 +7,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { startupTestSimulators } from "../config/test-simulators.js";
+import {
+  createCredentialFreeFetch,
+  createSimulatorModelFetch,
+  loadTestSimulators,
+  startupTestSimulators,
+} from "../config/test-simulators.js";
 import { baseSeed } from "./seeded.test-support.js";
 import { secretSweep, type SecretSweep } from "./secret-sweep.test-support.js";
 
@@ -60,6 +65,52 @@ describe("WARDBY_TEST_SIMULATORS keeps credentials out of every output", () => {
     });
     expect(simulators?.host).toBe("wardby-sim.wardby-sim.svc:8443");
     sweep.record("simulators", { origin: simulators?.origin, base: simulators?.base("slack") });
+    await flushLogs();
+    sweep.assertClean();
+  });
+});
+
+describe("model requests under WARDBY_TEST_SIMULATORS carry no provider key", () => {
+  it("neither the coding proxy's model fetch nor the native clients' fetch sends a planted key", async () => {
+    sweep = secretSweep(baseSeed());
+    const openaiKey = sweep.plant("openai-key", "api-key");
+    const anthropicKey = sweep.plant("anthropic-key", "api-key");
+    const simulators = loadTestSimulators({
+      WARDBY_TEST_SIMULATORS: "1",
+      WARDBY_SIM_BASE_URL: "http://localhost:8080",
+    })!;
+    const sent = async (url: string | URL | Request, init?: RequestInit) => {
+      sweep!.record("request", {
+        url: url instanceof Request ? url.url : url.toString(),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        body: typeof init?.body === "string" ? init.body : "",
+      });
+      return new Response("{}");
+    };
+    const blocked = () => new Error("blocked");
+    const proxy = createSimulatorModelFetch(simulators, blocked, sent);
+    await proxy("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${openaiKey}` },
+      body: "{}",
+    });
+    await proxy("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": anthropicKey },
+      body: "{}",
+    });
+    const native = createCredentialFreeFetch(simulators, blocked, sent);
+    await native("http://localhost:8080/model/openai/v1/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openaiKey}` },
+    });
+    await native(
+      new Request("http://localhost:8080/model/anthropic/v1/messages", {
+        method: "POST",
+        headers: { "X-Api-Key": anthropicKey },
+        body: "{}",
+      }),
+    );
     await flushLogs();
     sweep.assertClean();
   });

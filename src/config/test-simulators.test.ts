@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SIM_APP_KEY_FINGERPRINT } from "../../tools/wardby-sim/src/github/test-app-key.js";
 import {
+  createCredentialFreeFetch,
+  createSimulatorModelFetch,
   createSimulatorRegistryFetch,
+  refuseBedrockUnderTestSimulators,
+  SIMULATOR_PLACEHOLDER_API_KEY,
+  simulatorModelClientOptions,
   isLocalSimulatorHost,
   loadTestSimulators,
   SIMULATOR_GITHUB_APP_KEY_FINGERPRINT,
@@ -83,6 +88,12 @@ describe("WARDBY_TEST_SIMULATORS refusals", () => {
     ["Jira over http", { ...ON, WARDBY_JIRA_API_TOKEN: "sim-jira-token" }, "jira_needs_https"],
     ["public WARDBY_HOSTNAME", { ...ON, WARDBY_HOSTNAME: "app.example.com" }, "public_hostname"],
     ["public canonical URI", { ...ON, MCP_CANONICAL_URI: "https://app.example.com/mcp" }, "public_hostname"],
+    [
+      "with the load-test mock upstream",
+      { ...ON, WARDBY_LOAD_TEST: "1", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" },
+      "model_mock_conflict",
+    ],
+    ["with half the mock upstream", { ...ON, WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" }, "model_mock_conflict"],
   ];
   for (const [name, env, reason] of cases) {
     it(`refuses: ${name} → ${reason}`, () => {
@@ -200,5 +211,88 @@ describe("the simulator registry fetch", () => {
     }
     await expect(fetch("https://registry.npmjs.org/x", { redirect: "follow" })).rejects.toThrow("proxy_egress_blocked");
     expect(fake).not.toHaveBeenCalled();
+  });
+});
+
+describe("model requests under the switch carry no credential", () => {
+  const sims = loadTestSimulators(ON)!;
+  const blocked = () => new Error("blocked");
+  const OPENAI_KEY = "sk-proj-FAKEfakeFAKEfakeFAKEfake0123456789";
+  const ANTHROPIC_KEY = "sk-ant-api03-FAKEfakeFAKEfake0123456789";
+  const capture = () => {
+    const seen: { url: string; headers: Record<string, string>; body: string }[] = [];
+    const fake = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({
+        url: url instanceof Request ? url.url : url.toString(),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        body: typeof init?.body === "string" ? init.body : "",
+      });
+      return new Response("ok");
+    });
+    return { seen, fetch: fake as unknown as typeof globalThis.fetch };
+  };
+
+  it("the coding proxy's model fetch maps both protocols to the scripted model and drops every credential header", async () => {
+    const { seen, fetch } = capture();
+    const model = createSimulatorModelFetch(sims, blocked, fetch);
+    await model("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPENAI_KEY}`,
+        "openai-organization": "org-x",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+    await model("https://api.anthropic.com/v1/messages?beta=true", {
+      method: "POST",
+      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-beta": "b", "anthropic-version": "2023-06-01" },
+      body: "{}",
+    });
+    expect(seen.map((s) => s.url)).toEqual([
+      `${BASE}/model/openai/v1/responses`,
+      `${BASE}/model/anthropic/v1/messages?beta=true`,
+    ]);
+    expect(seen[1].headers).toEqual({ "anthropic-beta": "b", "anthropic-version": "2023-06-01" });
+    expect(JSON.stringify(seen)).not.toContain(OPENAI_KEY);
+    expect(JSON.stringify(seen)).not.toContain(ANTHROPIC_KEY);
+    expect(JSON.stringify(seen)).not.toContain("org-x");
+    for (const url of [
+      "https://api.openai.com/v1/chat/completions",
+      "https://example.com/v1/responses",
+      "https://u:p@api.openai.com/v1/responses",
+      `${BASE}/model/openai/v1/responses`,
+    ]) {
+      await expect(model(url, { method: "POST" }), url).rejects.toThrow("blocked");
+    }
+    expect(seen).toHaveLength(2);
+  });
+
+  it("the native clients get the scripted model's base, a placeholder key, and a fetch that drops it", async () => {
+    expect(simulatorModelClientOptions("anthropic", {})).toBeNull();
+    const anthropic = simulatorModelClientOptions("anthropic", ON)!;
+    const openai = simulatorModelClientOptions("openai", ON)!;
+    expect(anthropic.baseURL).toBe(`${BASE}/model/anthropic`);
+    expect(openai.baseURL).toBe(`${BASE}/model/openai/v1`);
+    expect(anthropic.apiKey).toBe(SIMULATOR_PLACEHOLDER_API_KEY);
+    const { seen, fetch } = capture();
+    const free = createCredentialFreeFetch(sims, blocked, fetch);
+    await free(`${BASE}/model/openai/v1/responses`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${SIMULATOR_PLACEHOLDER_API_KEY}`,
+        "x-api-key": ANTHROPIC_KEY,
+        "x-stainless-lang": "js",
+      },
+      body: "{}",
+    });
+    expect(seen[0].headers).toEqual({ "x-stainless-lang": "js" });
+    await expect(free("https://api.openai.com/v1/responses", {})).rejects.toThrow("blocked");
+    await expect(free(`${BASE.replace("8080", "9999")}/x`, {})).rejects.toThrow("blocked");
+  });
+
+  it("refuses Bedrock under the switch, and only under it", () => {
+    expect(() => refuseBedrockUnderTestSimulators({})).not.toThrow();
+    expect(() => refuseBedrockUnderTestSimulators(ON)).toThrow("test_simulators_refused:bedrock_not_simulated");
   });
 });
