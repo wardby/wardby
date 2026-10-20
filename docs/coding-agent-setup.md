@@ -515,7 +515,10 @@ the interrupted request.
 
 A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once, at the lead: the lead's reservation minus what the whole run tree
-has spent. This is decided per period: a sub-agent run holds nothing in a
+has spent. When the lead has an `allowedOverrunPercent`, a coding sub-agent
+can reserve more than the lead's budget; the lead then holds at least the
+unspent holds of every live sub-agent run in its tree, so the overrun still fits
+inside the group's cap. This is decided per period: a sub-agent run holds nothing in a
 period only when its lead started in that same period. So a delegating lead
 does not count against its group several times over.
 
