@@ -158,4 +158,254 @@ describe("ReviewReadLedger state", () => {
     a.recordPage("o/r", 1, view([f("src/a.ts", "partial", "z", { offset: 6, continues: false })], null), true);
     expect(a.unreadCode("o/r", 1, HEAD)).toEqual([]);
   });
+
+  describe("a sinceSha read after a full read of the same head", () => {
+    const compare = (files: PullRequestFileView[], fileListComplete = true) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: "b".repeat(40),
+        fileListComplete,
+      }) as unknown as PullRequestView;
+    const full = (files: PullRequestFileView[], fileListComplete = true) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: null,
+        fileListComplete,
+      }) as unknown as PullRequestView;
+    const listed = [f("src/a.ts", "complete"), f("src/b.ts", "later_page"), f("src/c.ts", "later_page")];
+
+    it("never narrows the gate (control plane: one ledger)", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full(listed), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+    });
+
+    it("never narrows the gate (sandbox: each request's ledger merged into the saved one)", () => {
+      const first = new ReviewReadLedger();
+      first.recordPage("o/r", 1, full(listed), false);
+      const saved = ReviewReadLedger.fromJSON(first.toJSON());
+      const second = ReviewReadLedger.fromJSON(saved.toJSON());
+      second.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(second.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+      saved.merge(second);
+      expect(saved.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+    });
+
+    it("a whole compare list does not clear a cut full list; a whole full list does", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")], false), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(true);
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("a cut compare list after a whole full list is not cut: the full list's files stay gated", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")]), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")], false), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
+  describe("a compare from a base the host did not vouch for", () => {
+    const B1 = "b".repeat(40);
+    const B2 = "c".repeat(40);
+    const read = (comparedFrom: string | null, trusted: string | null) =>
+      ({
+        headSha: HEAD,
+        files: [f("src/a.ts", "complete")],
+        nextPatchCursor: null,
+        comparedFrom,
+        lastReviewedSha: trusted,
+        lastCoveredSha: trusted,
+        fileListComplete: true,
+      }) as unknown as PullRequestView;
+
+    it("is unverified on a first review that compares from any ancestor (control plane)", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, read(B1, null), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      // A whole list of the pull request settles it.
+      reads.recordPage("o/r", 1, read(null, null), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("is verified when the base is the head the same read vouched for, and not for another base", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, read(B1, B1), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, read(B2, B1), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      expect(reads.baseUnverified("o/r", 2, HEAD)).toBe(false);
+    });
+
+    it("is unverified the same way in sandbox mode (saved, restored and merged)", () => {
+      const saved = new ReviewReadLedger();
+      const request = ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(saved.toJSON())));
+      request.recordPage("o/r", 1, read(B1, null), false);
+      saved.merge(request);
+      const restored = ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(saved.toJSON())));
+      expect(restored.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      const trusted = ReviewReadLedger.fromJSON(restored.toJSON());
+      trusted.recordPage("o/r", 1, read(B1, B1), false);
+      restored.merge(trusted);
+      expect(restored.baseUnverified("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
+  describe("a head saved without its compare bases (an older state, or an older gateway's rewrite)", () => {
+    const B1 = "b".repeat(40);
+    const delta = (lastCoveredSha: string | null = null) =>
+      ({
+        headSha: HEAD,
+        files: [f("src/a.ts", "complete")],
+        nextPatchCursor: null,
+        comparedFrom: B1,
+        lastReviewedSha: B1,
+        lastCoveredSha,
+        fileListComplete: true,
+      }) as unknown as PullRequestView;
+    const legacy = (reads: ReviewReadLedger) => {
+      const state = JSON.parse(JSON.stringify(reads.toJSON())) as { heads: Record<string, Record<string, unknown>> };
+      for (const head of Object.values(state.heads)) {
+        delete head.bases;
+        delete head.trustedBases;
+        delete head.basesKnown;
+      }
+      return ReviewReadLedger.fromJSON(state);
+    };
+
+    it("is never covered and stays unverified until a whole list is read", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, delta(), false);
+      const old = legacy(reads);
+      expect(old.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(old.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      expect(old.covered("o/r", 1, HEAD)).toBe(false);
+      // Even a later delta from a vouched-for base does not settle it: the earlier bases are unknown.
+      old.recordPage("o/r", 1, delta(B1), false);
+      expect(old.covered("o/r", 1, HEAD)).toBe(false);
+      old.recordPage("o/r", 1, { ...delta(), comparedFrom: null }, false);
+      expect(old.covered("o/r", 1, HEAD)).toBe(true);
+    });
+
+    it("keeps the bases unknown through a merge with a ledger that knows them", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, delta(B1), false);
+      const saved = legacy(reads);
+      const fresh = new ReviewReadLedger();
+      fresh.recordPage("o/r", 1, delta(B1), false);
+      expect(fresh.baseUnverified("o/r", 1, HEAD)).toBe(false);
+      fresh.merge(saved);
+      expect(fresh.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      // A state this version saved round-trips as known.
+      expect(ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(reads.toJSON()))).covered("o/r", 1, HEAD)).toBe(true);
+    });
+  });
+
+  describe("covered(): this attempt read every file of the head", () => {
+    const B1 = "b".repeat(40);
+    const page = (
+      files: PullRequestFileView[],
+      over: { comparedFrom?: string | null; lastCoveredSha?: string | null; fileListComplete?: boolean } = {},
+    ) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: null,
+        lastReviewedSha: null,
+        lastCoveredSha: null,
+        fileListComplete: true,
+        ...over,
+      }) as unknown as PullRequestView;
+
+    it("only for a whole, uncut list with every code file read", () => {
+      const reads = new ReviewReadLedger();
+      expect(reads.covered("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, page([f("src/a.ts", "later_page")]), false);
+      expect(reads.covered("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, page([f("src/a.ts", "complete")]), true);
+      expect(reads.covered("o/r", 1, HEAD)).toBe(true);
+      const cut = new ReviewReadLedger();
+      cut.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { fileListComplete: false }), false);
+      expect(cut.covered("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("for a delta only when it starts from the covered head the read returned", () => {
+      const trusted = new ReviewReadLedger();
+      trusted.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { comparedFrom: B1, lastCoveredSha: B1 }), false);
+      expect(trusted.covered("o/r", 1, HEAD)).toBe(true);
+      const other = new ReviewReadLedger();
+      other.recordPage("o/r", 1, page([f("src/a.ts", "complete")], { comparedFrom: B1, lastCoveredSha: null }), false);
+      expect(other.covered("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
+  describe("a file list the host cut", () => {
+    const cut = (files: PullRequestFileView[]) =>
+      ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: false }) as unknown as PullRequestView;
+    const whole = (files: PullRequestFileView[]) =>
+      ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: true }) as unknown as PullRequestView;
+
+    it("is cut even when every listed file was read, and only once the first page was seen", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), true);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(true);
+      expect(reads.fileListCut("o/r", 2, HEAD)).toBe(false);
+    });
+
+    it("a whole full list after a cut one clears it", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      reads.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("survives toJSON/fromJSON, and a state saved without the field reads as not cut", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      const state = JSON.parse(JSON.stringify(reads.toJSON())) as { heads: Record<string, Record<string, unknown>> };
+      expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(true);
+      for (const head of Object.values(state.heads)) {
+        delete head.listCut;
+        delete head.fullListSeen;
+      }
+      expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(false);
+      expect(ReviewReadLedger.fromJSON(state).unreadCode("o/r", 1, HEAD)).toEqual([]);
+    });
+
+    it("merges: a whole full list clears a cut, and a cut kept side by side with a compare stays", () => {
+      const saved = new ReviewReadLedger();
+      saved.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      const newer = ReviewReadLedger.fromJSON(saved.toJSON());
+      newer.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      const stale = ReviewReadLedger.fromJSON(saved.toJSON());
+      stale.merge(newer);
+      expect(stale.fileListCut("o/r", 1, HEAD)).toBe(false);
+
+      // Side by side: a whole compare list never clears the other request's cut full list.
+      const left = new ReviewReadLedger();
+      const right = new ReviewReadLedger();
+      left.recordPage("o/r", 1, { ...whole([f("src/a.ts", "complete")]), comparedFrom: "b".repeat(40) }, false);
+      right.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      left.merge(right);
+      expect(left.fileListCut("o/r", 1, HEAD)).toBe(true);
+      // And a whole full list in either request means every file is listed.
+      const done = new ReviewReadLedger();
+      done.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      left.merge(done);
+      expect(left.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+  });
 });

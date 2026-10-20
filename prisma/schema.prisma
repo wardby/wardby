@@ -1811,6 +1811,9 @@ model LocalReview {
   pullRequest   LocalPullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
   agentId       String
   headSha       String
+  /// headSha when this review read every file of it (null otherwise): the head a later
+  /// re-review may compare from and still APPROVE (repo_pr_read's lastCoveredSha).
+  coveredSha    String?
   /// APPROVE | CHANGES_REQUESTED | COMMENT
   verdict       String
   summary       String

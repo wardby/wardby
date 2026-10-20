@@ -31,6 +31,7 @@ import {
   CONTINUATION_CLOSED_CATEGORY,
   CONTINUATION_CLOSED_HOST_LINE,
 } from "../coding/continuation-wording.js";
+import { escapeHtmlComments } from "../providers/review-host/review-format.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { continuedForAnotherIssue, githubIssueKey, recordIssuePullRequests } from "./issue-bridge.js";
@@ -674,7 +675,11 @@ async function postFullReply(
   runId: string,
   reply: string,
 ): Promise<void> {
-  const bodies = fullReplyComments(reply, { maxChars: GITHUB_REPLY_MAX_CHARS, maxParts: REPLY_MAX_PARTS });
+  // Escaped before it is split, so each part stays under the cap as posted (comment() escapes again, a no-op).
+  const bodies = fullReplyComments(escapeHtmlComments(reply), {
+    maxChars: GITHUB_REPLY_MAX_CHARS,
+    maxParts: REPLY_MAX_PARTS,
+  });
   for (const [i, body] of bodies.entries()) {
     try {
       await host.comment(status.repository, { number: status.number, body });

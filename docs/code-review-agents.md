@@ -1037,6 +1037,8 @@ cursor returns `patch_cursor_malformed` (see
 `unread_files` while a source, test or config file of that head that
 `repo_pr_read` listed in the run is neither fully delivered nor read with
 `repo_read_file` at the head (one read of the path at the head counts).
+Every file any `repo_pr_read` of the head listed in the run stays gated: a
+later read with `sinceSha` lists fewer files but never takes any off.
 Removed files, documentation, lockfiles, generated files and fixtures are not
 gated, `CHANGES_REQUESTED` and `COMMENT` are always allowed, and the refusal
 changes nothing, so the agent can read the files and publish again. A file read in parts counts only
@@ -1056,6 +1058,60 @@ has read on its session after each `repo_pr_read` and `repo_read_file` call, so
 Reviewer prompts written before 0.6.1 still work, because the refusal tells
 the agent what to do; update them with the paging step from the shipped
 reviewer prompt.
+
+The file list itself has an upper bound: `repo_pr_read` lists at most 1,000
+changed files of a pull request, on GitHub and on a local repository alike,
+and on GitHub a `sinceSha` compare lists at most 300 (GitHub's own compare
+limit). When the pull request has more changed files than that, the result
+has `fileListComplete: false` and the files past the cut are not shown. Once
+a `repo_pr_read` of a head in the run is cut, `repo_publish_review` refuses
+`APPROVE` of that head with `file_list_truncated`, even when every listed file
+was read: an approval would cover files the agent never saw.
+`CHANGES_REQUESTED` and `COMMENT` still publish. Only a complete read of the
+whole pull request (without `sinceSha`) in the same run lifts the refusal, so
+an agent that passed `sinceSha` can call `repo_pr_read` again without it; a
+complete `sinceSha` read does not. A later run cannot approve the head through a
+`sinceSha` delta either, because a review whose list was cut never becomes a
+covered head (below). Otherwise `repo_publish_review` refuses the agent's
+`APPROVE` of that pull request: split it, or have a person review it. See
+[`file_list_truncated`](../help/errors/file-list-truncated.md).
+
+`sinceSha` accepts any earlier commit of the branch, so a read with it only
+narrows the review to the changes since that commit. `repo_pr_read` therefore
+also returns `lastCoveredSha`: the latest head this agent reviewed after
+reading every file, whatever the verdict. A review counts as covering its head
+when, in that run, no file list of the head was left cut, every source, test
+and config file it listed was read, and the run either read the whole pull
+request (no `sinceSha`) or compared only from the `lastCoveredSha` its reads
+returned. A review that does not cover its head keeps the earlier covered head.
+On GitHub the covered head is kept in the agent's summary comment marker (a
+summary comment written by a version before 0.6.1 has none, so the next review
+reads the whole pull request); on a local repository it is kept with each
+review. Only a marker at the very start of the App's own summary comment
+counts. In text an agent or a run supplies and the App posts (`repo_comment`,
+the summary, body and inline comments of `repo_publish_review`, and a mention
+run's status and reply), wardby escapes `<!--` as `&lt;!--` wherever it comes
+right before a wardby marker name, so such text shows as plain text and can
+never form a wardby marker. Any other HTML comment, such as one in a code
+block or a one-click suggestion, is posted as written. Text is escaped before
+its length limit is checked, and wardby adds its own markers after that. The coding-run status comment and the description comment are
+written by wardby and start with wardby's own marker. So an agent cannot be
+talked into vouching for a head it never read.
+
+`repo_publish_review` refuses `APPROVE` with `full_read_required` while the
+run has no `repo_pr_read` of the head without `sinceSha` and one of its reads
+compared from a commit other than the `lastCoveredSha` that read returned. A
+commit named in the pull request's own text, or `lastReviewedSha` when it
+differs from `lastCoveredSha`, is not a safe base. The agent reads the whole
+pull request (no `sinceSha`) or passes `lastCoveredSha`; the shipped reviewer
+prompt does this. See
+[`full_read_required`](../help/errors/full-read-required.md).
+
+Reviewer prompts written before 0.6.1 pass `lastReviewedSha` as `sinceSha`.
+They still work, because the refusal tells the agent to read the whole pull
+request, but update their re-review step from the shipped reviewer prompt to
+avoid the extra read. Owners of agents whose prompt is stored with the agent
+update it with `update_agent`.
 
 ### Mark ready when passing (`markReadyWhenPassing`)
 
@@ -1220,28 +1276,30 @@ internal marker to the model:
 Every call names the `repository` explicitly; it must resolve to one of the
 agent's links. Failures are always a JSON result, never a thrown error:
 
-| `error` code                    | Meaning                                                                                                                                                                                                                                                                               |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid_arguments_json`        | The tool call's arguments were not valid JSON.                                                                                                                                                                                                                                        |
-| `invalid_arguments`             | Arguments failed schema validation (missing/malformed field).                                                                                                                                                                                                                         |
-| `repository_not_linked`         | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.                                                                                                                                                 |
-| `write_access_required`         | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                                                                                                                                                                  |
-| `repository_access_denied`      | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked.                                                                                                                                          |
-| `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later.                                                                                                                                |
-| `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                                                                                                                                                      |
-| `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                                                                                                                                                  |
-| `issue_not_found`               | `repo_issue_read`: no issue with that number in the repository (or the repository has issues turned off).                                                                                                                                                                             |
-| `is_pull_request`               | `repo_issue_read`: the number is a pull request; read it with `repo_pr_read`.                                                                                                                                                                                                         |
-| `issues_unavailable`            | `repo_issue_read` on a local repository, which has no issues.                                                                                                                                                                                                                         |
-| `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                                                                                                                                                   |
-| `host_permission_missing`       | The App installation is missing a required permission.                                                                                                                                                                                                                                |
-| `host_invalid_response`         | The host returned something the client could not parse.                                                                                                                                                                                                                               |
-| `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                                                                                                                                                 |
-| `ci_failing`                    | `repo_publish_review` called with verdict `APPROVE`, on a `waitForCi` link's own check, while CI on the head is failing. See [Review after CI](#review-after-ci-waitforci) above.                                                                                                     |
-| `ci_pending`                    | Same, but CI on the head is still running.                                                                                                                                                                                                                                            |
-| `patch_cursor_stale`            | `repo_pr_read` with a `patchCursor` issued for another head or compare (the pull request moved on). Call again without `patchCursor`.                                                                                                                                                 |
-| `patch_cursor_malformed`        | `repo_pr_read` with a `patchCursor` it never issued (damaged, edited or over-long). Pass `nextPatchCursor` exactly as returned.                                                                                                                                                       |
-| `unread_files`                  | `repo_publish_review` with `APPROVE` while a source, test or config file of the head was listed by `repo_pr_read` but never fully read (all pages via `patchCursor`, or `repo_read_file` at `headSha`). Read the files, or publish `CHANGES_REQUESTED` naming the files not reviewed. |
+| `error` code                    | Meaning                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_arguments_json`        | The tool call's arguments were not valid JSON.                                                                                                                                                                                                                                                                                                                            |
+| `invalid_arguments`             | Arguments failed schema validation (missing/malformed field).                                                                                                                                                                                                                                                                                                             |
+| `repository_not_linked`         | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.                                                                                                                                                                                                                                     |
+| `write_access_required`         | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                                                                                                                                                                                                                                                      |
+| `repository_access_denied`      | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked.                                                                                                                                                                                                                              |
+| `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later.                                                                                                                                                                                                                    |
+| `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                                                                                                                                                                                                                                          |
+| `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                                                                                                                                                                                                                                      |
+| `issue_not_found`               | `repo_issue_read`: no issue with that number in the repository (or the repository has issues turned off).                                                                                                                                                                                                                                                                 |
+| `is_pull_request`               | `repo_issue_read`: the number is a pull request; read it with `repo_pr_read`.                                                                                                                                                                                                                                                                                             |
+| `issues_unavailable`            | `repo_issue_read` on a local repository, which has no issues.                                                                                                                                                                                                                                                                                                             |
+| `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                                                                                                                                                                                                                                       |
+| `host_permission_missing`       | The App installation is missing a required permission.                                                                                                                                                                                                                                                                                                                    |
+| `host_invalid_response`         | The host returned something the client could not parse.                                                                                                                                                                                                                                                                                                                   |
+| `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                                                                                                                                                                                                                                     |
+| `ci_failing`                    | `repo_publish_review` called with verdict `APPROVE`, on a `waitForCi` link's own check, while CI on the head is failing. See [Review after CI](#review-after-ci-waitforci) above.                                                                                                                                                                                         |
+| `ci_pending`                    | Same, but CI on the head is still running.                                                                                                                                                                                                                                                                                                                                |
+| `patch_cursor_stale`            | `repo_pr_read` with a `patchCursor` issued for another head or compare (the pull request moved on). Call again without `patchCursor`.                                                                                                                                                                                                                                     |
+| `patch_cursor_malformed`        | `repo_pr_read` with a `patchCursor` it never issued (damaged, edited or over-long). Pass `nextPatchCursor` exactly as returned.                                                                                                                                                                                                                                           |
+| `unread_files`                  | `repo_publish_review` with `APPROVE` while a source, test or config file of the head was listed by `repo_pr_read` but never fully read (all pages via `patchCursor`, or `repo_read_file` at `headSha`). Read the files, or publish `CHANGES_REQUESTED` naming the files not reviewed.                                                                                     |
+| `full_read_required`            | `repo_publish_review` with `APPROVE` when the run read the head only with a `sinceSha` other than the `lastCoveredSha` that read returned. Call `repo_pr_read` without `sinceSha` (or with `lastCoveredSha`), or publish `CHANGES_REQUESTED`. See [Large pull requests](#large-pull-requests).                                                                            |
+| `file_list_truncated`           | `repo_publish_review` with `APPROVE` after a `repo_pr_read` of the head in the run had `fileListComplete: false` (more changed files than the host lists) and no complete read without `sinceSha` followed. Call `repo_pr_read` without `sinceSha` if it was passed; otherwise publish `CHANGES_REQUESTED` or `COMMENT`. See [Large pull requests](#large-pull-requests). |
 
 `repo_publish_review` also returns
 `{ "published": false, "reason": "stale_head", ... }` instead of an error when
