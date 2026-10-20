@@ -138,6 +138,20 @@ function setActiveExecutor(executor: DbosExecutor | undefined): void {
 const cancellationReasons = new Map<string, string>();
 
 /**
+ * The id a takeover gives the fork of workflow `from` under application `version`. Deterministic, so
+ * a takeover that forked but never recorded the fork finishes it rather than forking again; and
+ * descendants share their ancestor's id as a prefix, which isForkOf relies on.
+ */
+export function forkWorkflowId(from: string, version: string): string {
+  return `${from}@${version}`;
+}
+
+/** Whether workflow `id` was forked from `from`, directly or through further forks (forkWorkflowId). */
+export function isForkOf(id: string, from: string): boolean {
+  return id.startsWith(`${from}@`);
+}
+
+/**
  * The DBOS workflow id that drives a run: `Run.executionWorkflowId` once the
  * run's workflow was forked under a new application version, otherwise the
  * run id (a run's first workflow is started with its run id).
@@ -173,8 +187,8 @@ export async function workflowIdOf(db: Pick<PrismaClient, "run">, runId: string)
 export const dbosStep: StepRunner = (name, fn) => runDbosStep(name, fn);
 
 /**
- * dbosStep for one run's workflow body. A cancellation of a workflow the run no longer names in
- * `executionWorkflowId` is not a stop: recover() took the run over (forked it) and cancelled this,
+ * dbosStep for one run's workflow body. A cancellation of a workflow the run has moved off (its
+ * `executionWorkflowId` names a fork of it) is not a stop: recover() took the run over (forked it) and cancelled this,
  * the forked-from workflow, while its owner was still alive. That attempt stops like one that lost
  * a step's checkpoint (RunOwnershipLostError: no terminal write), so the fork, not a reasonless
  * "cancelled" from the original, settles the run. takeOver records the fork's id before it
@@ -184,7 +198,7 @@ export function dbosStepFor(db: Pick<PrismaClient, "run">, runId: string): StepR
   const supersedes = async (cancelledWorkflowId: string): Promise<boolean> => {
     // A failed read falls back to an ordinary cancellation, as before this check existed.
     const current = await workflowIdOf(db, runId).catch(() => cancelledWorkflowId);
-    return current !== cancelledWorkflowId;
+    return isForkOf(current, cancelledWorkflowId);
   };
   return (name, fn) => runDbosStep(name, fn, supersedes);
 }
@@ -201,7 +215,7 @@ export function dbosStepFor(db: Pick<PrismaClient, "run">, runId: string): StepR
 export function stopAwareDbosStep(db: Pick<PrismaClient, "run">, runId: string): StepRunner {
   return stopAwareStep(db, runId, dbosStepFor(db, runId), {
     failOpen: true,
-    workflowId: () => DBOS.workflowID,
+    ownership: { workflowId: () => DBOS.workflowID, forkedFrom: isForkOf },
   });
 }
 
@@ -554,7 +568,7 @@ export class DbosExecutor implements Executor {
     // two workflows driving one run would each spend on every turn. DBOS inserts a fork's row with
     // a plain INSERT (bulkForkWorkflows in the SDK's system_database.js), so a repeated id would
     // fail on the key: look first, and treat a lost race the same way.
-    const forkedId = `${handle.id}@${DBOS.applicationVersion}`;
+    const forkedId = forkWorkflowId(handle.id, DBOS.applicationVersion);
     if (!(await DBOS.getWorkflowStatus(forkedId))) {
       try {
         await DBOS.forkWorkflow<void>(handle.id, decision.startStep, {

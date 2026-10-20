@@ -88,6 +88,7 @@ describe("dbosStepFor", () => {
   it.each([
     ["the run's own workflow (never forked)", null, "r1"],
     ["the fork the run names", "r1@v2", "r1@v2"],
+    ["a fork of a fork whose id is not recorded yet", "r1@v2", "r1@v2@v3"],
   ])("keeps a cancellation of %s a RunCancelledError", async (_label, named, cancelled) => {
     vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(new DbosErrors.DBOSWorkflowCancelledError(cancelled));
 
@@ -132,12 +133,17 @@ describe("stopAwareDbosStep", () => {
 
   // A taken-over original, as soon as the run names its fork: whether or not the takeover's cancel
   // landed, and also after the fork already finished the run (no second settle from the original).
-  it.each(["running", "succeeded"])(
-    "stops a workflow the run no longer names (row %s) as an ownership loss, without running the step",
-    async (status) => {
+  it.each([
+    ["running", "r1@v2", "r1"],
+    ["succeeded", "r1@v2", "r1"],
+    ["running", "r1@v2@v3", "r1"],
+    ["running", "r1@v2@v3", "r1@v2"],
+  ])(
+    "stops a workflow the run has moved off (row %s naming %s, running as %s) as an ownership loss, without running the step",
+    async (status, named, own) => {
       const runStep = vi.spyOn(DBOS, "runStep");
-      vi.spyOn(DBOS, "workflowID", "get").mockReturnValue("r1");
-      const db = { run: { findUnique: vi.fn(async () => ({ status, executionWorkflowId: "r1@v2" })) } };
+      vi.spyOn(DBOS, "workflowID", "get").mockReturnValue(own);
+      const db = { run: { findUnique: vi.fn(async () => ({ status, executionWorkflowId: named })) } };
 
       const err = await stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
 
@@ -150,6 +156,10 @@ describe("stopAwareDbosStep", () => {
   it.each([
     ["a fork whose record failed (the run names no fork)", null, "r1@v2"],
     ["the fork the run names", "r1@v2", "r1@v2"],
+    // A second takeover's fork, dequeued before its id is recorded (or its record failed): the run
+    // still names the fork it was forked from, which must not fence it out.
+    ["a fork of a fork whose id is not recorded yet", "r1@v2", "r1@v2@v3"],
+    ["a workflow whose id merely shares a prefix", "r10@v2", "r1"],
   ])("runs the step for %s", async (_label, named, own) => {
     vi.spyOn(DBOS, "runStep").mockResolvedValueOnce("recorded");
     vi.spyOn(DBOS, "workflowID", "get").mockReturnValue(own);

@@ -535,15 +535,26 @@ async function finishRunClaimed(
 
 /** Options for a durable executor's use of stopAwareStep (DbosExecutor); inline runs pass none. */
 export interface StopAwareStepOptions {
-  /** A failed read lets the step run, so the check adds no new way for a run to fail. */
+  /**
+   * A failed read lets the step run, so the check adds no new way for a run to fail. The cost: in an
+   * attempt that is already superseded, a step whose read fails still runs (at most that one step,
+   * since the next read that succeeds fences it).
+   */
   failOpen?: boolean;
   /**
-   * The workflow driving this attempt. When the run names a different one (`executionWorkflowId`,
-   * once a takeover recorded its fork), this attempt no longer owns the run and stops with a
-   * RunOwnershipLostError: no terminal write, no settle side effects. A null id fences nothing, so
-   * a fork whose record failed is not fenced out of the run it drives.
+   * Fences an attempt whose workflow the run has moved off. When the run's `executionWorkflowId`
+   * was forked from the workflow driving this attempt (a takeover recorded its fork), this attempt
+   * no longer owns the run and stops with a RunOwnershipLostError: no terminal write, no settle side
+   * effects. Only a fork *of this workflow* fences it: a null id, or an older id (a fork of a fork
+   * whose own id is not recorded yet, or failed to record), fences nothing, so a takeover's fork is
+   * never fenced out of the run it drives.
    */
-  workflowId?: () => string | undefined;
+  ownership?: {
+    /** The workflow driving this attempt, read when the step is called. */
+    workflowId: () => string | undefined;
+    /** Whether `recorded` was forked, directly or through further forks, from `own`. */
+    forkedFrom: (recorded: string, own: string) => boolean;
+  };
 }
 
 /**
@@ -563,7 +574,7 @@ export function stopAwareStep(
   const check = async (name: string, own: string | undefined): Promise<void> => {
     const read = db.run.findUnique({ where: { id: runId }, select: { status: true, executionWorkflowId: true } });
     const row = options.failOpen ? await read.catch(() => null) : await read;
-    if (row?.executionWorkflowId && own && row.executionWorkflowId !== own) {
+    if (row?.executionWorkflowId && own && options.ownership?.forkedFrom(row.executionWorkflowId, own)) {
       throw new RunOwnershipLostError(name);
     }
     if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
@@ -575,7 +586,7 @@ export function stopAwareStep(
   // assigns its function id then), and a replay of concurrent delegations matches steps by number.
   let previous: Promise<unknown> = Promise.resolve();
   return async (name, fn) => {
-    const own = options.workflowId?.();
+    const own = options.ownership?.workflowId();
     const checked = previous.then(() => check(name, own));
     previous = checked.catch(() => undefined);
     await checked;

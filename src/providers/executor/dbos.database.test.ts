@@ -917,6 +917,62 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     }
   }, 30_000);
 
+  it("recover(): a second takeover's fork drives the run even before (or without) its id being recorded", async () => {
+    const { run, childId, cleanup } = await leadWaitingAfterDeploy("refork-unrecorded");
+    try {
+      // Deploy 1 forks the run and records the fork; its process then dies while the fork waits.
+      const dying = killableClient();
+      executor = buildWith(scriptedLlm([]), `${executorId}-refork-u1`, dying.client, recordingChildExecutor().fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+      const firstFork = (await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId!;
+      await waitFor(
+        "the fork to be running here",
+        async () => (await DBOS.getWorkflowStatus(firstFork))?.status === "PENDING",
+      );
+      await executor.close();
+      dying.kill();
+      await recordUnderOtherVersion(firstFork);
+
+      // Deploy 2 forks the fork, but recording the new id fails: the run still names the first fork.
+      const flaky = new Proxy(db, {
+        get(target, prop) {
+          if (prop !== "run") return Reflect.get(target, prop);
+          return new Proxy(target.run, {
+            get(model, key) {
+              if (key !== "update") return Reflect.get(model, key);
+              return (args: { data: { executionWorkflowId?: unknown } }) =>
+                args.data.executionWorkflowId !== undefined
+                  ? Promise.reject(new Error("simulated failure recording the fork"))
+                  : model.update(args as never);
+            },
+          });
+        },
+      });
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-refork-u2`, flaky, recordingChildExecutor().fake);
+      await executor.launch();
+      await expect(executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: firstFork })).rejects.toThrow(
+        "simulated failure recording the fork",
+      );
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBe(firstFork);
+
+      // The second fork is not fenced out by the older id the run still names: it finishes the run.
+      await finishChildAndLead(run.id);
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect({ status: after.status, finalText: after.finalText }).toEqual({
+        status: "succeeded",
+        finalText: "lead done",
+      });
+      expect((await db.run.findMany({ where: { parentRunId: run.id } })).map((c) => c.id)).toEqual([childId]);
+      expect(resumedLlm.calls).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
   it("recover(): a fork orphaned under its own version is resumed (same-version adoption) and finishes", async () => {
     const { run, childId, cleanup } = await leadWaitingAfterDeploy("fork-resume");
     try {
@@ -1053,9 +1109,35 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         let release!: () => void;
         const open = new Promise<void>((resolve) => (release = resolve));
         const llm = scriptedLlm([delegate, finalAnswer("lead done"), finalAnswer("never paid for")], { turn: 2, open });
-        executor = buildWith(llm, `${executorId}-alive`, db, children.fake);
+        // Observes the original exactly: its pre-step row reads (completed) and the steps it hands DBOS.
+        let runIdOfTest = "";
+        let originalReads = 0;
+        const originalSteps: string[] = [];
+        const observed = new Proxy(db, {
+          get(target, prop) {
+            if (prop !== "run") return Reflect.get(target, prop);
+            return new Proxy(target.run, {
+              get(model, key) {
+                if (key !== "findUnique") return Reflect.get(model, key);
+                return async (args: { select?: { executionWorkflowId?: boolean } }) => {
+                  const own = DBOS.workflowID;
+                  const row = await model.findUnique(args as never);
+                  if (args.select?.executionWorkflowId && own === runIdOfTest) originalReads += 1;
+                  return row;
+                };
+              },
+            });
+          },
+        });
+        const realRunStep = DBOS.runStep.bind(DBOS);
+        const runStep = vi.spyOn(DBOS, "runStep").mockImplementation(((fn: never, config?: { name?: string }) => {
+          if (DBOS.workflowID === runIdOfTest) originalSteps.push(config?.name ?? "?");
+          return realRunStep(fn, config);
+        }) as typeof DBOS.runStep);
+        executor = buildWith(llm, `${executorId}-alive`, observed, children.fake);
         await executor.launch();
         const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+        runIdOfTest = run.id;
         const original = executor.start(run.id).then(
           () => "resolved",
           (err: unknown) => err,
@@ -1081,6 +1163,8 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         expect((await DBOS.getWorkflowStatus(run.id))?.status).toBe(cancelFails ? "PENDING" : "CANCELLED");
 
         // The child finishes: both the original's and the fork's delegate steps return.
+        const readsWhileWaiting = originalReads;
+        expect(originalSteps.at(-1)).toBe("turn:1:tool:0");
         await db.run.updateMany({
           where: { parentRunId: run.id },
           data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
@@ -1090,10 +1174,13 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         await waitFor("the original's delegate step to return", async () =>
           ((await DBOS.listWorkflowSteps(run.id)) ?? []).some((s) => s.name === "turn:1:tool:0"),
         );
+        await waitFor("the original's next pre-step read", () => originalReads > readsWhileWaiting);
+        // Handing a step to DBOS follows the read within microtasks; a macrotask later, it has or never will.
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(originalSteps.at(-1)).toBe("turn:1:tool:0");
+        runStep.mockRestore();
         await waitFor("the fork to ask for turn 2", () => llm.calls.length >= 2);
-        await new Promise((resolve) => setTimeout(resolve, 300));
         expect(llm.calls).toHaveLength(2);
-        expect(((await DBOS.listWorkflowSteps(run.id)) ?? []).map((s) => s.name).at(-1)).toBe("turn:1:tool:0");
         expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("running");
         release();
         await waitFor("the fork to finish the lead", async () => {
