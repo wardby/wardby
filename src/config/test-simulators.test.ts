@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SIM_APP_KEY_FINGERPRINT } from "../../tools/wardby-sim/src/github/test-app-key.js";
@@ -8,6 +9,7 @@ import {
   createSimulatorModelFetch,
   createSimulatorRegistryFetch,
   refuseBedrockUnderTestSimulators,
+  simulatorGitEnvironment,
   SIMULATOR_PLACEHOLDER_API_KEY,
   simulatorModelClientOptions,
   isLocalSimulatorHost,
@@ -94,6 +96,13 @@ describe("WARDBY_TEST_SIMULATORS refusals", () => {
       "model_mock_conflict",
     ],
     ["with half the mock upstream", { ...ON, WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" }, "model_mock_conflict"],
+    ["a relative CA file", { ...ON, WARDBY_SIM_CA_FILE: "ca.crt" }, "ca_file_invalid"],
+    ["a missing CA file", { ...ON, WARDBY_SIM_CA_FILE: "/nonexistent/wardby-sim-ca.crt" }, "ca_file_invalid"],
+    [
+      "a CA file that is not a certificate",
+      { ...ON, WARDBY_SIM_CA_FILE: join(ROOT, "package.json") },
+      "ca_file_invalid",
+    ],
   ];
   for (const [name, env, reason] of cases) {
     it(`refuses: ${name} → ${reason}`, () => {
@@ -294,5 +303,20 @@ describe("model requests under the switch carry no credential", () => {
   it("refuses Bedrock under the switch, and only under it", () => {
     expect(() => refuseBedrockUnderTestSimulators({})).not.toThrow();
     expect(() => refuseBedrockUnderTestSimulators(ON)).toThrow("test_simulators_refused:bedrock_not_simulated");
+  });
+});
+
+describe("the simulator's CA for git", () => {
+  it("is handed to git as GIT_SSL_CAINFO under the switch only", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wardby-sim-ca-test-"));
+    const ca = join(dir, "ca.crt");
+    writeFileSync(ca, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
+    try {
+      expect(simulatorGitEnvironment({ WARDBY_SIM_CA_FILE: ca })).toEqual({});
+      expect(simulatorGitEnvironment(ON)).toEqual({});
+      expect(simulatorGitEnvironment({ ...ON, WARDBY_SIM_CA_FILE: ca })).toEqual({ GIT_SSL_CAINFO: ca });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

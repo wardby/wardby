@@ -175,6 +175,7 @@ const INTERNAL_ENV: Record<string, string> = {
   WARDBY_MERGE_STATE_MSG: "not a variable: the name of a file in a git directory",
   WARDBY_TEST_SIMULATORS: "test-only: the release suite's simulator switch, refused alongside production configuration",
   WARDBY_SIM_BASE_URL: "test-only: the simulator's origin for WARDBY_TEST_SIMULATORS (loopback or cluster-local only)",
+  WARDBY_SIM_CA_FILE: "test-only: the simulator's throwaway CA for git under WARDBY_TEST_SIMULATORS",
   WARDBY_TEST_SIMULATORS_ALLOWED: "baked into an image at build time (0 for release images), never set by an operator",
 };
 

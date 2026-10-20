@@ -27,7 +27,9 @@
  * - the load-test mock upstream (WARDBY_LOAD_TEST / WARDBY_CODING_PROXY_MOCK_UPSTREAM) is also set.
  */
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { isAbsolute } from "node:path";
 import { logger } from "../core/logger.js";
 
 /** SHA-256 (hex) of the SPKI DER of the simulator's test GitHub App key (tools/wardby-sim/fixtures). */
@@ -73,6 +75,7 @@ export type TestSimulatorsRefusal =
   | "jira_needs_https"
   | "public_hostname"
   | "model_mock_conflict"
+  | "ca_file_invalid"
   | "bedrock_not_simulated";
 
 export class TestSimulatorsRefused extends Error {
@@ -83,6 +86,12 @@ export class TestSimulatorsRefused extends Error {
 }
 
 export interface TestSimulators {
+  /**
+   * WARDBY_SIM_CA_FILE: the simulator's throwaway CA (deploy/kind-coding/sim-ca.sh), trusted by the
+   * git commands wardby runs (GIT_SSL_CAINFO) so its https-only git can reach the simulator's
+   * git server. Node itself trusts it through NODE_EXTRA_CA_CERTS, set by the test harness.
+   */
+  caFile?: string;
   /** The simulator's origin, without a trailing slash ("http://wardby-sim.wardby-sim.svc:8080"). */
   origin: string;
   /** The host, for the startup warning (never carries credentials: those are refused). */
@@ -171,8 +180,31 @@ export function loadTestSimulators(env: NodeJS.ProcessEnv = process.env): TestSi
     throw new TestSimulatorsRefused("public_hostname");
   }
 
+  const caFile = env.WARDBY_SIM_CA_FILE?.trim();
+  if (caFile !== undefined && !validCaFile(caFile)) throw new TestSimulatorsRefused("ca_file_invalid");
+
   const origin = url.origin;
-  return { origin, host: url.host, base: (service) => `${origin}${SIMULATOR_PREFIXES[service]}` };
+  return {
+    origin,
+    host: url.host,
+    ...(caFile ? { caFile } : {}),
+    base: (service) => `${origin}${SIMULATOR_PREFIXES[service]}`,
+  };
+}
+
+function validCaFile(path: string): boolean {
+  if (!isAbsolute(path)) return false;
+  try {
+    return readFileSync(path, "utf8").includes("-----BEGIN CERTIFICATE-----");
+  } catch {
+    return false;
+  }
+}
+
+/** Extra environment for the git commands wardby runs: the simulator's CA, under the switch only. */
+export function simulatorGitEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const caFile = loadTestSimulators(env)?.caFile;
+  return caFile ? { GIT_SSL_CAINFO: caFile } : {};
 }
 
 /** The simulator's base for one service, or null when the switch is off (throws on a refusal). */
