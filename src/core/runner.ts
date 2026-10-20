@@ -54,7 +54,7 @@ import {
   WITHHELD_TEXT_NOTICE,
 } from "./secret-guard.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
-import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
+import { effectiveBudgetForRun } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { createDelegationSiblings } from "./delegation-siblings.js";
 import { findDelegationChild } from "./delegation-child.js";
@@ -284,7 +284,6 @@ const DELEGATION_CHILD_SELECT = {
   kind: true,
   budgetGroupId: true,
   budgetUsd: true,
-  allowedOverrunPercent: true,
   ownerId: true,
   nativeExecutionMode: true,
   codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
@@ -292,15 +291,6 @@ const DELEGATION_CHILD_SELECT = {
 
 /** The child agent fields a delegation decides on. */
 export type DelegationChildAgent = Prisma.AgentGetPayload<{ select: typeof DELEGATION_CHILD_SELECT }>;
-
-/**
- * A delegation's budget check sees what dispatch will reserve: a coding child's
- * limit includes its allowed overrun (dispatch's reserveCodingBudget); a native
- * child's budget has none.
- */
-function delegationBudgetOptions(childAgent: DelegationChildAgent): EffectiveBudgetOptions {
-  return childAgent.kind === "coding" ? { overrunPercent: childAgent.allowedOverrunPercent } : {};
-}
 
 /**
  * The live authorization of one delegation, and the child agent as it is now. Owners are re-read
@@ -1316,13 +1306,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             while (delegationSiblings.inFlight > 0) {
               // Taken before the budget read, so a sibling that finishes during it still wakes this wait.
               const finishes = delegationSiblings.finishes;
-              const { exhaustedBy } = await effectiveBudgetForRun(
-                db,
-                childAgent,
-                new Date(),
-                runId,
-                delegationBudgetOptions(childAgent),
-              );
+              // What dispatch will reserve: a coding child's base too, its overrun is never reserved.
+              const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
               const remainingMs = deadline - Date.now();
               if (!exhaustedBy || remainingMs <= 0) break;
               runnerLog.info(
@@ -1985,13 +1970,7 @@ export async function durableDelegate(
       if (siblings > 0) {
         const runTimeoutSec = coding ? (childAgent.codingProfile?.timeoutSec ?? 0) : 0;
         const boundMs = (queueTimeoutSec + runTimeoutSec + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
-        const { exhaustedBy } = await effectiveBudgetForRun(
-          db,
-          childAgent,
-          new Date(),
-          runId,
-          delegationBudgetOptions(childAgent),
-        );
+        const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
         if (exhaustedBy && now() - startedAt < boundMs) {
           await ledger.setDelegation(sessionId, callId, { status: "waiting_budget", childAgentId: edge.childAgentId });
           return { pending: true };

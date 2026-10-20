@@ -2219,9 +2219,9 @@ describe("delegate_to_<boundName> dispatch tool", () => {
         expect(bff).toBeCloseTo(2.98, 6);
       });
 
-      it("a coding child whose only room is the tree's overrun headroom is admitted at once, not made to wait", async () => {
-        // The lead's $3 with a 25% overrun makes the tree's cap $3.75 for coding children. order holds its
-        // own $2.99 after the lead's $0.01 turn, so only the overrun's $0.75 is left: bff takes it at once.
+      it("a coding child whose only room is the tree's overrun headroom waits: overrun is never reserved", async () => {
+        // The lead's $3 with a 25% overrun: coding children may top up to $3.75 in all, but each reserves only
+        // its base out of the lead's $3. order holds its $2.99 after the lead's $0.01 turn, so bff waits for it.
         const db = fakeDb(
           [
             { ...lead(true), budgetUsd: 3, allowedOverrunPercent: 25 },
@@ -2241,10 +2241,10 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           ["order", "succeeded"],
           ["bff", "succeeded"],
         ]);
-        expect(executor.state.max).toBe(2);
+        expect(executor.state.max).toBe(1);
         const [order, bff] = children.map((c) => Number(c.codingRun?.budgetReservedUsd));
         expect(order).toBeCloseTo(2.99, 6);
-        expect(bff).toBeCloseTo(0.75, 5);
+        expect(bff).toBeCloseTo(2.98, 6);
       });
 
       it("waits for a native sibling's hold too", async () => {
