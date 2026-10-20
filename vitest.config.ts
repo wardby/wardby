@@ -9,7 +9,7 @@ const sourceConditions = ["wardby-source", "node", "development|production"];
 export default defineConfig({
   ssr: { resolve: { conditions: sourceConditions } },
   test: {
-    include: ["src/**/*.test.ts", "deploy/**/*.test.mjs", "scripts/**/*.test.mjs"],
+    include: ["src/**/*.test.ts", "tools/**/*.test.ts", "deploy/**/*.test.mjs", "scripts/**/*.test.mjs"],
     // Tests explicitly include .env.local; dotenv-flow normally omits it when
     // NODE_ENV=test. Shell/CI variables remain highest priority.
     setupFiles: ["./vitest.setup.ts"],

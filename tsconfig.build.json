@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": "src", "customConditions": [] },
+  // Product code only: tools/** (test simulators) never ships in dist/.
+  "include": ["src/**/*.ts"],
   // src/tools/** are development commands, not product: capture-fixture.ts issues a pod
   // create-verb call (with dryRun=All) and must not ship in the deployed artifact.
   "exclude": [

@@ -10,8 +10,13 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "types": ["node"],
-    "rootDir": "src",
+    // rootDir "." takes in tools/**; with it, the "#prisma" import map no longer maps
+    // dist/ back to src/, so resolve its "wardby-source" condition (as vitest does).
+    "rootDir": ".",
+    "customConditions": ["wardby-source"],
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"]
+  // tools/** (the wardby-sim test simulator) is type-checked here but never built:
+  // tsconfig.build.json narrows include and sets rootDir to src.
+  "include": ["src/**/*.ts", "tools/**/*.ts"]
 }

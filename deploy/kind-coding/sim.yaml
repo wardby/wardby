@@ -1,0 +1,88 @@
+# TEST ONLY: wardby-sim, the release regression suite's simulator of GitHub, Slack, the
+# package registries and Jira (tools/wardby-sim). Apply it only to a throwaway kind
+# cluster; it must never be applied to a real cluster, and nothing under deploy/gke or
+# deploy/aws references it. It is not part of any kustomize overlay on purpose.
+#
+#   docker build -f tools/wardby-sim/Dockerfile -t localhost:5001/wardby-sim:dev .
+#   docker push localhost:5001/wardby-sim:dev
+#   kubectl --context kind-wardby apply -f deploy/kind-coding/sim.yaml
+#
+# wardby reaches it at http://wardby-sim.wardby-sim.svc.cluster.local:8080 (with
+# WARDBY_TEST_SIMULATORS=1, which refuses any host that is not loopback or cluster-local).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wardby-sim
+  labels:
+    wardby.dev/test-only: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-sim
+  namespace: wardby-sim
+  labels:
+    app: wardby-sim
+    wardby.dev/test-only: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wardby-sim
+  template:
+    metadata:
+      labels:
+        app: wardby-sim
+        wardby.dev/test-only: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sim
+          image: localhost:5001/wardby-sim:dev
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: WARDBY_SIM_PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /__sim/health
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: git
+              mountPath: /var/lib/wardby-sim/git
+      volumes:
+        - name: git
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-sim
+  namespace: wardby-sim
+  labels:
+    wardby.dev/test-only: "true"
+spec:
+  selector:
+    app: wardby-sim
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
