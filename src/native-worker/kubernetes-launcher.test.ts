@@ -300,6 +300,20 @@ describe("KubernetesNativeWorkerLauncher worker exit logging", () => {
     expect(fields.stderrTail).not.toContain(secret.slice(4));
   });
 
+  it("masks a secret's suffix at the start of a short read (a split long line or a rotated log)", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: async () => [secret] });
+    // Far fewer lines than the read's bound, yet the first returned line begins inside the value.
+    api.logs.set(`${ns}/${names.pod}/worker`, `${secret.slice(4)} rest of the line ${"r".repeat(60)}\nError: boom\n`);
+    await fail(api, 1);
+    expect(await handle.exited).toBe(1);
+    const [fields] = k8sWarn.mock.calls[0];
+    expect(fields.stderrTail).toContain("Error: boom");
+    expect(fields.stderrTail).not.toContain(secret.slice(4));
+    expect(fields.stderrTail).not.toContain("value-123");
+  });
+
   it("reports the exit promptly when the log read or the secret values read never answers", async () => {
     k8sWarn.mockClear();
     const hungLog = setup({ diagnosticTimeoutMs: 50 });

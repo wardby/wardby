@@ -222,12 +222,12 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
       k8sLog.warn({ pod: podName, code, stderrTailOmitted: "log_read_failed" }, "native worker exited non-zero");
       return;
     }
-    // The read stops at whichever bound it meets first: the line bound cuts the start, the byte cap
-    // (counted from the start of the selected lines) the end. A read that met neither is whole.
-    const bytes = Buffer.byteLength(log);
-    const end = bytes >= WORKER_LOG_TAIL_BYTES - 3;
-    const start = end || log.split("\n").length >= WORKER_LOG_TAIL_LINES;
-    const tail = await workerTailFields(log, input, launchOptions.secretValues, { start, end }, by - Date.now());
+    // The read may always begin mid-text, even with fewer lines than the bound: the kubelet splits
+    // a line over 16 KiB into partial records (each counted as a line), and log rotation drops the
+    // oldest text, so the start is always masked as cut. The byte cap (counted from the start of
+    // the selected lines) cuts the end only when it is met.
+    const end = Buffer.byteLength(log) >= WORKER_LOG_TAIL_BYTES - 3;
+    const tail = await workerTailFields(log, input, launchOptions.secretValues, { start: true, end }, by - Date.now());
     k8sLog.warn({ pod: podName, code, ...tail }, "native worker exited non-zero");
   }
 

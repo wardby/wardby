@@ -693,8 +693,9 @@ skipped unless its script sets its flag:
   redacted; `log_read_failed` (Kubernetes) means the worker pod's log could not
   be read within 10 seconds. Either way the run's failure is still recorded. On
   Kubernetes the tail comes from the last 100 lines of the worker pod's log (the
-  launcher needs `get` on `pods/log`); when that read is cut short, its cut ends
-  are masked too.
+  launcher needs `get` on `pods/log`). That read may begin partway through a
+  line (the kubelet splits very long lines, and logs rotate), so its first few
+  dozen characters are always masked, more when an attached secret is long.
 - **Workers cannot reach the gateway.** Confirm `NATIVE_GATEWAY_CONTAINER`
   matches the running container's name exactly and that the gateway listens on
   the port in `NATIVE_GATEWAY_URL` (default 8790).
