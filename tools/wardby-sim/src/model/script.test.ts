@@ -48,12 +48,11 @@ describe("scripted model", () => {
     const responses = events(
       renderResponses({ items: [{ type: "message", id: "m", role: "assistant", content: [] }] }, "resp_1", "gpt-x"),
     );
-    expect(responses.map((e) => e.event)).toEqual([
-      "response.created",
-      "response.output_item.added",
-      "response.output_item.done",
-      "response.completed",
-    ]);
+    expect(
+      responses
+        .map((e) => e.event)
+        .filter((e) => !e.startsWith("response.content_part") && !e.startsWith("response.output_text")),
+    ).toEqual(["response.created", "response.output_item.added", "response.output_item.done", "response.completed"]);
     expect(responses.at(-1)!.data.response.usage.input_tokens).toBe(1200);
     const messages = events(
       renderMessages(

@@ -82,6 +82,27 @@ export function renderResponses(turn: ResponsesTurn, id: string, model: string):
   });
   turn.items.forEach((item, index) => {
     out += sse("response.output_item.added", { type: "response.output_item.added", output_index: index, item });
+    // A message's text streams as content parts and output_text deltas, as the real API sends it
+    // (wardby's native OpenAI adapter reads the text from the deltas only).
+    const message = item as { type?: string; id?: string; content?: { type: string; text?: string }[] };
+    if (message.type === "message" && Array.isArray(message.content)) {
+      message.content.forEach((part, contentIndex) => {
+        if (part.type !== "output_text") return;
+        const ids = { item_id: message.id, output_index: index, content_index: contentIndex };
+        out += sse("response.content_part.added", {
+          type: "response.content_part.added",
+          ...ids,
+          part: { ...part, text: "" },
+        });
+        out += sse("response.output_text.delta", {
+          type: "response.output_text.delta",
+          ...ids,
+          delta: part.text ?? "",
+        });
+        out += sse("response.output_text.done", { type: "response.output_text.done", ...ids, text: part.text ?? "" });
+        out += sse("response.content_part.done", { type: "response.content_part.done", ...ids, part });
+      });
+    }
     out += sse("response.output_item.done", { type: "response.output_item.done", output_index: index, item });
   });
   out += sse("response.completed", {

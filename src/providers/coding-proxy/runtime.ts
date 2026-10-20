@@ -1,6 +1,10 @@
 import type { PrismaClient } from "#prisma";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
-import { createSimulatorRegistryFetch, startupTestSimulators } from "../../config/test-simulators.js";
+import {
+  createSimulatorModelFetch,
+  createSimulatorRegistryFetch,
+  startupTestSimulators,
+} from "../../config/test-simulators.js";
 import { logger } from "../../core/logger.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
@@ -170,7 +174,13 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     ledger: new PrismaProxyLedger(options.db),
     credentials: new EnvironmentCredentialResolver(env),
     audit,
-    ...(mock ? { fetch: createMockUpstream(mock) } : {}),
+    // WARDBY_TEST_SIMULATORS (test only; refused alongside the mock upstream): the scripted model,
+    // with every credential header dropped.
+    ...(simulators
+      ? { fetch: createSimulatorModelFetch(simulators, () => new Error(PROXY_EGRESS_ERROR)) }
+      : mock
+        ? { fetch: createMockUpstream(mock) }
+        : {}),
     // The run's first model request closes its dependency cache (no-op for a run with it off).
     ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
   });
