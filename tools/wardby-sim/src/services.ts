@@ -8,7 +8,11 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGitHubSim } from "./github/service.js";
+import { createNpmService } from "./registry/npm.js";
+import { createOsvService } from "./registry/osv.js";
+import { createPypiServices } from "./registry/pypi.js";
 import type { SimService } from "./service.js";
+import { createSlackService } from "./slack/web.js";
 
 export interface SimConfig {
   env: NodeJS.ProcessEnv;
@@ -24,7 +28,14 @@ export function buildServices(config: SimConfig): SimService[] {
       ...(env.WARDBY_SIM_GITHUB_APP_OWNER ? { ownerLogin: env.WARDBY_SIM_GITHUB_APP_OWNER } : {}),
     },
   });
-  return [github.service, github.gitService];
+  return [
+    github.service,
+    github.gitService,
+    createSlackService(),
+    createNpmService(),
+    ...createPypiServices(),
+    createOsvService(),
+  ];
 }
 
 /** Every route of every service, for the route table check. */

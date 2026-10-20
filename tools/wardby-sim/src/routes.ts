@@ -180,6 +180,73 @@ export const ROUTES: readonly RouteEntry[] = [
     "Push by git http-backend (real git); Contents: write; a protected branch refuses in a pre-receive hook with GH006. " +
       "Fires push and pull_request.synchronize.",
   ),
+
+  // --- Slack Web API (slack/web.ts) ---
+  unverified(
+    "slack",
+    "POST",
+    "/auth.test",
+    "Bearer auth (not_authed/invalid_auth/token_revoked); form body only. Docs only.",
+  ),
+  unverified(
+    "slack",
+    "POST",
+    "/conversations.info",
+    "Form body only (JSON → invalid_arguments, per wardby's own note); private not-member → channel_not_found; " +
+      "channels:read / groups:read scopes. Docs only.",
+  ),
+  unverified(
+    "slack",
+    "POST",
+    "/chat.postMessage",
+    "chat:write; archived → is_archived; public not-member → not_in_channel; private not-member → channel_not_found; " +
+      "an unknown thread_ts → thread_not_found (a guess).",
+  ),
+  unverified(
+    "slack",
+    "POST",
+    "/chat.update",
+    "message_not_found for an unknown or deleted ts; cant_update_message for another user's. Docs only.",
+  ),
+
+  // --- npm registry (registry/npm.ts, npm-model.ts) ---
+  unverified(
+    "npm",
+    "GET",
+    "/{package}",
+    "Packument: versions, time (+created/modified), dist-tags.latest, deprecated, dist.integrity/shasum of real " +
+      "tarballs. Abbreviated (corgi) documents are not modelled; the full document is always sent.",
+  ),
+  unverified("npm", "GET", "/{package}/{version}", "Per-version manifest. Docs only."),
+  unverified("npm", "GET", "/{package}/-/{file}", "A real .tgz (package/package.json, index.js)."),
+  unverified("npm", "GET", "/{scope}/{package}/-/{file}", "A scoped package's real .tgz."),
+
+  // --- PyPI (registry/pypi.ts, pypi-model.ts) ---
+  unverified(
+    "pypi",
+    "GET",
+    "/simple/{project}/",
+    "PEP 691 JSON (Accept: application/vnd.pypi.simple.v1+json) or PEP 503 HTML; names PEP 503-normalized; " +
+      "yanked and requires-python. Unverified against pypi.org.",
+  ),
+  unverified("pypi", "GET", "/pypi/{project}/json", "Project JSON: info of the newest upload, urls, releases."),
+  unverified("pypi", "GET", "/pypi/{project}/{version}/json", "Release JSON: info (requires_dist), urls with sha256."),
+  unverified(
+    "pypi-files",
+    "GET",
+    "/packages/*",
+    "Real pure-Python wheels and sdists, each with its own sha256; unknown files 404.",
+  ),
+
+  // --- OSV (registry/osv.ts) ---
+  unverified(
+    "osv",
+    "POST",
+    "/v1/query",
+    "Full advisories, or {} when none. Version matching simplified (dotted numeric).",
+  ),
+  unverified("osv", "POST", "/v1/querybatch", "ids + modified per query, or {}; 1,000 queries max. Docs only."),
+  unverified("osv", "GET", "/v1/vulns/{id}", "The advisory, or 404 {code:5}. Docs only."),
 ];
 
 /** Outbound events (webhooks the simulator sends), with the same verified rule as routes. */

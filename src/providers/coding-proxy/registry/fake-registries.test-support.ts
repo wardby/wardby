@@ -6,124 +6,75 @@
  */
 import { createHash } from "node:crypto";
 import type { UpstreamFetch } from "../../../coding/registry/types.js";
+import {
+  answerNpm,
+  NPM_ORIGIN,
+  standardNpmTarballUrl,
+  type NpmRegistryModel,
+  type NpmVersionSpec,
+} from "../../../../tools/wardby-sim/src/registry/npm-model.js";
+import {
+  answerPypi,
+  pypiFileUrlFor,
+  wheelFileName,
+  type PypiRegistryModel,
+  type PypiReleaseSpec,
+} from "../../../../tools/wardby-sim/src/registry/pypi-model.js";
 
-export interface FakeVersion {
-  deps?: Record<string, string>;
-  peer?: Record<string, string>;
-  optional?: Record<string, string>;
-  published?: string;
-  /** The registry's tarball URL, when not the standard one. */
-  tarball?: string;
-}
-export type FakeRegistry = Record<string, Record<string, FakeVersion>>;
+export type FakeVersion = NpmVersionSpec;
+export type FakeRegistry = NpmRegistryModel;
 
 export const tarballOf = (name: string, version: string) => new TextEncoder().encode(`tarball ${name}@${version}`);
 export const sriOf = (bytes: Uint8Array) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-export const tarballUrl = (name: string, version: string) =>
-  `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
+export const tarballUrl = standardNpmTarballUrl;
 
-/** A fake registry.npmjs.org; a version without `published` was published at `defaultPublished`. */
+/**
+ * A fake registry.npmjs.org; a version without `published` was published at `defaultPublished`.
+ * Its answers are the wardby-sim simulator's own (tools/wardby-sim/src/registry/npm-model.ts),
+ * without the simulator's extra fields.
+ */
 export function fakeNpmRegistry(registry: FakeRegistry, defaultPublished: string) {
   const calls: string[] = [];
   const upstream: UpstreamFetch = async (url) => {
     calls.push(url);
-    const tarball = Object.entries(registry)
-      .flatMap(([name, versions]) => Object.keys(versions).map((version) => ({ name, version })))
-      .find(({ name, version }) => tarballUrl(name, version) === url);
-    if (tarball) return new Response(tarballOf(tarball.name, tarball.version));
-    const match = url.match(/^https:\/\/registry\.npmjs\.org\/([^/]+)(?:\/([^/]+))?$/);
-    if (!match) return new Response("no route", { status: 404 });
-    const name = decodeURIComponent(match[1]);
-    const versions = registry[name];
-    if (!versions) return new Response("{}", { status: 404 });
-    const manifest = (version: string) => ({
-      name,
-      version,
-      dist: {
-        integrity: sriOf(tarballOf(name, version)),
-        tarball: versions[version].tarball ?? tarballUrl(name, version),
-      },
-      ...(versions[version].deps ? { dependencies: versions[version].deps } : {}),
-      ...(versions[version].peer ? { peerDependencies: versions[version].peer } : {}),
-      ...(versions[version].optional ? { optionalDependencies: versions[version].optional } : {}),
+    if (!url.startsWith(`${NPM_ORIGIN}/`)) return new Response("no route", { status: 404 });
+    const answer = answerNpm(registry, url.slice(NPM_ORIGIN.length), {
+      defaultPublished,
+      tarballBytes: tarballOf,
+      integrity: sriOf,
     });
-    if (match[2]) {
-      const version = decodeURIComponent(match[2]);
-      return versions[version]
-        ? Response.json(manifest(version))
-        : new Response('"version not found"', { status: 404 });
-    }
-    return Response.json({
-      name,
-      versions: Object.fromEntries(Object.keys(versions).map((version) => [version, manifest(version)])),
-      time: Object.fromEntries(
-        Object.entries(versions).map(([version, info]) => [version, info.published ?? defaultPublished]),
-      ),
-    });
+    if (answer.bytes) return new Response(answer.bytes);
+    if (answer.json !== undefined) return Response.json(answer.json);
+    return new Response(answer.text, { status: answer.status });
   };
   return { upstream, calls };
 }
 
-export interface FakeRelease {
-  requires?: string[];
-  uploaded?: string;
-  /** Only an sdist. */
-  sdistOnly?: boolean;
-}
-export type FakePypi = Record<string, Record<string, FakeRelease>>;
+export type FakeRelease = PypiReleaseSpec;
+export type FakePypi = PypiRegistryModel;
 
 export const wheelBytes = new TextEncoder().encode("wheel bytes");
 export const wheelSha256 = createHash("sha256").update(wheelBytes).digest("hex");
-export const wheelName = (name: string, version: string) => `${name.replace(/-/g, "_")}-${version}-py3-none-any.whl`;
-export const pypiFileUrl = (filename: string) => `https://files.pythonhosted.org/packages/ab/cd/${filename}`;
+export const wheelName = wheelFileName;
+export const pypiFileUrl = pypiFileUrlFor;
 
-/** A fake pypi.org and files.pythonhosted.org; a release without `uploaded` was uploaded at `defaultUploaded`. */
+/**
+ * A fake pypi.org and files.pythonhosted.org; a release without `uploaded` was uploaded at
+ * `defaultUploaded`. Its answers are the wardby-sim simulator's own
+ * (tools/wardby-sim/src/registry/pypi-model.ts) in its plain mode.
+ */
 export function fakePypiRegistry(pypi: FakePypi, defaultUploaded: string) {
   const calls: string[] = [];
   const upstream: UpstreamFetch = async (url) => {
     calls.push(url);
-    const json = url.match(/^https:\/\/pypi\.org\/pypi\/([^/]+)\/([^/]+)\/json$/);
-    if (json) {
-      const [name, version] = [decodeURIComponent(json[1]), decodeURIComponent(json[2])];
-      const release = pypi[name]?.[version];
-      if (!release) return new Response("{}", { status: 404 });
-      const files = release.sdistOnly
-        ? [
-            {
-              packagetype: "sdist",
-              filename: `${name}-${version}.tar.gz`,
-              url: pypiFileUrl(`${name}-${version}.tar.gz`),
-            },
-          ]
-        : [
-            {
-              packagetype: "bdist_wheel",
-              filename: wheelName(name, version),
-              url: pypiFileUrl(wheelName(name, version)),
-              yanked: false,
-              upload_time_iso_8601: release.uploaded ?? defaultUploaded,
-              digests: { sha256: wheelSha256 },
-            },
-          ];
-      return Response.json({ info: { name, version, requires_dist: release.requires ?? null }, urls: files });
-    }
-    const simple = url.match(/^https:\/\/pypi\.org\/simple\/([^/]+)\/$/);
-    if (simple) {
-      const versions = pypi[simple[1]];
-      if (!versions) return new Response("{}", { status: 404 });
-      return Response.json({
-        name: simple[1],
-        files: Object.entries(versions).map(([version, release]) => ({
-          filename: release.sdistOnly ? `${simple[1]}-${version}.tar.gz` : wheelName(simple[1], version),
-          url: pypiFileUrl(wheelName(simple[1], version)),
-          hashes: { sha256: wheelSha256 },
-          "upload-time": release.uploaded ?? defaultUploaded,
-          size: wheelBytes.byteLength,
-        })),
-      });
-    }
-    if (url.startsWith("https://files.pythonhosted.org/")) return new Response(wheelBytes);
-    return new Response("no route", { status: 404 });
+    const answer = answerPypi(pypi, url, {
+      defaultUploaded,
+      wheelBytes: () => wheelBytes,
+      sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
+    });
+    if (answer.bytes) return new Response(answer.bytes);
+    if (answer.json !== undefined) return Response.json(answer.json);
+    return new Response(answer.text, { status: answer.status });
   };
   return { upstream, calls };
 }
