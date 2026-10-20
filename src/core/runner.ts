@@ -2167,7 +2167,14 @@ export interface SandboxSessionSnapshot {
 }
 
 export type SandboxSessionOutcome =
-  | { kind: "started"; input: WorkerInput; capability: string; sessionId: string }
+  | {
+      kind: "started";
+      input: WorkerInput;
+      capability: string;
+      sessionId: string;
+      /** Every secret value the run's user tools may read, read on demand (never stored); rejects when any read fails. */
+      secretValues: () => Promise<string[]>;
+    }
   /** The run ended before a worker was needed (already terminal, or failed at load). */
   | { kind: "ended"; run: Run };
 
@@ -2253,7 +2260,20 @@ export async function createSandboxSession(options: {
     sessionId: session.id,
     capability,
     input: { ...input, gateway: { url: options.gatewayUrl, capability } },
+    secretValues: () => userToolSecretValues(tools, Object.keys(input.userTools)),
   };
+}
+
+/**
+ * Every secret value the sandbox run's user tools `names` may read (readable or brokered): what its
+ * worker can be handed, so what the gateway checks its cause codes against and a launcher masks
+ * from the worker's output tail. Rejects when any read fails (readRedactionValues).
+ */
+export async function userToolSecretValues(
+  tools: Pick<ReturnType<typeof createNativeRunTools>, "readableSecretValues">,
+  names: readonly string[],
+): Promise<string[]> {
+  return (await Promise.all(names.map((name) => tools.readableSecretValues(name)))).flat();
 }
 
 /** Run.executionBackend for a sandbox-mode run whose worker is (or was) launched. */

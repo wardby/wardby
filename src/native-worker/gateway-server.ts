@@ -20,6 +20,7 @@ import {
   recordNativeRunProgress,
   runDrivability,
   sandboxCapabilityHash,
+  userToolSecretValues,
   type NativeRunFinishContext,
   type NativeRunProviders,
   type RunnerDb,
@@ -111,12 +112,10 @@ export function runSecretValues(
   ctx: Pick<RebuiltRun, "snapshot" | "tools">,
   capability: string,
 ): () => Promise<string[]> {
-  return async () => {
-    const perTool = await Promise.all(
-      Object.keys(ctx.snapshot.input.userTools).map((tool) => ctx.tools.readableSecretValues(tool)),
-    );
-    return [capability, ...perTool.flat()];
-  };
+  return async () => [
+    capability,
+    ...(await userToolSecretValues(ctx.tools, Object.keys(ctx.snapshot.input.userTools))),
+  ];
 }
 
 /**
