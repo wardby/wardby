@@ -173,6 +173,9 @@ const INTERNAL_ENV: Record<string, string> = {
   WARDBY_CANARY_PROXY_IP: "set by the Kubernetes preflight for its own canary pod",
   WARDBY_DOCKER_SEED_DEBUG: "test-only: read only when NODE_ENV=test",
   WARDBY_MERGE_STATE_MSG: "not a variable: the name of a file in a git directory",
+  WARDBY_TEST_SIMULATORS: "test-only: the release suite's simulator switch, refused alongside production configuration",
+  WARDBY_SIM_BASE_URL: "test-only: the simulator's origin for WARDBY_TEST_SIMULATORS (loopback or cluster-local only)",
+  WARDBY_TEST_SIMULATORS_ALLOWED: "baked into an image at build time (0 for release images), never set by an operator",
 };
 
 /** Operator-facing variables named nowhere in the operator docs when this suite was written: finding D3. */
