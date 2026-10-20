@@ -76,7 +76,9 @@ optional for the verdict. A page that includes source, test or config files
 stops before the first doc, help, lockfile or generated file, so those come on
 later pages and a reviewer can skip them. Read every `unavailable` source, test or config file
 with `repo_read_file` at the head. A cursor goes stale when
-the branch moves (`patch_cursor_stale`): call again without it.
+the branch moves (`patch_cursor_stale`): call again without it. A damaged or
+rewritten cursor returns `patch_cursor_malformed`: pass `nextPatchCursor` back exactly
+as returned.
 `repo_publish_review` refuses `APPROVE` with
 `unread_files` while a listed source, test or config file is neither fully
 delivered nor read at `headSha`. A reviewer that cannot read everything should

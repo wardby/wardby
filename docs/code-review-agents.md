@@ -1027,7 +1027,8 @@ reviewer can skim or skip them and spend less of its budget. A file the host fou
 reported as such on later pages, and `patchesComplete` stays `false`. A cursor
 only works for the head and compare it was issued for: after a new push,
 `patch_cursor_stale` says to call again without it, and a damaged or oversized
-cursor returns `patch_cursor_malformed`.
+cursor returns `patch_cursor_malformed` (see
+[Patch cursor is malformed](../help/errors/patch-cursor-malformed.md)).
 
 `repo_publish_review` refuses `APPROVE` with
 `unread_files` while a source, test or config file of that head that
