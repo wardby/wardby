@@ -283,13 +283,16 @@ namespace that allows:
 | ----------------------------------- | --------------------------------- |
 | `pods`                              | `create`, `get`, `delete`, `list` |
 | `pods/exec`                         | `create`, `get`                   |
+| `pods/log`                          | `get`                             |
 | `secrets`                           | `create`, `delete`                |
 | `networking.k8s.io/networkpolicies` | `create`, `get`, `delete`         |
 | `services`                          | `get`                             |
 
 `list` on pods lets the startup sweep find leftover worker pods by label;
-`pods/exec` is how the server proves isolation from inside the pod; `services`
-is read once to find the gateway's ClusterIP. Coding runs on Kubernetes use a
+`pods/exec` is how the server proves isolation from inside the pod; `pods/log`
+is read only when a worker exits non-zero, for the redacted tail it logs (without
+it the server logs the exit with no tail); `services` is read once to find the
+gateway's ClusterIP. Coding runs on Kubernetes use a
 largely overlapping Role (`deploy/kind-coding/manifests/base/launcher-role.yaml`).
 
 ### 4. Configure the server
@@ -697,6 +700,19 @@ skipped unless its script sets its flag:
   the Service must list ports 8790 and 8791 and have ready endpoints.
 - **Check a run.** Call `get_run` for the run's status and error code, then use
   the matching error article from `search_help` or `get_help_article`.
+- **A worker exited non-zero.** The server logs `native worker exited non-zero`
+  with the exit code and `stderrTail`, the last 2,000 characters of the worker's
+  output. Before logging it, the server masks the run's gateway capability and
+  every secret value the agent's tools can read as `[REDACTED]`. Encoded forms
+  of a value (URL-encoded, base64) are not matched. Instead of a tail, the line
+  may carry `stderrTailOmitted`: `secrets_unavailable` means one of those
+  secrets could not be read within 10 seconds, so the tail could not be
+  redacted; `log_read_failed` (Kubernetes) means the worker pod's log could not
+  be read within 10 seconds. Either way the run's failure is still recorded. On
+  Kubernetes the tail comes from the last 100 lines of the worker pod's log (the
+  launcher needs `get` on `pods/log`). That read may begin partway through a
+  line (the kubelet splits very long lines, and logs rotate), so its first few
+  dozen characters are always masked, more when an attached secret is long.
 - **Workers cannot reach the gateway.** Confirm `NATIVE_GATEWAY_CONTAINER`
   matches the running container's name exactly and that the gateway listens on
   the port in `NATIVE_GATEWAY_URL` (default 8790).
