@@ -140,7 +140,10 @@ describe.skipIf(!process.env.DATABASE_URL)("confirms B1 and B2 (production dispa
     await db.run.updateMany({ where: { id: { in: [parent.id, child!.run.id] } }, data: { status: "cancelled" } });
   });
 
-  it("B2: a run started between a $10 (+50%) lead and its builder takes the rest of a $20 cap; the builder then reserves $15", async () => {
+  // B2 was confirmed here before overrun-from-room (#424): the builder reserved $15 and the group held $25
+  // against $20. Since #424 dispatch reserves the base only (the overrun comes from top-ups with room),
+  // so this now confirms the fix on production code.
+  it("B2 (resolved by #424): a run started between a $10 (+50%) lead and its builder; the builder reserves its $10 base, the group stays at its $20 cap", async () => {
     await setUpOnce();
     const g = await group("b2", 20);
     const leadId = await lead("b2-lead", 10, 50, g);
@@ -152,9 +155,8 @@ describe.skipIf(!process.env.DATABASE_URL)("confirms B1 and B2 (production dispa
     const otherReserved = await reserved(between!.run.id);
     const childReserved = await reserved(child!.run.id);
     expect(otherReserved).toBeCloseTo(10, 6);
-    expect(childReserved).toBeCloseTo(15, 6);
-    // $25 reserved against a $20 cap.
-    expect(otherReserved + childReserved).toBeGreaterThan(20);
+    expect(childReserved).toBeCloseTo(10, 6);
+    expect(otherReserved + childReserved).toBeLessThanOrEqual(20 + 1e-6);
     await db.run.updateMany({
       where: { id: { in: [parent.id, between!.run.id, child!.run.id] } },
       data: { status: "cancelled" },

@@ -120,13 +120,11 @@ async function start(w: World, agent: ModelAgent, parent?: ModelRun): Promise<vo
     if (effectiveBudgetUsd < MIN_RESERVATION_USD) run.status = "refused";
     return;
   }
-  // Dispatch (reserveCodingBudget): no row yet; the reservation is the overrun-raised limit.
-  const effective = await effectiveBudgetForRun(dbOf(w), asAgentRow(agent), NOW, parent?.id, {
-    overrunPercent: agent.allowedOverrunPercent,
-  });
-  const reservation = floorMicro(
-    Math.min((agent.budgetUsd * (100 + agent.allowedOverrunPercent)) / 100, effective.effectiveBudgetUsd),
-  );
+  // Dispatch (reserveCodingBudget, since overrun-from-room #424): no row yet; the reservation is the
+  // base, min(budget, effective). The overrun is not reserved up front: it comes later, only from
+  // top-ups the group and tree have room for (budget-topup.ts), which this model does not take.
+  const effective = await effectiveBudgetForRun(dbOf(w), asAgentRow(agent), NOW, parent?.id);
+  const reservation = floorMicro(Math.min(agent.budgetUsd, effective.effectiveBudgetUsd));
   if (reservation < MIN_RESERVATION_USD) {
     w.runs.push({ ...base, status: "refused", limit: 0 });
     return;
@@ -307,10 +305,12 @@ describe("budget invariants (model-based)", () => {
     ]);
     await start(w, w.agents[0]);
     await start(w, w.agents[1], w.runs[0]);
-    expect(w.runs[1].limit).toBe(15);
+    // Since overrun-from-room (#424) dispatch reserves the base only; the overrun comes later
+    // from top-ups the group has room for (not modelled here).
+    expect(w.runs[1].limit).toBe(10);
     await start(w, w.agents[2]);
-    // The group holds the builder's $15 for the tree, so the other run gets at most $5.
-    expect(w.runs[2].limit).toBeLessThanOrEqual(5 + EPSILON);
+    // The group holds the builder's $10 for the tree, so the other run gets at most $10.
+    expect(w.runs[2].limit).toBeLessThanOrEqual(10 + EPSILON);
     checkInvariants(w, ["lead starts", "lead delegates to builder", "other starts"], {
       delegation: true,
       leadSpend: "tree",
@@ -318,38 +318,32 @@ describe("budget invariants (model-based)", () => {
     });
   });
 
-  // FINDING: B2, unconfirmed; see regression-phase1-report.md. bug 3's fix raises a tree's group hold to its live coding
-  // reservations only once they exist. Until the lead delegates, the group holds the lead's
-  // budgetUsd, so a run that starts in between is given the rest of the cap; the coding child then
-  // reserves the lead's overrun on top (its group check leaves out holds of runs that started after
-  // the lead: first come, first served), and the group passes its cap by up to the lead's overrun.
-  it.fails(
-    "delegation trees, leads with an overrun and bounded by their tree: no group cap or tree ceiling is passed",
-    async () => {
-      await simulate("budget.tree-overrun", WORLDS, STEPS, { delegation: true, leadSpend: "tree", leadOverrun: true });
-    },
-  );
+  // Was FINDING B2 (a coding child reserved the lead's overrun up front, past the group cap). Resolved by
+  // overrun-from-room (#424): dispatch reserves the base only, and the overrun comes from top-ups the
+  // group and tree have room for. Confirmed on production dispatchRun (confirmations.release.test.ts).
+  // The model does not take top-ups yet, so it checks the dispatch side only.
+  it("delegation trees, leads with an overrun and bounded by their tree: no group cap or tree ceiling is passed", async () => {
+    await simulate("budget.tree-overrun", WORLDS, STEPS, { delegation: true, leadSpend: "tree", leadOverrun: true });
+  });
 
-  it.fails(
-    "B2, smallest case: a run started between a lead and its overrun-raised builder takes the group past its cap",
-    async () => {
-      const w = fixedWorld(20, [
-        agent("lead", "native", 10, 50),
-        agent("builder", "coding", 10, 50),
-        agent("other", "coding", 10),
-      ]);
-      await start(w, w.agents[0]);
-      await start(w, w.agents[2]);
-      // The group held the lead's $10, so the other run got the remaining $10.
-      expect(w.runs[1].limit).toBe(10);
-      await start(w, w.agents[1], w.runs[0]);
-      checkInvariants(w, ["lead starts", "other starts", "lead delegates to builder"], {
-        delegation: true,
-        leadSpend: "tree",
-        leadOverrun: true,
-      });
-    },
-  );
+  // Was FINDING B2; resolved by #424 (see above): the builder reserves its base, so the group stays at its cap.
+  it("B2, smallest case: a run started between a lead and its overrun-raised builder takes the group past its cap", async () => {
+    const w = fixedWorld(20, [
+      agent("lead", "native", 10, 50),
+      agent("builder", "coding", 10, 50),
+      agent("other", "coding", 10),
+    ]);
+    await start(w, w.agents[0]);
+    await start(w, w.agents[2]);
+    // The group held the lead's $10, so the other run got the remaining $10.
+    expect(w.runs[1].limit).toBe(10);
+    await start(w, w.agents[1], w.runs[0]);
+    checkInvariants(w, ["lead starts", "other starts", "lead delegates to builder"], {
+      delegation: true,
+      leadSpend: "tree",
+      leadOverrun: true,
+    });
+  });
 
   // FINDING: B1, unconfirmed; see regression-phase1-report.md. a lead's own model spend is bounded only by the budget
   // pinned when it loaded (runner.ts effectiveBudgetForRun, then engine-native's gate on its own
