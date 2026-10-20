@@ -139,7 +139,10 @@ function periodCapSentence(limit: BudgetLimit, details: ProxyRefusalDetails): st
 
 /**
  * Why the run's allowed overrun was not (all) there: `Its 10% allowed overrun
- * wasn't available because the "X" group had $0.40 left of its daily cap.`
+ * wasn't available because the "X" group had nothing left of its daily cap.`,
+ * or `Only $0.40 of its 10% allowed overrun was available because ...` when
+ * the run got part of it. A top-up takes whatever room there is, so the run is
+ * refused only once nothing is left.
  * `lead` names the lead for a run-tree limit (owner sentences only).
  */
 function overrunUnavailableSentence(overrun: OverrunUnavailableView, lead?: string): string {
@@ -152,7 +155,7 @@ function overrunUnavailableSentence(overrun: OverrunUnavailableView, lead?: stri
   const got = details.grantedUsd - details.baseBudgetUsd;
   if (got >= SAME_USD)
     return `Only ${usd(got)} of its ${allowed} was available because ${where} had no more left ${of}.`;
-  return `Its ${allowed} wasn't available because ${where} had ${usd(details.leftUsd)} left ${of}.`;
+  return `Its ${allowed} wasn't available because ${where} had nothing left ${of}.`;
 }
 
 /** What to raise when the overrun was what ran out: the full group's cap, or the lead's budget. */

@@ -72,7 +72,7 @@ describe("budget event sentences", () => {
 
     it("stopped at its base: says the overrun wasn't available and which cap to raise", () => {
       const e = refused({}, topUp({ leftUsd: 0.4 }));
-      const why = `Its 10% allowed overrun wasn't available because the "team" group had $0.40 left of its daily cap.`;
+      const why = `Its 10% allowed overrun wasn't available because the "team" group had nothing left of its daily cap.`;
       expect(ownerBudgetSentence(e, "builder")).toBe(
         `Stopped before turn 41: the next request needed a $0.20 hold, but only $0.05 of this run's $10.00 budget was left ($9.95 spent). ${why} To continue, raise the group's daily cap.`,
       );
@@ -95,9 +95,9 @@ describe("budget event sentences", () => {
     it("a full run tree names the lead to the owner, and only the tree to a host", () => {
       const e = refused({}, topUp({ groupName: undefined, leadAgentName: "lead", capUsd: 15 }), "run-tree");
       expect(ownerBudgetSentence(e, "builder")).toContain(
-        "Its 10% allowed overrun wasn't available because the lead's (lead) run tree had $0.00 left of its $15.00 budget. To continue, raise budgetUsd on lead.",
+        "Its 10% allowed overrun wasn't available because the lead's (lead) run tree had nothing left of its $15.00 budget. To continue, raise budgetUsd on lead.",
       );
-      expect(hostBudgetSentence(e)).toContain("because the lead's run tree had $0.00 left of its $15.00 budget.");
+      expect(hostBudgetSentence(e)).toContain("because the lead's run tree had nothing left of its $15.00 budget.");
       expect(hostBudgetSentence(e)).not.toContain("(lead)");
     });
 
@@ -109,7 +109,7 @@ describe("budget event sentences", () => {
         details: topUp(),
       };
       expect(hostBudgetSentence(e)).toBe(
-        `Out of budget: Its 10% allowed overrun wasn't available because the "team" group had $0.00 left of its weekly cap.`,
+        `Out of budget: Its 10% allowed overrun wasn't available because the "team" group had nothing left of its weekly cap.`,
       );
     });
   });

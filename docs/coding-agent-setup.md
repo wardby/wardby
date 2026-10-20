@@ -402,18 +402,23 @@ coding run reserves only its base budget: the smallest of the agent's
 Its limit is `budgetUsd` raised by the percent, and nothing is held for it up
 front. While the run works, wardby tops up what it may spend, in steps of 10%
 of its base (or the largest model request it has made, if that is more), each
-time it gets within one request of what it has been granted. A step is granted
+time it gets within its headroom of what it has been granted: two of its
+largest requests, or 20% of its base if that is more. A run whose base is
+smaller than its first request cannot use its overrun, since that request is
+refused before any top-up. A step is granted
 only out of room its budget group and run tree have left at that moment, and
 never past the limit. The coding proxy enforces what has been granted so far,
 and the Claude Code worker's own budget stop is set to the limit. `get_run`
 shows `budgetBaseUsd`, `budgetLimitUsd` (the limit) and `budgetReservedUsd`
 (what has been granted so far, which the group and run tree hold).
 
-Budget group caps and run-tree ceilings stay hard. If the group or run tree is
-full when a run needs more, the run stops at what it has been granted, with
-its work kept as below, and its budget sentence says why, for example "Its 10%
-allowed overrun wasn't available because the "team" group had $0.40 left of
-its daily cap." `get_run` then lists an `overrun_unavailable` event. A run that
+Budget group caps and run-tree ceilings stay hard. A top-up takes whatever room
+is left, so if the group or run tree fills up while a run needs more, the run
+stops at what it has been granted, with its work kept as below, and its budget
+sentence says why, for example "Only $0.40 of its 10% allowed overrun was
+available because the "team" group had no more left of its daily cap." (or
+"Its 10% allowed overrun wasn't available because the "team" group had nothing
+left of its daily cap." when it got none). `get_run` then lists an `overrun_unavailable` event. A run that
 was refused a top-up does not ask again, even if the group frees up later. The
 overrun a run actually got can therefore be lower than the agent's setting, or
 none. For a delegated run tree, the raised ceiling uses the lead (root) agent's

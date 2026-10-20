@@ -109,9 +109,12 @@ When the group or run tree has no room left for the next top-up, `get_run`
 lists an `overrun_unavailable` event (its `limit` names the full cap or
 `run-tree`), and the run asks for no more, even if room frees up later. The
 proxy then stops it at what it was granted, and the sentence says why, for
-example "Its 10% allowed overrun wasn't available because the "team" group had
-$0.40 left of its daily cap." or "Only $0.05 of its 10% allowed overrun was
-available because the lead's run tree had no more left of its $15.00 budget."
+example "Only $0.40 of its 10% allowed overrun was available because the
+"team" group had no more left of its daily cap.", or "Its 10% allowed overrun
+wasn't available because the lead's run tree had nothing left of its $15.00
+budget." when it got none. A top-up takes whatever room is left, so the run is
+refused only once nothing is. A run whose base is smaller than its first model
+request cannot use its overrun: that request is refused before any top-up.
 To continue, raise that cap (or the lead's `budgetUsd`) and continue the draft
 pull request. Runs dispatched before this behaviour have no `budgetLimitUsd`:
 their reservation already included the overrun, and they finish as before.

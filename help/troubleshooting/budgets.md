@@ -63,9 +63,9 @@ ceiling for coding sub-agents; native runs' own model calls are not affected.
 The overrun is not reserved. A run reserves its base budget, and is topped up
 toward its limit while it works, only from room its budget group and run tree
 have at that moment. Budget group and run-tree caps stay hard: in a full group
-the run stops at its base, and its budget sentence says so ("Its 10% allowed
-overrun wasn't available because the "team" group had $0.40 left of its daily
-cap."). `get_run` shows `budgetBaseUsd`, the limit in `budgetLimitUsd`, and what
+the run stops at what it was granted, and its budget sentence says so ("Only
+$0.40 of its 10% allowed overrun was available because the "team" group had no
+more left of its daily cap."). `get_run` shows `budgetBaseUsd`, the limit in `budgetLimitUsd`, and what
 has been granted so far in `budgetReservedUsd`. A run still stopped for budget
 keeps its work as a draft pull request you can continue. See
 `errors/budget-exhausted`.
