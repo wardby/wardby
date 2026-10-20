@@ -461,7 +461,7 @@ export interface ContainerExecutionStore {
    * Grants a run with an overrun limit one top-up when it is close to its grant and its budget group
    * and run tree have room (budget-topup.ts). Optional: without it a run stops at its base.
    */
-  topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome }>;
+  topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }>;
 }
 
 export interface CodingFailureAudit {
@@ -912,7 +912,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     return loadBudgetEvent(this.db, runId);
   }
 
-  topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome }> {
+  topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }> {
     return topUpCodingBudget(this.db, runId);
   }
 
@@ -1058,6 +1058,9 @@ export interface ContainerExecutorOptions {
 }
 
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
+/** The poll interval, at most, while a run with an overrun limit is near its grant. */
+export const TOP_UP_NEAR_POLL_MS = 1_000;
+
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
   packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
@@ -1310,9 +1313,11 @@ export class ContainerExecutor implements Executor {
         if (asksForTopUps && this.options.store.topUpBudget) {
           const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
             containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
-            return { outcome: "not_needed" as const };
+            return { outcome: "not_needed" as const, near: true };
           });
           if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
+          // Near its grant: poll often, so the next step lands before a request no longer fits.
+          else if (topUp.near) delay = Math.min(delay, TOP_UP_NEAR_POLL_MS);
         }
         await this.sleep(delay);
         delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));

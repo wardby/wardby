@@ -7,8 +7,8 @@
  *
  * The control plane grants top-ups, never the proxy: the executor's per-run
  * monitor loop calls topUpCodingBudget while the run's job is running. A run
- * close to its grant (spent + held within one maximum request hold of it) is
- * granted one step, under the same group dispatch lock dispatch takes, by
+ * close to its grant (spent + held within its headroom of it: two of its
+ * largest request holds, or 20% of its base if more) is granted one step, under the same group dispatch lock dispatch takes, by
  * raising CodingRun.budgetReservedUsd (what groups and run trees hold) and
  * CodingProxySession.budgetUsd (what the proxy enforces, re-read on every
  * request) together. When the group or tree has no room left, the run records
@@ -18,14 +18,8 @@
 import type { Prisma, PrismaClient } from "#prisma";
 import type { TopUpRefusalDetails } from "./budget-events.js";
 import { codingTopUpRoom, MIN_RESERVATION_USD } from "./budget-groups.js";
-import {
-  GROUP_DISPATCH_LOCK_SQL,
-  isSerializationConflict,
-  isTransactionUnavailable,
-  PERSIST_ATTEMPTS,
-} from "./dispatch.js";
+import { GROUP_DISPATCH_LOCK_SQL, isSerializationConflict, isTransactionUnavailable } from "./dispatch.js";
 import { logger } from "./logger.js";
-import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 
 const topUpLog = logger.child({ module: "budget-topup" });
 
@@ -41,10 +35,19 @@ export interface TopUpResult {
   outcome: TopUpOutcome;
   /** The run's grant after this call, when it has a limit. */
   grantedUsd?: number;
+  /**
+   * The run is within twice its headroom of its grant: the caller should ask
+   * again soon (the executor polls faster), since a top-up must land while the
+   * request before the one that would not fit is still in flight.
+   */
+  near?: boolean;
 }
 
 /** Share of the base one step adds, unless one maximum request hold is more. */
 export const TOP_UP_STEP_SHARE = 0.1;
+/** Headroom: the share of the base, or this many of the run's largest request holds if more. */
+export const TOP_UP_HEADROOM_SHARE = 0.2;
+export const TOP_UP_HEADROOM_HOLDS = 2;
 
 type TopUpTx = Prisma.TransactionClient;
 
@@ -55,7 +58,7 @@ interface TopUpState {
   sessionId: string;
   spentUsd: number;
   heldUsd: number;
-  /** The largest worst-case hold of any request so far: the headroom, and the least step. */
+  /** The largest worst-case hold of any request so far: the least step, and half the headroom. */
   maxHoldUsd: number;
 }
 
@@ -116,9 +119,23 @@ async function readState(db: TopUpTx | PrismaClient, runId: string): Promise<Top
   };
 }
 
-/** Close to its grant: one more maximum request hold would not fit. */
+/**
+ * How far below its grant a run asks for its next step. Agent loops grow their
+ * context, so the next request usually holds more than any before it, and the
+ * top-up has to land before it is sent.
+ */
+function headroomUsd(state: TopUpState): number {
+  return Math.max(TOP_UP_HEADROOM_HOLDS * state.maxHoldUsd, TOP_UP_HEADROOM_SHARE * state.baseUsd);
+}
+
+/** Close to its grant: within its headroom. */
 function isClose(state: TopUpState): boolean {
-  return state.spentUsd + state.heldUsd >= state.grantedUsd - state.maxHoldUsd;
+  return state.spentUsd + state.heldUsd >= state.grantedUsd - headroomUsd(state);
+}
+
+/** Near enough to its grant that the next poll should come soon. */
+function isNear(state: TopUpState): boolean {
+  return state.spentUsd + state.heldUsd >= state.grantedUsd - 2 * headroomUsd(state);
 }
 
 async function grantOnce(tx: TopUpTx, runId: string, now: Date): Promise<TopUpResult> {
@@ -126,7 +143,7 @@ async function grantOnce(tx: TopUpTx, runId: string, now: Date): Promise<TopUpRe
   await tx.$executeRawUnsafe(GROUP_DISPATCH_LOCK_SQL);
   const state = await readState(tx, runId);
   if ("outcome" in state) return state;
-  if (!isClose(state)) return { outcome: "not_needed", grantedUsd: state.grantedUsd };
+  if (!isClose(state)) return { outcome: "not_needed", grantedUsd: state.grantedUsd, near: isNear(state) };
 
   const room = await codingTopUpRoom(tx, runId, now);
   const step = Math.max(TOP_UP_STEP_SHARE * state.baseUsd, state.maxHoldUsd);
@@ -159,32 +176,34 @@ async function grantOnce(tx: TopUpTx, runId: string, now: Date): Promise<TopUpRe
     where: { id: state.sessionId, status: "active" },
     data: { budgetUsd: grantedUsd },
   });
-  return { outcome: "granted", grantedUsd };
+  return { outcome: "granted", grantedUsd, near: true };
 }
 
 /**
  * Grants the run one overrun step when it is close to its grant and its
  * budget group and run tree have room. Cheap when it is not close: that is
- * read without the lock. Retries serialization conflicts as dispatch does.
+ * read without the lock. One attempt per call, so a poll never blocks on
+ * retries: a serialization conflict (or a lock not had in time) answers
+ * not_needed and near, and the caller's next poll, soon, asks again.
  */
 export async function topUpCodingBudget(db: PrismaClient, runId: string, now: Date = new Date()): Promise<TopUpResult> {
   const state = await readState(db, runId);
   if ("outcome" in state) return state;
-  if (!isClose(state)) return { outcome: "not_needed", grantedUsd: state.grantedUsd };
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      const result = await db.$transaction((tx) => grantOnce(tx, runId, now), {
-        isolationLevel: "Serializable",
-        maxWait: CONTENDED_TX_MAX_WAIT_MS,
-      });
-      if (result.outcome === "granted" || result.outcome === "unavailable") {
-        topUpLog.info({ runId, outcome: result.outcome, grantedUsd: result.grantedUsd }, "coding run overrun top-up");
-      }
-      return result;
-    } catch (err) {
-      const retryable = isSerializationConflict(err) || isTransactionUnavailable(err);
-      if (!retryable || attempt >= PERSIST_ATTEMPTS - 1) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 10 + Math.random() * 40 * (attempt + 1)));
+  if (!isClose(state)) return { outcome: "not_needed", grantedUsd: state.grantedUsd, near: isNear(state) };
+  try {
+    const result = await db.$transaction((tx) => grantOnce(tx, runId, now), {
+      isolationLevel: "Serializable",
+      maxWait: TOP_UP_TX_MAX_WAIT_MS,
+    });
+    if (result.outcome === "granted" || result.outcome === "unavailable") {
+      topUpLog.info({ runId, outcome: result.outcome, grantedUsd: result.grantedUsd }, "coding run overrun top-up");
     }
+    return result;
+  } catch (err) {
+    if (!isSerializationConflict(err) && !isTransactionUnavailable(err)) throw err;
+    return { outcome: "not_needed", grantedUsd: state.grantedUsd, near: true };
   }
 }
+
+/** How long one top-up waits to start its transaction: short, so a poll (and its heartbeat) is never held long. */
+export const TOP_UP_TX_MAX_WAIT_MS = 2_000;

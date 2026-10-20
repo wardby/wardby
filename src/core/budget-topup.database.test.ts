@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
+import { PrismaProxyLedger } from "../providers/coding-proxy/prisma-ledger.js";
 import { computeGroupSpend } from "./budget-groups.js";
 import { hostBudgetSentence, loadBudgetEvent, ownerBudgetSentence, recordBudgetEvent } from "./budget-events.js";
 import { topUpCodingBudget } from "./budget-topup.js";
@@ -254,11 +255,11 @@ describe.skipIf(!process.env.DATABASE_URL)("coding budget top-ups (database)", (
     const owner = ownerBudgetSentence(loaded!.event, loaded!.agentName);
     expect(owner).toContain("this run's $1.00 budget was left");
     expect(owner).toContain(
-      `Its 10% allowed overrun wasn't available because the "${id("full")}" group had $0.00 left of its daily cap.`,
+      `Its 10% allowed overrun wasn't available because the "${id("full")}" group had nothing left of its daily cap.`,
     );
     expect(owner).toContain("To continue, raise the group's daily cap.");
     expect(hostBudgetSentence(loaded!.event)).toContain(
-      `Its 10% allowed overrun wasn't available because the "${id("full")}" group had $0.00 left of its daily cap.`,
+      `Its 10% allowed overrun wasn't available because the "${id("full")}" group had nothing left of its daily cap.`,
     );
     await finish(runId);
   });
@@ -341,6 +342,43 @@ describe.skipIf(!process.env.DATABASE_URL)("coding budget top-ups (database)", (
     }
     expect((await reservedUsd(runA)) + (await reservedUsd(runB))).toBeCloseTo(15, 6);
     await finish(parent.id, runA, runB);
+  });
+
+  it("a growing agent loop crosses its base and is topped up before the proxy refuses it", async () => {
+    // Base $1, 50% overrun. Each request's worst-case hold grows with the conversation (0.04, 0.045, ...)
+    // and the reply costs 60% of it. The executor's poll lands while every other request is in flight.
+    const agent = await codingAgent("growing", 1, 50, null);
+    const runId = await start(agent);
+    const sessionId = (await db.codingProxySession.findUniqueOrThrow({ where: { runId } })).id;
+    const ledger = new PrismaProxyLedger(db);
+    const pricing = { version: "t", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 };
+    const refusals: number[] = [];
+    for (let i = 0; i < 40 && (await costUsd(runId)) < 1.3; i++) {
+      const holdUsd = Number((0.04 + 0.005 * i).toFixed(6));
+      const reserved = await ledger.reserve({
+        id: randomUUID(),
+        sessionId,
+        requestKey: `r${i}`,
+        requestFingerprint: `f${i}`,
+        model: "gpt-5.6-luna",
+        reservationUsd: holdUsd,
+        ceilingUsd: holdUsd,
+        reservationBasis: "full",
+        pricing,
+        now: new Date(),
+      });
+      if (reserved.outcome !== "reserved") {
+        refusals.push(i);
+        break;
+      }
+      if (i % 2 === 1) await topUpCodingBudget(db, runId);
+      const usage = { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+      await ledger.complete(reserved.request.id, usage, Number((holdUsd * 0.6).toFixed(6)), 200);
+    }
+    expect(refusals).toEqual([]);
+    expect(await costUsd(runId)).toBeGreaterThan(1.3);
+    expect(await reservedUsd(runId)).toBeLessThanOrEqual(1.5 + 1e-6);
+    await finish(runId);
   });
 
   it("a run the proxy already refused gets no top-up", async () => {

@@ -210,7 +210,7 @@ class FakeStore implements ContainerExecutionStore {
     agentTextRunId: string;
   }) => Promise<boolean>;
   /** Overrun top-ups; tests that need it assign it. */
-  topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome }>;
+  topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome; near?: boolean }>;
 
   constructor(public run: ContainerRunSnapshot) {}
 
@@ -4464,6 +4464,29 @@ describe("overrun from available room", () => {
       await created.executor.start("run-1");
       expect(asked).toEqual(["run-1", "run-1", "run-1"]);
     }
+  });
+
+  it("polls at most every second while the run is near its grant", async () => {
+    const sleeps: number[] = [];
+    const created = await harness(
+      { budgetUsd: 1, budgetBaseUsd: 1, budgetLimitUsd: 1.5 },
+      IMAGE,
+      undefined,
+      undefined,
+      {
+        pollMinMs: 4_000,
+        pollMaxMs: 5_000,
+        sleep: async (ms: number) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    const near = [false, true, true, false];
+    created.store.topUpBudget = async () => ({ outcome: "not_needed", near: near.shift() ?? false });
+    let polls = 0;
+    created.jobs.status = async () => (++polls < 5 ? { state: "running" } : { state: "succeeded" });
+    await created.executor.start("run-1");
+    expect(sleeps).toEqual([4_000, 1_000, 1_000, 1_500]);
   });
 
   it("never asks for a top-up for a run without a limit", async () => {
