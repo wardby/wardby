@@ -1149,6 +1149,23 @@ ${extraEdge ? '\n"evil@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil@npm:1
     });
   }
 
+  for (const [format, body] of [
+    ["pnpm-lock.yaml v9", pnpmV9()],
+    ["pnpm-lock.yaml v6", pnpmV6()],
+    ["yarn.lock (classic)", yarnClassic()],
+    ["yarn.lock (Berry)", yarnBerry()],
+  ] as const) {
+    it(`labels a ${format}'s direct dependency top-level in package audit mode`, async () => {
+      const { plan, store } = setup(chain, { allowlist: ["unrelated"], packageAudit: "audit" });
+      const { json } = await plan(body);
+      expect(json).toEqual({ approved: 3, refused: [], audited: 3 });
+      const auditOf = (name: string) => [...store.approvals.values()].find((approval) => approval.name === name)?.audit;
+      expect(auditOf("a")).toEqual({ relation: "top-level" });
+      expect(auditOf("b")).toEqual({ relation: "transitive", via: "a" });
+      expect(auditOf("c")).toEqual({ relation: "transitive", via: "a" });
+    });
+  }
+
   for (const [format, forged] of [
     ["pnpm-lock.yaml", pnpmV9({ b: sriOf(new TextEncoder().encode("evil bytes")) })],
     ["classic yarn.lock", yarnClassic({ b: sriOf(new TextEncoder().encode("evil bytes")) })],

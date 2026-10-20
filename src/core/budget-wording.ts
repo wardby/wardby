@@ -8,11 +8,13 @@ import type { PrismaClient } from "#prisma";
 import { hostBudgetSentence, loadBudgetEvent } from "./budget-events.js";
 
 export interface BudgetFacts {
-  /** The run's own budget (a coding run's reservation); falls back to the agent's. */
+  /** The run's own budget (a coding run's reservation: its grant); falls back to the agent's. */
   runBudgetUsd?: number | null;
   agentBudgetUsd: number;
   /** The run's budget before the agent's allowed overrun; absent for runs from before the setting. */
   baseBudgetUsd?: number | null;
+  /** The most the run could have been topped up to (CodingRun.budgetLimitUsd); absent = its reservation. */
+  limitUsd?: number | null;
   budgetGroupName?: string | null;
   /** The run was refused before it started. */
   refused?: boolean;
@@ -45,9 +47,15 @@ export function budgetSentence(facts: BudgetFacts): string {
   }
   const runBudget = facts.runBudgetUsd ?? facts.agentBudgetUsd;
   const base = facts.baseBudgetUsd;
-  const percent = overrunPercent(base, runBudget);
-  if (base != null && percent !== null) {
-    return `Out of budget: this run's ${usd(base)} budget and its ${percent}% allowed overrun (${usd(runBudget)} in all) were used up.`;
+  const limit = facts.limitUsd ?? runBudget;
+  const percent = overrunPercent(base, limit);
+  if (base != null && percent !== null && runBudget > base) {
+    // Topped up only partly: what of the overrun its group and run tree had room for.
+    const overrun =
+      runBudget < limit
+        ? `${usd(runBudget - base)} of its ${percent}% allowed overrun`
+        : `its ${percent}% allowed overrun`;
+    return `Out of budget: this run's ${usd(base)} budget and ${overrun} (${usd(runBudget)} in all) were used up.`;
   }
   const used = `Out of budget: this run's ${usd(runBudget)} budget was used up`;
   // A run reserved less than the agent's own budget: its group had only that much left.
@@ -88,16 +96,18 @@ export async function loadBudgetSentence(
       where: { id: runId },
       select: {
         agent: { select: { budgetUsd: true, budgetGroup: { select: { name: true } } } },
-        codingRun: { select: { budgetReservedUsd: true, budgetBaseUsd: true } },
+        codingRun: { select: { budgetReservedUsd: true, budgetBaseUsd: true, budgetLimitUsd: true } },
       },
     });
     const agentBudgetUsd = Number(row?.agent?.budgetUsd);
     if (!row?.agent || !Number.isFinite(agentBudgetUsd)) throw new Error("budget_facts_unavailable");
     const reserved = row.codingRun ? Number(row.codingRun.budgetReservedUsd) : NaN;
     const base = row.codingRun?.budgetBaseUsd == null ? NaN : Number(row.codingRun.budgetBaseUsd);
+    const limit = row.codingRun?.budgetLimitUsd == null ? NaN : Number(row.codingRun.budgetLimitUsd);
     return budgetSentence({
       runBudgetUsd: Number.isFinite(reserved) ? reserved : null,
       baseBudgetUsd: Number.isFinite(base) ? base : null,
+      limitUsd: Number.isFinite(limit) ? limit : null,
       agentBudgetUsd,
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       refused,

@@ -9,21 +9,55 @@ function assertMarker(agentMarker: string): void {
   if (!SAFE_AGENT_MARKER.test(agentMarker)) throw new Error("review_marker_invalid");
 }
 
-export function reviewMarker(agentMarker: string, headSha: string): string {
+/**
+ * `coveredSha`: the latest head this agent reviewed after reading every file. A marker without
+ * it (an older one included) means none.
+ */
+export function reviewMarker(agentMarker: string, headSha: string, coveredSha?: string | null): string {
   assertMarker(agentMarker);
   if (!SAFE_SHA.test(headSha)) throw new Error("review_marker_invalid");
-  return `${MARKER_PREFIX}${agentMarker} sha=${headSha} -->`;
+  if (coveredSha && !SAFE_SHA.test(coveredSha)) throw new Error("review_marker_invalid");
+  return `${MARKER_PREFIX}${agentMarker} sha=${headSha}${coveredSha ? ` covered=${coveredSha}` : ""} -->`;
 }
 
+/**
+ * The review marker counts only at the very start of a body, where renderSummaryComment writes it:
+ * anywhere else it is text someone else wrote (model text the App posted, for one).
+ */
 export function hasReviewMarker(body: string, agentMarker: string): boolean {
   assertMarker(agentMarker);
-  return body.includes(`${MARKER_PREFIX}${agentMarker} sha=`);
+  return body.startsWith(`${MARKER_PREFIX}${agentMarker} sha=`);
+}
+
+function matchReviewMarker(body: string, agentMarker: string): RegExpExecArray | null {
+  assertMarker(agentMarker);
+  return new RegExp(`^${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40})(?: covered=([0-9a-f]{40}))? -->`).exec(body);
 }
 
 export function parseReviewMarker(body: string, agentMarker: string): string | null {
-  assertMarker(agentMarker);
-  const match = new RegExp(`${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40}) -->`).exec(body);
-  return match ? match[1] : null;
+  return matchReviewMarker(body, agentMarker)?.[1] ?? null;
+}
+
+/** The marker's covered head; null for a marker without one. */
+export function parseCoveredMarker(body: string, agentMarker: string): string | null {
+  return matchReviewMarker(body, agentMarker)?.[2] ?? null;
+}
+
+/**
+ * An HTML comment opener that starts a wardby marker: every marker wardby writes or ever wrote
+ * names `wardby…` (wardby:review/finding, wardby-status/description/latest/related) or the legacy
+ * `reevo-run…`. Case-insensitive, wider than any parse of them.
+ */
+const MARKER_OPENER = /<!--(?=\s*(?:wardby|reevo-run))/gi;
+
+/**
+ * Model-written text the App posts, with each opener of a wardby marker escaped (`&lt;!--`, shown
+ * as text), so no wardby marker can come from it. Any other `<!--` (in a code block or a
+ * ```suggestion, say) is left as written. One pass is enough: the replacement adds no `<` and no
+ * marker name, so it can never complete a new opener. wardby adds its own markers after this.
+ */
+export function escapeHtmlComments(text: string): string {
+  return text.replace(MARKER_OPENER, "&lt;!--");
 }
 
 export function verdictConclusion(verdict: ReviewVerdict): CheckConclusion {
@@ -57,13 +91,14 @@ export function renderInlineComment(comment: InlineComment, agentMarker: string)
 export function renderSummaryComment(input: {
   agentMarker: string;
   headSha: string;
+  coveredSha?: string | null;
   verdict: ReviewVerdict;
   summary: string;
   body: string;
   outside: InlineComment[];
 }): string {
   const sections = [
-    reviewMarker(input.agentMarker, input.headSha),
+    reviewMarker(input.agentMarker, input.headSha, input.coveredSha),
     `${BADGES[input.verdict]} — reviewed \`${input.headSha.slice(0, 7)}\``,
     input.summary,
     input.body,

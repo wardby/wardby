@@ -26,6 +26,13 @@ export interface WorkerLaunchOptions {
    * run ended meanwhile, and the launch stops with NATIVE_SANDBOX_LAUNCH_ABANDONED, creating nothing.
    */
   stillWanted?: () => Promise<boolean>;
+  /**
+   * Every secret value the worker may be handed (each user tool's readable or brokered secrets),
+   * for masking a failed worker's output tail before the launcher logs it; the run's capability is
+   * masked from the input itself. Rejects when any read fails. Absent or rejected: no tail is
+   * logged (fail closed).
+   */
+  secretValues?: () => Promise<readonly string[]>;
 }
 
 /** The run ended while its worker was launching, so none was created. */
@@ -82,9 +89,9 @@ export async function startSandboxRun(options: {
     networkReady: options.launcher.networkReadyAtLaunch !== false,
   });
   if (session.kind === "ended") return session;
-  const handle = await options.launcher.launch(
-    session.input,
-    options.stillWanted ? { stillWanted: options.stillWanted } : undefined,
-  );
+  const handle = await options.launcher.launch(session.input, {
+    ...(options.stillWanted ? { stillWanted: options.stillWanted } : {}),
+    secretValues: session.secretValues,
+  });
   return { kind: "launched", sessionId: session.sessionId, handle };
 }

@@ -586,42 +586,47 @@ describe("dispatchRun", () => {
           ...(budgetUsdOverride === undefined ? {} : { budgetUsdOverride }),
         });
 
-      it("no group, p=10: reserves the limit (1.10) and records the base (1.00)", async () => {
+      it("no group, p=10: reserves the base (1.00) and records the limit (1.10), never reserving it", async () => {
         const state = fakeDb(overrunAgent(10));
         await dispatch(state);
-        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(1.1, 6);
+        expect(state.codingRuns[0].budgetReservedUsd).toBe(1);
         expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
+        expect(state.codingRuns[0].budgetLimitUsd).toBeCloseTo(1.1, 6);
         expect(state.codingRuns[0].budgetLimitedBy).toBeNull();
       });
 
-      it("p=0: reservation and base are both today's 1.00", async () => {
+      it("p=0: reservation and base are both today's 1.00, and there is no limit to top up to", async () => {
         const state = fakeDb(overrunAgent(0));
         await dispatch(state);
         expect(state.codingRuns[0].budgetReservedUsd).toBe(1);
         expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
+        expect(state.codingRuns[0].budgetLimitUsd).toBeNull();
       });
 
-      it("group day remaining 1.05, p=10: the limit is 1.05 (limited by day), the base 1.00", async () => {
+      it("group day remaining 1.05, p=10: reserves the base 1.00; the limit 1.10 is left to top-ups", async () => {
         const state = fakeDb(overrunAgent(10, "group_1"), [], { group: group(1.05) });
         await dispatch(state);
-        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(1.05, 6);
+        expect(state.codingRuns[0].budgetReservedUsd).toBe(1);
         expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
-        expect(state.codingRuns[0].budgetLimitedBy).toBe("day");
+        expect(state.codingRuns[0].budgetLimitUsd).toBeCloseTo(1.1, 6);
+        expect(state.codingRuns[0].budgetLimitedBy).toBeNull();
       });
 
-      it("group remaining 0.80, p=10: limit and base are both 0.80", async () => {
+      it("group remaining 0.80, p=10: the base is the group's 0.80, limited by day", async () => {
         const state = fakeDb(overrunAgent(10, "group_1"), [], { group: group(0.8) });
         await dispatch(state);
         expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(0.8, 6);
         expect(state.codingRuns[0].budgetBaseUsd).toBeCloseTo(0.8, 6);
+        expect(state.codingRuns[0].budgetLimitUsd).toBeCloseTo(1.1, 6);
         expect(state.codingRuns[0].budgetLimitedBy).toBe("day");
       });
 
       it("budgetUsdOverride is the requested base: the limit raises it by the overrun", async () => {
         const state = fakeDb({ ...overrunAgent(10), budgetUsd: 2 });
         await dispatch(state, 0.5);
-        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(0.55, 6);
+        expect(state.codingRuns[0].budgetReservedUsd).toBe(0.5);
         expect(state.codingRuns[0].budgetBaseUsd).toBe(0.5);
+        expect(state.codingRuns[0].budgetLimitUsd).toBeCloseTo(0.55, 6);
       });
     });
   });
