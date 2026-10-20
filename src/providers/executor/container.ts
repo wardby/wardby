@@ -2574,7 +2574,10 @@ export class ContainerExecutor implements Executor {
         headRef: run.headRef,
         task,
         model: run.model,
-        budgetUsd: run.budgetUsd,
+        // The run's limit, not its grant: the proxy enforces the grant, and top-ups raise it while
+        // the job runs. Claude Code's own budget stop (its SDK maxBudgetUsd) is set from this, so it
+        // never stops a run before a top-up can; Codex has no stop of its own.
+        budgetUsd: run.budgetLimitUsd ?? run.budgetUsd,
         deadlineAt: deadlineAt.toISOString(),
         continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
         // Only when true: an untraced run's input stays exactly what older workers expect.
