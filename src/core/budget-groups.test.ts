@@ -404,6 +404,95 @@ describe("a delegated tree is held once", () => {
     expect(week).toMatchObject({ spentUsd: 9, reservedUsd: 12, remainingUsd: 4 });
   });
 
+  it("a coding child reserving the root's overrun: the tree holds the child's reservation, not the lead's budget", async () => {
+    // Lead $10 with 50% overrun: its coding child reserved $10 x 1.5 = $15.
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 4,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 15 },
+        },
+      ],
+    );
+    const cap = { dailyBudgetUsd: null, weeklyBudgetUsd: 20, monthlyBudgetUsd: null } as never;
+    const [week] = await computeGroupSpend(db, cap, [{ id: "lead", budgetUsd: 10 }, ...members.slice(1)], NOW);
+    // $4 spent + $11 the child may still spend: $5 left, not the $10 that $10 - $4 would leave.
+    expect(week).toMatchObject({ spentUsd: 4, reservedUsd: 11, remainingUsd: 5, heldRuns: 1 });
+  });
+
+  it("a live native sibling beside the coding child: the tree holds both unspent holds", async () => {
+    // Lead $10 with 50% overrun; a native $5 child, then a coding child sized $15 - $5 = $10.
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        { id: "N", agentId: "helper", costUsd: 0, startedAt: NOW, status: "running", parentRunId: "L" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 10 },
+        },
+      ],
+      [{ id: "helper", budgetGroupId: null, budgetUsd: 5 }],
+    );
+    const cap = { dailyBudgetUsd: null, weeklyBudgetUsd: 20, monthlyBudgetUsd: null } as never;
+    const [week] = await computeGroupSpend(db, cap, [{ id: "lead", budgetUsd: 10 }, ...members.slice(1)], NOW);
+    expect(week).toMatchObject({ spentUsd: 0, reservedUsd: 15, remainingUsd: 5, heldRuns: 1 });
+  });
+
+  it("a live child reserving less than the root has left: the root's own hold wins", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 10 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    // $21 - $2 = $19, not the child's $10 - $2 = $8.
+    expect(week).toMatchObject({ spentUsd: 2, reservedUsd: 19, remainingUsd: 4, heldRuns: 1 });
+  });
+
+  it("a finished coding child no longer raises the tree's hold", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 4,
+          startedAt: NOW,
+          status: "succeeded",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 15 },
+        },
+      ],
+    );
+    const cap = { dailyBudgetUsd: null, weeklyBudgetUsd: 20, monthlyBudgetUsd: null } as never;
+    const [week] = await computeGroupSpend(db, cap, [{ id: "lead", budgetUsd: 10 }, ...members.slice(1)], NOW);
+    expect(week).toMatchObject({ spentUsd: 4, reservedUsd: 6, remainingUsd: 10 });
+  });
+
   it("two parallel children: still one hold of $21", async () => {
     const db = fakeDb(
       [],
@@ -418,6 +507,7 @@ describe("a delegated tree is held once", () => {
           parentRunId: "L",
           codingRun: { budgetReservedUsd: 20 },
         },
+        // Dispatch leaves the second child only what the first did not take: $21 - $20.
         {
           id: "C2",
           agentId: "builder",
@@ -425,7 +515,7 @@ describe("a delegated tree is held once", () => {
           startedAt: NOW,
           status: "running",
           parentRunId: "L",
-          codingRun: { budgetReservedUsd: 20 },
+          codingRun: { budgetReservedUsd: 1 },
         },
       ],
     );
@@ -479,6 +569,7 @@ describe("a delegated tree is held once", () => {
       [
         { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
         { id: "N", agentId: "outsider", costUsd: 3, startedAt: NOW, status: "running", parentRunId: "L" },
+        // Dispatched with $4 of the tree's $21 spent: $17 reserved.
         {
           id: "G",
           agentId: "builder",
@@ -486,7 +577,7 @@ describe("a delegated tree is held once", () => {
           startedAt: NOW,
           status: "running",
           parentRunId: "N",
-          codingRun: { budgetReservedUsd: 20 },
+          codingRun: { budgetReservedUsd: 17 },
         },
       ],
     );
