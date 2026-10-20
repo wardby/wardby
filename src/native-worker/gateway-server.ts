@@ -336,11 +336,13 @@ export async function* streamModel(
       // Failed before the response started: the provider billed nothing. Once started: settle at an estimate.
       if (sawEvent || responseStarted) {
         // Bill the input and the output seen so far, never more than the hold. With no output seen
-        // (cut while thinking or reasoning), the output the hold reserved for: an unknown output
-        // fails toward overestimating. Estimating must never mask the stream error: on any
+        // (cut while thinking or reasoning), the run's median completed call, or none before the
+        // first one: as the coding proxy does. Estimating must never mask the stream error: on any
         // failure, keep the full hold and rethrow the original.
         try {
-          const output = streamedText ? await streamedOutputTokens(ctx.llm, req.model, streamedText) : outputTokens;
+          const output = streamedText
+            ? await streamedOutputTokens(ctx.llm, req.model, streamedText)
+            : ((await ledger.medianOutputTokens(ctx.session.id)) ?? 0);
           const costUsd = Math.min(reservationUsd, ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }));
           await ledger.markUncertain(ctx.session.id, callId, {
             inputTokens,

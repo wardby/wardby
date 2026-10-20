@@ -1749,18 +1749,40 @@ describe("interrupted replies settle at an estimate", () => {
       await expect(execute(h, "next", new TestSink(), raw)).resolves.toBeDefined();
     });
 
-    it("once the response started, books the output the hold reserved for", async () => {
+    it("once the response started, with no completed reply to take a median from, books no output", async () => {
+      let call = 0;
       const h = await harness({
         budgetUsd,
-        // A frame with no type relays no output.
-        fetch: async () => new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n'),
+        fetch: async () => {
+          call += 1;
+          // A frame with no type relays no output.
+          if (call === 1) return new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n');
+          return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
+        },
       });
       await expect(execute(h, "started", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
       const request = await h.ledger.getRequest(reservedRequestId(h.events));
-      expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 10 } });
-      expect(request!.actualCostUsd!).toBeCloseTo(hold, 12);
-      await expect(execute(h, "next", new TestSink(), raw)).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 0 } });
+      expect(request!.actualCostUsd!).toBeCloseTo(hold - outputPart, 12);
+      await expect(execute(h, "next", new TestSink(), raw)).resolves.toBeDefined();
     });
+  });
+
+  it("books the run's median output for a stream cut after its response started with nothing relayed", async () => {
+    let call = 0;
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () => {
+        call += 1;
+        if (call === 2) return new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n');
+        return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    await expect(execute(h, "first", new TestSink(), requestBody(true))).resolves.toBeDefined();
+    await expect(execute(h, "started", new TestSink(), requestBody(true))).rejects.toMatchObject({ status: 502 });
+    const uncertain = h.events.find((e) => e.type === "request.uncertain")!;
+    const request = await h.ledger.getRequest(uncertain.requestId!);
+    expect(request).toMatchObject({ costEstimated: true, usage: { outputTokens: USAGE.output_tokens } });
   });
 
   it("keeps refusing a retry of the same body with duplicate_uncertain", async () => {

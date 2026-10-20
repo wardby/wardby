@@ -36,15 +36,15 @@ export function relayedOutputTokens(bytes: number): number {
 /**
  * The best known cost of a reply that broke before its final usage (spec PR 1
  * › 1b): usage already read, else the previous reply's input, else the input
- * part of the hold; plus the output seen so far. With no output seen and no
- * run median to go by, the output the hold reserved for: an unknown output
- * fails toward overestimating. A stream that failed before its response
- * started generated none. Never more than the request's worst case.
+ * part of the hold; plus the output seen so far. With no output seen, the
+ * run's median completed reply, or none while the run has no completed reply
+ * (a deliberate rule: one cut must not book a whole reserved reply). A stream
+ * that failed before its response started generated none. Never more than the
+ * request's worst case.
  */
 export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPricing): InterruptedEstimate {
   const relayed = relayedOutputTokens(facts.relayedOutputBytes);
-  const unknown = facts.beforeResponse ? 0 : facts.maxOutputTokens;
-  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? unknown);
+  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? 0);
   const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.ceilingUsd ?? facts.reservationUsd));
   if (facts.readUsage) {
     const usage: ProxyUsage = {
@@ -68,7 +68,7 @@ export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPrici
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheWriteTokens: 0,
-    outputTokens: relayed > 0 ? relayed : unknown,
+    outputTokens: output,
     reasoningTokens: 0,
   };
   const inputPart = facts.reservationUsd - (facts.maxOutputTokens * pricing.outputPerMTok) / 1_000_000;
