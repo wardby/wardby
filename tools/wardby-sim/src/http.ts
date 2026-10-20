@@ -80,3 +80,8 @@ export function matchPath(pattern: string, path: string): Record<string, string>
   }
   return want.length === got.length ? params : null;
 }
+
+/** A string field, or `fallback` when the value is anything else. */
+export function textOf(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : typeof value === "number" ? String(value) : fallback;
+}
