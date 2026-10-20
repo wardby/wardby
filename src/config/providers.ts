@@ -14,6 +14,7 @@ import {
 } from "../providers/jobs/kubernetes-platform.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import { loadMobileConfig, type MobileConfig } from "./mobile.js";
+import { testSimulatorBase } from "./test-simulators.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
@@ -210,8 +211,11 @@ export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig
   ) {
     throw new Error("WARDBY_JIRA_SITE_URL must be a bare https origin such as https://your-site.atlassian.net.");
   }
-  const apiBaseUrl = httpsOrigin(base, "WARDBY_JIRA_API_BASE_URL");
-  if (!JIRA_GATEWAY.test(apiBaseUrl)) {
+  // WARDBY_TEST_SIMULATORS (test only): the simulator stands in for the gateway; it refuses
+  // to start over plain http while Jira is configured, so Jira stays https-only.
+  const simulatorJira = testSimulatorBase("jira", env);
+  const apiBaseUrl = simulatorJira ?? httpsOrigin(base, "WARDBY_JIRA_API_BASE_URL");
+  if (!simulatorJira && !JIRA_GATEWAY.test(apiBaseUrl)) {
     throw new Error(
       "WARDBY_JIRA_API_BASE_URL must be https://api.atlassian.com/ex/jira/<cloudId>, the only base a service " +
         "account's API token works against.",
@@ -263,6 +267,8 @@ export function loadSlackConfig(env: NodeJS.ProcessEnv = process.env): SlackConf
   if (customizeRaw && customizeRaw !== "true" && customizeRaw !== "false") {
     throw new Error("WARDBY_SLACK_CUSTOMIZE must be true or false.");
   }
+  // WARDBY_TEST_SIMULATORS (test only): the simulator's Slack Web API, whatever the override says.
+  apiBaseUrl = testSimulatorBase("slack", env) ?? apiBaseUrl;
   return { botToken: token, apiBaseUrl, customize: customizeRaw === "true" };
 }
 

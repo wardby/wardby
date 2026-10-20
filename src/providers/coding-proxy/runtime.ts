@@ -1,5 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
+import { createSimulatorRegistryFetch, startupTestSimulators } from "../../config/test-simulators.js";
 import { logger } from "../../core/logger.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
@@ -24,7 +25,7 @@ import {
   DEFAULT_PLAN_MAX_PER_RUN,
   RegistryService,
 } from "./registry/service.js";
-import { createPinnedProxyFetch, type PinnedProxyFetchOptions } from "./secure-fetch.js";
+import { createPinnedProxyFetch, PROXY_EGRESS_ERROR, type PinnedProxyFetchOptions } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditSink } from "./types.js";
 
@@ -95,9 +96,15 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const audit: ProxyAuditSink | undefined = mock
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
+  // Throws (test_simulators_refused) on any refusal, before anything listens.
+  const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
   const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
-  const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
+  // WARDBY_TEST_SIMULATORS (test only): the registry hosts go to their simulators, and every
+  // other host is still refused.
+  const pinned = simulators
+    ? createSimulatorRegistryFetch(simulators, () => new Error(PROXY_EGRESS_ERROR))
+    : buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
   const upstream = createRegistryUpstream(pinned);
   const metadataTimeoutMs = positiveInt(env.REGISTRY_METADATA_TIMEOUT_MS, 30_000);
   const maxMetadataBytes = positiveInt(env.REGISTRY_MAX_METADATA_MB, 64) * MIB;
