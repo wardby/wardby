@@ -9,7 +9,7 @@
  * comment. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
-import { summarizeRegistryFetches, type RegistryRefusalSummary } from "../coding/registry/report.js";
+import { summarizeRegistryFetches, warningRefusals, type RegistryRefusalSummary } from "../coding/registry/report.js";
 import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 import {
   isPackageAuditMode,
@@ -201,25 +201,33 @@ export function fullReplyComments(reply: string, opts: { maxChars: number; maxPa
   );
 }
 
+type RefusalOutcome = {
+  pullRequests: readonly PullRequestOutcome[];
+  failedChildren: readonly FailedChild[];
+  packageRefusals?: readonly RegistryRefusalSummary[];
+  noChanges?: boolean;
+};
+
+/**
+ * The refusals that can block the run: all of them when a coding sub-run failed, otherwise all but
+ * listing-only ones, which the installer may only have looked at (see LISTING_REFUSAL_FILENAME).
+ */
+export function blockingRefusals(outcome: Omit<RefusalOutcome, "noChanges">): RegistryRefusalSummary[] {
+  const refusals = outcome.packageRefusals ?? [];
+  return outcome.failedChildren.length > 0 ? [...refusals] : warningRefusals(refusals);
+}
+
 /**
  * Whether package refusals blocked the run: it succeeded, but nothing reached a pull request, a coding
- * sub-run made no changes or failed, and packages were refused. The GitHub and Jira status comments and
- * the Slack `run_blocked` event all use it, so they always agree.
+ * sub-run made no changes or failed, and packages were refused (blockingRefusals). The GitHub and Jira
+ * status comments and the Slack `run_blocked` event all use it, so they always agree.
  */
-export function isBlockedByRefusals(
-  run: Pick<FinishedRun, "status">,
-  outcome: {
-    pullRequests: readonly PullRequestOutcome[];
-    failedChildren: readonly FailedChild[];
-    packageRefusals?: readonly RegistryRefusalSummary[];
-    noChanges?: boolean;
-  },
-): boolean {
+export function isBlockedByRefusals(run: Pick<FinishedRun, "status">, outcome: RefusalOutcome): boolean {
   return (
     run.status === "succeeded" &&
     outcome.pullRequests.length === 0 &&
     (outcome.noChanges === true || outcome.failedChildren.length > 0) &&
-    (outcome.packageRefusals?.length ?? 0) > 0
+    blockingRefusals(outcome).length > 0
   );
 }
 
@@ -263,13 +271,22 @@ export function outcomeBody(
     packageRefusals: refusals,
     noChanges: opts.noChanges,
   });
+  const blockedBy = blocked ? blockingRefusals({ pullRequests, failedChildren, packageRefusals: refusals }) : [];
+  // The ⚠️ line: on a no-changes run it keeps listing-only refusals (see LISTING_REFUSAL_FILENAME), and
+  // when blocked it holds only those the ⛔ list leaves out.
+  const noChangesRun = opts.noChanges === true && pullRequests.length === 0;
+  const warned = blocked
+    ? refusals.filter((refusal) => !blockedBy.includes(refusal))
+    : noChangesRun
+      ? refusals
+      : warningRefusals(refusals);
   const warning =
-    !blocked && (links.length > 0 || run.status === "succeeded") && refusals.length > 0
-      ? packageRefusalWording(refusals, { blocked: false })
+    (links.length > 0 || run.status === "succeeded") && warned.length > 0
+      ? packageRefusalWording(warned, { blocked: false })
       : "";
   const audit = opts.packageAudit ? packageAuditWording(opts.packageAudit.mode, opts.packageAudit.summary) : "";
   const footer = warning + (warning ? "\n\n" : "") + audit + (audit ? "\n\n" : "") + runLine(run.id);
-  if (blocked) return packageRefusalWording(refusals) + "\n\n" + footer;
+  if (blocked) return packageRefusalWording(blockedBy) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -450,7 +467,16 @@ export async function collectRunOutcome(
     try {
       const fetches = await db.registryFetch.findMany({
         where: { runId: { in: codingIds } },
-        select: { ecosystem: true, name: true, version: true, outcome: true, reason: true, sizeBytes: true },
+        select: {
+          ecosystem: true,
+          name: true,
+          version: true,
+          outcome: true,
+          reason: true,
+          sizeBytes: true,
+          filename: true,
+          runId: true,
+        },
         orderBy: { createdAt: "asc" },
       });
       packageRefusals = summarizeRegistryFetches(fetches).packageRefusals;

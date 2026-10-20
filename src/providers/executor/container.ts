@@ -80,6 +80,7 @@ import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
+import { warningRefusals } from "../../coding/registry/report.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import {
   hostBudgetSentence,
@@ -1047,7 +1048,7 @@ export interface ContainerExecutorOptions {
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
-  packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  packageRefusals: Array<{ ecosystem: string; name: string; reason: string; listingOnly?: boolean }>;
   /** The run's package audit mode (CodingRun.packageAuditMode); absent when it was off. */
   packageAuditMode?: PackageAuditMode;
   /** What the registry served only because of it (summarizePackageAudit entries). */
@@ -2232,7 +2233,8 @@ export class ContainerExecutor implements Executor {
     try {
       const report = await this.options.registryReport?.(runId);
       const packages = Array.isArray(report?.packages) ? report.packages : [];
-      const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      // A listing-only refusal is for get_run and the agent, not the PR (see LISTING_REFUSAL_FILENAME).
+      const packageRefusals = Array.isArray(report?.packageRefusals) ? warningRefusals(report.packageRefusals) : [];
       const packageAudit = isPackageAuditMode(report?.packageAuditMode)
         ? { mode: report.packageAuditMode, entries: Array.isArray(report.packageAudit) ? report.packageAudit : [] }
         : undefined;

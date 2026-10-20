@@ -1263,6 +1263,21 @@ stays unrecorded: a single pinned version withheld while others are listed
 (`jinja2==2.10` with a blocking advisory), since the registry never sees
 the client's pin.
 
+An installer often reads an index it doesn't need (a resolver weighing
+candidates, a dependency behind a platform marker), so a refusal recorded
+only from an index weighs less than a refused download. Once any version of
+that name is served later in the same coding run, it is dropped like any
+other refusal the run got past. If nothing of that name was served,
+`wardby-packages` and `get_run` list it (`get_run` marks it
+`"listingOnly": true`), and the status shows it according to the outcome:
+
+- a coding sub-run failed: it counts toward ⛔ blocked, like any refusal;
+- the run made no changes: it is a ⚠️ dependency install line, not ⛔ (for
+  example, a package whose only release has nothing but too-new wheels);
+- a pull request was opened or updated: it adds no **Dependency install
+  incomplete** warning, no ⚠️ line, and no entry in the pull request's
+  package section.
+
 ## Safeguards
 
 - **Dependency graph only.** Only packages on the allowlist, or reachable
@@ -1390,9 +1405,17 @@ one package):
 `hint` says what the refusal code means and what to do about it; it is
 present for the allowlist codes below and omitted for codes without guidance.
 `size` is the number of bytes served, or `null` if none was recorded.
+A refusal the run got past is left out of `packageRefusals`, and so out of
+the pull request warning, the status comments and Slack: the registry later
+served the same package to the same coding run (for a refusal of one
+version, that version), for example after npm retried a temporary
+`wardby_upstream_error`. A package served to a different coding sub-run
+does not clear it, and a refusal recorded after the package was served
+still counts.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
-entries they refused (each refusal is also in `packageRefusals`). A run with
+entries they refused (each refusal is also in `packageRefusals`, unless that
+version was served later). A run with
 [package audit mode](#package-audit-mode) on also returns `packageAuditMode`
 and `packageAudit`, and its pull request opens with a caution banner listing
 the packages installed outside the allowlist.
