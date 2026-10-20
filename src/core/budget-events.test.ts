@@ -8,6 +8,7 @@ import {
   type BudgetEventView,
   type BudgetLimit,
   type ProxyRefusalDetails,
+  type TopUpRefusalDetails,
 } from "./budget-events.js";
 
 const proxy = (extra: Partial<ProxyRefusalDetails> = {}): ProxyRefusalDetails => ({
@@ -42,6 +43,75 @@ describe("budget event sentences", () => {
       "needed a $0.20 hold, but only $0.05 of this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) was left ($1.05 spent).";
     expect(hostBudgetSentence(e)).toBe(`Out of budget: the next model request ${facts}`);
     expect(ownerBudgetSentence(e, "a")).toContain(`the next request ${facts}`);
+  });
+
+  describe("overrun from available room", () => {
+    const topUp = (extra: Partial<TopUpRefusalDetails> = {}): TopUpRefusalDetails => ({
+      source: "top-up",
+      capUsd: 20,
+      spentUsd: 6,
+      heldUsd: 14,
+      leftUsd: 0,
+      baseBudgetUsd: 10,
+      grantedUsd: 10,
+      limitUsd: 11,
+      groupName: "team",
+      ...extra,
+    });
+    const refused = (
+      details: Partial<ProxyRefusalDetails>,
+      overrun: TopUpRefusalDetails,
+      limit: BudgetLimit = "day",
+    ) => ({
+      ...event(
+        "run",
+        proxy({ budgetUsd: 10, spentUsd: 9.95, refusedHoldUsd: 0.2, baseBudgetUsd: 10, limitUsd: 11, ...details }),
+      ),
+      overrun: { limit, details: overrun },
+    });
+
+    it("stopped at its base: says the overrun wasn't available and which cap to raise", () => {
+      const e = refused({}, topUp({ leftUsd: 0.4 }));
+      const why = `Its 10% allowed overrun wasn't available because the "team" group had $0.40 left of its daily cap.`;
+      expect(ownerBudgetSentence(e, "builder")).toBe(
+        `Stopped before turn 41: the next request needed a $0.20 hold, but only $0.05 of this run's $10.00 budget was left ($9.95 spent). ${why} To continue, raise the group's daily cap.`,
+      );
+      expect(hostBudgetSentence(e)).toBe(
+        `Out of budget: the next model request needed a $0.20 hold, but only $0.05 of this run's $10.00 budget was left ($9.95 spent). ${why}`,
+      );
+    });
+
+    it("topped up partly: names the part of the overrun it got", () => {
+      const e = refused({ budgetUsd: 10.4, spentUsd: 10.35 }, topUp({ grantedUsd: 10.4 }));
+      const owner = ownerBudgetSentence(e, "builder");
+      expect(owner).toContain(
+        "of this run's $10.00 budget and $0.40 of its 10% allowed overrun ($10.40 in all) was left",
+      );
+      expect(owner).toContain(
+        `Only $0.40 of its 10% allowed overrun was available because the "team" group had no more left of its daily cap.`,
+      );
+    });
+
+    it("a full run tree names the lead to the owner, and only the tree to a host", () => {
+      const e = refused({}, topUp({ groupName: undefined, leadAgentName: "lead", capUsd: 15 }), "run-tree");
+      expect(ownerBudgetSentence(e, "builder")).toContain(
+        "Its 10% allowed overrun wasn't available because the lead's (lead) run tree had $0.00 left of its $15.00 budget. To continue, raise budgetUsd on lead.",
+      );
+      expect(hostBudgetSentence(e)).toContain("because the lead's run tree had $0.00 left of its $15.00 budget.");
+      expect(hostBudgetSentence(e)).not.toContain("(lead)");
+    });
+
+    it("an overrun_unavailable event on its own reads as the overrun sentence", () => {
+      const e: BudgetEventView = {
+        kind: "overrun_unavailable",
+        limit: "week",
+        at: "2026-10-16T00:00:00.000Z",
+        details: topUp(),
+      };
+      expect(hostBudgetSentence(e)).toBe(
+        `Out of budget: Its 10% allowed overrun wasn't available because the "team" group had $0.00 left of its weekly cap.`,
+      );
+    });
   });
 
   it("keeps today's text without a base, with base == limit, or when the overrun rounds to 0%", () => {
@@ -179,10 +249,13 @@ describe("loadBudgetEvent", () => {
         },
       },
       runBudgetEvent: {
-        findFirst: async () => ({ limit, at: new Date(0), details }),
+        findFirst: async ({ where }: { where: { kind?: string } }) =>
+          where.kind === undefined || where.kind === "refused"
+            ? { kind: "refused", limit, at: new Date(0), details }
+            : null,
         findMany: async () => [
-          { limit, at: new Date(0), details },
-          { limit: "run", at: new Date(1), details },
+          { kind: "refused", limit, at: new Date(0), details },
+          { kind: "refused", limit: "run", at: new Date(1), details },
         ],
       },
     };

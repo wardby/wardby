@@ -2796,7 +2796,7 @@ export class ContainerExecutor implements Executor {
   /** The overrun sentence for a finished run that spent past its base budget, as status details. */
   private overrunDetails(run: ContainerRunSnapshot): { overrunSentence?: string } {
     if (run.budgetBaseUsd === undefined) return {};
-    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetUsd);
+    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetLimitUsd ?? run.budgetUsd);
     return sentence ? { overrunSentence: sentence } : {};
   }
 
@@ -2808,6 +2808,7 @@ export class ContainerExecutor implements Executor {
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
       baseBudgetUsd: run.budgetBaseUsd,
+      limitUsd: run.budgetLimitUsd,
       budgetGroupName: run.budgetGroupName,
     });
   }
