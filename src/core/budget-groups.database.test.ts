@@ -348,7 +348,7 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     });
   });
 
-  it("a delegated tree holds its coding child's overrun-raised reservation, so the group never reserves past its cap", async () => {
+  it("B2: a delegated coding child reserves only its base, so a run started between the lead and it never takes the group past its cap", async () => {
     const g = await group("tree-overrun", 20);
     const lead = id("overrun-lead");
     await db.agent.create({
@@ -367,14 +367,15 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     await db.agent.update({ where: { id: builder }, data: { allowedOverrunPercent: 50 } });
     const other = await codingAgent("overrun-other", 10, g);
     const parent = await db.run.create({ data: { agentId: lead, status: "running", costUsd: 0 } });
+    // Started after the lead, before its builder: first come, first served, the builder's dispatch does not see it.
+    const result = await dispatchRun({ db, executor, agentId: other });
     const child = await dispatchRun({ db, executor, agentId: builder, trigger: "subagent", parentRunId: parent.id });
 
-    // The tree may spend $10 x 1.5 = $15 through its coding child: the group must hold that, not the lead's $10.
+    // The builder reserves its $10 base out of the lead's $10; its overrun ($15 in all) is left to top-ups.
     const childReserved = (await reservedUsd(child!.run.id)) ?? 0;
-    expect(childReserved).toBeCloseTo(15, 6);
-    const result = await dispatchRun({ db, executor, agentId: other });
+    expect(childReserved).toBeCloseTo(10, 6);
     const otherReserved = (await reservedUsd(result!.run.id)) ?? 0;
-    expect(otherReserved).toBeCloseTo(5, 6);
+    expect(otherReserved).toBeCloseTo(10, 6);
     expect(childReserved + otherReserved).toBeLessThanOrEqual(20 + 1e-6);
 
     await db.run.updateMany({
@@ -408,12 +409,12 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     });
     const child = await dispatchRun({ db, executor, agentId: builder, trigger: "subagent", parentRunId: parent.id });
 
-    // The tree's $15 ceiling less the native sibling's $5 hold.
+    // The lead's $10 less the native sibling's $5 hold; the overrun is never reserved.
     const childReserved = (await reservedUsd(child!.run.id)) ?? 0;
-    expect(childReserved).toBeCloseTo(10, 6);
+    expect(childReserved).toBeCloseTo(5, 6);
     const result = await dispatchRun({ db, executor, agentId: other });
-    // The tree holds $5 + $10 = $15, leaving $5.
-    expect(await reservedUsd(result!.run.id)).toBeCloseTo(5, 6);
+    // The tree holds $5 + $5 = $10, leaving $10.
+    expect(await reservedUsd(result!.run.id)).toBeCloseTo(10, 6);
 
     await db.run.updateMany({
       where: { id: { in: [parent.id, native.id, child!.run.id, result!.run.id] } },

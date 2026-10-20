@@ -398,19 +398,36 @@ permission as changing `budgetUsd`. On a coding agent it raises the limit of
 each of its runs; on a lead agent that delegates, it raises its run tree's
 ceiling for coding sub-agents. Native runs' own model calls are not affected.
 
-At dispatch a coding run gets a base budget (the smallest of the agent's
-`budgetUsd`, what its budget group has left and what its run tree has left) and
-a limit, worked out the same way with `budgetUsd` raised by the percent. The
-limit is what the coding proxy, the Claude Code worker's own budget stop and
-the end-of-run checks enforce. `get_run` shows `budgetBaseUsd` and
-`budgetReservedUsd` (the limit).
+The overrun is permission to spend more, not a reservation. At dispatch a
+coding run reserves only its base budget: the smallest of the agent's
+`budgetUsd`, what its budget group has left and what its run tree has left.
+Its limit is `budgetUsd` raised by the percent, and nothing is held for it up
+front. While the run works, wardby tops up what it may spend, in steps of 10%
+of its base (or the largest model request it has made, if that is more), each
+time it gets within its headroom of what it has been granted: two of its
+largest requests, or 20% of its base if that is more. A run whose base is
+smaller than its first request cannot use its overrun, since that request is
+refused before any top-up. A step is granted
+only out of room its budget group and run tree have left at that moment, and
+never past the limit. The coding proxy enforces what has been granted so far,
+and the Claude Code worker's own budget stop is set to the limit. `get_run`
+shows `budgetBaseUsd`, `budgetLimitUsd` (the limit) and `budgetReservedUsd`
+(what has been granted so far, which the group and run tree hold).
 
-Budget group caps stay hard. A budget group holds the full limit for each run,
-and the overrun can only use room the group and the run tree still have, so a
-nearly spent group trims or removes it. The percent a run actually got can
-therefore be lower than the agent's setting. For a delegated run tree, the
-ceiling uses the lead (root) agent's percent, so set it on the lead agent to
-give its coding sub-agents room beyond the lead's `budgetUsd`.
+Budget group caps and run-tree ceilings stay hard. A top-up takes whatever room
+is left, so if the group or run tree fills up while a run needs more, the run
+stops at what it has been granted, with its work kept as below, and its budget
+sentence says why, for example "Only $0.40 of its 10% allowed overrun was
+available because the "team" group had no more left of its daily cap." (or
+"Its 10% allowed overrun wasn't available because the "team" group had nothing
+left of its daily cap." when it got none). `get_run` then lists an `overrun_unavailable` event. A run that
+was refused a top-up does not ask again, even if the group frees up later. The
+overrun a run actually got can therefore be lower than the agent's setting, or
+none. For a delegated run tree, the raised ceiling uses the lead (root) agent's
+percent, so set it on the lead agent to let its coding sub-agents go beyond
+the lead's `budgetUsd`. Runs dispatched before this behaviour have no
+`budgetLimitUsd`: their reservation already includes the overrun, and they
+finish as before.
 
 Every live run still pending or running holds its unspent reservation
 (reservation minus cost so far) against its group; a native run holds its
@@ -498,14 +515,14 @@ sub-agent are tracked apart) on the same model, plus the request body's growth
 since then. That reply is used only if it started within the 5-minute prompt
 cache window before the request and the body has not shrunk since (as after a
 compaction). Failing that, the whole request body counts as new input. New input
-is counted at one token per 3 bytes, a deliberately high count, and priced at the
-higher of the model's input and cache-write rates. It adds the output relayed so far (text,
-tool-call input, and thinking or reasoning text), counted high. If nothing was
-relayed, it adds the median output of the run's replies on that model, or, with
-no completed reply on that model, the full output the hold reserved for. A
-streaming request that failed before the provider's response started adds no
-output, because nothing was generated. A provider's placeholder output count at the start of a reply is
-used only as a minimum. The estimate is never more than the request's worst
+is counted at one token per 3 bytes, a deliberately high count, and priced at
+the higher of the model's input and cache-write rates. It adds the output
+relayed so far (text, tool-call input, and thinking or reasoning text), counted
+high. With nothing relayed, the run's median completed reply on that model is
+used, or no output if there is none yet. A streaming request that failed before
+the provider's response started adds no output, because nothing was generated.
+A provider's placeholder output count at the start of a reply is used only as a
+minimum. The estimate is never more than the request's worst
 case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's
 request ledger. If the estimate cannot be computed or recorded, the request
@@ -517,10 +534,11 @@ the interrupted request.
 
 A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once, at the lead: the lead's reservation minus what the whole run tree
-has spent. When the lead has an `allowedOverrunPercent`, a coding sub-agent
-can reserve more than the lead's budget; the lead then holds at least the
-unspent holds of every live sub-agent run in its tree, so the overrun still fits
-inside the group's cap. This is decided per period: a sub-agent run holds nothing in a
+has spent. Each sub-agent reserves its own base out of what the lead's budget
+has left. When the lead has an `allowedOverrunPercent`, its coding sub-agents
+can be topped up past the lead's budget, up to its raised ceiling; the lead
+then holds at least the unspent holds of every live sub-agent run in its tree
+(top-ups included), so the overrun still fits inside the group's cap. This is decided per period: a sub-agent run holds nothing in a
 period only when its lead started in that same period. So a delegating lead
 does not count against its group several times over.
 
@@ -529,7 +547,8 @@ does not count against its group several times over.
 `get_run` returns `budgetEvents` for a run that was refused for budget,
 including a run whose model request was refused but that still finished,
 failed for another reason, or was stopped. The event is recorded when the run
-ends. Each event has `kind` (`refused`), `limit`, `at` and `details`. `limit` says which
+ends. Each event has `kind` (`refused`, or `overrun_unavailable` for a top-up
+the group or run tree had no room for), `limit`, `at` and `details`. `limit` says which
 cap bound the run: `run` (the agent's own `budgetUsd`), `run-tree` (what the
 lead had left), or `day`, `week` or `month` (the budget group's cap for that
 period). For a refused model request, `details` holds the budget, the amount
@@ -539,7 +558,10 @@ turn, plus the basis of the refused hold (`refusedHoldBasis`) and its worst case
 held and the number of holding runs (`heldRuns`). Both also name the agent's
 budget group (`groupName`) when it has one, and the lead agent
 (`leadAgentName`) for a `run-tree` limit; a refused model request also gives
-the agent's own `budgetUsd` (`agentBudgetUsd`).
+the agent's own `budgetUsd` (`agentBudgetUsd`). An `overrun_unavailable` event
+holds the full cap or tree's numbers (`capUsd`, `spentUsd`, `heldUsd`,
+`leftUsd`), the run's `baseBudgetUsd`, `grantedUsd` and `limitUsd`, and the
+name of the group whose cap was full (`groupName`), which can be the lead's.
 
 The run's error carries the same facts in one sentence after the code, for
 example `coding_budget_exhausted: <sentence>`. A lead's sub-agent result
@@ -548,7 +570,9 @@ check summaries show the amounts and the budget group's name only. See
 [Run stopped out of budget](../help/errors/budget-exhausted.md).
 
 Budget sentences name both parts when the run had an overrun, for example
-"this run's $1.00 budget and its 10% allowed overrun ($1.10 in all)".
+"this run's $1.00 budget and its 10% allowed overrun ($1.10 in all)", or
+"$1.00 budget and $0.05 of its 10% allowed overrun ($1.05 in all)" when only
+part of it was available.
 
 #### Finished work is delivered
 

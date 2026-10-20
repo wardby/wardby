@@ -175,7 +175,7 @@ function isOrderedBefore(run: RunOrder, other: RunOrder): boolean {
  * root's hold, so it holds nothing (its cost still counts as spent), and the
  * root holds its reservation minus the cost of every run in its tree, or the
  * unspent holds of its tree's live runs when that is more (a coding run's
- * reservation takes the root agent's overrun). A sub-run
+ * grant can grow past the root's budget through overrun top-ups). A sub-run
  * whose root is in another group, has finished, or whose hold is left out
  * here (excludeReservationRunIds, holdsBefore) holds its own reservation. So
  * does a sub-run in a period its root did not start in (a root that started
@@ -248,9 +248,9 @@ export async function computeGroupSpend(
   }
   // Such a root holds its reservation minus the cost of its whole tree, every
   // run in it included (also runs in other groups: they spend the tree too).
-  // The runs below it may hold more than that: a coding run's reservation takes
-  // the root agent's overrun, and dispatch sized it beside its live siblings'
-  // holds. So the root holds at least the unspent holds of every live run below
+  // The runs below it may hold more than that: a coding run's grant takes
+  // top-ups from the root agent's overrun, and dispatch sized it beside its live
+  // siblings' holds. So the root holds at least the unspent holds of every live run below
   // it, each held as in siblingHoldsUsd.
   const treeHoldByRoot = new Map<string, number>();
   for (const rootId of heldRoots) {
@@ -473,9 +473,10 @@ function siblingHoldsUsd(rows: readonly TreeRow[], parentRunId: string, now: Dat
 }
 
 /**
- * With `withOverrun` (coding dispatch), the tree's ceiling is the root
- * agent's budgetUsd raised by its own allowedOverrunPercent, still capped by
- * the root's budget group; without it (native callers), today's ceiling.
+ * With `withOverrun` (a coding run's top-up, codingTopUpRoom), the tree's
+ * ceiling is the root agent's budgetUsd raised by its own
+ * allowedOverrunPercent, still capped by the root's budget group; without it
+ * (dispatch and native callers), the root's budgetUsd: what the tree holds.
  */
 async function runTreeSpend(
   db: BudgetGroupsDb,
@@ -533,27 +534,13 @@ async function runTreeSpend(
 export type BudgetConstraint = Period | "run-tree";
 
 export interface EffectiveBudgetResult {
-  /**
-   * The ceiling to use. With EffectiveBudgetOptions.overrunPercent this is the
-   * run's limit: its own budgetUsd raised by the overrun, then tightened.
-   */
+  /** The ceiling to use. */
   effectiveBudgetUsd: number;
-  /**
-   * Set only when an overrun was requested: the agent's own budgetUsd
-   * tightened by the same constraints, without the overrun (<= effectiveBudgetUsd).
-   */
-  baseBudgetUsd?: number;
-  /**
-   * Which constraint(s), if any, are tighter right now than the agent's own
-   * budgetUsd, or its overrun-raised limit when overrunPercent is given.
-   */
+  /** Which constraint(s), if any, are tighter right now than the agent's own budgetUsd. */
   constrainedBy: BudgetConstraint[];
   /** The first constraint with nothing left (< MIN_RESERVATION_USD), set only when there is one. */
   exhaustedBy?: BudgetConstraint;
-  /**
-   * The constraint whose value equals effectiveBudgetUsd, when that is below the
-   * agent's own budgetUsd, or its overrun-raised limit when overrunPercent is given.
-   */
+  /** The constraint whose value equals effectiveBudgetUsd, when that is below the agent's own budgetUsd. */
   limitedBy?: BudgetConstraint;
   /** The numbers behind exhaustedBy, for the dispatch refusal record. */
   exhaustedDetail?: { capUsd: number; spentUsd: number; heldUsd: number; heldRuns: number };
@@ -572,14 +559,6 @@ export interface EffectiveBudgetOptions {
    * the holds of runs that started after it (first come, first served).
    */
   self?: RunOrder;
-  /**
-   * Coding dispatch only: the agent's allowedOverrunPercent. The limit
-   * (effectiveBudgetUsd) starts from budgetUsd x (1 + p/100) instead of
-   * budgetUsd, the run tree's ceiling takes the root agent's own overrun, and
-   * baseBudgetUsd reports the budget without it. Group and run-tree remainders
-   * still cap both. Omitted (native callers): today's numbers exactly.
-   */
-  overrunPercent?: number;
 }
 
 /**
@@ -607,32 +586,25 @@ export async function effectiveBudgetForRun(
   parentRunId?: string,
   options: EffectiveBudgetOptions = {},
 ): Promise<EffectiveBudgetResult> {
-  const { self, overrunPercent } = options;
+  const { self } = options;
   const ownSpend: SpendOptions = { excludeReservationRunIds: self ? [self.id] : [], holdsBefore: self };
-  if (!parentRunId) return groupCappedBudget(db, agent, now, ownSpend, undefined, overrunPercent);
+  if (!parentRunId) return groupCappedBudget(db, agent, now, ownSpend);
 
-  const tree = await runTreeSpend(db, parentRunId, now, self, overrunPercent !== undefined);
+  const tree = await runTreeSpend(db, parentRunId, now, self);
   const sharesRootGroup = agent.budgetGroupId !== null && agent.budgetGroupId === tree.rootBudgetGroupId;
   const spend: SpendOptions = sharesRootGroup
     ? { excludeReservationRunIds: [...tree.treeRunIds, ...(self ? [self.id] : [])], holdsBefore: tree.root }
     : ownSpend;
-  return groupCappedBudget(
-    db,
-    agent,
-    now,
-    spend,
-    {
-      value: tree.remainingUsd,
-      reason: "run-tree",
-      detail: {
-        capUsd: tree.capUsd,
-        spentUsd: tree.spentUsd,
-        heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
-        heldRuns: 0,
-      },
+  return groupCappedBudget(db, agent, now, spend, {
+    value: tree.remainingUsd,
+    reason: "run-tree",
+    detail: {
+      capUsd: tree.capUsd,
+      spentUsd: tree.spentUsd,
+      heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
+      heldRuns: 0,
     },
-    overrunPercent,
-  );
+  });
 }
 
 async function groupCappedBudget(
@@ -644,10 +616,8 @@ async function groupCappedBudget(
   overrunPercent?: number,
 ): Promise<EffectiveBudgetResult> {
   const ownBudgetUsd = Number(agent.budgetUsd);
-  // The limit the candidates tighten: own raised by the overrun, when one was requested.
+  // The ceiling the candidates tighten: own raised by the overrun, when one is given (a run tree's raised cap).
   const ownLimitUsd = overrunPercent === undefined ? ownBudgetUsd : (ownBudgetUsd * (100 + overrunPercent)) / 100;
-  const base = (values: number[]) =>
-    overrunPercent === undefined ? {} : { baseBudgetUsd: Math.min(ownBudgetUsd, ...values) };
   const candidates: BudgetCandidate[] = [];
 
   if (agent.budgetGroupId) {
@@ -677,7 +647,7 @@ async function groupCappedBudget(
 
   if (extra) candidates.push(extra);
 
-  if (candidates.length === 0) return { effectiveBudgetUsd: ownLimitUsd, ...base([]), constrainedBy: [] };
+  if (candidates.length === 0) return { effectiveBudgetUsd: ownLimitUsd, constrainedBy: [] };
 
   const values = candidates.map((c) => c.value);
   const constrainedBy = candidates.filter((c) => c.value < ownLimitUsd).map((c) => c.reason);
@@ -688,9 +658,79 @@ async function groupCappedBudget(
     effectiveBudgetUsd < ownLimitUsd ? candidates.find((c) => c.value === effectiveBudgetUsd) : undefined;
   return {
     effectiveBudgetUsd,
-    ...base(values),
     constrainedBy,
     ...(limiting ? { limitedBy: limiting.reason } : {}),
     ...(exhausted ? { exhaustedBy: exhausted.reason, exhaustedDetail: exhausted.detail } : {}),
+  };
+}
+
+/** What limits a coding run's next overrun top-up: the room left, and the constraint with the least. */
+export interface TopUpRoom {
+  /** The most a top-up may add now; Infinity when no group or run tree constrains the run. */
+  roomUsd: number;
+  limitedBy?: BudgetConstraint;
+  /** The numbers behind limitedBy. */
+  detail?: { capUsd: number; spentUsd: number; heldUsd: number };
+  /** The budget group whose cap limits it, when limitedBy is a period. */
+  groupName?: string;
+}
+
+/**
+ * Room for a coding run's overrun top-up (budget-topup.ts): the least of what
+ * its budget group, its run tree's root group, and its run tree's
+ * overrun-raised ceiling have left right now. Each group is seen whole: every
+ * live hold counts, this run's own grant (or its tree's hold) included, with
+ * no first-come-first-served ordering, because a top-up is new money that runs
+ * started later did not count when they reserved. A grant of at most roomUsd
+ * raises each group's and the tree's committed total by at most that much, so
+ * caps and ceilings stay hard. Callers hold the group dispatch lock.
+ */
+export async function codingTopUpRoom(db: BudgetGroupsDb, runId: string, now: Date = new Date()): Promise<TopUpRoom> {
+  const run = await db.run.findUniqueOrThrow({
+    where: { id: runId },
+    select: { parentRunId: true, agent: { select: { budgetGroupId: true } } },
+  });
+  const candidates: (BudgetCandidate & { groupName?: string })[] = [];
+  const groupIds = new Set<string>();
+  if (run.agent.budgetGroupId) groupIds.add(run.agent.budgetGroupId);
+  if (run.parentRunId) {
+    // Every live run in the tree off the ancestor chain holds its grant, this run's included.
+    const tree = await runTreeSpend(db, run.parentRunId, now, undefined, true);
+    candidates.push({
+      value: tree.remainingUsd,
+      reason: "run-tree",
+      detail: {
+        capUsd: tree.capUsd,
+        spentUsd: tree.spentUsd,
+        heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
+        heldRuns: 0,
+      },
+    });
+    // The root's group holds the tree, this run's grant included, wherever this run's own group is.
+    if (tree.rootBudgetGroupId) groupIds.add(tree.rootBudgetGroupId);
+  }
+  for (const groupId of groupIds) {
+    const group = await db.budgetGroup.findUnique({
+      where: { id: groupId },
+      include: { agents: { select: { id: true, budgetUsd: true } } },
+    });
+    if (!group) continue;
+    for (const s of await computeGroupSpend(db, group, group.agents, now)) {
+      candidates.push({
+        value: s.remainingUsd,
+        reason: s.period,
+        detail: { capUsd: s.capUsd, spentUsd: s.spentUsd, heldUsd: s.reservedUsd, heldRuns: s.heldRuns },
+        groupName: group.name,
+      });
+    }
+  }
+  if (candidates.length === 0) return { roomUsd: Infinity };
+  const least = candidates.reduce((min, c) => (c.value < min.value ? c : min));
+  const { capUsd, spentUsd, heldUsd } = least.detail;
+  return {
+    roomUsd: Math.max(0, least.value),
+    limitedBy: least.reason,
+    detail: { capUsd, spentUsd, heldUsd },
+    ...(least.groupName !== undefined ? { groupName: least.groupName } : {}),
   };
 }

@@ -94,15 +94,14 @@ export function previousInput(input: {
  * › 1b): usage already read, else the input from its conversation's previous
  * reply (previousInput), else the whole body as uncached input
  * (bodyInputTokens), else (body size unknown) the input part of the hold; plus
- * the output seen so far. With no output seen, the model's median output, or
- * with no median the output the hold reserved for: an unknown output fails
- * toward overestimating. A stream that failed before its response started
- * generated none. Never more than the request's worst case.
+ * the output seen so far. With no output seen, the model's median completed
+ * reply, or none while there is no completed reply (a deliberate rule: one cut
+ * must not book a whole reserved reply). A stream that failed before its
+ * response started generated none. Never more than the request's worst case.
  */
 export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPricing): InterruptedEstimate {
   const relayed = relayedOutputTokens(facts.relayedOutputBytes);
-  const unknown = facts.beforeResponse ? 0 : facts.maxOutputTokens;
-  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? unknown);
+  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? 0);
   const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.ceilingUsd ?? facts.reservationUsd));
   if (facts.readUsage) {
     const usage: ProxyUsage = {

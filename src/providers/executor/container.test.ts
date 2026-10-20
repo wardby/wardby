@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hostBudgetSentence, ownerBudgetSentence, type BudgetEventView } from "../../core/budget-events.js";
+import type { TopUpOutcome } from "../../core/budget-topup.js";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import {
   budgetStoppedSummary,
@@ -208,6 +209,8 @@ class FakeStore implements ContainerExecutionStore {
     sha256: string;
     agentTextRunId: string;
   }) => Promise<boolean>;
+  /** Overrun top-ups; tests that need it assign it. */
+  topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome; near?: boolean }>;
 
   constructor(public run: ContainerRunSnapshot) {}
 
@@ -4446,5 +4449,93 @@ describe("normalizeCollectedLockfiles", () => {
     await writeFile(join(workspace, "package-lock.json"), lock(PROXIED));
     expect(await normalizeCollectedLockfiles("codex", workspace)).toEqual([]);
     expect(await readFile(join(workspace, "package-lock.json"), "utf8")).toContain("wardby-proxy");
+  });
+});
+
+describe("overrun from available room", () => {
+  const claudeRun = { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const;
+  const claudeImages = { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE };
+
+  async function launched(overrides: Partial<ContainerRunSnapshot>, claude = false) {
+    const created = await harness(overrides, IMAGE, new InMemoryCodingRunObserver(), claude ? claudeImages : undefined);
+    let input: Record<string, unknown> | undefined;
+    created.jobs.onLaunch = () => {
+      input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+    };
+    return { created, input: () => input! };
+  }
+
+  it("gives the Claude Code worker the run's limit as its own budget stop; the proxy session gets the grant", async () => {
+    const { created, input } = await launched(
+      { ...claudeRun, budgetUsd: 1, budgetBaseUsd: 1, budgetLimitUsd: 1.5 },
+      true,
+    );
+    await created.executor.start("run-1");
+    // The worker turns input.budgetUsd into the SDK's maxBudgetUsd (claude-coding-worker/sdk.ts).
+    expect(input().budgetUsd).toBe(1.5);
+    expect(created.sessions.lastInput?.budgetUsd).toBe(1);
+  });
+
+  it("an old run without a limit gives the worker its reservation, as before", async () => {
+    const { created, input } = await launched({ ...claudeRun, budgetUsd: 1.5, budgetBaseUsd: 1 }, true);
+    await created.executor.start("run-1");
+    expect(input().budgetUsd).toBe(1.5);
+    expect(created.sessions.lastInput?.budgetUsd).toBe(1.5);
+  });
+
+  it("asks for top-ups while the job runs, for Codex and Claude Code alike, and stops asking once refused", async () => {
+    for (const provider of ["codex", "claude-code"] as const) {
+      const overrides = provider === "codex" ? {} : claudeRun;
+      const { created } = await launched(
+        { ...overrides, budgetUsd: 1, budgetBaseUsd: 1, budgetLimitUsd: 1.5 },
+        provider === "claude-code",
+      );
+      const asked: string[] = [];
+      const answers: TopUpOutcome[] = ["not_needed", "granted", "unavailable"];
+      created.store.topUpBudget = async (runId: string) => {
+        asked.push(runId);
+        return { outcome: answers.shift() ?? "not_needed" };
+      };
+      let polls = 0;
+      created.jobs.status = async () => (++polls < 6 ? { state: "running" } : { state: "succeeded" });
+      await created.executor.start("run-1");
+      expect(asked).toEqual(["run-1", "run-1", "run-1"]);
+    }
+  });
+
+  it("polls at most every second while the run is near its grant", async () => {
+    const sleeps: number[] = [];
+    const created = await harness(
+      { budgetUsd: 1, budgetBaseUsd: 1, budgetLimitUsd: 1.5 },
+      IMAGE,
+      undefined,
+      undefined,
+      {
+        pollMinMs: 4_000,
+        pollMaxMs: 5_000,
+        sleep: async (ms: number) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    const near = [false, true, true, false];
+    created.store.topUpBudget = async () => ({ outcome: "not_needed", near: near.shift() ?? false });
+    let polls = 0;
+    created.jobs.status = async () => (++polls < 5 ? { state: "running" } : { state: "succeeded" });
+    await created.executor.start("run-1");
+    expect(sleeps).toEqual([4_000, 1_000, 1_000, 1_500]);
+  });
+
+  it("never asks for a top-up for a run without a limit", async () => {
+    const { created } = await launched({ budgetUsd: 1, budgetBaseUsd: 1 });
+    let asked = 0;
+    created.store.topUpBudget = async () => {
+      asked += 1;
+      return { outcome: "granted" };
+    };
+    let polls = 0;
+    created.jobs.status = async () => (++polls < 4 ? { state: "running" } : { state: "succeeded" });
+    await created.executor.start("run-1");
+    expect(asked).toBe(0);
   });
 });

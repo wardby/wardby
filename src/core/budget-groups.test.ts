@@ -1098,105 +1098,41 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
   });
 });
 
-describe("effectiveBudgetForRun with an allowed overrun (coding dispatch)", () => {
-  const dayGroup = (dailyBudgetUsd: number) => ({
-    id: "g1",
-    name: "g",
-    dailyBudgetUsd,
-    weeklyBudgetUsd: null,
-    monthlyBudgetUsd: null,
-    warnThresholdRatio: 0.8,
-    agentIds: ["a1"],
-  });
-
-  it("no group, p=10: the limit is own x 1.10, the base is own", async () => {
-    const db = fakeDb([], []);
-    const result = await effectiveBudgetForRun(
-      db,
-      { id: "a1", budgetGroupId: null, budgetUsd: 1 } as never,
-      NOW,
-      undefined,
-      { overrunPercent: 10 },
-    );
-    expect(result).toEqual({ effectiveBudgetUsd: 1.1, baseBudgetUsd: 1, constrainedBy: [] });
-  });
-
-  it("p=0: limit and base are both today's number", async () => {
-    const db = fakeDb([], []);
-    const result = await effectiveBudgetForRun(
-      db,
-      { id: "a1", budgetGroupId: null, budgetUsd: 1 } as never,
-      NOW,
-      undefined,
-      { overrunPercent: 0 },
-    );
-    expect(result).toEqual({ effectiveBudgetUsd: 1, baseBudgetUsd: 1, constrainedBy: [] });
-  });
-
-  it("group remaining 1.05, p=10: the limit is the group's remainder, the base stays own", async () => {
-    const db = fakeDb([dayGroup(1.05)], []);
-    const result = await effectiveBudgetForRun(
-      db,
-      { id: "a1", budgetGroupId: "g1", budgetUsd: 1 } as never,
-      NOW,
-      undefined,
-      { overrunPercent: 10 },
-    );
-    expect(result).toEqual({
-      effectiveBudgetUsd: 1.05,
-      baseBudgetUsd: 1,
-      constrainedBy: ["day"],
-      limitedBy: "day",
-    });
-  });
-
-  it("group remaining 0.80, p=10: limit and base are both the group's remainder", async () => {
-    const db = fakeDb([dayGroup(0.8)], []);
-    const result = await effectiveBudgetForRun(
-      db,
-      { id: "a1", budgetGroupId: "g1", budgetUsd: 1 } as never,
-      NOW,
-      undefined,
-      { overrunPercent: 10 },
-    );
-    expect(result).toEqual({
-      effectiveBudgetUsd: 0.8,
-      baseBudgetUsd: 0.8,
-      constrainedBy: ["day"],
-      limitedBy: "day",
-    });
-  });
-
+describe("an allowed overrun is never reserved", () => {
   const tree = (rootOverrunPercent: number) =>
     fakeDb(
       [],
       [{ id: "run-root", agentId: "root-agent", costUsd: 2.1, startedAt: TODAY_START, status: "running" }],
       [
         { id: "root-agent", budgetGroupId: null, budgetUsd: 2, allowedOverrunPercent: rootOverrunPercent },
-        { id: "child-agent", budgetGroupId: null, budgetUsd: 1, allowedOverrunPercent: 0 },
+        { id: "child-agent", budgetGroupId: null, budgetUsd: 1, allowedOverrunPercent: 50 },
       ],
     );
-  const child = { id: "child-agent", budgetGroupId: null, budgetUsd: 1, allowedOverrunPercent: 0 } as never;
+  const child = { id: "child-agent", budgetGroupId: null, budgetUsd: 1, allowedOverrunPercent: 50 } as never;
 
-  it("delegated child: the run tree's cap takes the root's overrun (2.00 x 1.25 = 2.50, 2.10 spent)", async () => {
-    const result = await effectiveBudgetForRun(tree(25), child, NOW, "run-root", { overrunPercent: 0 });
-    expect(result.effectiveBudgetUsd).toBeCloseTo(0.4, 9);
-    expect(result.baseBudgetUsd).toBeCloseTo(0.4, 9);
-    expect(result.limitedBy).toBe("run-tree");
-    expect(result.exhaustedBy).toBeUndefined();
-  });
-
-  it("delegated child under a root with no overrun: the tree is spent, refused run-tree", async () => {
-    const result = await effectiveBudgetForRun(tree(0), child, NOW, "run-root", { overrunPercent: 0 });
+  it("a delegated child's base comes from the root's budget, not its overrun-raised ceiling: the tree is spent", async () => {
+    const result = await effectiveBudgetForRun(tree(25), child, NOW, "run-root");
     expect(result.effectiveBudgetUsd).toBe(0);
-    expect(result.baseBudgetUsd).toBe(0);
     expect(result.exhaustedBy).toBe("run-tree");
     expect(result.exhaustedDetail).toMatchObject({ capUsd: 2, spentUsd: 2.1 });
   });
 
-  it("a native caller (no overrunPercent) gets today's numbers for a p=50 agent, top-level and delegated", async () => {
+  it("a p=50 agent gets its own budget, top-level and delegated", async () => {
     const top = await effectiveBudgetForRun(
-      fakeDb([dayGroup(10)], []),
+      fakeDb(
+        [
+          {
+            id: "g1",
+            name: "g",
+            dailyBudgetUsd: 10,
+            weeklyBudgetUsd: null,
+            monthlyBudgetUsd: null,
+            warnThresholdRatio: 0.8,
+            agentIds: ["a1"],
+          },
+        ],
+        [],
+      ),
       { id: "a1", budgetGroupId: "g1", budgetUsd: 5, allowedOverrunPercent: 50 } as never,
       NOW,
     );
@@ -1216,7 +1152,7 @@ describe("effectiveBudgetForRun with an allowed overrun (coding dispatch)", () =
     expect(delegated).toEqual({ effectiveBudgetUsd: 1, constrainedBy: ["run-tree"], limitedBy: "run-tree" });
   });
 
-  it("a coding run's hold in its group is its reservation, the overrun-raised limit", async () => {
+  it("a coding run's hold in its group is its grant: its base plus the top-ups granted so far", async () => {
     const db = fakeDb(
       [],
       [

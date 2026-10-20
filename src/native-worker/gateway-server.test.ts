@@ -5,7 +5,6 @@ import {
   CONSOLE_WITHHELD_MESSAGE,
   failureResponse,
   finish,
-  GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS,
   hostCall,
   runSecretValues,
   serveGatewayRequest,
@@ -26,6 +25,7 @@ function fakeLedger() {
     complete: vi.fn(async () => undefined),
     release: vi.fn(async () => undefined),
     markUncertain: vi.fn(async () => undefined),
+    medianOutputTokens: vi.fn(async (): Promise<number | undefined> => undefined),
   };
 }
 
@@ -130,18 +130,26 @@ describe("streamModel mid-stream failure", () => {
     return { llm, priceUsd };
   }
 
-  it("once the response started, books the hold's output for a stream cut before its first event", async () => {
+  it("once the response started, with no completed call to take a median from, books input and no output", async () => {
     const ledger = fakeLedger();
     const { llm, priceUsd } = cutBeforeFirstEvent(true);
     await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
-    const reserved = GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS;
-    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: reserved });
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: 0 });
+    expect(ledger.markUncertain).toHaveBeenCalledWith("sess_1", "call_1", expect.objectContaining({ outputTokens: 0 }));
+    expect(ledger.release).not.toHaveBeenCalled();
+  });
+
+  it("once the response started, books the run's median output for a stream cut before its first event", async () => {
+    const ledger = fakeLedger();
+    ledger.medianOutputTokens.mockResolvedValue(700);
+    const { llm, priceUsd } = cutBeforeFirstEvent(true);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: 700 });
     expect(ledger.markUncertain).toHaveBeenCalledWith(
       "sess_1",
       "call_1",
-      expect.objectContaining({ outputTokens: reserved }),
+      expect.objectContaining({ outputTokens: 700 }),
     );
-    expect(ledger.release).not.toHaveBeenCalled();
   });
 
   it("before the response started, releases the hold: nothing was generated", async () => {

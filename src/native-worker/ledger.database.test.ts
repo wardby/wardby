@@ -132,6 +132,30 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     expect(totals.tokensIn).toBe(1_000);
   });
 
+  it("gives the median output of the session's completed calls, and none before the first", async () => {
+    const created = (await session(10, new Date(Date.now() + 60_000))).created;
+    expect(await ledger.medianOutputTokens(created.id)).toBeUndefined();
+    const usage = (outputTokens: number) => ({
+      inputTokens: 10,
+      outputTokens,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0.001,
+    });
+    for (const [callId, output] of [
+      ["a", 100],
+      ["b", 300],
+      ["c", 900],
+    ] as const) {
+      await ledger.reserve({ sessionId: created.id, callId, reservationUsd: 0.1, now: new Date() });
+      await ledger.complete(created.id, callId, usage(output));
+    }
+    // An estimated (uncertain) call does not count.
+    await ledger.reserve({ sessionId: created.id, callId: "cut", reservationUsd: 0.1, now: new Date() });
+    await ledger.markUncertain(created.id, "cut", usage(5_000));
+    expect(await ledger.medianOutputTokens(created.id)).toBe(300);
+  });
+
   it("never overspends under concurrent reservations", async () => {
     const { created } = await session(1);
     const outcomes = await Promise.all(
