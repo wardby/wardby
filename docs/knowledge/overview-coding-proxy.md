@@ -11,9 +11,9 @@ sources:
   - id: session
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L978-L1020
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L1041-L1094
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/providers/coding-proxy/proxy.ts#L1041-L1120
   - id: plan
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/registry/service.ts#L585-L632
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/providers/coding-proxy/registry/service.ts#L658-L706
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -36,17 +36,17 @@ wardby:
     - id: model
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/proxy.ts
-      lines: [1041, 1094]
+      lines: [1041, 1120]
       symbol: CodingProxy.execute
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:b439b84431007b244f246836807cbae4b4a075c4bf1a1f618c11877e7d0082b7
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:a30509bcd07e37f05a6044e2403708426f2973f158dc5419a91ffc735661b369
     - id: plan
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/registry/service.ts
-      lines: [585, 632]
+      lines: [658, 706]
       symbol: RegistryService.planLockfile / runPlan
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:f3a6b41a918c6c88275abf0f72536341483cdcd1d3aceaf8e3b7e4821513413d
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:9992a13668e202cd9c686a5bb1a097ef3ee119fdcae9ff889260717430fc7b36
   confidence: high
 ---
 
@@ -67,6 +67,6 @@ The area owns model-session and request accounting, registry facts and approvals
 
 [^session]: src/providers/coding-proxy/proxy.ts, lines 978-1020.
 
-[^model]: src/providers/coding-proxy/proxy.ts, lines 1041-1094.
+[^model]: src/providers/coding-proxy/proxy.ts, lines 1041-1120.
 
-[^plan]: src/providers/coding-proxy/registry/service.ts, lines 585-632.
+[^plan]: src/providers/coding-proxy/registry/service.ts, lines 658-706.

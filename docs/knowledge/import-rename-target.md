@@ -11,7 +11,7 @@ sources:
   - id: abort
     url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/import/index.ts#L98-L106
   - id: upsert
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/import/create.ts#L134-L155
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/import/create.ts#L150-L175
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -34,10 +34,10 @@ wardby:
     - id: upsert
       repo: github:wardby/wardby
       path: src/import/create.ts
-      lines: [134, 155]
+      lines: [150, 175]
       symbol: createFromBundle
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
-      spanHash: sha256:010d97c925923a101c0cedb4d148e39f6ba70aec7b0f4e1d2355fddb4855e6a8
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:f514858615a3799a9b5212c2301dd43013c9682f87166c32b7b70e35907c8c09
   confidence: high
 ---
 
@@ -49,4 +49,4 @@ Preflight treats an occupied prefixed rename target as fatal even under the rena
 
 [^abort]: src/import/index.ts, lines 98-106.
 
-[^upsert]: src/import/create.ts, lines 134-155.
+[^upsert]: src/import/create.ts, lines 150-175.

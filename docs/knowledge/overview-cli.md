@@ -13,7 +13,7 @@ sources:
   - id: import
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/import/index.ts#L72-L106
   - id: serve
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/cli.ts#L1013-L1030
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/cli.ts#L1017-L1034
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -43,9 +43,9 @@ wardby:
     - id: serve
       repo: github:wardby/wardby
       path: src/cli.ts
-      lines: [1013, 1030]
+      lines: [1017, 1034]
       symbol: serve
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
       spanHash: sha256:b2e4a9d5adf84699138e39a87b134e8eb8bbec07ceaf842e54ba3bcabef18116
   confidence: high
 ---
@@ -71,4 +71,4 @@ This area owns local state files, command orchestration and import reports. Dura
 
 [^import]: src/import/index.ts, lines 72-106.
 
-[^serve]: src/cli.ts, lines 1013-1030.
+[^serve]: src/cli.ts, lines 1017-1034.

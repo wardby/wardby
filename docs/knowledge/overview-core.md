@@ -9,11 +9,11 @@ sources:
   - id: schedule
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/scheduler.ts#L55-L82
   - id: dispatch
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/dispatch.ts#L634-L684
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/core/dispatch.ts#L658-L716
   - id: engine
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/engine-native.ts#L90-L156
   - id: finish
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L499-L516
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/core/runner.ts#L518-L534
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -29,10 +29,10 @@ wardby:
     - id: dispatch
       repo: github:wardby/wardby
       path: src/core/dispatch.ts
-      lines: [634, 684]
+      lines: [658, 716]
       symbol: dispatchRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:2e9f0d8d431b6e7d2571f0126a39763be2f87f8ff2f0147a17c7fb69f144054e
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:c39e7a16680eeb8e52c7d75fd70c0f30853f70728b47972af7429ef9e78837f0
     - id: engine
       repo: github:wardby/wardby
       path: src/core/engine-native.ts
@@ -43,10 +43,10 @@ wardby:
     - id: finish
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [499, 516]
+      lines: [518, 534]
       symbol: finishRunClaimed
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:258b0ccb1bf328fef95a5e459858eb3f02ecc3d600f6ff4a7aae562a6416936c
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:3f3f1310080c30aafa7b564d9439c9d40683faee04c506be8ae831628709ac33
   confidence: high
 ---
 
@@ -65,8 +65,8 @@ Core orchestrates Run, delegation edges, budget reservations and integration sta
 
 [^schedule]: src/core/scheduler.ts, lines 55-82.
 
-[^dispatch]: src/core/dispatch.ts, lines 634-684.
+[^dispatch]: src/core/dispatch.ts, lines 658-716.
 
 [^engine]: src/core/engine-native.ts, lines 90-156.
 
-[^finish]: src/core/runner.ts, lines 499-516.
+[^finish]: src/core/runner.ts, lines 518-534.
