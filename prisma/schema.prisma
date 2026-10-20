@@ -521,9 +521,16 @@ model CodingRun {
   workerImage           String?
   /// Claude Code's tool-runner image, resolved from the agent's toolchain at dispatch; null for Codex runs.
   toolImage             String?
+  /// What the run may spend now: its base, plus every overrun top-up granted so
+  /// far (on runs with budgetLimitUsd). Budget groups and run trees hold it.
   budgetReservedUsd     Decimal             @db.Decimal(10, 6)
-  /// The budget before the agent's allowed overrun; budgetReservedUsd is the enforced limit. Null on older runs.
+  /// The budget before the agent's allowed overrun. Null on older runs.
   budgetBaseUsd         Decimal?            @db.Decimal(10, 6)
+  /// The most the run may spend: its base budget raised by the agent's allowed
+  /// overrun, never reserved up front; top-ups raise budgetReservedUsd toward it
+  /// only from room its group and run tree have left. Null = no top-ups (older
+  /// runs, or no allowed overrun): budgetReservedUsd is the limit.
+  budgetLimitUsd        Decimal?            @db.Decimal(10, 6)
   /// What set budgetReservedUsd below the agent's own budget at dispatch:
   /// run-tree, day, week or month. Null = the agent's own budget.
   budgetLimitedBy       String?
@@ -689,12 +696,14 @@ enum CodingProxyRequestStatus {
 
 enum RunBudgetEventKind {
   refused
+  /// A coding run's overrun top-up found no room in its budget group or run tree.
+  overrun_unavailable
 }
 
 /// One budget decision about a run: a refusal by the coding proxy or at
-/// dispatch, with the numbers behind it. `limit` names what refused it:
-/// run, run-tree, day, week or month. `details` holds amounts, the model and
-/// the turn; never secrets or message text.
+/// dispatch, or an overrun top-up with no room, with the numbers behind it.
+/// `limit` names what refused it: run, run-tree, day, week or month. `details`
+/// holds amounts, the model and the turn; never secrets or message text.
 model RunBudgetEvent {
   id      String             @id @default(cuid())
   runId   String
@@ -941,7 +950,8 @@ model RegistryAllowance {
   ecosystem  String
   name       String
   /// Set only in an audit-mode run: the top-level audited package whose metadata or file declared this
-  /// name (its own name for a top-level audited package). Null = a normal allowance.
+  /// name (its own name for a top-level audited package; empty when a lockfile plan could not tell). Null = a
+  /// normal allowance.
   auditedVia String?
   createdAt  DateTime  @default(now())
   run        CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
@@ -1810,6 +1820,9 @@ model LocalReview {
   pullRequest   LocalPullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
   agentId       String
   headSha       String
+  /// headSha when this review read every file of it (null otherwise): the head a later
+  /// re-review may compare from and still APPROVE (repo_pr_read's lastCoveredSha).
+  coveredSha    String?
   /// APPROVE | CHANGES_REQUESTED | COMMENT
   verdict       String
   summary       String

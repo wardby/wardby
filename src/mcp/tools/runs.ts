@@ -94,6 +94,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           packageAuditMode: true,
           budgetBaseUsd: true,
           budgetReservedUsd: true,
+          budgetLimitUsd: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -147,6 +148,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
         ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),
+        // The most overrun top-ups may raise budgetReservedUsd to; absent = the reservation is the limit.
+        ...(codingRun?.budgetLimitUsd != null ? { budgetLimitUsd: Number(codingRun.budgetLimitUsd) } : {}),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),

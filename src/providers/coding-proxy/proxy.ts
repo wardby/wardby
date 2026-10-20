@@ -15,7 +15,7 @@ import {
   terminalUsageFromSseFrame,
 } from "./metering.js";
 import { conversationKey, estimateHold } from "./hold.js";
-import { estimateInterrupted, type InterruptedEstimate } from "./interrupted.js";
+import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import type {
   CredentialResolver,
@@ -140,6 +140,14 @@ interface ParsedRequest {
 interface RelayProgress {
   /** The output tokens the request reserved for. */
   maxOutputTokens: number;
+  /** A streaming request: until its response starts, the provider has generated nothing. */
+  stream: boolean;
+  /** Set once the upstream response has started (its headers arrived). */
+  responseStarted?: boolean;
+  /** UTF-8 bytes of the request body the proxy forwarded. */
+  bodyBytes: number;
+  /** The request's input estimated at reserve time from its conversation's previous reply. */
+  previousInput?: ProxyUsage;
   /** UTF-8 bytes of output text relayed to the client. */
   relayedOutputBytes: number;
   /** The Anthropic stream's usage tracker, once a stream is being relayed. */
@@ -1081,6 +1089,7 @@ export class CodingProxy {
     const conversation = conversationKey(session.protocol, parsed.body);
     // A failed lookup holds the ceiling: never a reason to fail the request.
     const previous = conversation ? await this.ledger.previousReply(session.id, conversation).catch(() => null) : null;
+    const holdNow = this.now();
     const hold = estimateHold({
       protocol: session.protocol,
       model: parsed.model,
@@ -1088,8 +1097,10 @@ export class CodingProxy {
       maxOutputTokens: parsed.maxOutputTokens,
       pricing: snapshot,
       previous,
-      now: this.now(),
+      now: holdNow,
     });
+    // An interrupted reply's input, from the same previous reply and clock as the hold.
+    const previousPrompt = previousInput({ model: parsed.model, bodyBytes, previous, pricing: snapshot, now: holdNow });
     const reservationUsd = hold.holdUsd;
     const holdAudit = {
       reservationUsd,
@@ -1170,7 +1181,13 @@ export class CodingProxy {
     const deadlineTimer = setTimeout(() => controller.abort(), remainingMs);
     deadlineTimer.unref();
     this.trackActive(session.id, controller);
-    const progress: RelayProgress = { maxOutputTokens: parsed.maxOutputTokens, relayedOutputBytes: 0 };
+    const progress: RelayProgress = {
+      maxOutputTokens: parsed.maxOutputTokens,
+      stream: parsed.stream,
+      bodyBytes,
+      ...(previousPrompt ? { previousInput: previousPrompt } : {}),
+      relayedOutputBytes: 0,
+    };
     const cleanupActive = () => {
       clearTimeout(deadlineTimer);
       const active = this.activeRequests.get(session.id);
@@ -1201,6 +1218,7 @@ export class CodingProxy {
         redirect: "error",
         signal: controller.signal,
       });
+      progress.responseStarted = true;
     } catch {
       cleanupActive();
       await this.markUncertain(
@@ -1462,8 +1480,11 @@ export class CodingProxy {
       const estimate = estimateInterrupted(
         {
           ...progress.anthropic?.partial(),
+          beforeResponse: progress.stream && !progress.responseStarted,
           relayedOutputBytes: progress.relayedOutputBytes,
           ...hints,
+          ...(progress.previousInput ? { previous: progress.previousInput } : {}),
+          bodyBytes: progress.bodyBytes,
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
           ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
@@ -1477,10 +1498,29 @@ export class CodingProxy {
   }
 }
 
-/** UTF-8 bytes of output text in a relayed SSE frame: OpenAI text deltas, Anthropic text_delta blocks. */
+/** OpenAI Responses events whose string `delta` is generated output: text, tool input, reasoning. */
+const OPENAI_OUTPUT_DELTAS = new Set([
+  "response.output_text.delta",
+  "response.refusal.delta",
+  "response.function_call_arguments.delta",
+  "response.custom_tool_call_input.delta",
+  "response.reasoning_text.delta",
+  "response.reasoning_summary_text.delta",
+]);
+
+/** The generated-output field of each Anthropic content_block_delta type (signatures are not output). */
+const ANTHROPIC_OUTPUT_DELTAS: Record<string, string> = {
+  text_delta: "text",
+  input_json_delta: "partial_json",
+  thinking_delta: "thinking",
+};
+
+/**
+ * UTF-8 bytes of generated output in a relayed SSE frame: text, tool-call input and thinking or
+ * reasoning deltas, which are most of a coding agent's output.
+ */
 function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
-  const type = protocol === "anthropic-messages" ? "content_block_delta" : "response.output_text.delta";
-  if (!frame.includes(type)) return 0;
+  if (!frame.includes(protocol === "anthropic-messages" ? "content_block_delta" : ".delta")) return 0;
   try {
     const data = frame
       .split("\n")
@@ -1488,10 +1528,17 @@ function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
       .map((line) => line.slice(5).trimStart())
       .join("\n");
     const value = JSON.parse(data) as Record<string, unknown> | null;
-    if (!value || value.type !== type) return 0;
-    if (protocol === "openai-responses") return typeof value.delta === "string" ? Buffer.byteLength(value.delta) : 0;
+    if (!value || typeof value.type !== "string") return 0;
+    if (protocol === "openai-responses") {
+      return OPENAI_OUTPUT_DELTAS.has(value.type) && typeof value.delta === "string"
+        ? Buffer.byteLength(value.delta)
+        : 0;
+    }
+    if (value.type !== "content_block_delta") return 0;
     const delta = value.delta as Record<string, unknown> | undefined;
-    return delta?.type === "text_delta" && typeof delta.text === "string" ? Buffer.byteLength(delta.text) : 0;
+    const field = typeof delta?.type === "string" ? ANTHROPIC_OUTPUT_DELTAS[delta.type] : undefined;
+    const text = field ? delta?.[field] : undefined;
+    return typeof text === "string" ? Buffer.byteLength(text) : 0;
   } catch {
     return 0;
   }

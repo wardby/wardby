@@ -175,6 +175,8 @@ export type ClaudeStreamEvent =
 export async function* mapClaudeStream(
   events: AsyncIterable<ClaudeStreamEvent>,
   priceUsd: (usage: LlmUsage) => number,
+  /** Called at message_start: the response has started, and output may be billed from here on. */
+  onResponseStarted?: () => void,
 ): AsyncIterable<LlmStreamEvent> {
   const toolBuffers = new Map<number, { id: string; name: string; argsJson: string }>();
   let start: ClaudeUsage = {};
@@ -184,6 +186,7 @@ export async function* mapClaudeStream(
   for await (const ev of events) {
     switch (ev.type) {
       case "message_start":
+        onResponseStarted?.();
         start = ev.message.usage ?? {};
         outputTokens = ev.message.usage?.output_tokens ?? 0;
         break;

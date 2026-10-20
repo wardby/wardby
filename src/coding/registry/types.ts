@@ -154,6 +154,13 @@ export interface DeclaredDependency {
   key: string;
   name: string;
   range: string;
+  /** PyPI only: the extras the declaring line asks of the dependency
+   *  (`uvicorn[standard]`), normalized. Absent when it asks none. */
+  extras?: readonly string[];
+  /** PyPI only: the parent's extras the line is gated on (`extra == "test"`);
+   *  an empty list is a gate that could not be read, never followed. Absent
+   *  for an ungated line. */
+  when?: readonly string[];
 }
 
 /** One installed package a lockfile claims, where it installs it. None of
@@ -194,6 +201,11 @@ export interface ParsedLockfile {
    *  to (npm: the nearest ancestor `node_modules/<key>`), or undefined
    *  (not installed, or a local project). */
   resolve(fromPath: string, key: string): LockfileEntry | undefined;
+  /** Every entry `key` may resolve to from `fromPath`, when the lockfile can
+   *  pin one name at several versions without saying which a parent uses
+   *  (a requirements file's marker-split pins); the plan keeps those inside
+   *  the declared range. Omitted when `resolve` is exact. */
+  resolveAll?(fromPath: string, key: string): readonly LockfileEntry[];
   /** The dependency keys the lockfile itself lists for the entry at
    *  `path`, when `resolve` answers only for those (pnpm, yarn). Such a
    *  lockfile can be parsed in a worker thread and shipped back as an edge
@@ -220,6 +232,12 @@ export interface VersionFact {
  *  registry reads only. Every decision (integrity, edges, reachability,
  *  release age, advisories) is the registry core's. */
 export interface LockfilePlanSupport {
+  /** What an approval grants. `versions` (the default): exact name@version
+   *  pairs, each download served directly and checked against the approved
+   *  integrity (npm: one tarball per version). `names`: an allowance for the
+   *  name only, so downloads keep every usual per-file check (PyPI: a
+   *  release has many files, wheels only, each with its own release age). */
+  readonly approves?: "versions" | "names";
   /** Parse a lockfile. Throws a RegistryError for one it cannot verify
    *  (unsupported version: 400 `wardby_lockfile_unsupported`; invalid:
    *  400 `wardby_bad_request`; more than `maxEntries` entries: 413
@@ -227,8 +245,9 @@ export interface LockfilePlanSupport {
    *  route for this ecosystem, which a lockfile written through it records
    *  as the download source. */
   parse(body: string, options: { maxEntries: number; proxyRegistryUrl: string }): ParsedLockfile;
-  /** The registry's own record of one version, without its publish time;
-   *  null when the registry has no such version. */
+  /** The registry's own record of one version, with or without its publish
+   *  time (`publishedAt` null: read with fetchPublishTimes); null when the
+   *  registry has no such version. */
   fetchVersionFact(
     name: string,
     version: string,
@@ -247,6 +266,9 @@ export interface LockfilePlanSupport {
   /** Whether a dependency declared as `range` accepts `version`, as the
    *  client itself decides it when it reuses a locked version. */
   edgeSatisfies(version: string, range: string): boolean;
+  /** The dependencies of a version installed with `extras` (PyPI), from its
+   *  fact; omitted when every declared dependency is always an edge (npm). */
+  dependenciesOf?(fact: VersionFact, extras: readonly string[]): readonly DeclaredDependency[];
   /** Whether `body` should be parsed in a worker thread rather than on the
    *  proxy's event loop (a YAML or yarn lockfile, which is far costlier to
    *  read than JSON). Its parse must provide `dependencyKeys`. */

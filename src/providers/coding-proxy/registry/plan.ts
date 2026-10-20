@@ -18,8 +18,13 @@
  *   edges, through versions old enough and without a HIGH/CRITICAL advisory
  *   (one the run's accepted set waives does not count; malware always does).
  *
+ * PyPI dependency lines may be gated on extras: an entry is expanded with the
+ * extras it is installed with (a start's allowlist entry's, then those its
+ * parents' lines ask of it), and a plain install follows none.
+ *
  * A refused entry refuses itself and whatever is reachable only through it;
- * everything else is approved, as exact name@version pairs. In package
+ * everything else is approved, as exact name@version pairs (an ecosystem
+ * that `approves: "names"` turns them into name allowances). In package
  * audit mode every registry entry is a start as well: one the allowlist does
  * not reach is approved when it passes every other check, marked with its
  * audit verdict (and, in `full`, a version kept only past non-malware
@@ -157,12 +162,16 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
   // passes the fact checks below (integrity, release age, advisories), and
   // edges are still followed only inside declared ranges.
   const starts = new Set<LockfileEntry>();
+  // The extras each reached entry is installed with (PyPI): a start's are its
+  // allowlist entry's, a child's those its parents' lines ask of it.
+  const extrasOf = new Map<LockfileEntry, Set<string>>();
   for (const entry of lockfile.entries) {
     if (entry.kind !== "registry") continue;
     const root = matchRoot(input.roots, adapter.normalizeName(entry.name));
     if (!root) continue;
     if (root.range && !safeSatisfies(adapter, entry.version, root.range)) continue;
     starts.add(entry);
+    extrasOf.set(entry, new Set(root.extras ?? []));
   }
 
   // Breadth first over verified edges, fetching facts one layer at a time
@@ -194,7 +203,7 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     }
     signal.throwIfAborted();
     await loadFacts(input, layer, outcomes);
-    const next: LockfileEntry[] = [];
+    const next = new Set<LockfileEntry>();
     for (const entry of layer) {
       const outcome = outcomes.get(versionKey(entry.name, entry.version))!;
       if ("refusal" in outcome) {
@@ -223,19 +232,37 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
       }
       candidates.add(entry);
       const children: LockfileEntry[] = [];
-      for (const dependency of fact.dependencies) {
-        const child = lockfile.resolve(entry.path, dependency.key);
-        if (!child || child.kind !== "registry" || child.name !== dependency.name) continue;
-        if (!support.edgeSatisfies(child.version, dependency.range)) continue;
-        children.push(child);
-        if (!visited.has(child)) {
-          visited.add(child);
-          next.push(child);
+      const dependencies = support.dependenciesOf
+        ? support.dependenciesOf(fact, [...(extrasOf.get(entry) ?? [])].sort())
+        : fact.dependencies;
+      for (const dependency of dependencies) {
+        const resolved = lockfile.resolveAll
+          ? lockfile.resolveAll(entry.path, dependency.key)
+          : [lockfile.resolve(entry.path, dependency.key)];
+        for (const child of resolved) {
+          if (!child || child.kind !== "registry" || child.name !== dependency.name) continue;
+          if (!support.edgeSatisfies(child.version, dependency.range)) continue;
+          children.push(child);
+          const asked = dependency.extras ?? [];
+          if (!visited.has(child)) {
+            visited.add(child);
+            extrasOf.set(child, new Set(asked));
+            next.add(child);
+            continue;
+          }
+          // Reached again with extras it lacked: expanded again, now with them
+          // (extras only grow, so this ends).
+          const known = extrasOf.get(child) ?? new Set<string>();
+          if (asked.some((extra) => !known.has(extra))) {
+            for (const extra of asked) known.add(extra);
+            extrasOf.set(child, known);
+            next.add(child);
+          }
         }
       }
       edges.set(entry, children);
     }
-    layer = next;
+    layer = [...next];
   }
 
   // One advisory lookup for every candidate version.
@@ -418,6 +445,7 @@ async function loadFacts(input: PlanInput, layer: readonly LockfileEntry[], outc
   if (missing.length === 0) return;
 
   const fresh = new Map<string, VersionFact>();
+  const complete: StoredVersionFact[] = [];
   await eachLimited(missing, input.factConcurrency ?? DEFAULT_PLAN_FACT_CONCURRENCY, async ({ name, version }) => {
     const key = versionKey(name, version);
     try {
@@ -432,6 +460,13 @@ async function loadFacts(input: PlanInput, layer: readonly LockfileEntry[], outc
         });
         return;
       }
+      // A registry that gives the publish time with the version (PyPI) needs no second read.
+      if (fact.publishedAt) {
+        const stored: StoredVersionFact = { ...fact, publishedAt: fact.publishedAt };
+        complete.push(stored);
+        outcomes.set(key, checkedFact(input, stored));
+        return;
+      }
       fresh.set(key, fact);
     } catch (error) {
       if (signal.aborted) throw error;
@@ -442,7 +477,6 @@ async function loadFacts(input: PlanInput, layer: readonly LockfileEntry[], outc
 
   const byName = new Map<string, string[]>();
   for (const fact of fresh.values()) byName.set(fact.name, [...(byName.get(fact.name) ?? []), fact.version]);
-  const complete: StoredVersionFact[] = [];
   await eachLimited(
     [...byName.entries()],
     input.timeConcurrency ?? DEFAULT_PLAN_TIME_CONCURRENCY,
@@ -508,5 +542,8 @@ function upstreamRefusal(error: unknown): Omit<PlanRefusal, "name" | "version"> 
     return { code: "wardby_metadata_too_large", reason: error.message };
   if (error instanceof RegistryError && error.code === "wardby_package_not_found")
     return { code: "wardby_package_not_found", reason: error.message };
+  // A release with nothing the registry may serve (PyPI: no wheel) stays so.
+  if (error instanceof RegistryError && error.code === "wardby_file_not_allowed")
+    return { code: "wardby_file_not_allowed", reason: error.message, intrinsic: true };
   return { code: "wardby_upstream_error", reason: "the registry could not be read for it; try again" };
 }

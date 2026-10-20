@@ -5,7 +5,7 @@
  * stays exactly what each concrete adapter (anthropic.ts, bedrock.ts) has in
  * common, and nothing more.
  */
-import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
+import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmStreamHooks, LlmToolDef } from "./types.js";
 import {
   toClaudeRequest,
   withCacheBreakpoints,
@@ -51,7 +51,7 @@ export class ClaudeLlmProvider implements CatalogLlmAdapter {
     return new ClaudeLlmProvider(this.client, pinnedLookup(entry));
   }
 
-  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
+  async *stream(req: LlmRequest, signal?: AbortSignal, hooks?: LlmStreamHooks): AsyncIterable<LlmStreamEvent> {
     // Defence in depth behind config-time validation: a level the model
     // doesn't accept would fail the whole call, so it is dropped here.
     const { effort, ...rest } = req;
@@ -61,7 +61,7 @@ export class ClaudeLlmProvider implements CatalogLlmAdapter {
       { model: req.model, ...claudeReq },
       { signal },
     ) as AsyncIterable<ClaudeStreamEvent>;
-    yield* mapClaudeStream(raw, (usage) => this.priceUsd(req.model, usage));
+    yield* mapClaudeStream(raw, (usage) => this.priceUsd(req.model, usage), hooks?.onResponseStarted);
   }
 
   async countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number> {

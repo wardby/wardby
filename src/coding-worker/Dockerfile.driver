@@ -57,9 +57,19 @@ COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs
 # package registry's refusals for the run, which pip and uv don't print.
 COPY src/coding-worker/registry-refusals.mjs ./coding-worker/registry-refusals.mjs
 COPY src/coding-worker/wardby-packages.mjs ./coding-worker/wardby-packages.mjs
-RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs \
+# `wardby-packages plan` and the uv shim (uv-shim.mjs + uv-lock.mjs), linked
+# as uv: verify a Python lockfile with the registry proxy (pypi-plan.mjs,
+# POST /registry/pypi/-/plan) before an install, and point a uv.lock's PyPI
+# URLs at the proxy for the command. The real uv is in the node-python image.
+COPY src/coding-worker/pypi-plan.mjs ./coding-worker/pypi-plan.mjs
+COPY src/coding-worker/uv-lock.mjs ./coding-worker/uv-lock.mjs
+COPY src/coding-worker/uv-shim.mjs ./coding-worker/uv-shim.mjs
+RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-worker/uv-shim.mjs \
     && ln -s ../coding-worker/wardby-packages.mjs /opt/wardby/bin/wardby-packages \
-    && test "$(bash -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages
+    && ln -s ../coding-worker/uv-shim.mjs /opt/wardby/bin/uv \
+    && test "$(bash -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages \
+    && test "$(bash -lc 'command -v uv')" = /opt/wardby/bin/uv \
+    && { /opt/wardby/bin/uv --version 2>&1 || true; } | grep -q "uv is not installed"
 # Fail the build, not every run, when a module the worker imports is missing:
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on

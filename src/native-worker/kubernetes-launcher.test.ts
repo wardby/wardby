@@ -6,6 +6,18 @@ import { KubernetesNativeWorkerLauncher } from "./kubernetes-launcher.js";
 import type { WorkerInput } from "./protocol.js";
 import type { Power } from "../core/power.js";
 
+const k8sWarn = vi.hoisted(() => vi.fn());
+vi.mock("../core/logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../core/logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    if (bindings.module === "native-kubernetes-launcher") vi.spyOn(log, "warn").mockImplementation(k8sWarn);
+    return log;
+  });
+  return real;
+});
+
 const ns = "wardby-runs";
 const image = `registry.local:5001/wardby-native-worker@sha256:${"a".repeat(64)}`;
 const input = {
@@ -14,7 +26,15 @@ const input = {
 } as unknown as WorkerInput;
 const names = nativeKubernetesNames("run_k1");
 
-function setup(options: { probe?: number; serviceIp?: string | null; power?: Power; readyTimeoutMs?: number } = {}) {
+function setup(
+  options: {
+    probe?: number;
+    serviceIp?: string | null;
+    power?: Power;
+    readyTimeoutMs?: number;
+    diagnosticTimeoutMs?: number;
+  } = {},
+) {
   const api = new FakeKubernetesApi();
   api.namespaces.add(ns);
   if (options.serviceIp !== null) {
@@ -46,6 +66,7 @@ function setup(options: { probe?: number; serviceIp?: string | null; power?: Pow
     pollMs: 1,
     sleep,
     power: options.power,
+    diagnosticTimeoutMs: options.diagnosticTimeoutMs,
   });
   return { api, launcher, proven };
 }
@@ -234,6 +255,128 @@ describe("KubernetesNativeWorkerLauncher", () => {
     expect(proven).not.toHaveBeenCalled();
     expect(exists(api, "secret", names.secret)).toBe(false);
     expect(exists(api, "networkpolicy", names.policy)).toBe(false);
+  });
+});
+
+describe("KubernetesNativeWorkerLauncher worker exit logging", () => {
+  const secret = "fake-secret-value-123";
+  const capability = input.gateway!.capability;
+  const fail = async (api: FakeKubernetesApi, exitCode: number) => {
+    const pod = (await api.readPod(ns, names.pod))!;
+    api.put("pod", ns, {
+      ...pod,
+      status: { phase: "Failed", containerStatuses: [{ name: "worker", state: { terminated: { exitCode } } }] },
+    } as V1Pod);
+  };
+
+  it("logs the worker's log tail on a non-zero exit, masking its capability and secret values", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: async () => [secret] });
+    api.logs.set(`${ns}/${names.pod}/worker`, `starting\ntoken ${capability}\nsecret ${secret}\nError: boom\n`);
+    await fail(api, 2);
+    expect(await handle.exited).toBe(2);
+    expect(k8sWarn).toHaveBeenCalledTimes(1);
+    const [fields, message] = k8sWarn.mock.calls[0];
+    expect(message).toBe("native worker exited non-zero");
+    expect(fields).toMatchObject({ pod: names.pod, code: 2 });
+    expect(fields.stderrTail).toContain("Error: boom");
+    expect(fields.stderrTail).toContain("[REDACTED]");
+    expect(JSON.stringify(k8sWarn.mock.calls)).not.toContain(capability);
+    expect(JSON.stringify(k8sWarn.mock.calls)).not.toContain(secret);
+  });
+
+  it("masks a value the bounded log read cut at its start", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: async () => [secret] });
+    // Over the read's line bound, the oldest line holding the value's tail is where the read begins.
+    const lines = [`x${secret}`.slice(0, 5), secret.slice(4), ...Array.from({ length: 99 }, (_, i) => `line ${i}`)];
+    api.logs.set(`${ns}/${names.pod}/worker`, lines.join("\n"));
+    await fail(api, 1);
+    expect(await handle.exited).toBe(1);
+    const [fields] = k8sWarn.mock.calls[0];
+    expect(fields.stderrTail).toContain("line 98");
+    expect(fields.stderrTail).not.toContain(secret.slice(4));
+  });
+
+  it("masks a secret's suffix at the start of a short read (a split long line or a rotated log)", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: async () => [secret] });
+    // Far fewer lines than the read's bound, yet the first returned line begins inside the value.
+    api.logs.set(`${ns}/${names.pod}/worker`, `${secret.slice(4)} rest of the line ${"r".repeat(60)}\nError: boom\n`);
+    await fail(api, 1);
+    expect(await handle.exited).toBe(1);
+    const [fields] = k8sWarn.mock.calls[0];
+    expect(fields.stderrTail).toContain("Error: boom");
+    expect(fields.stderrTail).not.toContain(secret.slice(4));
+    expect(fields.stderrTail).not.toContain("value-123");
+  });
+
+  it("reports the exit promptly when the log read or the secret values read never answers", async () => {
+    k8sWarn.mockClear();
+    const hungLog = setup({ diagnosticTimeoutMs: 50 });
+    hungLog.api.readLogTail = () => new Promise<string>(() => {});
+    const first = await hungLog.launcher.launch(input, { secretValues: async () => [secret] });
+    await fail(hungLog.api, 1);
+    const started = Date.now();
+    expect(await first.exited).toBe(1);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(k8sWarn.mock.calls[0][0]).toEqual({ pod: names.pod, code: 1, stderrTailOmitted: "log_read_failed" });
+
+    k8sWarn.mockClear();
+    const hungSecrets = setup({ diagnosticTimeoutMs: 50 });
+    hungSecrets.api.logs.set(`${ns}/${names.pod}/worker`, `leak ${capability}\n`);
+    const second = await hungSecrets.launcher.launch(input, { secretValues: () => new Promise<string[]>(() => {}) });
+    await fail(hungSecrets.api, 1);
+    expect(await second.exited).toBe(1);
+    expect(k8sWarn.mock.calls[0][0]).toEqual({ pod: names.pod, code: 1, stderrTailOmitted: "secrets_unavailable" });
+  });
+
+  it("tells a failed log read from an empty log", async () => {
+    k8sWarn.mockClear();
+    const refused = setup();
+    refused.api.readLogTail = () => Promise.reject(new Error("forbidden"));
+    const first = await refused.launcher.launch(input, { secretValues: async () => [] });
+    await fail(refused.api, 1);
+    expect(await first.exited).toBe(1);
+    expect(k8sWarn.mock.calls[0][0]).toEqual({ pod: names.pod, code: 1, stderrTailOmitted: "log_read_failed" });
+
+    k8sWarn.mockClear();
+    const empty = setup();
+    const second = await empty.launcher.launch(input, { secretValues: async () => [] });
+    await fail(empty.api, 1);
+    expect(await second.exited).toBe(1);
+    expect(k8sWarn.mock.calls[0][0]).toEqual({ pod: names.pod, code: 1 });
+  });
+
+  it("keeps the log's last line when the selected lines are long", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: async () => [] });
+    const long = Array.from({ length: 150 }, (_, i) => `${i} ${"j".repeat(1_000)}`);
+    api.logs.set(`${ns}/${names.pod}/worker`, [...long, "native sandbox worker failed: boom"].join("\n"));
+    await fail(api, 1);
+    expect(await handle.exited).toBe(1);
+    expect(k8sWarn.mock.calls[0][0].stderrTail).toMatch(/native sandbox worker failed: boom$/);
+  });
+
+  it("logs no tail when the secret values cannot be read (fail closed), and nothing on a clean exit", async () => {
+    k8sWarn.mockClear();
+    const { api, launcher } = setup();
+    const handle = await launcher.launch(input, { secretValues: () => Promise.reject(new Error("read failed")) });
+    api.logs.set(`${ns}/${names.pod}/worker`, `leak ${capability}\n`);
+    await fail(api, 1);
+    expect(await handle.exited).toBe(1);
+    expect(k8sWarn.mock.calls[0][0]).toEqual({ pod: names.pod, code: 1, stderrTailOmitted: "secrets_unavailable" });
+
+    k8sWarn.mockClear();
+    const clean = setup();
+    const ok = await clean.launcher.launch(input, { secretValues: async () => [] });
+    await fail(clean.api, 0);
+    expect(await ok.exited).toBe(0);
+    expect(k8sWarn).not.toHaveBeenCalled();
   });
 });
 

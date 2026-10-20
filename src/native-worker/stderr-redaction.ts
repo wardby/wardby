@@ -1,6 +1,7 @@
 /**
  * The sandbox worker's stderr is not a redacted channel by itself: a failed worker's stderr tail
- * reaches the server's log (docker-launcher.ts), and a tool's host calls hand the worker secret
+ * reaches the server's log (docker-launcher.ts, kubernetes-launcher.ts; the launcher masks it
+ * again, as the worker is untrusted), and a tool's host calls hand the worker secret
  * values (`secrets.get`). The worker knows those exact values (raw and JSON-escaped), so it masks
  * them in everything it writes to stderr — its own failure line and the shared logger's lines —
  * with the shared redactor's spans (secretSpans: the union of every occurrence, overlapping ones

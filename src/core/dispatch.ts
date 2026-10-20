@@ -276,13 +276,18 @@ export function budgetExhaustedError(constraint: BudgetConstraint): string {
  * agents to groups is not blocked. It serializes grouped coding dispatches
  * across all groups; each holds it only for one short transaction.
  */
-const GROUP_DISPATCH_LOCK_SQL = 'LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE';
+export const GROUP_DISPATCH_LOCK_SQL = 'LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE';
 
 interface CodingBudgetReservation {
-  /** The run's limit: its base raised by the agent's allowedOverrunPercent, then tightened. */
+  /** What is reserved at dispatch: the run's base budget (CodingRun.budgetReservedUsd). */
   budgetUsd: number;
-  /** The run's base budget: the requested ceiling tightened the same way, without the overrun. */
+  /** The run's base budget: the requested ceiling tightened by its group and run tree. */
   baseBudgetUsd: number;
+  /**
+   * The most the run may spend through top-ups: the requested ceiling raised by
+   * the agent's allowedOverrunPercent, never reserved. Null without an overrun.
+   */
+  limitUsd: number | null;
   /** The group period or run tree that held the reservation below the agent's own budget. */
   limitedBy?: BudgetConstraint;
   refusal?: string;
@@ -297,12 +302,14 @@ function floorToMicroUsd(usd: number): number {
 
 /**
  * A coding run's budget reservation: the requested base (override or the
- * agent's budgetUsd) and its limit (the base raised by the agent's
- * allowedOverrunPercent), each tightened by its budget group and run tree,
- * where every live in-flight run's unspent hold already counts as spent. The
- * limit is what is reserved (CodingRun.budgetReservedUsd); the base is kept
- * beside it (CodingRun.budgetBaseUsd). Both rounded down to 6 decimal places;
- * a limit less than that is refused.
+ * agent's budgetUsd) tightened by its budget group and run tree, where every
+ * live in-flight run's unspent hold already counts as spent. Only the base is
+ * reserved (CodingRun.budgetReservedUsd, and budgetBaseUsd beside it). The
+ * agent's allowedOverrunPercent raises the requested base to the run's limit
+ * (CodingRun.budgetLimitUsd), which is never reserved: the run may spend past
+ * its base only through top-ups its group and run tree have room for when it
+ * needs them (budget-topup.ts). Rounded down to 6 decimal places; a base less
+ * than that is refused.
  */
 async function reserveCodingBudget(
   tx: DispatchTx,
@@ -311,21 +318,27 @@ async function reserveCodingBudget(
   options: DispatchRunOptions,
 ): Promise<CodingBudgetReservation> {
   const overrunPercent = agent.allowedOverrunPercent;
-  const effective = await effectiveBudgetForRun(tx, agent, now, options.parentRunId, { overrunPercent });
+  const effective = await effectiveBudgetForRun(tx, agent, now, options.parentRunId);
   const requested = options.budgetUsdOverride ?? Number(agent.budgetUsd);
-  const budgetUsd = floorToMicroUsd(Math.min((requested * (100 + overrunPercent)) / 100, effective.effectiveBudgetUsd));
-  const baseBudgetUsd = floorToMicroUsd(Math.min(requested, effective.baseBudgetUsd ?? effective.effectiveBudgetUsd));
-  if (budgetUsd < MIN_RESERVATION_USD && effective.exhaustedBy) {
+  const baseBudgetUsd = floorToMicroUsd(Math.min(requested, effective.effectiveBudgetUsd));
+  if (baseBudgetUsd < MIN_RESERVATION_USD && effective.exhaustedBy) {
     return {
       budgetUsd: 0,
       baseBudgetUsd: 0,
+      limitUsd: null,
       refusal: budgetExhaustedError(effective.exhaustedBy),
       ...(effective.exhaustedDetail
         ? { refusalDetail: { limit: effective.exhaustedBy, detail: effective.exhaustedDetail } }
         : {}),
     };
   }
-  return { budgetUsd, baseBudgetUsd, ...(effective.limitedBy ? { limitedBy: effective.limitedBy } : {}) };
+  const limitUsd = overrunPercent > 0 ? floorToMicroUsd((requested * (100 + overrunPercent)) / 100) : null;
+  return {
+    budgetUsd: baseBudgetUsd,
+    baseBudgetUsd,
+    limitUsd: limitUsd !== null && limitUsd > baseBudgetUsd ? limitUsd : null,
+    ...(effective.limitedBy ? { limitedBy: effective.limitedBy } : {}),
+  };
 }
 
 /**
@@ -890,6 +903,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               toolImage,
               budgetReservedUsd: budgetUsd,
               budgetBaseUsd: codingBudget.baseBudgetUsd,
+              budgetLimitUsd: codingBudget.limitUsd,
               rootCodingRunId,
               mergeOrder,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,

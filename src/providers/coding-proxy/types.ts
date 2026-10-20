@@ -144,10 +144,10 @@ export interface ProxyLedger {
     estimate?: { usage: ProxyUsage; costUsd: number },
   ): Promise<void>;
   /**
-   * What an interrupted reply can be estimated from: the usage of the session's latest completed,
-   * non-estimated reply for this model, and the median output tokens of its completed replies.
+   * What an interrupted reply's output can be estimated from: the median output tokens of the
+   * session's completed replies for this model. Its input comes from previousReply.
    */
-  settlementHints(sessionId: string, model: string): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }>;
+  settlementHints(sessionId: string, model: string): Promise<{ medianOutputTokens?: number }>;
   /** The latest completed or uncertain request of a conversation, or null when it has none. */
   previousReply(sessionId: string, conversationKey: string): Promise<PreviousReply | null>;
   cancelSession(sessionId: string): Promise<void>;

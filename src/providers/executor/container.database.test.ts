@@ -112,6 +112,27 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("terminate reports whether it changed the row: true once, false when the run already ended", async () => {
+    const runningId = `container-term-running-${randomUUID()}`;
+    const doneId = `container-term-done-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: runningId, agentId, executionManaged: true, status: "running" } });
+      await db.run.create({ data: { id: doneId, agentId, executionManaged: true, status: "succeeded" } });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.terminate(runningId, "cancelled", "cancelled")).resolves.toBe(true);
+      await expect(store.terminate(runningId, "failed", "late")).resolves.toBe(false);
+      await expect(store.terminate(doneId, "cancelled", "cancelled")).resolves.toBe(false);
+      await expect(db.run.findUniqueOrThrow({ where: { id: runningId } })).resolves.toMatchObject({
+        status: "cancelled",
+      });
+      await expect(db.run.findUniqueOrThrow({ where: { id: doneId } })).resolves.toMatchObject({
+        status: "succeeded",
+      });
+    } finally {
+      await db.run.deleteMany({ where: { id: { in: [runningId, doneId] } } });
+    }
+  });
+
   it("refuses to claim a run that is no longer pending/running, and leaves no claim behind", async () => {
     const alreadyFailedRunId = `container-already-failed-${randomUUID()}`;
     try {

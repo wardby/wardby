@@ -104,6 +104,37 @@ url-dep@^1.0.0:
     ]);
     expect(failure(() => parse(classic, 3))).toEqual([413, "wardby_lockfile_too_large"]);
   });
+
+  it("stands in for the projects with the descriptors no entry depends on", () => {
+    const body = `# yarn lockfile v1
+
+a@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/a/-/a-1.0.0.tgz"
+  integrity sha512-a1
+  dependencies:
+    b "^1.0.0"
+
+a@^2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/a/-/a-2.0.0.tgz"
+  integrity sha512-a2
+
+b@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/b/-/b-1.0.0.tgz"
+  integrity sha512-b
+`;
+    const parsed = parse(body);
+    // Two workspaces declare a at different ranges: one project each.
+    expect(parsed.projects).toEqual([
+      { path: ".", dependencies: [{ key: "a", name: "a", range: "^1.0.0" }] },
+      { path: ".#1", dependencies: [{ key: "a", name: "a", range: "^2.0.0" }] },
+    ]);
+    expect(parsed.resolve(".", "a")).toMatchObject({ version: "1.0.0" });
+    expect(parsed.resolve(".#1", "a")).toMatchObject({ version: "2.0.0" });
+    expect(parsed.resolve(".", "b")).toBeUndefined();
+  });
 });
 
 describe("parseYarnLockfile: yarn Berry", () => {

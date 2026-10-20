@@ -283,13 +283,16 @@ namespace that allows:
 | ----------------------------------- | --------------------------------- |
 | `pods`                              | `create`, `get`, `delete`, `list` |
 | `pods/exec`                         | `create`, `get`                   |
+| `pods/log`                          | `get`                             |
 | `secrets`                           | `create`, `delete`                |
 | `networking.k8s.io/networkpolicies` | `create`, `get`, `delete`         |
 | `services`                          | `get`                             |
 
 `list` on pods lets the startup sweep find leftover worker pods by label;
-`pods/exec` is how the server proves isolation from inside the pod; `services`
-is read once to find the gateway's ClusterIP. Coding runs on Kubernetes use a
+`pods/exec` is how the server proves isolation from inside the pod; `pods/log`
+is read only when a worker exits non-zero, for the redacted tail it logs (without
+it the server logs the exit with no tail); `services` is read once to find the
+gateway's ClusterIP. Coding runs on Kubernetes use a
 largely overlapping Role (`deploy/kind-coding/manifests/base/launcher-role.yaml`).
 
 ### 4. Configure the server
@@ -612,7 +615,12 @@ remaining budget cannot cover is refused and the run ends `budget_exhausted`
 instead of overspending. The worker cannot raise or bypass its budget because it
 never talks to the provider directly. A call that breaks off before its final
 usage is settled at an estimate (never more than its reservation) and
-included in the run's cost.
+included in the run's cost. The estimate is the call's input plus the output
+streamed so far (text and tool calls), counted high. If the provider's response
+had started but no output had arrived yet (for example while the model was
+thinking or reasoning), the run's median completed reply is used, or no output
+if there is none yet. A call that failed before the provider's response started is released,
+because nothing was generated.
 
 ## Failure modes
 
@@ -634,6 +642,18 @@ included in the run's cost.
 | [`native_sandbox_gateway_error`](../help/errors/native-sandbox-gateway-error.md)               | The worker's call to the gateway failed with an error the run could not continue from (`native_sandbox_gateway_error: <code>: <message>`; for `internal`, only `native_sandbox_gateway_error: internal: <cause code>`, never the message; the cause code is one of wardby's declared codes and never one that matches a secret value the run can read). | Read the code and message; for `internal` (`internal: <cause code>` when the gateway named one), read the gateway's logs. Trigger the run again. |
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
+
+For the gateway's `internal` code, the run's error carries a `causeCode` only
+when the failing error's message led with one of wardby's own declared codes,
+the gateway could read the run's secret values, and that code does not match
+any of them; it is shown as `native_sandbox_gateway_error: internal: <causeCode>`.
+Otherwise the error is just `native_sandbox_gateway_error: internal`. The
+gateway's own log line (`native gateway request failed`) carries the error with
+its message and stack, the run's secret values replaced by `[REDACTED]`, so the
+message itself starts with the code; it has no separate `causeCode` field. Only
+when the gateway could not read the run's secret values does the line carry just
+the error's name (`errName`) and a `causeCode` field, with no message.
+See [Native sandbox gateway error](../help/errors/native-sandbox-gateway-error.md).
 
 ## Roll back
 
@@ -680,6 +700,19 @@ skipped unless its script sets its flag:
   the Service must list ports 8790 and 8791 and have ready endpoints.
 - **Check a run.** Call `get_run` for the run's status and error code, then use
   the matching error article from `search_help` or `get_help_article`.
+- **A worker exited non-zero.** The server logs `native worker exited non-zero`
+  with the exit code and `stderrTail`, the last 2,000 characters of the worker's
+  output. Before logging it, the server masks the run's gateway capability and
+  every secret value the agent's tools can read as `[REDACTED]`. Encoded forms
+  of a value (URL-encoded, base64) are not matched. Instead of a tail, the line
+  may carry `stderrTailOmitted`: `secrets_unavailable` means one of those
+  secrets could not be read within 10 seconds, so the tail could not be
+  redacted; `log_read_failed` (Kubernetes) means the worker pod's log could not
+  be read within 10 seconds. Either way the run's failure is still recorded. On
+  Kubernetes the tail comes from the last 100 lines of the worker pod's log (the
+  launcher needs `get` on `pods/log`). That read may begin partway through a
+  line (the kubelet splits very long lines, and logs rotate), so its first few
+  dozen characters are always masked, more when an attached secret is long.
 - **Workers cannot reach the gateway.** Confirm `NATIVE_GATEWAY_CONTAINER`
   matches the running container's name exactly and that the gateway listens on
   the port in `NATIVE_GATEWAY_URL` (default 8790).

@@ -216,7 +216,7 @@ describe("packageAuditWording", () => {
     expect(text).toContain("🔎 **Package audit mode (`full`) was on:**");
     expect(text).toContain("`expo-dev-client` (npm)");
     expect(text).toContain("1 served despite advisories");
-    expect(text).toContain("`update_agent`");
+    expect(text).toContain("`approve_audited_packages`");
   });
 
   it("neutralises names and escapes Slack mrkdwn", () => {

@@ -18,12 +18,14 @@ export interface ParseRequest {
 
 /** A ParsedLockfile without its functions: `edges[i]` lists, for
  *  `entries[i]`, each dependency key the lockfile records that resolves to
- *  an entry, with that entry's index. */
+ *  an entry, with that entry's index; `projectEdges[i]` the same for
+ *  `projects[i]`. */
 export interface ShippedLockfile {
   entries: ParsedLockfile["entries"];
   projects: ParsedLockfile["projects"];
   integrity?: ParsedLockfile["integrity"];
   edges: [key: string, target: number][][];
+  projectEdges: [key: string, target: number][][];
 }
 
 export type ParseResponse =
@@ -45,27 +47,31 @@ export function parseAndShip(request: ParseRequest): ShippedLockfile {
   });
   if (!parsed.dependencyKeys) throw new Error("this lockfile format cannot be parsed off the event loop");
   const index = new Map(parsed.entries.map((entry, at) => [entry, at]));
-  const edges = parsed.entries.map((entry) => {
-    const keys = parsed.dependencyKeys!(entry.path);
+  const edgesOf = (path: string, what: "entry" | "project") => {
+    let keys = parsed.dependencyKeys!(path);
+    // A project's edges only label audited packages top-level (best effort):
+    // past the bound they are cut, never a reason to refuse the plan.
+    if (what === "project") keys = keys.slice(0, MAX_EDGES_PER_ENTRY);
     if (keys.length > MAX_EDGES_PER_ENTRY)
       throw new RegistryError(
         413,
         "wardby_lockfile_too_large",
-        `lockfile entry "${entry.path}" lists ${keys.length} dependencies; at most ${MAX_EDGES_PER_ENTRY} are read`,
+        `lockfile ${what} "${path}" lists ${keys.length} dependencies; at most ${MAX_EDGES_PER_ENTRY} are read`,
       );
     const out: [string, number][] = [];
     for (const key of keys) {
-      const target = parsed.resolve(entry.path, key);
+      const target = parsed.resolve(path, key);
       const at = target && index.get(target);
       if (at !== undefined && at !== null) out.push([key, at]);
     }
     return out;
-  });
+  };
   return {
     entries: parsed.entries,
     projects: parsed.projects,
     ...(parsed.integrity ? { integrity: parsed.integrity } : {}),
-    edges,
+    edges: parsed.entries.map((entry) => edgesOf(entry.path, "entry")),
+    projectEdges: parsed.projects.map((project) => edgesOf(project.path, "project")),
   };
 }
 

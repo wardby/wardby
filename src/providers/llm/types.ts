@@ -76,8 +76,17 @@ export type LlmStreamEvent =
   | { type: "tool_call"; id: string; name: string; argsJson: string }
   | { type: "done"; stopReason: string; usage: LlmUsage };
 
+/** Observers of a stream's progress that its events do not show. */
+export interface LlmStreamHooks {
+  /**
+   * Called once the provider's response has started. From then on the provider
+   * may bill output (thinking or reasoning included) before any event is yielded.
+   */
+  onResponseStarted?: () => void;
+}
+
 export interface LlmProvider {
-  stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent>;
+  stream(req: LlmRequest, signal?: AbortSignal, hooks?: LlmStreamHooks): AsyncIterable<LlmStreamEvent>;
   /**
    * Pre-flight token count for budget enforcement. `tools`, when passed,
    * must be counted too — a provider bills the serialized tool schemas as

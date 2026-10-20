@@ -143,6 +143,9 @@ function sseEvent(frame: string): { name?: string; value?: Record<string, unknow
 /** Accumulates Anthropic's split input/output usage until message_stop. */
 export class AnthropicSseUsageTracker {
   private startUsage?: Record<string, unknown>;
+  /** message_start's output count: a placeholder (usually 1), not a running count. */
+  private startOutputTokens?: number;
+  /** message_delta's running output count. */
   private outputTokens?: number;
   private stopped = false;
 
@@ -164,7 +167,9 @@ export class AnthropicSseUsageTracker {
         tokenCount(record.cache_read_input_tokens ?? 0, "cache_read_input_tokens");
         tokenCount(record.cache_creation_input_tokens ?? 0, "cache_creation_input_tokens");
         this.startUsage = record;
-        if (record.output_tokens !== undefined) this.outputTokens = tokenCount(record.output_tokens, "output_tokens");
+        if (record.output_tokens !== undefined) {
+          this.startOutputTokens = tokenCount(record.output_tokens, "output_tokens");
+        }
         return { terminal: false };
       }
       case "message_delta": {
@@ -174,13 +179,14 @@ export class AnthropicSseUsageTracker {
         return { terminal: false };
       }
       case "message_stop": {
-        if (this.stopped || !this.startUsage || this.outputTokens === undefined) {
+        const outputTokens = this.outputTokens ?? this.startOutputTokens;
+        if (this.stopped || !this.startUsage || outputTokens === undefined) {
           return { terminal: true };
         }
         this.stopped = true;
         return {
           terminal: true,
-          usage: parseAnthropicAuthoritativeUsage({ ...this.startUsage, output_tokens: this.outputTokens }),
+          usage: parseAnthropicAuthoritativeUsage({ ...this.startUsage, output_tokens: outputTokens }),
         };
       }
       default:
@@ -188,10 +194,14 @@ export class AnthropicSseUsageTracker {
     }
   }
 
-  /** What a cut stream reported before its message_stop: start usage (input incl. cache reads) and output so far. */
+  /**
+   * What a cut stream reported before its message_stop: start usage (input incl. cache reads), the
+   * output count message_delta reported, and message_start's output count as a floor only.
+   */
   partial(): {
     readUsage?: { inputTokens: number; cachedInputTokens: number; cacheWriteTokens: number };
     reportedOutputTokens?: number;
+    outputFloorTokens?: number;
   } {
     if (!this.startUsage) return this.outputTokens === undefined ? {} : { reportedOutputTokens: this.outputTokens };
     const cached = tokenCount(this.startUsage.cache_read_input_tokens ?? 0, "cache_read_input_tokens");
@@ -202,6 +212,7 @@ export class AnthropicSseUsageTracker {
         cacheWriteTokens: tokenCount(this.startUsage.cache_creation_input_tokens ?? 0, "cache_creation_input_tokens"),
       },
       ...(this.outputTokens !== undefined ? { reportedOutputTokens: this.outputTokens } : {}),
+      ...(this.startOutputTokens !== undefined ? { outputFloorTokens: this.startOutputTokens } : {}),
     };
   }
 }

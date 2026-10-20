@@ -38,9 +38,17 @@ RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-work
 # ../coding-worker/registry-refusals.mjs to add them to a failed command's output.
 COPY src/coding-worker/registry-refusals.mjs /opt/wardby/coding-worker/registry-refusals.mjs
 COPY src/coding-worker/wardby-packages.mjs /opt/wardby/coding-worker/wardby-packages.mjs
-RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs \
+# `wardby-packages plan` and the uv shim (src/coding-worker/uv-shim.mjs + uv-lock.mjs), linked as uv:
+# verify a Python lockfile with the registry proxy (pypi-plan.mjs) before an install, and point a
+# uv.lock's PyPI URLs at the proxy for the command. The real uv is in the node-python image.
+COPY src/coding-worker/pypi-plan.mjs /opt/wardby/coding-worker/pypi-plan.mjs
+COPY src/coding-worker/uv-lock.mjs /opt/wardby/coding-worker/uv-lock.mjs
+COPY src/coding-worker/uv-shim.mjs /opt/wardby/coding-worker/uv-shim.mjs
+RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-worker/uv-shim.mjs \
     && ln -s ../coding-worker/wardby-packages.mjs /opt/wardby/bin/wardby-packages \
+    && ln -s ../coding-worker/uv-shim.mjs /opt/wardby/bin/uv \
     && test "$(sh -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages \
+    && test "$(sh -lc 'command -v uv')" = /opt/wardby/bin/uv \
     && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured"
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
@@ -82,6 +90,9 @@ RUN test ! -e /usr/bin/docker \
     && python --version \
     && python -m pytest --version \
     && uv --version \
+    # The uv shim (/opt/wardby/bin/uv) runs this real uv.
+    && test "$(sh -lc 'command -v uv')" = /opt/wardby/bin/uv \
+    && sh -lc 'uv --version' | grep -q '^uv 0.12.23' \
     && python -m ruff --version \
     # A registry-mode venv must be creatable offline, carry pip, and still see pytest/ruff.
     && python -m venv --system-site-packages /tmp/venv-check \

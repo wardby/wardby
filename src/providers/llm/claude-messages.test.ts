@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { toClaudeRequest, withCacheBreakpoints, estimateClaudeTokens } from "./claude-messages.js";
 import type { LlmRequest, LlmMessage } from "./types.js";
 
@@ -77,6 +77,16 @@ async function collect(it: AsyncIterable<LlmStreamEvent>) {
 }
 
 describe("mapClaudeStream", () => {
+  it("reports the response started at message_start, before any output event", async () => {
+    const started = vi.fn();
+    async function* cutAfterStart(): AsyncIterable<ClaudeStreamEvent> {
+      yield { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 1 } } };
+      throw new Error("cut while thinking");
+    }
+    await expect(collect(mapClaudeStream(cutAfterStart(), () => 0, started))).rejects.toThrow("cut while thinking");
+    expect(started).toHaveBeenCalledTimes(1);
+  });
+
   it("maps text deltas, a tool call, and a done event with mapped usage", async () => {
     const events: ClaudeStreamEvent[] = [
       {

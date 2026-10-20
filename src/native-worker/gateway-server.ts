@@ -20,6 +20,7 @@ import {
   recordNativeRunProgress,
   runDrivability,
   sandboxCapabilityHash,
+  userToolSecretValues,
   type NativeRunFinishContext,
   type NativeRunProviders,
   type RunnerDb,
@@ -27,6 +28,7 @@ import {
 } from "../core/runner.js";
 import { ReviewReadLedger } from "../core/review-reads.js";
 import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
+import { relayedOutputTokens } from "../providers/coding-proxy/interrupted.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
@@ -111,12 +113,10 @@ export function runSecretValues(
   ctx: Pick<RebuiltRun, "snapshot" | "tools">,
   capability: string,
 ): () => Promise<string[]> {
-  return async () => {
-    const perTool = await Promise.all(
-      Object.keys(ctx.snapshot.input.userTools).map((tool) => ctx.tools.readableSecretValues(tool)),
-    );
-    return [capability, ...perTool.flat()];
-  };
+  return async () => [
+    capability,
+    ...(await userToolSecretValues(ctx.tools, Object.keys(ctx.snapshot.input.userTools))),
+  ];
 }
 
 /**
@@ -305,11 +305,20 @@ export async function* streamModel(
 
   let settled = false;
   let sawEvent = false;
+  // Set once the provider's response starts: it may bill hidden thinking or reasoning before any event.
+  let responseStarted = false;
+  // Generated output seen so far (text and tool calls), for an estimate if the stream is cut.
   let streamedText = "";
   try {
-    for await (const event of ctx.llm.stream(req)) {
+    const hooks = {
+      onResponseStarted: () => {
+        responseStarted = true;
+      },
+    };
+    for await (const event of ctx.llm.stream(req, undefined, hooks)) {
       sawEvent = true;
       if (event.type === "text") streamedText += event.delta;
+      if (event.type === "tool_call") streamedText += event.name + event.argsJson;
       if (event.type === "done") {
         settled = true;
         await ledger.complete(ctx.session.id, callId, {
@@ -324,14 +333,16 @@ export async function* streamModel(
     }
   } catch (err) {
     if (!settled) {
-      // Refused before anything streamed: the provider billed nothing. Mid-stream: settle at an estimate.
-      if (sawEvent) {
-        // Bill the input and the output seen so far, never more than the hold. Estimating must
-        // never mask the stream error: on any failure, keep the full hold and rethrow the original.
+      // Failed before the response started: the provider billed nothing. Once started: settle at an estimate.
+      if (sawEvent || responseStarted) {
+        // Bill the input and the output seen so far, never more than the hold. With no output seen
+        // (cut while thinking or reasoning), the run's median completed call, or none before the
+        // first one: as the coding proxy does. Estimating must never mask the stream error: on any
+        // failure, keep the full hold and rethrow the original.
         try {
           const output = streamedText
-            ? await ctx.llm.countTokens(req.model, [{ role: "assistant", content: streamedText }]).catch(() => 0)
-            : 0;
+            ? await streamedOutputTokens(ctx.llm, req.model, streamedText)
+            : ((await ledger.medianOutputTokens(ctx.session.id)) ?? 0);
           const costUsd = Math.min(reservationUsd, ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }));
           await ledger.markUncertain(ctx.session.id, callId, {
             inputTokens,
@@ -350,9 +361,7 @@ export async function* streamModel(
   } finally {
     if (!settled) {
       // The worker stopped reading (its own budget cutoff) before usage arrived: bill an estimate.
-      const output = streamedText
-        ? await ctx.llm.countTokens(req.model, [{ role: "assistant", content: streamedText }]).catch(() => 0)
-        : 0;
+      const output = await streamedOutputTokens(ctx.llm, req.model, streamedText);
       await ledger.complete(ctx.session.id, callId, {
         inputTokens,
         outputTokens: output,
@@ -362,6 +371,14 @@ export async function* streamModel(
       });
     }
   }
+}
+
+/** Output tokens of a cut stream's output: counted, else the deliberately high bytes / 3 estimate. */
+async function streamedOutputTokens(llm: LlmProvider, model: string, streamed: string): Promise<number> {
+  if (!streamed) return 0;
+  return llm
+    .countTokens(model, [{ role: "assistant", content: streamed }])
+    .catch(() => relayedOutputTokens(Buffer.byteLength(streamed)));
 }
 
 /** The review tools that record reads (repo_publish_review checks them). */

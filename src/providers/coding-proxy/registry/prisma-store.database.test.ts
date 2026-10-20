@@ -140,6 +140,21 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       expect(read).toHaveLength(600);
       expect(read.find((fact) => fact.version === "1.0.0")).toEqual(facts[0]);
       expect(await store.getVersionFacts("pypi", [{ name, version: "1.0.0" }])).toEqual([]);
+      // A PyPI fact keeps each dependency line's extras and extra gate.
+      const pypiFact = {
+        name,
+        version: "2.0",
+        publishedAt: new Date("2020-01-01T00:00:00Z"),
+        integrity: "sha256-x",
+        downloadUrl: `https://files.pythonhosted.org/packages/ab/${name}-2.0-py3-none-any.whl`,
+        dependencies: [
+          { key: "uvicorn", name: "uvicorn", range: ">=0.30", extras: ["standard"], when: ["web"] },
+          { key: "h11", name: "h11", range: "*" },
+        ],
+      };
+      await store.putVersionFacts("pypi", [pypiFact]);
+      expect(await store.getVersionFacts("pypi", [{ name, version: "2.0" }])).toEqual([pypiFact]);
+      await db.registryVersionFact.deleteMany({ where: { ecosystem: "pypi", name } });
 
       await store.approveVersions(runId, "npm", [{ name, version: "1.0.1", integrity: "sha512-1" }]);
       expect(await store.findApprovedVersion(runId, "npm", name, "1.0.1")).toEqual({

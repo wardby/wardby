@@ -366,7 +366,7 @@ describe("pnpm and yarn help", () => {
     const { buildHelpCatalog } = await import("./catalog.js");
     const { fileURLToPath } = await import("node:url");
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
-    for (const query of ["allowedOverrunPercent", "budget overrun"]) {
+    for (const query of ["allowedOverrunPercent", "budget overrun", "overrun_unavailable", "overrun not available"]) {
       const ids = searchHelp(catalog, query)
         .slice(0, 3)
         .map((result) => result.page.id);
