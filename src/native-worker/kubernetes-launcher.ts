@@ -18,7 +18,7 @@ import { KubernetesAlreadyExistsError, type KubernetesApi } from "../providers/j
 import { canonicalResources } from "../providers/jobs/kubernetes-isolation.js";
 import type { KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 import { NATIVE_GATEWAY_PORT, type NativeWorkerLimits } from "./docker-isolation.js";
-import type { NativeWorkerState } from "./docker-launcher.js";
+import { WORKER_TAIL_TIMEOUT_MS, withTimeout, workerTailFields, type NativeWorkerState } from "./docker-launcher.js";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import {
@@ -48,6 +48,14 @@ const k8sLog = logger.child({ module: "native-kubernetes-launcher" });
 export const NATIVE_SANDBOX_NETWORK_UNENFORCED = "native_sandbox_network_unenforced";
 export const NATIVE_SANDBOX_ISOLATION_MISMATCH = "native_sandbox_isolation_mismatch";
 export const NATIVE_SANDBOX_CAPACITY = "native_sandbox_capacity";
+
+/**
+ * A failed worker's log is read this far back before its tail is redacted and cut. The API server
+ * applies `limitBytes` from the start of the selected lines, so it would cut the end (the worker's
+ * final failure line): it is only a memory cap, far above what the line bound selects in practice.
+ */
+const WORKER_LOG_TAIL_LINES = 100;
+const WORKER_LOG_TAIL_BYTES = 1024 * 1024;
 
 /** The API server's refusal of a pod the namespace's ResourceQuota has no room for (403 "exceeded quota"). */
 export function isQuotaRejection(err: unknown): boolean {
@@ -81,6 +89,8 @@ export interface KubernetesNativeWorkerLauncherOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Low-power mode: wakes the (possibly scaled-to-zero) native gateway before a launch. Default `DISABLED_POWER`. */
   power?: Power;
+  /** The bound on a failed worker's diagnostic (log and secret reads) before its exit is reported. Default WORKER_TAIL_TIMEOUT_MS. */
+  diagnosticTimeoutMs?: number;
 }
 
 /**
@@ -183,10 +193,42 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
           this.createIfMissing(() => this.api.createSecret(this.ns, buildNativeInputSecret(input, this.ns))),
       });
       await this.options.onNetworkProven(runId);
+      // Read before the exit is reported, so the pod (and its log) still exists.
+      return this.handleByName(names.pod, (code) => this.logFailedExit(names.pod, code, input, launchOptions));
     } else {
       k8sLog.info({ pod: names.pod }, "native worker pod already exists: attaching, not relaunching");
     }
     return this.handle(runId);
+  }
+
+  /** A non-zero exit, with the tail of the worker's log (bounded and redacted: workerTailFields), as the Docker launcher logs it. */
+  private async logFailedExit(
+    podName: string,
+    code: number,
+    input: WorkerInput,
+    launchOptions: WorkerLaunchOptions,
+  ): Promise<void> {
+    if (code === 0) return;
+    // One bound for the whole diagnostic, so a hung read never holds back the exit (and the run's end).
+    const by = Date.now() + (this.options.diagnosticTimeoutMs ?? WORKER_TAIL_TIMEOUT_MS);
+    let log: string;
+    try {
+      log = await withTimeout(
+        this.api.readLogTail(this.ns, podName, NATIVE_WORKER_CONTAINER, WORKER_LOG_TAIL_LINES, WORKER_LOG_TAIL_BYTES),
+        by - Date.now(),
+      );
+    } catch {
+      // The pod may already be gone, the read may be refused (no pods/log), or it timed out.
+      k8sLog.warn({ pod: podName, code, stderrTailOmitted: "log_read_failed" }, "native worker exited non-zero");
+      return;
+    }
+    // The read may always begin mid-text, even with fewer lines than the bound: the kubelet splits
+    // a line over 16 KiB into partial records (each counted as a line), and log rotation drops the
+    // oldest text, so the start is always masked as cut. The byte cap (counted from the start of
+    // the selected lines) cuts the end only when it is met.
+    const end = Buffer.byteLength(log) >= WORKER_LOG_TAIL_BYTES - 3;
+    const tail = await workerTailFields(log, input, launchOptions.secretValues, { start: true, end }, by - Date.now());
+    k8sLog.warn({ pod: podName, code, ...tail }, "native worker exited non-zero");
   }
 
   /**
@@ -294,11 +336,14 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
     return this.handleByName(nativeKubernetesNames(runId).pod);
   }
 
-  private handleByName(podName: string): WorkerHandle {
+  private handleByName(podName: string, onExit?: (code: number) => Promise<void>): WorkerHandle {
     const exited = (async () => {
       for (;;) {
         const state = await this.inspectByName(podName);
-        if (state.state === "exited") return state.exitCode;
+        if (state.state === "exited") {
+          await onExit?.(state.exitCode).catch(() => {});
+          return state.exitCode;
+        }
         if (state.state === "missing") return null;
         await this.sleep(this.options.pollMs ?? 1_000);
       }

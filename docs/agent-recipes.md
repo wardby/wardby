@@ -532,6 +532,11 @@ fails with category `continuation_closed` and pushes nothing — see
 
 #### Limits
 
+- If two executions of one delegation step overlap (for example a stalled
+  process and the process that took the run over) and the call id is already
+  held by a run of a different sub-agent, the call returns
+  `delegation_conflict` to the lead without starting a run or failing it; see
+  [Delegation conflict](../help/errors/delegation-conflict.md).
 - Cancelling the lead run does not stop a native sub-agent that is already
   running; it keeps running to completion. A coding sub-agent is stopped.
 - If Wardby restarts mid-batch, the batch's delegation calls replay and each

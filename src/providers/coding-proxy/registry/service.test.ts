@@ -11,6 +11,7 @@ import {
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
 import { refusalHint } from "../../../coding/registry/refusal-hints.js";
+import { LISTING_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import { capabilityHash } from "../proxy.js";
 import { auditAdvisoryOf, splitWaived, type WithheldAdvisory } from "./audit.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
@@ -177,6 +178,17 @@ describe("RegistryService", () => {
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_package_not_allowed");
     expect(store.fetches[0]).toMatchObject({ name: "stranger", outcome: "refused" });
+  });
+
+  it("records a download of a version that does not resolve under that version, not the whole name", async () => {
+    const { registry, store } = service();
+    await expect(registry.handle(request("dl/app/9.9.9"))).resolves.toMatchObject({ status: 404 });
+    expect(store.fetches.at(-1)).toMatchObject({
+      outcome: "refused",
+      name: "app",
+      version: "9.9.9",
+      reason: "wardby_version_filtered",
+    });
   });
 
   it("serves only versions older than the release age and grows the graph from them", async () => {
@@ -1112,15 +1124,24 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
     const listed = JSON.parse(index.body) as { files: { filename: string; "core-metadata"?: unknown }[] };
     expect(listed.files.map((entry) => entry.filename)).toEqual(["demo-1.0.tar.gz"]);
     expect(listed.files[0]["core-metadata"]).toBeUndefined();
-    expect(store.fetches.map((fetch) => [fetch.outcome, fetch.name, fetch.reason])).toEqual([
-      ["refused", "demo", "wardby_file_not_allowed"],
+    expect(store.fetches.map((fetch) => [fetch.outcome, fetch.name, fetch.reason, fetch.filename])).toEqual([
+      ["refused", "demo", "wardby_file_not_allowed", LISTING_REFUSAL_FILENAME],
     ]);
     await expect(get("files/demo/demo-1.0.tar.gz")).resolves.toMatchObject({ status: 403 });
     expect(urls.some((url) => url.endsWith(".tar.gz"))).toBe(false);
 
-    const tooNew = pypiService(() => [file(newWheel, 1)]);
-    await tooNew.get("simple/demo/");
-    expect(tooNew.store.fetches.map((fetch) => fetch.reason)).toEqual(["wardby_version_filtered"]);
+    // A kept release whose only wheel is too new: listed, nothing servable.
+    const tooNew = pypiService(() => [file("demo-1.0.tar.gz", 100), file(newWheel, 1)]);
+    await expect(tooNew.get("simple/demo/")).resolves.toMatchObject({ status: 200 });
+    expect(tooNew.store.fetches.map((fetch) => [fetch.reason, fetch.filename])).toEqual([
+      ["wardby_version_filtered", LISTING_REFUSAL_FILENAME],
+    ]);
+    // No release kept at all: the index is refused (404), a refusal of the name, not a listing's.
+    const noneKept = pypiService(() => [file(newWheel, 1)]);
+    await expect(noneKept.get("simple/demo/")).resolves.toMatchObject({ status: 404 });
+    expect(noneKept.store.fetches.map((fetch) => [fetch.reason, fetch.filename])).toEqual([
+      ["wardby_version_filtered", undefined],
+    ]);
   });
 
   it("records nothing for an index that still lists a wheel", async () => {

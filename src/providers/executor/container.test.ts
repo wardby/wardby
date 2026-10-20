@@ -298,10 +298,12 @@ class FakeStore implements ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: { failureCategory: string; diagnosticId: string },
-  ): Promise<void> {
-    if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
+  ): Promise<boolean> {
+    // Like the real store: only a run still pending or running is changed.
+    if (runId !== this.run.runId || !["pending", "running"].includes(this.run.status)) return false;
     this.run.status = status;
     this.terminations.push({ status, error, ...(audit ? { audit } : {}) });
+    return true;
   }
 }
 
@@ -1662,6 +1664,23 @@ describe("ContainerExecutor", () => {
       ]);
       expect(created.vcs.lastFinalizeDetails?.packageRefusals).toEqual([
         { ecosystem: "npm", name: "is-even", reason: "wardby_package_not_allowed" },
+      ]);
+    });
+
+    it("leaves a listing-only refusal out of the pull request description", async () => {
+      const report = {
+        packages: [],
+        packageRefusals: [
+          { ecosystem: "pypi", name: "looked-at", reason: "wardby_file_not_allowed", listingOnly: true },
+          { ecosystem: "pypi", name: "needed", reason: "wardby_file_not_allowed" },
+        ],
+      };
+      const created = await fixRound({}, { registryReport: async () => report });
+      created.store.pullRequestRunIds = async () => ["run-1"];
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.packageRefusals).toEqual([
+        { ecosystem: "pypi", name: "needed", reason: "wardby_file_not_allowed" },
       ]);
     });
 
@@ -3677,6 +3696,24 @@ describe("ContainerExecutor", () => {
     expect(created.jobs.stops).toBe(1);
     expect(created.jobs.removals).toBe(2);
     expect(created.vcs.cleaned).toBe(1);
+  });
+
+  it("leaves a run that finished while stop was loading it alone: no cancel event, no job kill, no failed comment", async () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const created = await harness({ jobHandle: handle, proxySessionId: "session-1" });
+    const load = created.store.load.bind(created.store);
+    created.store.load = async (runId: string) => {
+      const snapshot = await load(runId);
+      // The run commits succeeded between stop() loading it and fencing it.
+      created.store.run.status = "succeeded";
+      return snapshot;
+    };
+    await created.executor.stop("run-1", "stop_run");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.store.terminations).toHaveLength(0);
+    expect(created.vcs.notifyFinishedCalls).toHaveLength(0);
+    expect(created.jobs.stops).toBe(0);
+    expect(created.sessions.cancels).toBe(0);
   });
 
   it("stops a run queued for a slot: cancelled before it ever launches, and a later start launches nothing", async () => {

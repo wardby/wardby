@@ -230,6 +230,10 @@ export function normalizeGitHubEvent(
       body,
       author: user.login,
       authorId: String(user.id),
+      authorAssociation: String(issue?.author_association),
+      ...(typeof obj(p.repository)?.private === "boolean"
+        ? { repositoryPrivate: obj(p.repository)?.private as boolean }
+        : {}),
       subject: { title, body },
     };
   }
@@ -260,6 +264,10 @@ export function normalizeGitHubEvent(
       body,
       author: user.login,
       authorId: String(user.id),
+      authorAssociation: String(comment?.author_association),
+      ...(typeof obj(p.repository)?.private === "boolean"
+        ? { repositoryPrivate: obj(p.repository)?.private as boolean }
+        : {}),
       ...(subject ? { subject } : {}),
       ...(priorRunId ? { priorRunId } : {}),
     };

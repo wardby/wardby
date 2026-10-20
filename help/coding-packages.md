@@ -143,7 +143,10 @@ pip and uv don't print why the registry refused a package (pip says
 and hints; a Claude Code agent also gets those lines after any failed
 command. The registry also records packages it hides from the index: one
 with only source distributions (`wardby_file_not_allowed`), or whose every
-wheel is too new (`wardby_version_filtered`).
+wheel is too new (`wardby_version_filtered`). The installer may only have
+looked at that index, so such a refusal (`get_run` marks it `listingOnly`)
+adds nothing to a pull request, shows as a ⚠️ line on a run that made no
+changes, and blocks the status (⛔) only when a coding sub-run failed.
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,
@@ -208,6 +211,10 @@ pull request or pushed changes result, GitHub and Jira status comments show
 status keeps the agent's reply or answer, or the pull request link, and adds a
 ⚠️ dependency install warning. Refusal lists show at most ten distinct entries and a count
 of the rest; `get_run` has the full list.
+A refusal the run got past does not count: when the registry later served the
+same package (or, for a refused version, that version) to the same coding run,
+for example after npm retried a temporary error, it is left out of the status,
+the warning and `get_run`. A package served to another sub-run doesn't clear it.
 
 For next steps, see [Package refusal errors](errors/package-refusals.md) and
 [Run status comments](status-comments.md). After an approver updates the

@@ -81,6 +81,7 @@ import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
+import { warningRefusals } from "../../coding/registry/report.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import {
   hostBudgetSentence,
@@ -447,7 +448,7 @@ export interface ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /**
    * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
    * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
@@ -921,14 +922,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const finishedAt = new Date();
+    let changed = false;
     const agentId = await this.db.$transaction(async (tx) => {
       const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
         data: { status, error, finishedAt, heartbeatAt: new Date() },
       });
       if (!updated.count) return null;
+      changed = true;
       if (audit) {
         await tx.codingRun.update({
           where: { runId },
@@ -941,6 +944,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
     // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
     if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
+    return changed;
   }
 }
 
@@ -1063,7 +1067,7 @@ export const TOP_UP_NEAR_POLL_MS = 1_000;
 
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
-  packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  packageRefusals: Array<{ ecosystem: string; name: string; reason: string; listingOnly?: boolean }>;
   /** The run's package audit mode (CodingRun.packageAuditMode); absent when it was off. */
   packageAuditMode?: PackageAuditMode;
   /** What the registry served only because of it (summarizePackageAudit entries). */
@@ -1163,10 +1167,14 @@ export class ContainerExecutor implements Executor {
     const run = await this.options.store.load(runId);
     if (!run) return;
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
-    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
-    await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    // False when the run reached a terminal status after the load above: its finisher owns the
+    // cleanup and the continuation comment (recover() cleans up any terminal run the reconciler sees
+    // later), so stopping now would overwrite a good outcome. "stopping" is emitted only once this
+    // stop owns the run, so it is always followed by its terminal and cleanup events.
+    if (!(await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit))) return;
+    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
@@ -2255,7 +2263,8 @@ export class ContainerExecutor implements Executor {
     try {
       const report = await this.options.registryReport?.(runId);
       const packages = Array.isArray(report?.packages) ? report.packages : [];
-      const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      // A listing-only refusal is for get_run and the agent, not the PR (see LISTING_REFUSAL_FILENAME).
+      const packageRefusals = Array.isArray(report?.packageRefusals) ? warningRefusals(report.packageRefusals) : [];
       const packageAudit = isPackageAuditMode(report?.packageAuditMode)
         ? { mode: report.packageAuditMode, entries: Array.isArray(report.packageAudit) ? report.packageAudit : [] }
         : undefined;

@@ -75,7 +75,7 @@ function fakePypi(pypi: FakePypi) {
   return { upstream, calls };
 }
 
-function setup(pypi: FakePypi, allowlist: string[], policy: unknown = {}) {
+function setup(pypi: FakePypi, allowlist: string[], policy: unknown = {}, packageAudit: "audit" | null = null) {
   const fake = fakePypi(pypi);
   const store = new MemoryRegistryStore();
   store.contexts.set(capabilityHash("rrg_token"), {
@@ -86,7 +86,7 @@ function setup(pypi: FakePypi, allowlist: string[], policy: unknown = {}) {
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: false,
-    packageAudit: null,
+    packageAudit,
   });
   const service = new RegistryService({
     adapters: new Map([["pypi", pypiAdapter]]),
@@ -267,6 +267,19 @@ source = { git = "https://github.com/agronholm/anyio?rev=x#x" }
     expect(json.approved).toBe(3);
     expect(refusedOf(json)).toEqual({ "anyio@4.6.0": "wardby_lockfile_entry_unsupported" });
     expect(await allowed("pydantic")).toBe(true);
+  });
+
+  it("audit: a package the plan could not place stays unknown when it is downloaded", async () => {
+    const { plan, get, store } = setup(app, ["fastapi"], {}, "audit");
+    // A requirements file declares no project, so nothing in it is top-level.
+    expect((await plan(appRequirements)).json).toMatchObject({ approved: 5, refused: [] });
+    await expect(get("simple/requests/")).resolves.toMatchObject({ status: 200 });
+    const served = await get(`files/requests/${wheelName("requests", "2.32.0")}`);
+    if (!("stream" in served)) throw new Error("expected a stream");
+    await new Response(served.stream).arrayBuffer();
+    const relations = store.audits.filter((row) => row.name === "requests").map((row) => row.relation);
+    expect(relations.length).toBeGreaterThan(0);
+    expect(new Set(relations)).toEqual(new Set(["unknown"]));
   });
 
   it("answers a Poetry lockfile with a clear unsupported error", async () => {
