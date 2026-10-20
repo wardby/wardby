@@ -4,16 +4,25 @@ import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
 vi.mock("../../core/runner.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../core/runner.js")>()),
   executeRun: vi.fn(),
+  failNativeRun: vi.fn(),
 }));
 
-import { executeRun, RunCancelledError, RunOwnershipLostError, type NativeRunProviders } from "../../core/runner.js";
-import { dbosStep, DbosExecutor } from "./dbos.js";
+import {
+  executeRun,
+  failNativeRun,
+  RunCancelledError,
+  RunOwnershipLostError,
+  type NativeRunProviders,
+} from "../../core/runner.js";
+import { dbosStep, dbosStepFor, DbosExecutor, stopAwareDbosStep } from "./dbos.js";
 
 const executeRunMock = vi.mocked(executeRun);
+const failNativeRunMock = vi.mocked(failNativeRun);
 
 afterEach(() => {
   vi.restoreAllMocks();
   executeRunMock.mockReset();
+  failNativeRunMock.mockReset();
 });
 
 describe("dbosStep", () => {
@@ -59,6 +68,132 @@ describe("dbosStep", () => {
   });
 });
 
+describe("dbosStepFor", () => {
+  const dbNaming = (executionWorkflowId: string | null) => ({
+    run: { findUnique: vi.fn(async () => ({ executionWorkflowId })) },
+  });
+
+  it("turns the cancellation of a workflow the run was forked away from into an ownership loss", async () => {
+    const sdkErr = new DbosErrors.DBOSWorkflowCancelledError("r1");
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(sdkErr);
+
+    const err = await dbosStepFor(dbNaming("r1@v2") as never, "r1")("turn:2:llm", async () => "x").catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(RunOwnershipLostError);
+    expect((err as RunOwnershipLostError).cause).toBe(sdkErr);
+  });
+
+  it.each([
+    ["the run's own workflow (never forked)", null, "r1"],
+    ["the fork the run names", "r1@v2", "r1@v2"],
+    ["a fork of a fork whose id is not recorded yet", "r1@v2", "r1@v2@v3"],
+  ])("keeps a cancellation of %s a RunCancelledError", async (_label, named, cancelled) => {
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(new DbosErrors.DBOSWorkflowCancelledError(cancelled));
+
+    const err = await dbosStepFor(dbNaming(named) as never, "r1")("turn:2:llm", async () => "x").catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+  });
+
+  it("falls back to a RunCancelledError when the run's workflow id cannot be read", async () => {
+    vi.spyOn(DBOS, "runStep").mockRejectedValueOnce(new DbosErrors.DBOSWorkflowCancelledError("r1"));
+    const db = { run: { findUnique: vi.fn(async () => Promise.reject(new Error("db down"))) } };
+
+    const err = await dbosStepFor(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+  });
+});
+
+describe("stopAwareDbosStep", () => {
+  it("stops before the step, without running it, once the run's row is terminal", async () => {
+    const runStep = vi.spyOn(DBOS, "runStep");
+    const db = { run: { findUnique: vi.fn(async () => ({ status: "cancelled" })) } };
+
+    const err = await stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+    expect((err as Error).message).toBe('Run cancelled: stopped before step "turn:2:llm".');
+    expect(runStep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the row is drivable", async () => ({ status: "running" })],
+    ["the row cannot be read", async () => Promise.reject(new Error("db down"))],
+  ])("runs the step when %s", async (_label, findUnique) => {
+    vi.spyOn(DBOS, "runStep").mockResolvedValueOnce("recorded");
+    const db = { run: { findUnique: vi.fn(findUnique) } };
+
+    await expect(stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x")).resolves.toBe("recorded");
+  });
+
+  // A taken-over original, as soon as the run names its fork: whether or not the takeover's cancel
+  // landed, and also after the fork already finished the run (no second settle from the original).
+  it.each([
+    ["running", "r1@v2", "r1"],
+    ["succeeded", "r1@v2", "r1"],
+    ["running", "r1@v2@v3", "r1"],
+    ["running", "r1@v2@v3", "r1@v2"],
+  ])(
+    "stops a workflow the run has moved off (row %s naming %s, running as %s) as an ownership loss, without running the step",
+    async (status, named, own) => {
+      const runStep = vi.spyOn(DBOS, "runStep");
+      vi.spyOn(DBOS, "workflowID", "get").mockReturnValue(own);
+      const db = { run: { findUnique: vi.fn(async () => ({ status, executionWorkflowId: named })) } };
+
+      const err = await stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(RunOwnershipLostError);
+      expect(err).not.toBeInstanceOf(RunCancelledError);
+      expect(runStep).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["a fork whose record failed (the run names no fork)", null, "r1@v2"],
+    ["the fork the run names", "r1@v2", "r1@v2"],
+    // A second takeover's fork, dequeued before its id is recorded (or its record failed): the run
+    // still names the fork it was forked from, which must not fence it out.
+    ["a fork of a fork whose id is not recorded yet", "r1@v2", "r1@v2@v3"],
+    ["a workflow whose id merely shares a prefix", "r10@v2", "r1"],
+  ])("runs the step for %s", async (_label, named, own) => {
+    vi.spyOn(DBOS, "runStep").mockResolvedValueOnce("recorded");
+    vi.spyOn(DBOS, "workflowID", "get").mockReturnValue(own);
+    const db = { run: { findUnique: vi.fn(async () => ({ status: "running", executionWorkflowId: named })) } };
+
+    await expect(stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x")).resolves.toBe("recorded");
+  });
+
+  it("hands concurrent steps to DBOS in call order even when their row reads finish out of order", async () => {
+    // DBOS numbers a step when runStep is called; a replay of parallel delegations matches by number.
+    const order: string[] = [];
+    vi.spyOn(DBOS, "runStep").mockImplementation(async (_fn: unknown, config?: { name?: string }) => {
+      order.push(config?.name ?? "?");
+      return "recorded";
+    });
+    const reads = [30, 0];
+    const db = {
+      run: {
+        findUnique: vi.fn(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => resolve({ status: "running", executionWorkflowId: null }), reads.shift()),
+            ),
+        ),
+      },
+    };
+    const step = stopAwareDbosStep(db as never, "r1");
+
+    await Promise.all([step("turn:1:tool:0", async () => "a"), step("turn:1:tool:1", async () => "b")]);
+
+    expect(order).toEqual(["turn:1:tool:0", "turn:1:tool:1"]);
+  });
+});
+
 describe("DbosExecutor.runInsideWorkflow", () => {
   function executor() {
     const db = { run: { update: vi.fn(async () => ({})) } };
@@ -73,6 +208,13 @@ describe("DbosExecutor.runInsideWorkflow", () => {
   it("hands the SDK's own conflict error back to DBOS for an ownership loss", async () => {
     const sdkErr = new DbosErrors.DBOSWorkflowConflictError("r1");
     executeRunMock.mockRejectedValueOnce(new RunOwnershipLostError("turn:1:llm", { cause: sdkErr }));
+
+    await expect(executor().runInsideWorkflow("r1")).rejects.toBe(sdkErr);
+  });
+
+  it("hands a forked-from workflow's own cancellation back to DBOS as itself", async () => {
+    const sdkErr = new DbosErrors.DBOSWorkflowCancelledError("r1");
+    executeRunMock.mockRejectedValueOnce(new RunOwnershipLostError("turn:2:llm", { cause: sdkErr }));
 
     await expect(executor().runInsideWorkflow("r1")).rejects.toBe(sdkErr);
   });
@@ -93,5 +235,43 @@ describe("DbosExecutor.runInsideWorkflow", () => {
     executeRunMock.mockRejectedValueOnce(boom);
 
     await expect(executor().runInsideWorkflow("r3")).rejects.toBe(boom);
+  });
+});
+
+describe("DbosExecutor.stop", () => {
+  function launchedExecutor(row: { status: string; executionWorkflowId: string | null }) {
+    const db = { run: { findUnique: vi.fn(async () => row) } };
+    const executor = new DbosExecutor(
+      {} as NativeRunProviders,
+      { systemDatabaseUrl: "postgresql://unused", schemaName: "dbos_test", executorId: "unit" },
+      db as never,
+      60_000,
+    );
+    // stop() launches DBOS only when this executor has not; the cancel itself is stubbed.
+    (executor as unknown as { launched: boolean }).launched = true;
+    return executor;
+  }
+
+  it("still cancels the workflow when the terminal write's settle throws", async () => {
+    failNativeRunMock.mockRejectedValueOnce(new Error("closing the review check failed"));
+    const cancel = vi.spyOn(DBOS, "cancelWorkflow").mockResolvedValue(undefined);
+
+    await expect(
+      launchedExecutor({ status: "running", executionWorkflowId: null }).stop("r1", "operator stop"),
+    ).rejects.toThrow("closing the review check failed");
+
+    expect(cancel).toHaveBeenCalledWith("r1");
+  });
+
+  it("still cancels the run's own workflow when the database cannot be read, and rethrows the read's error", async () => {
+    const executor = launchedExecutor({ status: "running", executionWorkflowId: null });
+    const down = new Error("db down");
+    (executor as unknown as { db: { run: { findUnique: () => Promise<never> } } }).db.run.findUnique = () =>
+      Promise.reject(down);
+    const cancel = vi.spyOn(DBOS, "cancelWorkflow").mockRejectedValue(new Error("system database down too"));
+
+    await expect(executor.stop("r1", "operator stop")).rejects.toBe(down);
+
+    expect(cancel).toHaveBeenCalledWith("r1");
   });
 });
