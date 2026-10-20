@@ -71,7 +71,7 @@ async function readState(db: TopUpTx | PrismaClient, runId: string): Promise<Top
       budgetBaseUsd: true,
       budgetLimitUsd: true,
       run: { select: { status: true } },
-      proxySession: { select: { id: true, status: true } },
+      proxySession: { select: { id: true, status: true, budgetExhaustedAt: true } },
     },
   });
   if (!coding || coding.budgetLimitUsd == null) return { outcome: "closed" };
@@ -80,7 +80,9 @@ async function readState(db: TopUpTx | PrismaClient, runId: string): Promise<Top
   const result = { outcome: "closed", grantedUsd } as const;
   if (grantedUsd + MIN_RESERVATION_USD > limitUsd) return result;
   if (coding.run.status !== "running" && coding.run.status !== "pending") return result;
-  if (!coding.proxySession || coding.proxySession.status !== "active") return result;
+  // Already refused by the proxy: the worker is stopping, a grant now would only be held for nothing.
+  const session = coding.proxySession;
+  if (!session || session.status !== "active" || session.budgetExhaustedAt) return result;
   const refused = await db.runBudgetEvent.findFirst({
     where: { runId, kind: "overrun_unavailable" },
     select: { id: true },
@@ -101,13 +103,13 @@ async function readState(db: TopUpTx | PrismaClient, runId: string): Promise<Top
         ELSE 0
       END), 0) AS "held",
       COALESCE(MAX(COALESCE("ceilingUsd", "reservationUsd")), 0) AS "maxHold"
-    FROM "CodingProxyRequest" WHERE "sessionId" = ${coding.proxySession.id}
+    FROM "CodingProxyRequest" WHERE "sessionId" = ${session.id}
   `;
   return {
     baseUsd: coding.budgetBaseUsd == null ? grantedUsd : Number(coding.budgetBaseUsd),
     grantedUsd,
     limitUsd,
-    sessionId: coding.proxySession.id,
+    sessionId: session.id,
     spentUsd: Number(totals[0]?.spent ?? 0),
     heldUsd: Number(totals[0]?.held ?? 0),
     maxHoldUsd: Number(totals[0]?.maxHold ?? 0),

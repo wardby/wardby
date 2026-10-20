@@ -343,6 +343,15 @@ describe.skipIf(!process.env.DATABASE_URL)("coding budget top-ups (database)", (
     await finish(parent.id, runA, runB);
   });
 
+  it("a run the proxy already refused gets no top-up", async () => {
+    const agent = await codingAgent("exhausted", 1, 50, null);
+    const runId = await start(agent);
+    await db.codingProxySession.update({ where: { runId }, data: { budgetExhaustedAt: new Date() } });
+    expect((await spendToGrantAndAsk(runId)).outcome).toBe("closed");
+    expect(await reservedUsd(runId)).toBeCloseTo(1, 6);
+    await finish(runId);
+  });
+
   it("an old run (null budgetLimitUsd) behaves exactly as before: no top-up, its reservation stays", async () => {
     const agent = await codingAgent("old", 1, 50, null);
     const runId = await start(agent);
