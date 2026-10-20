@@ -46,6 +46,7 @@ interface FakeRunRow {
     packageAuditMode?: "audit" | "full" | null;
     budgetBaseUsd?: string | null;
     budgetReservedUsd?: string | null;
+    budgetLimitUsd?: string | null;
   } | null;
   auditRecords?: Array<{
     ecosystem: string;
@@ -369,7 +370,12 @@ describe("run observability tools", () => {
           error: null,
           startedAt: now,
           finishedAt: now,
-          codingRun: { result: null, budgetBaseUsd: "1.000000", budgetReservedUsd: "1.100000" },
+          codingRun: {
+            result: null,
+            budgetBaseUsd: "1.000000",
+            budgetReservedUsd: "1.100000",
+            budgetLimitUsd: "1.500000",
+          },
         },
       ],
     );
@@ -379,7 +385,7 @@ describe("run observability tools", () => {
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
-    expect(parseText(result as never)).toMatchObject({ budgetBaseUsd: 1, budgetReservedUsd: 1.1 });
+    expect(parseText(result as never)).toMatchObject({ budgetBaseUsd: 1, budgetReservedUsd: 1.1, budgetLimitUsd: 1.5 });
     await client.close();
   });
 

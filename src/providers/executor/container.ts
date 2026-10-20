@@ -48,6 +48,7 @@ import {
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
+import { topUpCodingBudget, type TopUpOutcome } from "../../core/budget-topup.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
@@ -321,6 +322,11 @@ export interface ContainerRunSnapshot {
   agentBudgetUsd?: number;
   /** The run's budget before the agent's allowed overrun (CodingRun.budgetBaseUsd); absent for older runs. */
   budgetBaseUsd?: number;
+  /**
+   * The most the run may spend through overrun top-ups (CodingRun.budgetLimitUsd); `budgetUsd` is
+   * what it has been granted so far. Absent for older runs and runs without an allowed overrun.
+   */
+  budgetLimitUsd?: number;
   budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
@@ -452,6 +458,11 @@ export interface ContainerExecutionStore {
   recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
   /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
   budgetEvent?(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null>;
+  /**
+   * Grants a run with an overrun limit one top-up when it is close to its grant and its budget group
+   * and run tree have room (budget-topup.ts). Optional: without it a run stops at its base.
+   */
+  topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }>;
 }
 
 export interface CodingFailureAudit {
@@ -517,6 +528,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
       ...(row.codingRun.budgetBaseUsd == null ? {} : { budgetBaseUsd: Number(row.codingRun.budgetBaseUsd) }),
+      ...(row.codingRun.budgetLimitUsd == null ? {} : { budgetLimitUsd: Number(row.codingRun.budgetLimitUsd) }),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -901,6 +913,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     return loadBudgetEvent(this.db, runId);
   }
 
+  topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }> {
+    return topUpCodingBudget(this.db, runId);
+  }
+
   async terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -1046,6 +1062,9 @@ export interface ContainerExecutorOptions {
 }
 
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
+/** The poll interval, at most, while a run with an overrun limit is near its grant. */
+export const TOP_UP_NEAR_POLL_MS = 1_000;
+
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
   packageRefusals: Array<{ ecosystem: string; name: string; reason: string; listingOnly?: boolean }>;
@@ -1286,6 +1305,8 @@ export class ContainerExecutor implements Executor {
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
       let observedRunning = false;
+      // Overrun from available room: asked on each poll until it is granted in full or refused once.
+      let asksForTopUps = run.budgetLimitUsd !== undefined && run.budgetLimitUsd > run.budgetUsd;
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
@@ -1297,6 +1318,15 @@ export class ContainerExecutor implements Executor {
           this.emit({ stage: "running", runId, jobId: handle.id });
         }
         await this.options.store.heartbeat(runId);
+        if (asksForTopUps && this.options.store.topUpBudget) {
+          const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
+            containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
+            return { outcome: "not_needed" as const, near: true };
+          });
+          if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
+          // Near its grant: poll often, so the next step lands before a request no longer fits.
+          else if (topUp.near) delay = Math.min(delay, TOP_UP_NEAR_POLL_MS);
+        }
         await this.sleep(delay);
         delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));
         run = (await this.options.store.load(runId)) ?? run;
@@ -2558,7 +2588,10 @@ export class ContainerExecutor implements Executor {
         headRef: run.headRef,
         task,
         model: run.model,
-        budgetUsd: run.budgetUsd,
+        // The run's limit, not its grant: the proxy enforces the grant, and top-ups raise it while
+        // the job runs. Claude Code's own budget stop (its SDK maxBudgetUsd) is set from this, so it
+        // never stops a run before a top-up can; Codex has no stop of its own.
+        budgetUsd: run.budgetLimitUsd ?? run.budgetUsd,
         deadlineAt: deadlineAt.toISOString(),
         continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
         // Only when true: an untraced run's input stays exactly what older workers expect.
@@ -2777,7 +2810,7 @@ export class ContainerExecutor implements Executor {
   /** The overrun sentence for a finished run that spent past its base budget, as status details. */
   private overrunDetails(run: ContainerRunSnapshot): { overrunSentence?: string } {
     if (run.budgetBaseUsd === undefined) return {};
-    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetUsd);
+    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetLimitUsd ?? run.budgetUsd);
     return sentence ? { overrunSentence: sentence } : {};
   }
 
@@ -2789,6 +2822,7 @@ export class ContainerExecutor implements Executor {
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
       baseBudgetUsd: run.budgetBaseUsd,
+      limitUsd: run.budgetLimitUsd,
       budgetGroupName: run.budgetGroupName,
     });
   }
