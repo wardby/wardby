@@ -102,6 +102,19 @@ describe("coding proxy metering", () => {
     ).toThrow("invalid_upstream_sse");
   });
 
+  it("reports message_start's output count only as a floor until a message_delta arrives", () => {
+    const tracker = new AnthropicSseUsageTracker();
+    tracker.consume(
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":7,"output_tokens":1}}}',
+    );
+    expect(tracker.partial()).toEqual({
+      readUsage: { inputTokens: 7, cachedInputTokens: 0, cacheWriteTokens: 0 },
+      outputFloorTokens: 1,
+    });
+    tracker.consume('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":40}}');
+    expect(tracker.partial()).toMatchObject({ reportedOutputTokens: 40 });
+  });
+
   it("ends the stream on an upstream failure event and keeps only its error code", () => {
     const frame = (data: string) => `event: x\ndata: ${data}`;
     expect(

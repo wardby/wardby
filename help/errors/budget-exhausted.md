@@ -156,10 +156,16 @@ is not kept.
 When a reply breaks off before its final usage, the proxy settles the request
 at an estimate instead of keeping its whole hold: the usage it already read,
 else the run's previous reply's input, else the input part of the hold, plus
-the output relayed so far counted high, and never more than the request's
-worst case. The
-request is flagged as estimated and counted in the run's cost. If the
-estimate cannot be computed or recorded, the request keeps its full hold. A run can exceed its budget by at
+the output relayed so far (text, tool-call input, and thinking or reasoning
+text) counted high, and never more than the request's worst case. With nothing
+relayed, the run's median completed reply is used, or no output if there is
+none yet. A streaming request that failed before the provider's response
+started books no output. The native sandbox gateway follows the same rule: a
+call cut after the response started but before any output (for example while
+the model was thinking) is booked at its input plus the run's median completed
+reply, or its input alone if there is none yet. The request is flagged as
+estimated and counted in the run's cost. If the estimate cannot be computed or
+recorded, the request keeps its full hold. A run can exceed its budget by at
 most the gap between the estimate and the real cost.
 
 ## Group holds for delegated runs

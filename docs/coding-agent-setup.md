@@ -511,8 +511,13 @@ connection, a worker that is stopped mid-reply), the proxy settles the request
 at an estimate instead of leaving its whole hold in place. The estimate is the
 input usage the proxy already read; failing that, the input of the run's
 previous completed reply; failing that, the input part of the request's hold.
-It adds the output relayed so far, counted high, and is never more than the
-request's worst case. An estimated request is flagged `costEstimated`, counts in the
+It adds the output relayed so far (text, tool-call input, and thinking or
+reasoning text), counted high. With nothing relayed, the run's median
+completed reply is used, or no output if there is none yet. A streaming request
+that failed before the provider's response started adds no output, because
+nothing was generated. A provider's placeholder output count at the start of a
+reply is used only as a minimum. The estimate is never more than the request's worst
+case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's
 request ledger. If the estimate cannot be computed or recorded, the request
 keeps its full hold. A run can therefore exceed

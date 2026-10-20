@@ -30,7 +30,7 @@
 import OpenAI from "openai";
 import { encode as encodeCl100kBase } from "gpt-tokenizer/encoding/cl100k_base";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
-import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmToolDef, LlmUsage } from "./types.js";
+import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmStreamHooks, LlmToolDef, LlmUsage } from "./types.js";
 import { computeCost } from "./pricing-core.js";
 import { currentLookup, pinnedLookup, type CatalogLookup } from "./catalog-lookup.js";
 import type { CatalogEntry } from "./catalog-types.js";
@@ -170,7 +170,7 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
     return new OpenAiLlmProvider("", this.client, pinnedLookup(entry));
   }
 
-  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
+  async *stream(req: LlmRequest, signal?: AbortSignal, hooks?: LlmStreamHooks): AsyncIterable<LlmStreamEvent> {
     const entry = this.lookup(req.model);
     // Effort is sent only at a level the catalog says the model accepts and
     // dropped otherwise (the LlmRequest.effort contract). Temperature only
@@ -189,6 +189,7 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
       ...(sendTemperature ? { temperature: req.temperature } : {}),
     };
     const stream = await this.client.responses.create(params, { signal });
+    hooks?.onResponseStarted?.();
 
     let sawToolCall = false;
     for await (const event of stream) {

@@ -25,6 +25,7 @@ function fakeLedger() {
     complete: vi.fn(async () => undefined),
     release: vi.fn(async () => undefined),
     markUncertain: vi.fn(async () => undefined),
+    medianOutputTokens: vi.fn(async (): Promise<number | undefined> => undefined),
   };
 }
 
@@ -84,6 +85,79 @@ describe("streamModel mid-stream failure", () => {
     expect(estimate.costUsd).toBeLessThanOrEqual(HOLD_USD);
     expect(ledger.complete).not.toHaveBeenCalled();
     expect(ledger.release).not.toHaveBeenCalled();
+  });
+
+  it("counts streamed tool calls in the estimate, and falls back to a high byte count when counting fails", async () => {
+    const ledger = fakeLedger();
+    const argsJson = JSON.stringify({ path: "a".repeat(290) });
+    let counted = 0;
+    const priceUsd = vi.fn((_model: string, _usage: { inputTokens: number; outputTokens: number }) => 0.01);
+    const llm = {
+      countTokens: vi.fn(async () => {
+        counted += 1;
+        if (counted === 1) return 100;
+        throw new Error("tokenizer unavailable");
+      }),
+      priceUsd,
+      async *stream(): AsyncIterable<LlmStreamEvent> {
+        yield { type: "text", delta: "abc" };
+        yield { type: "tool_call", id: "t1", name: "read", argsJson };
+        throw new Error("upstream reset");
+      },
+    } as unknown as LlmProvider;
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    const output = Math.ceil(Buffer.byteLength(`abcread${argsJson}`) / 3);
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: output });
+    expect(ledger.markUncertain).toHaveBeenCalledWith(
+      "sess_1",
+      "call_1",
+      expect.objectContaining({ outputTokens: output }),
+    );
+  });
+
+  /** A provider whose stream fails before its first event, after its response started or not. */
+  function cutBeforeFirstEvent(started: boolean) {
+    const priceUsd = vi.fn((_model: string, _usage: { inputTokens: number; outputTokens: number }) => 0.01);
+    const llm = {
+      countTokens: vi.fn(async () => 100),
+      priceUsd,
+      // eslint-disable-next-line require-yield
+      async *stream(_req: unknown, _signal: unknown, hooks?: { onResponseStarted?: () => void }) {
+        if (started) hooks?.onResponseStarted?.();
+        throw new Error("upstream reset");
+      },
+    } as unknown as LlmProvider;
+    return { llm, priceUsd };
+  }
+
+  it("once the response started, with no completed call to take a median from, books input and no output", async () => {
+    const ledger = fakeLedger();
+    const { llm, priceUsd } = cutBeforeFirstEvent(true);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: 0 });
+    expect(ledger.markUncertain).toHaveBeenCalledWith("sess_1", "call_1", expect.objectContaining({ outputTokens: 0 }));
+    expect(ledger.release).not.toHaveBeenCalled();
+  });
+
+  it("once the response started, books the run's median output for a stream cut before its first event", async () => {
+    const ledger = fakeLedger();
+    ledger.medianOutputTokens.mockResolvedValue(700);
+    const { llm, priceUsd } = cutBeforeFirstEvent(true);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: 700 });
+    expect(ledger.markUncertain).toHaveBeenCalledWith(
+      "sess_1",
+      "call_1",
+      expect.objectContaining({ outputTokens: 700 }),
+    );
+  });
+
+  it("before the response started, releases the hold: nothing was generated", async () => {
+    const ledger = fakeLedger();
+    const { llm } = cutBeforeFirstEvent(false);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    expect(ledger.release).toHaveBeenCalledWith("sess_1", "call_1");
+    expect(ledger.markUncertain).not.toHaveBeenCalled();
   });
 
   it("marks the call uncertain without an estimate when pricing throws, and rethrows the stream error", async () => {

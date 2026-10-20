@@ -615,7 +615,12 @@ remaining budget cannot cover is refused and the run ends `budget_exhausted`
 instead of overspending. The worker cannot raise or bypass its budget because it
 never talks to the provider directly. A call that breaks off before its final
 usage is settled at an estimate (never more than its reservation) and
-included in the run's cost.
+included in the run's cost. The estimate is the call's input plus the output
+streamed so far (text and tool calls), counted high. If the provider's response
+had started but no output had arrived yet (for example while the model was
+thinking or reasoning), the run's median completed reply is used, or no output
+if there is none yet. A call that failed before the provider's response started is released,
+because nothing was generated.
 
 ## Failure modes
 

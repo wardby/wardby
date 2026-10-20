@@ -6,7 +6,11 @@ export interface InterruptedFacts {
   readUsage?: { inputTokens: number; cachedInputTokens: number; cacheWriteTokens: number };
   /** Output tokens the upstream reported so far (Anthropic message_delta), if any. */
   reportedOutputTokens?: number;
-  /** UTF-8 bytes of output text relayed to the client before the break. */
+  /** message_start's output count: a placeholder (usually 1), so only a floor, never the count. */
+  outputFloorTokens?: number;
+  /** A stream that failed before its response started: the provider generated no output. */
+  beforeResponse?: boolean;
+  /** UTF-8 bytes of output relayed to the client before the break: text, tool input, thinking. */
   relayedOutputBytes: number;
   /** Usage of the session's latest completed, non-estimated reply for the same model. */
   previous?: ProxyUsage;
@@ -32,15 +36,20 @@ export function relayedOutputTokens(bytes: number): number {
 /**
  * The best known cost of a reply that broke before its final usage (spec PR 1
  * › 1b): usage already read, else the previous reply's input, else the input
- * part of the hold; plus the output seen so far. Never more than the request's worst case.
+ * part of the hold; plus the output seen so far. With no output seen, the
+ * run's median completed reply, or none while the run has no completed reply
+ * (a deliberate rule: one cut must not book a whole reserved reply). A stream
+ * that failed before its response started generated none. Never more than the
+ * request's worst case.
  */
 export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPricing): InterruptedEstimate {
   const relayed = relayedOutputTokens(facts.relayedOutputBytes);
+  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? 0);
   const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.ceilingUsd ?? facts.reservationUsd));
   if (facts.readUsage) {
     const usage: ProxyUsage = {
       ...facts.readUsage,
-      outputTokens: facts.reportedOutputTokens ?? relayed,
+      outputTokens: facts.reportedOutputTokens ?? Math.max(facts.outputFloorTokens ?? 0, output),
       reasoningTokens: 0,
     };
     return { usage, costUsd: clamp(computeCost(pricing, usage)) };
@@ -50,7 +59,7 @@ export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPrici
       inputTokens: facts.previous.inputTokens,
       cachedInputTokens: facts.previous.cachedInputTokens,
       cacheWriteTokens: facts.previous.cacheWriteTokens,
-      outputTokens: facts.relayedOutputBytes > 0 ? relayed : (facts.medianOutputTokens ?? 0),
+      outputTokens: output,
       reasoningTokens: 0,
     };
     return { usage, costUsd: clamp(computeCost(pricing, usage)) };
@@ -59,9 +68,9 @@ export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPrici
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheWriteTokens: 0,
-    outputTokens: relayed,
+    outputTokens: output,
     reasoningTokens: 0,
   };
   const inputPart = facts.reservationUsd - (facts.maxOutputTokens * pricing.outputPerMTok) / 1_000_000;
-  return { usage, costUsd: clamp(inputPart + (relayed * pricing.outputPerMTok) / 1_000_000) };
+  return { usage, costUsd: clamp(inputPart + (usage.outputTokens * pricing.outputPerMTok) / 1_000_000) };
 }
