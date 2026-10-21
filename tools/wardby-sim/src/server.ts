@@ -67,7 +67,8 @@ export function createSimServer(options: SimServerOptions): SimServer {
     let principal: string | undefined;
     const fault = service ? state.faults.take(service.name, req.method, path) : undefined;
     let response: SimResponse;
-    if (fault) {
+    if (fault?.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+    if (fault && !fault.passThrough) {
       response = fault.response;
     } else if (service) {
       try {

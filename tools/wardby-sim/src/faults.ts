@@ -13,6 +13,10 @@ export interface FaultSpec {
   /** How many matching calls to let through before the fault fires (default 0). */
   after?: number;
   response: SimResponse;
+  /** Hold the call this long first (a slow service). */
+  delayMs?: number;
+  /** After the delay, answer from the real route instead of `response` (a delay-only fault). */
+  passThrough?: boolean;
 }
 
 export interface Fault extends FaultSpec {
@@ -75,12 +79,25 @@ export function parseFaultSpec(value: unknown): FaultSpec | null {
     typeof v.method !== "string" ||
     typeof v.path !== "string" ||
     (v.mode !== "once" && v.mode !== "sticky") ||
-    !response ||
-    typeof response.status !== "number" ||
+    (v.passThrough !== true && (!response || typeof response.status !== "number")) ||
+    (v.delayMs !== undefined && (typeof v.delayMs !== "number" || v.delayMs < 0 || v.delayMs > 600_000)) ||
     (v.after !== undefined && (typeof v.after !== "number" || !Number.isInteger(v.after) || v.after < 0))
   ) {
     return null;
   }
+  if (v.passThrough === true) {
+    return {
+      service: v.service,
+      method: v.method,
+      path: v.path,
+      mode: v.mode,
+      ...(typeof v.after === "number" ? { after: v.after } : {}),
+      ...(typeof v.delayMs === "number" ? { delayMs: v.delayMs } : {}),
+      passThrough: true,
+      response: { status: 0 },
+    };
+  }
+  if (!response) return null;
   const headers =
     response.headers && typeof response.headers === "object"
       ? Object.fromEntries(Object.entries(response.headers as Record<string, unknown>).map(([k, x]) => [k, String(x)]))
@@ -97,8 +114,9 @@ export function parseFaultSpec(value: unknown): FaultSpec | null {
     path: v.path,
     mode: v.mode,
     ...(typeof v.after === "number" ? { after: v.after } : {}),
+    ...(typeof v.delayMs === "number" ? { delayMs: v.delayMs } : {}),
     response: {
-      status: response.status,
+      status: response.status as number,
       ...(headers
         ? { headers }
         : typeof response.body === "object"

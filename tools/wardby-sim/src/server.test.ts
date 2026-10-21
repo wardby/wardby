@@ -126,6 +126,23 @@ describe("wardby-sim server skeleton", () => {
     expect((await call(sim, "GET", "/toy/count")).body).toEqual({ value: 1 });
   });
 
+  it("holds a call for a delay-only fault, then answers from the real route", async () => {
+    sim = createSimServer({ services: [counterService()] });
+    const added = await call(sim, "POST", "/__sim/faults", {
+      service: "toy",
+      method: "POST",
+      path: "/count",
+      mode: "once",
+      delayMs: 150,
+      passThrough: true,
+    });
+    expect(added.status).toBe(201);
+    const started = Date.now();
+    expect((await call(sim, "POST", "/toy/count")).body).toEqual({ value: 1 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+    expect(sim.state.calls.list({ service: "toy" })[0].faultId).toBe(record(added.body).id);
+  });
+
   it("rejects a malformed fault", async () => {
     sim = createSimServer({ services: [counterService()] });
     expect((await call(sim, "POST", "/__sim/faults", { service: "toy", mode: "always" })).status).toBe(400);
