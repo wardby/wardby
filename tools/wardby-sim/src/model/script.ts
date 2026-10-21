@@ -204,7 +204,30 @@ export class ScriptedModel {
 
   /** The SSE body answering `body`, or null when no script of `protocol` matches it. */
   answer(protocol: ScriptProtocol, body: string): string | null {
-    const script = this.scripts.find((s) => s.protocol === protocol && body.includes(s.match));
+    // A lead's later requests carry its sub-agent's marker too (in the delegation it made), so the
+    // system prompt (Anthropic `system`, OpenAI `instructions`) decides first; then the marker that
+    // comes first anywhere in the request.
+    let head = "";
+    try {
+      const parsed = JSON.parse(body) as { system?: unknown; instructions?: unknown };
+      head = JSON.stringify(parsed.system ?? parsed.instructions ?? "");
+    } catch {
+      // not JSON: the whole body decides
+    }
+    const earliest = (text: string): TurnScript | undefined => {
+      let found: TurnScript | undefined;
+      let at = Number.POSITIVE_INFINITY;
+      for (const candidate of this.scripts) {
+        if (candidate.protocol !== protocol) continue;
+        const index = text.indexOf(candidate.match);
+        if (index !== -1 && index < at) {
+          found = candidate;
+          at = index;
+        }
+      }
+      return found;
+    };
+    const script = earliest(head) ?? earliest(body);
     if (!script) return null;
     const index = Math.min(this.cursors.get(script) ?? 0, script.turns.length - 1);
     this.cursors.set(script, index + 1);

@@ -2,16 +2,18 @@
   "agent": "builder",
   "protocol": "anthropic-messages",
   "match": "[flow-g:builder]",
-  "status": "partly validated: accepted and metered by the real coding proxy; not yet replayed through Claude Code itself",
+  "status": "follows the Claude Code worker's own tools (mcp__wardby_tools__run_command, StructuredOutput), as seen in a Flow G run; accepted and metered by the real coding proxy",
   "turns": [
     {
       "content": [
-        { "type": "text", "text": "Adding the joke file." },
+        { "type": "text", "text": "Adding the joke file and running the tests." },
         {
           "type": "tool_use",
           "id": "toolu_flowg_1",
-          "name": "Write",
-          "input": { "file_path": "jokes/flow-g.txt", "content": "Knock knock. Who's there? Flow G.\n" }
+          "name": "mcp__wardby_tools__run_command",
+          "input": {
+            "command": "mkdir -p jokes && printf 'Knock knock. Who'\\''s there? Flow G.\\n' > jokes/flow-g.txt && npm test"
+          }
         }
       ],
       "stop_reason": "tool_use"
@@ -21,19 +23,21 @@
         {
           "type": "tool_use",
           "id": "toolu_flowg_2",
-          "name": "Bash",
-          "input": { "command": "npm test", "description": "Run the tests" }
+          "name": "StructuredOutput",
+          "input": {
+            "schemaVersion": 1,
+            "runId": "{{runId}}",
+            "outcome": "changes_ready",
+            "summary": "Adds a Flow G joke.\n\n- [x] jokes/flow-g.txt\n\nHow to try it: read jokes/flow-g.txt.",
+            "tag": "flow-g",
+            "tests": [{ "command": "npm test", "outcome": "passed" }]
+          }
         }
       ],
       "stop_reason": "tool_use"
     },
     {
-      "content": [
-        {
-          "type": "text",
-          "text": "{\"schemaVersion\":1,\"runId\":\"{{runId}}\",\"outcome\":\"changes_ready\",\"summary\":\"Adds a Flow G joke.\\n\\n- [x] jokes/flow-g.txt\\n\\nHow to try it: read jokes/flow-g.txt.\",\"tag\":\"flow-g\",\"tests\":[{\"command\":\"npm test\",\"outcome\":\"passed\"}]}"
-        }
-      ],
+      "content": [{ "type": "text", "text": "Done." }],
       "stop_reason": "end_turn"
     }
   ]

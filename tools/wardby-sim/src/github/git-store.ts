@@ -2,7 +2,7 @@
 // per simulated repo, so diffs, compares, merge-tree and conflicts are git's own. Every
 // REST answer about content (pull request files, compare, contents, trees) is read from here.
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -114,8 +114,9 @@ export class GitStore {
 
   /** Removes every repository (a scenario reset). */
   clear(): void {
-    rmSync(this.root, { recursive: true, force: true });
+    // The root itself stays: in a pod it is a mounted volume, which cannot be removed.
     mkdirSync(this.root, { recursive: true });
+    for (const entry of readdirSync(this.root)) rmSync(join(this.root, entry), { recursive: true, force: true });
   }
 
   dispose(): void {

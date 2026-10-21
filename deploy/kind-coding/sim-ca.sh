@@ -44,13 +44,13 @@ chmod 644 "$OUT/ca.crt" "$OUT/tls.crt"
 echo "sim-ca.sh: wrote $OUT/ca.crt, $OUT/tls.crt, $OUT/tls.key (TEST ONLY, valid 7 days)."
 
 if [[ "$APPLY" == "--apply" ]]; then
-  CONTEXT="$(kubectl config current-context)"
+  CONTEXT="${KUBE_CONTEXT:-$(kubectl config current-context)}"
   if [[ "$CONTEXT" != kind-* ]]; then
     echo "sim-ca.sh: refusing to apply to context '$CONTEXT': kind clusters only." >&2
     exit 1
   fi
-  kubectl create secret tls wardby-sim-tls -n wardby-sim --cert="$OUT/tls.crt" --key="$OUT/tls.key" \
-    --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create configmap wardby-sim-ca -n wardby-coding --from-file=ca.crt="$OUT/ca.crt" \
-    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl --context "$CONTEXT" create secret tls wardby-sim-tls -n wardby-sim --cert="$OUT/tls.crt" --key="$OUT/tls.key" \
+    --dry-run=client -o yaml | kubectl --context "$CONTEXT" apply -f -
+  kubectl --context "$CONTEXT" create configmap wardby-sim-ca -n wardby-coding --from-file=ca.crt="$OUT/ca.crt" \
+    --dry-run=client -o yaml | kubectl --context "$CONTEXT" apply -f -
 fi

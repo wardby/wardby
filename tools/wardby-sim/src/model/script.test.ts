@@ -104,11 +104,14 @@ describe("scripted model", () => {
     expect(ask("[flow-g:builder]")).toContain('\\"runId\\":\\"r1\\"');
     expect(ask("[flow-g:nobody]")).toBeNull();
     expect(model.answer("anthropic-messages", "[flow-g:builder]")).toBeNull();
+    // A lead's request that carries its sub-agent's marker later on still belongs to the lead.
+    expect(ask("[flow-g:delivery] then the delegation: [flow-g:builder] add a joke")).toContain("The builder opened");
     expect(model.served.map((s) => `${s.agent}:${s.turn}`)).toEqual([
       "builder:0",
       "delivery:0",
       "builder:1",
       "builder:1",
+      "delivery:1",
     ]);
   });
 
@@ -269,9 +272,9 @@ describe("Flow G builder scripts through the real coding proxy", () => {
       turns.push(await response.text());
     }
     expect(h.rejected).toEqual([]);
-    expect(turns[0]).toContain('"name":"Write"');
-    expect(turns[1]).toContain('"name":"Bash"');
-    expect(turns[2]).toContain('\\"runId\\":\\"run-flowg\\"');
+    expect(turns[0]).toContain('"name":"mcp__wardby_tools__run_command"');
+    expect(turns[1]).toContain('"name":"StructuredOutput"');
+    expect(turns[1]).toContain('\\"runId\\":\\"run-flowg\\"');
     const completed = h.audit.filter((e) => e.type === "response.completed");
     expect(completed).toHaveLength(3);
   });

@@ -81,7 +81,14 @@ export default tseslint.config(
     // CLI stdout, not server logging through pino -- plus
     // host-functions.test.ts's test that deliberately intercepts
     // console.log to verify secret redaction.
-    files: ["src/**/*.test.ts", "src/**/*.test-support.ts", "tools/**/*.test.ts", "tools/**/*.test-support.ts"],
+    files: [
+      "src/**/*.test.ts",
+      "src/**/*.test-support.ts",
+      "tools/**/*.test.ts",
+      "tools/**/*.test-support.ts",
+      // The Flow G runner drives JSON-RPC and simulator JSON loosely, like a test harness.
+      "tools/wardby-sim/src/flow-g/runner.ts",
+    ],
     rules: {
       "@typescript-eslint/consistent-type-imports": "off",
       "no-console": "off",

@@ -253,15 +253,16 @@ export const ROUTES: readonly RouteEntry[] = [
     "model",
     "POST",
     "/openai/v1/responses",
-    "Streams scripted Responses output items. The event set matches what wardby's proxy and the pinned Codex CLI " +
-      "accept (replayed through both in model/script.test.ts), not every event the real API sends.",
+    "Streams scripted Responses output items (message text also as output_text deltas). Replayed by the pinned " +
+      "Codex CLI through the proxy and by wardby's native OpenAI client (model/script.test.ts, Flow G), not " +
+      "every event the real API sends.",
   ),
   unverified(
     "model",
     "POST",
     "/anthropic/v1/messages",
-    "Streams scripted content blocks (text, tool_use). Accepted and metered by wardby's proxy; not yet replayed " +
-      "through Claude Code itself.",
+    "Streams scripted content blocks (text, tool_use). Replayed by Claude Code through the proxy and by wardby's " +
+      "native Anthropic client in Flow G; the real API's full event set is not modelled.",
   ),
 ];
 
