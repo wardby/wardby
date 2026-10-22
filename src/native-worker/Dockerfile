@@ -1,6 +1,6 @@
 # The native sandbox worker (docs/native-sandbox.md): runs one sandbox-mode native run's engine and
 # user tools, reaching only the native gateway. No credentials, no database client, no shell use.
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
@@ -11,12 +11,12 @@ COPY help ./help
 COPY src ./src
 RUN npm run build
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS worker-dependencies
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS worker-dependencies
 WORKDIR /worker
 COPY src/native-worker/package.json src/native-worker/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4
 LABEL org.opencontainers.image.source="https://github.com/wardby/wardby"
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \

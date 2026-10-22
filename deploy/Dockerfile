@@ -2,7 +2,7 @@
 # generated Prisma client, the help index) is plain JavaScript, so an arm64 machine building the
 # linux/amd64 images compiles natively instead of under emulation. Every stage that ships or runs
 # on the cluster (runtime, migration) stays on the target platform.
-FROM --platform=$BUILDPLATFORM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+FROM --platform=$BUILDPLATFORM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
@@ -19,7 +19,7 @@ RUN npm run build
 # The migration image needs the Prisma CLI (a devDependency) and prisma.config.ts, which Prisma 7
 # needs for the schema, migrations path and DATABASE_URL. It runs on the cluster, so it is built
 # for the target platform rather than from the (builder-platform) build stage.
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS migration
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS migration
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
@@ -40,7 +40,7 @@ COPY scripts/rds-iam-url.mjs ./scripts/rds-iam-url.mjs
 RUN npx prisma generate
 CMD ["npm", "run", "prisma:migrate"]
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS runtime
 WORKDIR /app
 # Images are release images by default: they refuse the test-only WARDBY_TEST_SIMULATORS
 # switch (src/config/test-simulators.ts). Only a throwaway test cluster's build passes
