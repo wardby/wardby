@@ -94,10 +94,15 @@ case with `AUTH_PROVIDER=delegating`), register a public client with it and
 enter its client id when adding the server. The client must:
 
 - be a public client using the authorization code flow with PKCE (S256);
-- have the loopback redirect URI `http://127.0.0.1/callback` (the app uses an
-  available local port at sign-in time, and per RFC 8252 identity providers
-  match everything except the port);
-- be allowed to request the `admin:view` scope for the Wardby resource.
+- have the exact loopback redirect URI `http://127.0.0.1:8585/callback` (the app
+  listens on this fixed port at sign-in time). Some identity providers match a
+  loopback redirect by its exact port rather than the port-agnostic rule of
+  RFC 8252 §7.3, so register this precise URI — a port-less or wildcard loopback
+  entry may not match;
+- be allowed to request the `admin:view` scope for the Wardby resource;
+- enable the refresh-token grant and allow the `offline_access` scope — the app
+  requests it so the provider returns a refresh token, and sign-in fails without
+  one.
 
 ## Infrastructure view
 

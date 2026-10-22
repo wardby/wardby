@@ -14,7 +14,11 @@ use url::Url;
 
 use crate::error::AppError;
 
-pub const SCOPE: &str = "admin:view";
+/// `offline_access` is required so the authorization server returns a refresh
+/// token (sign-in fails without one); `admin:view` is the viewer's privileged
+/// scope. The self-hosted AS ignores scopes it does not advertise, so the extra
+/// scope is harmless there.
+pub const SCOPE: &str = "admin:view offline_access";
 pub const CLIENT_NAME: &str = "wardby viewer";
 /// Redirect registered once per server; sign-in substitutes the bound port
 /// (RFC 8252 section 7.3, which the wardby server honours).
@@ -565,7 +569,7 @@ mod tests {
             ("response_type", "code"),
             ("client_id", "cid"),
             ("redirect_uri", "http://127.0.0.1:5555/callback"),
-            ("scope", "admin:view"),
+            ("scope", "admin:view offline_access"),
             ("state", "ST"),
             ("code_challenge", "CH"),
             ("code_challenge_method", "S256"),

@@ -190,7 +190,10 @@ that case, register the MCP client manually as a **public/native application**:
 
 - require authorization code flow with PKCE S256;
 - do not issue or embed a client secret in a desktop client;
-- register the client's exact loopback callback URI; and
+- register the client's exact loopback callback URI;
+- enable the refresh-token grant and allow the `offline_access` scope, so the
+  client receives a refresh token (desktop clients need one to keep a session);
+  and
 - allow it to request the Wardby audience and scopes.
 
 To let the Wardby mobile app sign in, also register its private-use redirect
@@ -211,6 +214,12 @@ provider. Other MCP clients need an equivalent way to supply a pre-registered
 public client ID. If a client supports only dynamic registration, either enable
 that feature with suitable provider-side restrictions or use Wardby's
 self-hosted authentication mode.
+
+The Wardby viewer desktop app signs in on a fixed loopback callback,
+`http://127.0.0.1:8585/callback`; register that exact URI on its public/native
+client. Some providers match a loopback redirect by its exact port rather than
+the port-agnostic rule of RFC 8252 §7.3 — for those, this precise port must be
+registered, because a port-less or wildcard loopback entry will not match it.
 
 ## 4. Configure Wardby
 
