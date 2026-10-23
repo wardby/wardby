@@ -26,7 +26,7 @@ import { openPullRequestHints, openSiblings, openSiblingsForIssue } from "./rela
 import { githubIssueKey } from "./issue-bridge.js";
 vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }));
 import { maybeMarkReady } from "./mark-ready.js";
-import { mentionTaskText, siblingContinuationHints } from "./host-events.js";
+import { mentionDeclinedBody, mentionTaskText, siblingContinuationHints } from "./host-events.js";
 import { isIssueMentionTask } from "./host-status.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
@@ -739,22 +739,97 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
     expect(result.followUps).toHaveLength(2); // the reaction, then the status comment
   });
 
-  it("does not ask about the commenter when no agent would act on the mention", async () => {
-    const repoAccess = gate();
-    const d = deps([], host(), repoAccess);
-    await routeHostEvent(mention("@wardby hi"), d);
-    expect(repoAccess.authorizeHostUser).not.toHaveBeenCalled();
-  });
+  describe("a mention that starts nothing explains why, to a commenter with write access", () => {
+    const post = async (result: Awaited<ReturnType<typeof routeHostEvent>>) => {
+      expect(result.runIds).toEqual([]);
+      for (const f of result.followUps) await f();
+    };
 
-  it("refuses the mention responder when its own link is no longer authorized", async () => {
-    vi.mocked(dispatchRun).mockClear();
-    const d = deps(
-      [{ agentId: "a3", triggers: ["mention"], checkName: null }],
-      host(),
-      gate({ use: () => ({ ok: false, reason: "owner_required" }) }),
-    );
-    expect(await routeHostEvent(mention("@wardby fix"), d)).toEqual({ runIds: [], followUps: [] });
-    expect(dispatchRun).not.toHaveBeenCalled();
+    it("when no agent is linked to the repository", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([]);
+      await post(await routeHostEvent(mention("@wardby hi"), d));
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.acknowledge).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+        number: 7,
+        body: expect.stringContaining("no agent on this repository is set up to answer mentions"),
+      });
+    });
+
+    it("when a review is asked for and no reviewer is linked", async () => {
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      await post(await routeHostEvent(mention("@wardby review"), d));
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+        number: 7,
+        body: expect.stringContaining("no reviewer agent is linked"),
+      });
+    });
+
+    it("when the linked agent's own repository access is no longer authorized", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps(
+        [{ agentId: "a3", triggers: ["mention"], checkName: null }],
+        host(),
+        gate({ use: () => ({ ok: false, reason: "owner_required" }) }),
+      );
+      await post(await routeHostEvent(mention("@wardby fix"), d));
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+        number: 7,
+        body: expect.stringContaining("can no longer use this repository"),
+      });
+    });
+
+    it.each([
+      { isFork: true, state: "open" },
+      { isFork: false, state: "closed" },
+    ])("when a review is asked for on a pull request that is %j", async (head) => {
+      const h = host();
+      h.pullRequestHead = vi.fn(async () => ({ headSha: SHA, ...head }));
+      const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], h);
+      await post(await routeHostEvent(mention("@wardby review"), d));
+      expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+        number: 7,
+        body: expect.stringContaining("closed or comes from a fork"),
+      });
+    });
+
+    it("in the review thread when the mention was in one", async () => {
+      const d = deps([]);
+      await post(
+        await routeHostEvent(
+          {
+            ...(mention("@wardby hi") as Extract<HostEvent, { kind: "mention" }>),
+            comment: { kind: "inline", id: "88" },
+            replyToReviewCommentId: "88",
+          },
+          d,
+        ),
+      );
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(
+        REPO,
+        expect.objectContaining({ replyToReviewCommentId: "88" }),
+      );
+    });
+
+    it("without naming the App, so the reply can never be matched as a mention of itself", () => {
+      for (const reason of [
+        "no_responder",
+        "no_reviewer",
+        "agent_not_authorized",
+        "pull_request_not_reviewable",
+      ] as const) {
+        expect(mentionDeclinedBody(reason)).not.toContain("@");
+      }
+    });
+
+    it("but says nothing to a commenter without write access, even with nothing linked", async () => {
+      const d = deps([], host(), gate({ commenter: { ok: false, reason: "insufficient_permission", level: "read" } }));
+      expect(await routeHostEvent(mention("@wardby hi"), d)).toEqual({ runIds: [], followUps: [] });
+      expect(d.hosts.github.comment).not.toHaveBeenCalled();
+    });
   });
 
   it("records the dispatched PR on a review started by '@wardby review'", async () => {
