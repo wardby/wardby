@@ -244,11 +244,9 @@ describe("Flow G builder scripts through the real coding proxy", () => {
 
   it("builder.claude: the proxy accepts, streams and meters every scripted turn", async () => {
     const h = await proxyWith("anthropic-messages", "claude-sonnet-5");
-    const fixture = JSON.parse(
-      readFileSync(
-        resolve(import.meta.dirname, "../../../../src/providers/coding-proxy/fixtures/anthropic-sdk-request.json"),
-        "utf8",
-      ),
+    // Loaded as a module (the proxy's allowlist fixture, shared so the two can't drift), not read as file data.
+    const fixture = structuredClone(
+      require("../../../../src/providers/coding-proxy/fixtures/anthropic-sdk-request.json"),
     ) as Record<string, unknown>;
     // Claude Code's own request shape (the proxy's allowlist fixture), with the agent's marker and run id in the prompt.
     const messages = structuredClone(fixture.messages) as { content: { type: string; text?: string }[] }[];
