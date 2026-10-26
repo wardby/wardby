@@ -179,6 +179,19 @@ describe("PyPI sim", () => {
     expect((await get("/pypi-files/packages/ab/cd/nope.whl")).status).toBe(404);
   });
 
+  it("escapes data-requires-python and file names in the PEP 503 HTML page", async () => {
+    await script([
+      {
+        action: "pypi.project",
+        name: "sim-quoted",
+        releases: { "1.0": { requiresPython: '>=3.8" onmouseover="x' } },
+      },
+    ]);
+    const html = (await get("/pypi/simple/sim-quoted/")).bytes.toString();
+    expect(html).toContain('data-requires-python="&gt;=3.8&quot; onmouseover=&quot;x"');
+    expect(html).not.toContain('" onmouseover="');
+  });
+
   it.skipIf(!has("python3", ["-m", "pip", "--version"]))(
     "pip installs a real wheel and its dependency, hashes checked",
     async () => {

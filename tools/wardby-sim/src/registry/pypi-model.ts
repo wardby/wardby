@@ -181,10 +181,11 @@ export function answerPypi(model: PypiRegistryModel, url: string, options: PypiA
     const anchors = files
       .map((file) => {
         const rp = file.release.requiresPython
-          ? ` data-requires-python="${file.release.requiresPython.replace(/</g, "&lt;").replace(/>/g, "&gt;")}"`
+          ? ` data-requires-python="${escapeHtml(file.release.requiresPython)}"`
           : "";
         const yanked = file.release.yanked ? ' data-yanked=""' : "";
-        return `<a href="${pypiFileUrlFor(file.filename)}#sha256=${options.sha256(file.bytes)}"${rp}${yanked}>${file.filename}</a><br/>`;
+        const href = escapeHtml(`${pypiFileUrlFor(file.filename)}#sha256=${options.sha256(file.bytes)}`);
+        return `<a href="${href}"${rp}${yanked}>${escapeHtml(file.filename)}</a><br/>`;
       })
       .join("\n");
     return {
@@ -207,4 +208,14 @@ export function answerPypi(model: PypiRegistryModel, url: string, options: PypiA
     return { status: 404, text: "Not Found" };
   }
   return { status: 404, text: "no route" };
+}
+
+/** Escapes text for an HTML attribute value or element content, as PEP 503's index pages need. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
