@@ -12,7 +12,7 @@
  *
  * Gaps found when this suite was written are listed in KNOWN_*: the main tests check everything
  * else and that each listed gap is still a gap (so a fixed one is taken off the list); the
- * `it.fails` tests below them hold the gaps themselves, as findings. This file reads only source
+ * `it.fails` tests below them hold the gaps themselves, as findings, until they are fixed. This file reads only source
  * and docs, never a secret value, so it is the one release file without a secret sweep.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -255,15 +255,23 @@ describe("docs and help drift", () => {
   });
 
   // FINDING: D1-D4, unconfirmed; see regression-phase1-report.md. The gaps themselves.
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("D1: the known undocumented error codes have help/errors articles", () => {
     expect([...KNOWN_UNDOCUMENTED_CODES].filter((code) => !named(helpErrorsText, code))).toEqual([]);
   });
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("D2: the known undocumented MCP tools are named in docs/ or help/", () => {
     expect([...KNOWN_UNDOCUMENTED_TOOLS].filter((tool) => !named(operatorText, tool))).toEqual([]);
   });
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("D3: the known undocumented environment variables are named in the operator docs", () => {
     expect([...KNOWN_UNDOCUMENTED_ENV].filter((name) => !named(operatorText, name))).toEqual([]);
   });
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("D4: the known long tags lines are at most 120 characters", () => {
     expect(tagProblems().filter(({ file }) => KNOWN_LONG_TAGS.has(file))).toEqual([]);
   });

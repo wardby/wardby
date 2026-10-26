@@ -248,6 +248,8 @@ describe("review completeness: the GitHub host", () => {
   // FINDING: R2, unconfirmed; see regression-phase1-report.md. an attempt that never called repo_pr_read is not gated at
   // all (unreadCode is null, by design, so a resumed attempt whose earlier pages were replayed
   // without reaching the handler is not refused). So an APPROVE with nothing read is accepted.
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("an APPROVE with nothing read is refused", async () => {
     const { host } = gitHubHost(5);
     const out = await publish(controlPlaneAttempt(host, LINK), REPO, SHA, "APPROVE");

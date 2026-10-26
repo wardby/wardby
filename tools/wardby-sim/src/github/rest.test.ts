@@ -487,7 +487,7 @@ describe("GitHub sim: compare, contents, trees", () => {
       "diverged",
     );
     expect((await h.call("GET", `${R}/compare/${"a".repeat(40)}...${head}`, undefined, { token })).status).toBe(404);
-  });
+  }, 30_000); // builds a real 300-file commit; slow on a busy machine or CI runner
 
   it("serves raw file content, base64 JSON, a directory listing, and 404 for a missing path", async () => {
     const token = await h.mint({ contents: "read" });

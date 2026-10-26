@@ -352,6 +352,8 @@ describe("budget invariants (model-based)", () => {
   // the group holds max(lead budget - tree cost, coding holds) for the tree, not their sum. So after
   // a child spends, the lead can still spend its whole budget: the tree reaches past the lead's
   // budget, and the group past its cap.
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails(
     "delegation trees, each lead spending up to its pinned budget (the engine today): no group cap or tree ceiling is passed",
     async () => {
@@ -359,6 +361,8 @@ describe("budget invariants (model-based)", () => {
     },
   );
 
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails("B1, smallest case: a $10 lead that delegates a $10 builder can bring its tree to $20", async () => {
     const w = fixedWorld(100, [agent("lead", "native", 10), agent("builder", "coding", 10)]);
     await start(w, w.agents[0]);

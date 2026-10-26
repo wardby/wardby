@@ -292,6 +292,8 @@ describe.skipIf(!process.env.DATABASE_URL)("lifecycle races under DBOS (database
   // that follow the turn), forks the run, and the fork fails as "the run's steps changed in the
   // new version" although the code is the same: the run ends lost, and a stalled-but-alive
   // original that would have finished is cancelled.
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails(
     "a takeover never forks a run it then loses as 'steps changed' when nothing changed",
     async () => {

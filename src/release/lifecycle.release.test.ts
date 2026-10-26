@@ -282,6 +282,8 @@ describe.skipIf(!process.env.DATABASE_URL)("lifecycle races (database)", () => {
   // that commits between the read and the write is overwritten: the row ends `succeeded`, while
   // terminate reported it ended the run, so ContainerExecutor.stop goes on to emit `cancelled`,
   // kill the job and mark the pull request's check failed.
+  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
+  // the fixing PR turns this into a normal `it`.
   it.fails(
     "a coding run's finish racing a stop or a failure, with the finish first: one terminal write, the first one",
     async () => {
