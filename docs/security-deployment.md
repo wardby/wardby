@@ -516,6 +516,7 @@ records. Delete them (see pruning above) if you want the rollback to be final.
 | Surface                        | Limit                                             |
 | ------------------------------ | ------------------------------------------------- |
 | MCP/webhook bodies             | 1 MiB raw bytes                                   |
+| MCP tool-call arguments        | 100,000 array elements and object members         |
 | Auth bodies                    | 64 KiB raw bytes                                  |
 | Request completion / headers   | 15 seconds / 10 seconds                           |
 | Sandbox fetch                  | 8 MiB encoded and decoded, 5 redirects, 8 seconds |

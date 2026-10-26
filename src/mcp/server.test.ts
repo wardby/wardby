@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { InMemoryTransport, inputRequired } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { Prisma } from "#prisma";
-import { buildMcpServer } from "./server.js";
+import { buildMcpServer, MAX_TOOL_INPUT_ELEMENTS } from "./server.js";
 import { TASKS_EXTENSION_ID } from "./capabilities.js";
 import type { McpRequestContext } from "./context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../core/grants.test-support.js";
@@ -99,6 +99,35 @@ describe("buildMcpServer", () => {
 
     expect(result.isError).toBeFalsy();
     expect(receivedCtx?.principal.subject).toBe("user-1");
+    await client.close();
+  });
+
+  it("a tool call whose arguments exceed MAX_TOOL_INPUT_ELEMENTS is refused before the handler runs", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext(fakeCtx(["agents:read"]));
+    let calls = 0;
+    mcp.registerTool({
+      name: "take",
+      scope: "agents:read",
+      inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "number" } } } },
+      handler: async () => {
+        calls += 1;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    });
+
+    const { client } = await connectClient(mcp);
+    const atLimit = await client.callTool({
+      name: "take",
+      arguments: { items: new Array<number>(MAX_TOOL_INPUT_ELEMENTS - 1).fill(0) },
+    });
+    expect(atLimit.isError).toBeFalsy();
+    const over = await client
+      .callTool({ name: "take", arguments: { items: new Array<number>(MAX_TOOL_INPUT_ELEMENTS).fill(0) } })
+      .catch((err: unknown) => ({ isError: true, content: [{ type: "text", text: String(err) }] }));
+    expect(over.isError).toBe(true);
+    expect(JSON.stringify(over.content)).toContain("maximum");
+    expect(calls).toBe(1);
     await client.close();
   });
 
