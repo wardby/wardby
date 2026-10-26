@@ -551,7 +551,11 @@ built-in Zod 3 API (`zod/v3`) so that existing tools keep working; see
 the fix for GHSA-mrhx-c7xc-m3w5: given an array, set, or map larger than its
 `.max()`, it still checks every element and records an issue for each bad one.
 For a tool's arguments that work stays inside the sandbox limits above, the same
-limits that bound the tool's own code. Wardby's own validation uses Zod 4.
+limits that bound the tool's own code. Wardby's own validation uses Zod 4. A
+tool whose schema the next release (Zod 4 only) would reject is flagged with a
+`warnings` list in `create_tool`, `update_tool`, `dry_run_tool`, `list_tools`
+and `get_agent` results (on tools the caller owns) and in one server log line
+per tool at startup; a warning names only the tool and the removed Zod 3 methods.
 
 Every resolved address must be global. A tool's own `allowedHosts` only
 narrows egress; it never opens a private, loopback or link-local destination.

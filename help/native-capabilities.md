@@ -36,6 +36,8 @@ Wardby warns about each such tool now:
 
 - `create_tool`, `update_tool` and `dry_run_tool` results include a `warnings`
   list naming the tool and the removed methods;
+- in `list_tools` and in `get_agent`'s attached tools, each tool you own that is
+  affected carries the same `warnings` list;
 - `wardby tool create` and bundle imports print the same warning;
 - the server logs one warning per affected tool at startup.
 

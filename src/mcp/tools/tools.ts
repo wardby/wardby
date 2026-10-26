@@ -10,8 +10,15 @@
  * convention as every other tool in this codebase.
  */
 import { Prisma, type PrismaClient, type Tool } from "#prisma";
-import { deriveJsonSchema, validateParams, zod4Compatibility } from "../../sandbox/zod-params.js";
-import { toolSubject, zod3SampleArgsWarning, zod3ToolWarnings, zod3WindowWarning } from "../../core/zod3-window.js";
+import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
+import {
+  cachedZod4Compatibility,
+  toolSubject,
+  withZod3ToolWarnings,
+  zod3SampleArgsWarning,
+  zod3ToolWarnings,
+  zod3WindowWarning,
+} from "../../core/zod3-window.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
@@ -260,7 +267,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       // Zod 3 compatibility window: would the next release (Zod 4 only) compile
       // this schema, and treat the sample arguments the same way?
       const subject = "This paramsZod";
-      const compatibility = await zod4Compatibility(args.paramsZod);
+      const compatibility = await cachedZod4Compatibility(args.paramsZod);
       const compatWarning =
         compatibility.compatible === true
           ? zod3SampleArgsWarning(subject, validated, await validateParams(args.paramsZod, args.sampleArgs, ["v4"]))
@@ -455,21 +462,26 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
-      const project = (tool: Tool) => projectTool(tool, ctx.principal.id);
+      // Zod 3 window: the caller's own tools carry their warnings (cached per paramsZod text).
+      const project = (tool: Tool) => withZod3ToolWarnings(projectTool(tool, ctx.principal.id));
       if (args.agentId) {
         const { access } = await requireAgentAccess(ctx, args.agentId, "read");
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
         // The agent's owner sees every tool on it (projected: code only for
         // the tool's own owner); anyone else only tools they could see anyway.
         return textResult(
-          rows
-            .map((r) => r.tool)
-            .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
-            .map(project),
+          await Promise.all(
+            rows
+              .map((r) => r.tool)
+              .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
+              .map(project),
+          ),
         );
       }
       const tools = await ctx.db.tool.findMany({ where: visibleToPrincipal(ctx.principal.id) });
-      return textResult(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));
+      return textResult(
+        await Promise.all(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project)),
+      );
     },
   });
 }

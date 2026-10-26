@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { logZod3ToolWarnings, toolSubject, zod3SampleArgsWarning, zod3ToolWarnings } from "./zod3-window.js";
+import {
+  cachedZod4Compatibility,
+  clearZod4CompatibilityCache,
+  logZod3ToolWarnings,
+  toolSubject,
+  withZod3ToolWarnings,
+  zod3SampleArgsWarning,
+  zod3ToolWarnings,
+} from "./zod3-window.js";
 
 // A fake value in the schema text: no warning may carry the schema's content.
 const FAKE_SECRET = "sk-fake-0123456789abcdef";
@@ -61,5 +69,29 @@ describe("Zod 3 window warnings", () => {
     const lines: { fields: object; message: string }[] = [];
     expect(await logZod3ToolWarnings(db, { warn: (fields, message) => lines.push({ fields, message }) })).toBe(0);
     expect(lines).toEqual([{ fields: { errorName: "Error" }, message: "zod3_window_check_failed" }]);
+  });
+
+  it("caches compatibility by the paramsZod text, so a changed schema is always probed again", async () => {
+    clearZod4CompatibilityCache();
+    const first = cachedZod4Compatibility(ZOD3_ONLY);
+    expect(cachedZod4Compatibility(ZOD3_ONLY)).toBe(first);
+    expect(await first).toEqual({ compatible: false, removed: ["z.ostring()", ".nonstrict()"] });
+    expect(await cachedZod4Compatibility(ZOD4_OK)).toEqual({ compatible: true });
+    // An "unknown" result is not kept.
+    const invalid = cachedZod4Compatibility("not valid {{{");
+    expect(await invalid).toEqual({ compatible: "unknown" });
+    expect(cachedZod4Compatibility("not valid {{{")).not.toBe(invalid);
+  });
+
+  it("adds warnings only to a row that carries its paramsZod (the caller's own tool)", async () => {
+    expect(await withZod3ToolWarnings({ id: "t", name: "old", paramsZod: ZOD3_ONLY })).toMatchObject({
+      warnings: [expect.stringMatching(/^Tool "old"'s paramsZod uses Zod 3 API/)],
+    });
+    expect(await withZod3ToolWarnings({ id: "t", name: "old", description: "d", public: true })).toEqual({
+      id: "t",
+      name: "old",
+      description: "d",
+      public: true,
+    });
   });
 });

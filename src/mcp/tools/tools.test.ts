@@ -389,6 +389,53 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("list_tools shows the Zod 3 window warning on the caller's own tools, and re-checks a changed paramsZod", async () => {
+    const row = (id: string, ownerId: string, paramsZod: string) => ({
+      id,
+      name: id,
+      description: "d",
+      paramsZod,
+      jsonSchema: {},
+      code: "return 1;",
+      ownerId,
+    });
+    const zod3 = "z.object({ city: z.ostring() }).nonstrict()";
+    const db = fakeDb([row("legacy", "p1", zod3), row("modern", "p1", "z.object({ city: z.string() })")]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+    const list = async () =>
+      Object.fromEntries(
+        (
+          parseText((await client.callTool({ name: "list_tools", arguments: {} })) as never) as {
+            name: string;
+            warnings?: string[];
+          }[]
+        ).map((t) => [t.name, t]),
+      );
+
+    const first = await list();
+    expect(first.legacy.warnings).toEqual([
+      expect.stringContaining(
+        'Tool "legacy"\'s paramsZod uses Zod 3 API that Zod 4 removed: z.ostring(), .nonstrict().',
+      ),
+    ]);
+    expect(first.modern).not.toHaveProperty("warnings");
+
+    // The warning follows the paramsZod text, never a stale cached result.
+    const fixed = await client.callTool({
+      name: "update_tool",
+      arguments: { toolId: "legacy", paramsZod: "z.object({ city: z.string().optional() }).passthrough()" },
+    });
+    expect(parseText(fixed as never)).not.toHaveProperty("warnings");
+    await db.tool.update({ where: { id: "modern" }, data: { paramsZod: "z.object({ ip: z.string().ip() })" } });
+    const second = await list();
+    expect(second.legacy).not.toHaveProperty("warnings");
+    expect(second.modern.warnings).toEqual([expect.stringContaining("Zod 4 removed: .ip().")]);
+    await client.close();
+  });
+
   it("create_tool reports a duplicate name for the caller as a friendly 409 naming the tool", async () => {
     const db = fakeDb([
       { id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" },
