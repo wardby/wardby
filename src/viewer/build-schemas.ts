@@ -2,8 +2,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { VIEWER_SCHEMAS } from "./api-schema.js";
+import { viewerJsonSchema } from "./api-schema.js";
 import { OPENAPI_PATH, renderViewerOpenApi } from "./openapi.js";
 
 export const SCHEMA_DIR = join(dirname(fileURLToPath(import.meta.url)), "schemas");
@@ -12,7 +12,15 @@ export function renderSchemas(): Record<string, string> {
   return Object.fromEntries(
     Object.entries(VIEWER_SCHEMAS).map(([name, schema]) => [
       `${name}.schema.json`,
-      `${JSON.stringify(zodToJsonSchema(schema, { name, $refStrategy: "none" }), null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          $ref: `#/definitions/${name}`,
+          definitions: { [name]: viewerJsonSchema(schema) },
+          $schema: "http://json-schema.org/draft-07/schema#",
+        },
+        null,
+        2,
+      )}\n`,
     ]),
   );
 }

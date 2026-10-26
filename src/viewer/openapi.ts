@@ -6,8 +6,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { VIEWER_SCHEMAS } from "./api-schema.js";
+import { viewerJsonSchema } from "./api-schema.js";
 import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, SSE_HEARTBEAT_MS } from "./limits.js";
 
 export const OPENAPI_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../docs/viewer-api.openapi.yml");
@@ -118,9 +118,7 @@ export const VIEWER_ROUTES: readonly ViewerRoute[] = [
 function componentSchemas(): Json {
   const schemas: Json = {};
   for (const [name, schema] of Object.entries(VIEWER_SCHEMAS)) {
-    const json = zodToJsonSchema(schema, { target: "jsonSchema2019-09", $refStrategy: "none" }) as Json;
-    delete json.$schema;
-    schemas[name] = json;
+    schemas[name] = viewerJsonSchema(schema);
   }
   schemas.ViewerError = {
     type: "object",

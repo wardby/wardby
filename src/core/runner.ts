@@ -202,7 +202,7 @@ const DelegateArgs = z
     grantParentMemoryKeys: z.array(z.string()).optional(),
     continuePriorRun: z.string().optional(),
     mergeOrder: z
-      .number({ invalid_type_error: MERGE_ORDER_RANGE_MESSAGE })
+      .number({ error: MERGE_ORDER_RANGE_MESSAGE })
       .int(MERGE_ORDER_RANGE_MESSAGE)
       .min(1, MERGE_ORDER_RANGE_MESSAGE)
       .max(99, MERGE_ORDER_RANGE_MESSAGE)

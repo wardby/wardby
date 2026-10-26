@@ -5,9 +5,10 @@
  * eval (pure computation, no host I/O — `installExtras` is a no-op):
  *
  *  - `deriveJsonSchema`: registration-time. Compiles the schema and derives
- *    its JSON Schema (via the vendored `zod-to-json-schema`) — what's sent
- *    to the model as the tool's `parameters`. A malformed schema fails here,
- *    not at call time.
+ *    its JSON Schema (Zod's own `z.toJSONSchema`, input side, rewritten in
+ *    the spelling zod-to-json-schema used: core/zod-json-schema.ts) — what's
+ *    sent to the model as the tool's `parameters`. A malformed schema fails
+ *    here, not at call time.
  *  - `validateParams`: call-time. Compiles the same schema (again, inside
  *    the sandbox) and parses the model-supplied arguments against it.
  *    Zod's own validation error (a real thrown `ZodError`, whose `.message`
@@ -20,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { evalToJson, type SandboxResult } from "./eval-core.js";
+import { legacyJsonSchema } from "../core/zod-json-schema.js";
 
 const GENERATED_DIR = fileURLToPath(new URL("./generated/", import.meta.url));
 
@@ -28,10 +30,8 @@ let vendorPreludeCache: string | undefined;
 function getVendorPrelude(): string {
   if (vendorPreludeCache) return vendorPreludeCache;
   let zodBundle: string;
-  let zodToJsonSchemaBundle: string;
   try {
     zodBundle = readFileSync(path.join(GENERATED_DIR, "zod.bundle.js"), "utf8");
-    zodToJsonSchemaBundle = readFileSync(path.join(GENERATED_DIR, "zod-to-json-schema.bundle.js"), "utf8");
   } catch (err) {
     throw new Error(
       `Sandbox vendor bundles missing (run "npm run build:vendor" first): ${
@@ -40,10 +40,7 @@ function getVendorPrelude(): string {
       { cause: err },
     );
   }
-  vendorPreludeCache =
-    `${zodBundle}\n${zodToJsonSchemaBundle}\n` +
-    `const z = __zodModule.default.z;\n` +
-    `const zodToJsonSchema = __zodToJsonSchemaModule.default.zodToJsonSchema;\n`;
+  vendorPreludeCache = `${zodBundle}\nconst z = __zodModule.default.z;\n`;
   return vendorPreludeCache;
 }
 
@@ -52,9 +49,10 @@ export async function deriveJsonSchema(paramsZodSource: string): Promise<Sandbox
   const code = `${getVendorPrelude()}
 (async () => {
   const schema = (${paramsZodSource});
-  return JSON.stringify(zodToJsonSchema(schema));
+  return JSON.stringify(z.toJSONSchema(schema, { target: "draft-07", io: "input", unrepresentable: "any" }));
 })()`;
-  return evalToJson(code, undefined, () => {});
+  const result = await evalToJson(code, undefined, () => {});
+  return result.ok ? { ...result, value: legacyJsonSchema(result.value, { closeObjects: true }) } : result;
 }
 
 /** Call-time: compiles the schema source and validates the model-supplied args against it. */

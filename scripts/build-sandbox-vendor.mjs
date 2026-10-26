@@ -1,7 +1,7 @@
-// Bundles zod + zod-to-json-schema into single self-contained IIFE scripts
+// Bundles zod (which carries its own JSON Schema converter) into a single self-contained IIFE script
 // that the WASM sandbox can `evalCode` directly — QuickJS has no module
 // loader, so the tool-registration-time schema compile and the per-call
-// param validation both need these as plain global-exposing scripts, not
+// param validation both need it as a plain global-exposing script, not
 // Node-resolved imports. Generated, not hand-written; output is gitignored
 // and rebuilt by `npm run build:vendor` (wired into `prepare`).
 //
@@ -44,9 +44,3 @@ async function bundleGlobal(entryContents, globalName, outfile) {
 }
 
 await bundleGlobal(`import * as zod from "zod"; export default zod;`, "__zodModule", "zod.bundle.js");
-
-await bundleGlobal(
-  `import * as ztjs from "zod-to-json-schema"; export default ztjs;`,
-  "__zodToJsonSchemaModule",
-  "zod-to-json-schema.bundle.js",
-);
