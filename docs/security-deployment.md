@@ -519,6 +519,7 @@ records. Delete them (see pruning above) if you want the rollback to be final.
 | MCP tool-call arguments        | 100,000 array elements and object members         |
 | Auth bodies                    | 64 KiB raw bytes                                  |
 | Request completion / headers   | 15 seconds / 10 seconds                           |
+| Sandbox invocation             | 32 MiB heap, 1 MiB stack, 10 seconds              |
 | Sandbox fetch                  | 8 MiB encoded and decoded, 5 redirects, 8 seconds |
 | Bridge input / output          | 1 MiB / 12 MiB                                    |
 | Parser input / console payload | 256 KiB / 16 KiB                                  |
@@ -535,6 +536,22 @@ Response limits also apply after decompression. Fetch validates every redirect
 and pins the validated DNS result to the connection while retaining Host and
 TLS verification. Cross-origin redirects remove credentials, including custom
 API-key headers; forwarding a request body across origins is rejected.
+
+Every sandbox invocation, including the one that validates a custom tool's
+call arguments against its `paramsZod`, runs in a fresh QuickJS runtime with the
+heap, stack, and time limits above. One that hits a limit fails that tool call
+only: the model receives a `validation_failed` or sandbox error result and the
+run continues. The invocation runs on the thread of the process that hosts the
+run (the server, or the run's worker with the native sandbox), so a call that
+runs to the time limit holds that thread for up to 10 seconds.
+
+For this release only, a custom tool's `paramsZod` is compiled with Zod 4's
+built-in Zod 3 API (`zod/v3`) so that existing tools keep working; see
+[native capabilities](../help/native-capabilities.md). `zod/v3` does not have
+the fix for GHSA-mrhx-c7xc-m3w5: given an array, set, or map larger than its
+`.max()`, it still checks every element and records an issue for each bad one.
+For a tool's arguments that work stays inside the sandbox limits above, the same
+limits that bound the tool's own code. Wardby's own validation uses Zod 4.
 
 Every resolved address must be global. A tool's own `allowedHosts` only
 narrows egress; it never opens a private, loopback or link-local destination.
