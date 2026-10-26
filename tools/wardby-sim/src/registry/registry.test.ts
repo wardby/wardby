@@ -214,7 +214,8 @@ describe("PyPI sim", () => {
         { PIP_CONFIG_FILE: "/dev/null" },
       );
       expect(result.code, result.out).toBe(0);
-      expect(readFileSync(join(work, "site/sim_requests/__init__.py"), "utf8")).toContain('"2.0.0"');
+      // The wheel keeps the project's own spelling (Sim_Requests): exact case, since Linux filesystems are case-sensitive.
+      expect(readFileSync(join(work, "site/Sim_Requests/__init__.py"), "utf8")).toContain('"2.0.0"');
       expect(existsSync(join(work, "site/sim_idna/__init__.py"))).toBe(true);
     },
     180_000,
