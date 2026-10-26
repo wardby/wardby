@@ -72,7 +72,7 @@ FROM base AS node-python
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
-    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 uv==0.12.23 \
+    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 uv==0.13.4 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     # Most Python projects (and their own docs) say `python`, not `python3`.
@@ -92,7 +92,7 @@ RUN test ! -e /usr/bin/docker \
     && uv --version \
     # The uv shim (/opt/wardby/bin/uv) runs this real uv.
     && test "$(sh -lc 'command -v uv')" = /opt/wardby/bin/uv \
-    && sh -lc 'uv --version' | grep -q '^uv 0.12.23' \
+    && sh -lc 'uv --version' | grep -q '^uv 0.13.4' \
     && python -m ruff --version \
     # A registry-mode venv must be creatable offline, carry pip, and still see pytest/ruff.
     && python -m venv --system-site-packages /tmp/venv-check \

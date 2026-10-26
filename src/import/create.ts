@@ -24,6 +24,7 @@ import {
 } from "../core/secret-guard.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
+import { toolSubject, zod3ToolWarnings } from "../core/zod3-window.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
@@ -138,6 +139,7 @@ export async function createFromBundle(
         },
       }));
     toolIdMap.set(t.name, tool.id);
+    if (tool.paramsZod === t.paramsZod) warnings.push(...(await zod3ToolWarnings(toolSubject(tool.name), t.paramsZod)));
     toolsCreated++;
   }
 

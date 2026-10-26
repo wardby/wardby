@@ -3220,6 +3220,40 @@ describe("agent tools under grants", () => {
     await owner.client.close();
   });
 
+  it("get_agent shows the Zod 3 window warning on the caller's own tools only", async () => {
+    const attachment = (id: string, ownerId: string, paramsZod: string) => ({
+      agentId: "a1",
+      toolId: id,
+      allowedSecrets: [],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+      tool: { id, name: id, description: "d", paramsZod, jsonSchema: {}, code: "return 1;", ownerId },
+    });
+    const zod3 = "z.object({ city: z.ostring() }).nonstrict()";
+    const seed = base({
+      tools: [
+        attachment("legacy", "owner", zod3),
+        attachment("modern", "owner", "z.object({ city: z.string() })"),
+        attachment("theirs", "g", zod3),
+      ],
+    });
+    const owner = await as("owner", seed, []);
+    const body = JSON.parse(text(await owner.client.callTool({ name: "get_agent", arguments: { id: "a1" } }))) as {
+      tools: { tool: { name: string; warnings?: string[] } }[];
+    };
+    const byName = Object.fromEntries(body.tools.map((t) => [t.tool.name, t.tool]));
+    expect(byName.legacy.warnings).toEqual([
+      expect.stringContaining(
+        'Tool "legacy"\'s paramsZod uses Zod 3 API that Zod 4 removed: z.ostring(), .nonstrict().',
+      ),
+    ]);
+    expect(byName.modern).not.toHaveProperty("warnings");
+    // Not the caller's tool: no paramsZod in the projection, so no warning either.
+    expect(byName.theirs).not.toHaveProperty("warnings");
+    await owner.client.close();
+  });
+
   it("delete_agent is owner-only, and removes the agent's grants with it", async () => {
     const writer = await as("g", base(), [grant("write")]);
     const refused = await writer.client.callTool({ name: "delete_agent", arguments: { id: "a1" } });

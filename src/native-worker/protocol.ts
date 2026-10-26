@@ -291,5 +291,5 @@ export function parseMessage<T>(text: string, schema: z.ZodType<T>): T {
 export function parseParams<M extends GatewayMethod>(method: M, params: unknown): GatewayParams<M> {
   const parsed = GatewayParamsSchemas[method].safeParse(params);
   if (!parsed.success) throw new ProtocolError("message_invalid", parsed.error.issues[0]?.message);
-  return parsed.data;
+  return parsed.data as GatewayParams<M>;
 }

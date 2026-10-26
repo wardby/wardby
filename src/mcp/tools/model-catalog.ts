@@ -63,7 +63,7 @@ export interface ModelCatalogToolDeps {
   refresh?: () => Promise<void>;
 }
 
-function parse<Output>(schema: z.ZodType<Output, z.ZodTypeDef, unknown>, label: string, value: unknown): Output {
+function parse<Output>(schema: z.ZodType<Output, unknown>, label: string, value: unknown): Output {
   const result = schema.safeParse(value);
   if (!result.success) {
     const details = result.error.issues

@@ -29,14 +29,15 @@ COPY --from=worker-dependencies /worker/node_modules ./node_modules
 # database, provider-credential, and configuration modules), at the same relative paths as dist/.
 COPY --from=build /build/dist/native-worker ./native-worker
 COPY --from=build /build/dist/sandbox ./sandbox
-COPY --from=build /build/dist/core/engine-native.js /build/dist/core/budget.js /build/dist/core/logger.js /build/dist/core/untrusted-content.js /build/dist/core/error-code.js /build/dist/core/secret-spans.js ./core/
+COPY --from=build /build/dist/core/engine-native.js /build/dist/core/budget.js /build/dist/core/logger.js /build/dist/core/untrusted-content.js /build/dist/core/error-code.js /build/dist/core/secret-spans.js /build/dist/core/zod-json-schema.js ./core/
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 COPY --from=build /build/dist/providers/engine/types.js ./providers/engine/types.js
 COPY --from=build /build/dist/providers/llm/pricing-core.js /build/dist/providers/llm/types.js ./providers/llm/
 # Fail the build, not every run, when a module the worker imports is missing. main.js runs on
 # import, so this loads what it imports rather than main.js itself.
 RUN node --input-type=module -e 'await Promise.all(["worker", "stdio", "http-transport", "protocol"].map((name) => import(`/opt/wardby/native-worker/${name}.js`)))' \
-    && test -f /opt/wardby/sandbox/generated/zod.bundle.js
+    && test -f /opt/wardby/sandbox/generated/zod.bundle.js \
+    && test -f /opt/wardby/sandbox/generated/zod3.bundle.js
 # No general-purpose network or build tooling for a tool escape to use.
 RUN for executable in curl wget ssh sudo gcc make docker nc; do test ! -e "/usr/bin/$executable"; done
 USER 10001:10001

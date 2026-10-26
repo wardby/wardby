@@ -47,6 +47,15 @@ const SERVER_VERSION = (
   JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }
 ).version;
 
+/**
+ * Most array elements plus object members one `tools/call` may carry
+ * (GHSA-46jr-4wx8-v453). Validating an argument tree costs memory per node, so
+ * without a bound one request inside the 1 MiB body limit could hold a very
+ * large tree. The largest legitimate input is a datastore value, itself capped
+ * at 1 MiB; 100,000 nodes leaves ample room for any realistic value.
+ */
+export const MAX_TOOL_INPUT_ELEMENTS = 100_000;
+
 export interface ToolSpec<Args = Record<string, unknown>> {
   name: string;
   description?: string;
@@ -249,6 +258,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
       {
         requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) },
         instructions: SERVER_INSTRUCTIONS,
+        maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
       },
     );
     mcpServer.server.registerCapabilities({ extensions: { [TASKS_EXTENSION_ID]: {} } });

@@ -45,7 +45,7 @@ const UpdateSchema = z
 type Key = z.infer<typeof KeySchema>;
 type CatalogRow = CodingServiceRow & { builtin: boolean; createdAt: Date; updatedAt: Date };
 
-function parse<Output>(schema: z.ZodType<Output, z.ZodTypeDef, unknown>, label: string, value: unknown): Output {
+function parse<Output>(schema: z.ZodType<Output, unknown>, label: string, value: unknown): Output {
   const result = schema.safeParse(value);
   if (!result.success) {
     const details = result.error.issues

@@ -49,6 +49,7 @@ import {
 } from "../auth/access.js";
 import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } from "../../core/grants.js";
 import { projectTool } from "./tools.js";
+import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
 import {
@@ -1075,10 +1076,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       return textResult({
         ...withProfileWarnings(withOperatorMode(agent)),
         access,
-        tools: agent.tools.map((attachment) => ({
-          ...attachment,
-          tool: projectTool(attachment.tool, ctx.principal.id),
-        })),
+        // Zod 3 window: the caller's own tools carry their warnings (see core/zod3-window.ts).
+        tools: await Promise.all(
+          agent.tools.map(async (attachment) => ({
+            ...attachment,
+            tool: await withZod3ToolWarnings(projectTool(attachment.tool, ctx.principal.id)),
+          })),
+        ),
       });
     },
   });
