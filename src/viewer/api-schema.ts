@@ -6,6 +6,7 @@
  * `npm run build:viewer-schemas`, and commit the regenerated files.
  */
 import { z } from "zod";
+import { legacyJsonSchema } from "../core/zod-json-schema.js";
 
 export const RunStatusSchema = z.enum([
   "pending",
@@ -233,3 +234,13 @@ export const VIEWER_SCHEMAS = {
   "viewer-event": ViewerEventSchema,
   "infra-info": InfraInfoSchema,
 } as const;
+
+/** A viewer schema's JSON Schema (draft-07 keywords, no `$schema`), as the published files spell it. */
+export function viewerJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const json = legacyJsonSchema(z.toJSONSchema(schema, { target: "draft-07", io: "output" })) as Record<
+    string,
+    unknown
+  >;
+  delete json.$schema;
+  return json;
+}

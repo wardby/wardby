@@ -11,6 +11,14 @@
  */
 import { Prisma, type PrismaClient, type Tool } from "#prisma";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
+import {
+  cachedZod4Compatibility,
+  toolSubject,
+  withZod3ToolWarnings,
+  zod3SampleArgsWarning,
+  zod3ToolWarnings,
+  zod3WindowWarning,
+} from "../../core/zod3-window.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
@@ -123,7 +131,8 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             ownerId: ctx.principal.id,
           },
         });
-        return textResult(tool);
+        const warnings = await zod3ToolWarnings(toolSubject(tool.name), args.paramsZod);
+        return textResult(warnings.length ? { ...tool, warnings } : tool);
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           throw new McpError(409, `A tool named "${args.name}" already exists for your principal.`);
@@ -169,7 +178,9 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         const tool = await updateToolGuarded(ctx.db, args.toolId, prepared.data, (row) =>
           assertStrictlyOwnedTool(row, args.toolId, ctx.principal.id),
         );
-        return textResult(tool);
+        const warnings =
+          args.paramsZod === undefined ? [] : await zod3ToolWarnings(toolSubject(tool.name), args.paramsZod);
+        return textResult(warnings.length ? { ...tool, warnings } : tool);
       } catch (err) {
         if (err instanceof ToolAttachedError) {
           throw new McpError(
@@ -227,7 +238,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "dry_run_tool",
     scope: "tools:write",
     description:
-      "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch().",
+      "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch(). For this release a paramsZod is still compiled with Zod 3; a `warnings` list in the result means the next release, which compiles it with Zod 4 only, will reject it or treat the sample args differently.",
     inputSchema: {
       type: "object",
       properties: {
@@ -253,10 +264,20 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       const jsonSchema = schemaResult.value;
 
       const validated = await validateParams(args.paramsZod, args.sampleArgs);
+      // Zod 3 compatibility window: would the next release (Zod 4 only) compile
+      // this schema, and treat the sample arguments the same way?
+      const subject = "This paramsZod";
+      const compatibility = await cachedZod4Compatibility(args.paramsZod);
+      const compatWarning =
+        compatibility.compatible === true
+          ? zod3SampleArgsWarning(subject, validated, await validateParams(args.paramsZod, args.sampleArgs, ["v4"]))
+          : zod3WindowWarning(subject, compatibility);
+      const warnings = compatWarning ? { warnings: [compatWarning] } : {};
       if (!validated.ok) {
         return textResult({
           jsonSchema,
           result: { ok: false, errorKind: validated.errorKind, errorMessage: validated.errorMessage },
+          ...warnings,
         });
       }
 
@@ -280,7 +301,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         toolName: "dry_run_tool",
         allowedFetchHosts: hosts.data.allowedHosts ?? [],
       });
-      return textResult({ jsonSchema, result: sandboxResult });
+      return textResult({ jsonSchema, result: sandboxResult, ...warnings });
     },
   });
 
@@ -441,21 +462,26 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
-      const project = (tool: Tool) => projectTool(tool, ctx.principal.id);
+      // Zod 3 window: the caller's own tools carry their warnings (cached per paramsZod text).
+      const project = (tool: Tool) => withZod3ToolWarnings(projectTool(tool, ctx.principal.id));
       if (args.agentId) {
         const { access } = await requireAgentAccess(ctx, args.agentId, "read");
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
         // The agent's owner sees every tool on it (projected: code only for
         // the tool's own owner); anyone else only tools they could see anyway.
         return textResult(
-          rows
-            .map((r) => r.tool)
-            .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
-            .map(project),
+          await Promise.all(
+            rows
+              .map((r) => r.tool)
+              .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
+              .map(project),
+          ),
         );
       }
       const tools = await ctx.db.tool.findMany({ where: visibleToPrincipal(ctx.principal.id) });
-      return textResult(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));
+      return textResult(
+        await Promise.all(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project)),
+      );
     },
   });
 }

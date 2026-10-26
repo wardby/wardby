@@ -40,13 +40,14 @@ export const NeutralAgentSchema = z.object({
   memoryEnabled: z.boolean().default(false),
   /** Where the agent's runs execute; absent = control-plane. Native agents only (every imported agent is native). */
   nativeExecutionMode: z.enum(["control-plane", "sandbox"]).optional(),
+  // Each field optional with no default: Zod 4 would apply a default inside
+  // .partial(), where Zod 3 left an absent field absent.
   unmodeled: z
     .object({
-      description: z.string().nullable().default(null),
-      slug: z.string().nullable().default(null),
-      emailAllowlist: z.unknown().nullable().default(null),
+      description: z.string().nullable().optional(),
+      slug: z.string().nullable().optional(),
+      emailAllowlist: z.unknown().nullable().optional(),
     })
-    .partial()
     .default({}),
 });
 export type NeutralAgent = z.infer<typeof NeutralAgentSchema>;

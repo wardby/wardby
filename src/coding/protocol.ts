@@ -413,6 +413,13 @@ export function normalizeCodingTag(value: unknown): string | null | undefined {
 }
 
 /**
+ * The tag schemas' type. Zod 4 types a transform's output key as required, but
+ * an absent tag still parses to an absent key (as under Zod 3), so the type
+ * keeps the key optional. Types only: the emitted protocol.js is unchanged.
+ */
+type OptionalTagSchema = z.ZodOptional<z.ZodType<string | undefined, string | null | undefined>>;
+
+/**
  * A short, caller-visible reference (e.g. a ticket ID) surfaced in the PR title. Never free text.
  * Accepts null as well as undefined: OpenAI's strict Structured Outputs mode requires every
  * property in an object schema with additionalProperties:false to be listed in "required" —
@@ -424,7 +431,7 @@ const tagSchema = z
   .regex(SAFE_TAG, "must be a short, safe tag")
   .nullable()
   .optional()
-  .transform((value) => value ?? undefined);
+  .transform((value) => value ?? undefined) as unknown as OptionalTagSchema;
 
 const testResultSchema = z
   .object({
@@ -628,7 +635,7 @@ const agentOutputFields = {
   summary: summaryText(),
   tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
   // Model-written, so normalized rather than rejected; see normalizeCodingTag.
-  tag: z.preprocess(normalizeCodingTag, tagSchema),
+  tag: z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema,
 };
 
 function redactAgentOutput<T extends { summary: string; tests: { command: string }[]; tag?: string }>(value: T): T {

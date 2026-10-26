@@ -50,6 +50,7 @@ import { buildPower } from "../core/power-composition.js";
 import type { McpProviders, McpRequestContext } from "./context.js";
 import type { Principal, PrismaClient } from "#prisma";
 import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
+import { logZod3ToolWarnings } from "../core/zod3-window.js";
 import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
@@ -320,6 +321,8 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   await providers.executor.launch?.();
   warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
+  // Zod 3 compatibility window: one warning per custom tool the next release breaks. In the background.
+  void logZod3ToolWarnings(prisma, mcpLog);
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });

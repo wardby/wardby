@@ -82,6 +82,7 @@ import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { buildPower } from "./core/power-composition.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
+import { toolSubject, zod3ToolWarnings } from "./core/zod3-window.js";
 import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
 import {
   ToolAttachedError,
@@ -327,6 +328,8 @@ async function toolCreate(args: string[]): Promise<void> {
       code: code!,
     },
   });
+  for (const warning of await zod3ToolWarnings(toolSubject(tool.name), paramsZod!))
+    console.error(`warning: ${warning}`);
   console.log(tool.id);
 }
 

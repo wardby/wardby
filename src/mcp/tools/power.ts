@@ -21,7 +21,7 @@ const TARGETS = ["proxy", "gateway"] as const satisfies readonly PowerTarget[];
 const SleepSchema = z.object({ target: z.enum(TARGETS).optional() }).strict();
 const StatusSchema = z.object({}).strict();
 
-function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, label: string, value: unknown): T {
+function parse<T>(schema: z.ZodType<T, unknown>, label: string, value: unknown): T {
   const result = schema.safeParse(value ?? {});
   if (!result.success) {
     const details = result.error.issues
