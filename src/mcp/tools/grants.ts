@@ -16,6 +16,7 @@ import {
   EVERYONE_KEY,
   EVERYONE_MAX,
   LEVELS,
+  agentOwnerBindings,
   SHAREABLE_TYPES,
   accessRank,
   atLeast,
@@ -85,7 +86,17 @@ async function requireOwnedResource(ctx: McpRequestContext, db: GrantTx, type: R
   return (await assertAgentAccess(ctx, row, id, "owner", db)).agent;
 }
 
-type GrantTx = Pick<PrismaClient, "agent" | "principal" | "resourceGrant">;
+type GrantTx = Pick<
+  PrismaClient,
+  | "agent"
+  | "principal"
+  | "resourceGrant"
+  | "agentSecret"
+  | "agentDatastore"
+  | "agentRepository"
+  | "agentSubAgent"
+  | "agentTool"
+>;
 
 /**
  * The ownership check and the write in one Serializable transaction (review
@@ -137,7 +148,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       "Owner-only whatever the level: the coding profile (task, base ref, protected paths, task-override opt-in, image, packages, limits), kind, budget group, sub-agents, secret/datastore/repository bindings, tool capabilities, memory and datastore contents, grants, delete. " +
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
-      "Granting again replaces the level. Everyone is capped at execute. The grantee must have signed in once.",
+      "Granting again replaces the level. Everyone may get write only on an agent with no secrets, datastores, repositories, sub-agents or tool capabilities. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -164,10 +175,16 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           );
         }
         if (!principal && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
-          throw new McpError(
-            400,
-            `An everyone grant can be at most ${EVERYONE_MAX[type]}: write for everyone would let anyone rewrite an agent that holds your tools and secrets.`,
-          );
+          throw new McpError(400, `An everyone grant can be at most ${EVERYONE_MAX[type]}.`);
+        }
+        if (!principal && atLeast(type, args.level, "write")) {
+          const bindings = await agentOwnerBindings(tx, resource.id);
+          if (bindings.length) {
+            throw new McpError(
+              409,
+              `Agent "${resource.id}" holds ${bindings.join(", ")}: write for everyone would let anyone rewrite an agent that uses them. Detach them first, or grant everyone execute.`,
+            );
+          }
         }
         const granteeKey = principal ? principalGranteeKey(principal.id) : EVERYONE_KEY;
         const grant = await tx.resourceGrant.upsert({

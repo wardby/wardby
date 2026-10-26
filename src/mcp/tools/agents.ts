@@ -1067,6 +1067,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_agents",
     scope: "agents:read",
+    description:
+      "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args: Record<string, never>, ctx) => {
       const [where, accessOf] = await Promise.all([readableAgentsWhere(ctx), agentAccessResolver(ctx)]);

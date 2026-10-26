@@ -18,7 +18,7 @@ import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import { requireOwnedSecret } from "../auth/ownership.js";
-import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
+import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   clearUnbrokerOutcome,
   getSecretElicitationOutcome,
@@ -310,7 +310,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       // (A2/S2-2): a binding hands the value to every tool the owner lets
       // read it. Not even the stdio operator crosses owners.
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
-      requireBindingOwner(ctx, agent);
+      await requireBindable(ctx, agent);
       const ownerId = agent.ownerId!;
       try {
         // Resolved among the agent owner's secrets (== the caller here).

@@ -1,3 +1,4 @@
+import { fakeResourceGrants } from "./grants.test-support.js";
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
@@ -49,6 +50,7 @@ function buildCombinedDb(
   let counter = 0;
 
   const db = {
+    resourceGrant: fakeResourceGrants(),
     agent: {
       findUnique: async ({ where }: any) =>
         (where.name ? [...agents.values()].find((a) => a.name === where.name) : agents.get(where.id)) ?? null,

@@ -13,7 +13,7 @@
  */
 import { Prisma, type PrismaClient } from "#prisma";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../../coding/protocol.js";
-import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
+import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
@@ -146,7 +146,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
       } else {
         agent = (await requireAgentAccess(ctx, args.agentId, "read")).agent;
-        requireBindingOwner(ctx, agent);
+        await requireBindable(ctx, agent);
       }
       if (agent.kind !== "native") {
         throw new McpError(

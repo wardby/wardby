@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { fakeResourceGrants } from "../core/grants.test-support.js";
 import { PrismaClient } from "#prisma";
 import { createPrismaClient } from "../core/db.js";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
@@ -156,6 +157,7 @@ function buildFakeDb() {
   let n = 0;
 
   const db = {
+    resourceGrant: fakeResourceGrants(),
     agent: {
       create: async ({ data }: { data: Partial<FakeAgentRow> & { name: string } }) => {
         const row: FakeAgentRow = {

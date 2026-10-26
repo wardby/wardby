@@ -45,8 +45,8 @@ describe("grant levels", () => {
     expect(atLeast("agent", "use", "read")).toBe(false);
   });
 
-  it("caps everyone grants below write", () => {
-    expect(EVERYONE_MAX).toEqual({ agent: "execute", tool: "use", budget_group: "use" });
+  it("caps everyone grants at write for agents and below write for the rest", () => {
+    expect(EVERYONE_MAX).toEqual({ agent: "write", tool: "use", budget_group: "use" });
   });
 });
 
@@ -105,8 +105,8 @@ describe("effectiveAccess", () => {
   });
 
   it("an everyone grant stored above EVERYONE_MAX is read as the cap", async () => {
-    const grants = db([{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "write" }]);
-    expect(await effectiveAccess(grants, "agent", agent, "p")).toBe("execute");
+    const grants = db([{ resourceType: "tool", resourceId: "t1", granteeKind: "everyone", level: "write" }]);
+    expect(await effectiveAccess(grants, "tool", { id: "t1", ownerId: "owner" }, "p")).toBe("use");
   });
 
   it("a null principal (e.g. a legacy webhook with no creator) only gets everyone grants", async () => {

@@ -22,13 +22,13 @@ export type Level<T extends ResourceType = ResourceType> = (typeof LEVELS)[T][nu
 export type Access<T extends ResourceType = ResourceType> = "none" | Level<T> | "owner";
 
 /**
- * Highest level an "everyone" grant may carry: never write. Everyone-write
- * on an agent would bring back the old public-mutable model (anyone
- * rewriting the prompt of an agent that holds its owner's tools and
- * secrets). Also applied when a stored everyone row is read, so a row
- * written around grant_access can't exceed it either.
+ * Highest level an "everyone" grant may carry. Agents may be public-write
+ * (anyone signed in can edit them) but only while they hold none of their
+ * owner's bindings: see agentOwnerBindings and the guard in grant_access and
+ * the binding tools. Otherwise anyone could rewrite the prompt of an agent
+ * that holds its owner's secrets.
  */
-export const EVERYONE_MAX = { agent: "execute", tool: "use", budget_group: "use" } as const satisfies {
+export const EVERYONE_MAX = { agent: "write", tool: "use", budget_group: "use" } as const satisfies {
   [T in ResourceType]: Level<T>;
 };
 
@@ -175,4 +175,43 @@ export function everyoneGrantData(type: ResourceType, resourceId: string, level:
 export async function deleteGrantsFor(db: GrantDb, type: ResourceType, resourceId: string): Promise<number> {
   const { count } = await db.resourceGrant.deleteMany({ where: { resourceType: type, resourceId } });
   return count;
+}
+
+type BindingDb = Pick<
+  PrismaClient,
+  "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool"
+>;
+
+/**
+ * The owner-only bindings an agent holds, by kind (empty = none). An agent
+ * may be public-write only while this is empty; binding a secret, datastore,
+ * repository, sub-agent or owner-granted tool capability to a public-write
+ * agent is refused for the same reason.
+ */
+export async function agentOwnerBindings(db: BindingDb, agentId: string): Promise<string[]> {
+  const [secrets, datastores, repositories, subagents, capabilityTools] = await Promise.all([
+    db.agentSecret.count({ where: { agentId } }),
+    db.agentDatastore.count({ where: { agentId } }),
+    db.agentRepository.count({ where: { agentId } }),
+    db.agentSubAgent.count({ where: { parentAgentId: agentId } }),
+    db.agentTool.count({ where: { agentId, capabilitiesGrantedById: { not: null } } }),
+  ]);
+  return Object.entries({
+    secrets,
+    datastores,
+    repositories,
+    "sub-agents": subagents,
+    "tool capabilities": capabilityTools,
+  })
+    .filter(([, count]) => count > 0)
+    .map(([kind]) => kind);
+}
+
+/** True when everyone holds write on the agent. */
+export async function isPublicWritable(db: GrantDb, agentId: string): Promise<boolean> {
+  const row = await db.resourceGrant.findFirst({
+    where: { resourceType: "agent", resourceId: agentId, granteeKey: EVERYONE_KEY },
+    select: { level: true },
+  });
+  return row !== null && atLeast("agent", row.level, "write");
 }

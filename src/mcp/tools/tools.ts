@@ -41,7 +41,7 @@ import {
   canRead,
 } from "../auth/ownership.js";
 import { agentAccessResolver, assertAgentAccess, requireAgentAccess } from "../auth/access.js";
-import { atLeast } from "../../core/grants.js";
+import { atLeast, isPublicWritable } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
 import { textResult } from "./text-result.js";
 import { brokerCompatibilityWarnings } from "./secret-broker-compat.js";
@@ -372,6 +372,12 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             throw new McpError(
               403,
               "Only the agent's owner can grant capabilities to an attachment; ask them to re-run attach_tool with the capabilities.",
+            );
+          }
+          if (capabilitiesPassed && (await isPublicWritable(tx, agent.id))) {
+            throw new McpError(
+              409,
+              `Agent "${agent.id}" is writable by everyone, so tool capabilities cannot be granted on it; revoke or lower the everyone grant first.`,
             );
           }
           const existing = await tx.agentTool.findUnique({

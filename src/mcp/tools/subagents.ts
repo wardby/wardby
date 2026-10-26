@@ -19,7 +19,7 @@ import {
   agentAccessResolver,
   agentNotFound,
   requireAgentAccess,
-  requireBindingOwner,
+  requireBindable,
 } from "../auth/access.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -78,7 +78,7 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
         throw new McpError(400, "An agent cannot be its own sub-agent.");
       }
       const { agent: parent } = await requireAgentAccess(ctx, args.parentAgentId, "read");
-      requireBindingOwner(ctx, parent);
+      await requireBindable(ctx, parent);
       // The caller could trigger the child anyway; the edge must not widen that.
       const { agent: child } = await requireAgentAccess(ctx, args.childAgentId, "execute");
       if (parent.ownerId === null) {
