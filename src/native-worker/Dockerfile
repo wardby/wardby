@@ -36,7 +36,8 @@ COPY --from=build /build/dist/providers/llm/pricing-core.js /build/dist/provider
 # Fail the build, not every run, when a module the worker imports is missing. main.js runs on
 # import, so this loads what it imports rather than main.js itself.
 RUN node --input-type=module -e 'await Promise.all(["worker", "stdio", "http-transport", "protocol"].map((name) => import(`/opt/wardby/native-worker/${name}.js`)))' \
-    && test -f /opt/wardby/sandbox/generated/zod.bundle.js
+    && test -f /opt/wardby/sandbox/generated/zod.bundle.js \
+    && test -f /opt/wardby/sandbox/generated/zod3.bundle.js
 # No general-purpose network or build tooling for a tool escape to use.
 RUN for executable in curl wget ssh sudo gcc make docker nc; do test ! -e "/usr/bin/$executable"; done
 USER 10001:10001

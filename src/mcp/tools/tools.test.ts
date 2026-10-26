@@ -320,6 +320,75 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("create_tool keeps a Zod 3-only paramsZod working this release and warns that it stops in the next", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const zod3 = await client.callTool({
+      name: "create_tool",
+      arguments: {
+        name: "legacy",
+        description: "x",
+        paramsZod: "z.object({ city: z.ostring() }).nonstrict()",
+        code: "return 1;",
+      },
+    });
+    expect(zod3.isError).toBeFalsy();
+    const body = parseText(zod3 as never) as { name: string; warnings?: string[] };
+    expect(body.name).toBe("legacy");
+    expect(body.warnings).toHaveLength(1);
+    expect(body.warnings?.[0]).toContain(
+      'Tool "legacy"\'s paramsZod uses Zod 3 API that Zod 4 removed: z.ostring(), .nonstrict().',
+    );
+    expect(body.warnings?.[0]).toContain("Zod 3 schemas stop working in the next release");
+
+    const zod4 = await client.callTool({
+      name: "create_tool",
+      arguments: { name: "modern", description: "x", paramsZod: "z.object({ city: z.string() })", code: "return 1;" },
+    });
+    expect(parseText(zod4 as never)).not.toHaveProperty("warnings");
+    await client.close();
+  });
+
+  it("dry_run_tool validates against a Zod 3-only paramsZod and warns about the next release", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const call = (paramsZod: string, sampleArgs: object) =>
+      client.callTool({ name: "dry_run_tool", arguments: { paramsZod, code: "return params;", sampleArgs } });
+    const zod3 = parseText(
+      (await call("z.object({ city: z.ostring() }).nonstrict()", { city: "Oslo", x: 1 })) as never,
+    ) as {
+      result: { ok: boolean; value?: unknown };
+      warnings?: string[];
+    };
+    expect(zod3.result).toEqual({ ok: true, value: { city: "Oslo", x: 1 } });
+    expect(zod3.warnings).toHaveLength(1);
+    expect(zod3.warnings?.[0]).toMatch(
+      /^This paramsZod uses Zod 3 API that Zod 4 removed: z\.ostring\(\), \.nonstrict\(\)\. /,
+    );
+
+    // Compiles with both, but Zod 4 applies a default inside .partial(): a different parsed value.
+    const differs = parseText((await call("z.object({ a: z.string().default('x') }).partial()", {})) as never) as {
+      result: { ok: boolean; value?: unknown };
+      warnings?: string[];
+    };
+    expect(differs.result).toEqual({ ok: true, value: {} });
+    expect(differs.warnings?.[0]).toMatch(
+      /^This paramsZod parses the sample arguments to a different value with Zod 4\./,
+    );
+
+    const same = parseText((await call("z.object({ city: z.string() })", { city: "Oslo" })) as never);
+    expect(same).not.toHaveProperty("warnings");
+    await client.close();
+  });
+
   it("create_tool reports a duplicate name for the caller as a friendly 409 naming the tool", async () => {
     const db = fakeDb([
       { id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" },
@@ -1068,6 +1137,22 @@ describe("tool authoring tools", () => {
       expect(JSON.stringify(body.jsonSchema)).toContain("who");
       expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'new';");
       expect(isolationLevelsOf(db)).toEqual([Prisma.TransactionIsolationLevel.Serializable]);
+      await client.close();
+    });
+
+    it("warns when the new paramsZod uses Zod 3 API that the next release drops", async () => {
+      const { client } = await setup([owned()]);
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", paramsZod: "z.object({ who: z.string().ip() })" },
+      });
+      const body = parseText(result as never) as FakeToolRow & { warnings?: string[] };
+      expect(JSON.stringify(body.jsonSchema)).toContain("who");
+      expect(body.warnings).toEqual([
+        expect.stringContaining('Tool "greet"\'s paramsZod uses Zod 3 API that Zod 4 removed: .ip().'),
+      ]);
+      const codeOnly = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 2;" } });
+      expect(parseText(codeOnly as never)).not.toHaveProperty("warnings");
       await client.close();
     });
 
