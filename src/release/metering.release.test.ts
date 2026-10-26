@@ -5,8 +5,9 @@
  * - the settled output is at least what was relayed before the cut (ceil(bytes / 3)), unless the
  *   upstream had already reported its own running count (Anthropic message_delta);
  * - the settled cost never exceeds the request's worst case (its ceiling, else its hold);
- * - an unknown output (nothing relayed, nothing reported, no run history) settles at the output
- *   the hold reserved for, and a run's first request with nothing read settles at its full hold.
+ * - an unknown output (nothing relayed, nothing reported) settles at the run's median completed
+ *   reply, or at no output when there is none yet (#371's rule, kept by #425); the input is still
+ *   booked, so the estimate is never $0.
  *
  * Matrix: protocol (Anthropic Messages, OpenAI Responses) x every delta kind that is generated
  * output (and one that is not) x every event boundary x run history (none, one completed reply),
@@ -70,6 +71,8 @@ interface Reply {
   /** Index of the frame carrying the upstream's own running output count (Anthropic message_delta). */
   reportedAt?: number;
   reportedTokens?: number;
+  /** Anthropic message_start's placeholder output count (0 or 1). */
+  startOutputTokens?: number;
 }
 
 const ANTHROPIC_DELTAS = ["text_delta", "input_json_delta", "thinking_delta", "signature_delta"] as const;
@@ -94,6 +97,7 @@ function anthropicReply(r: Rng, kinds: readonly (typeof ANTHROPIC_DELTAS)[number
     frames.push(frame(data));
     outputBytes.push(bytes);
   };
+  const startOutputTokens = r.pick([0, 1]);
   push({
     type: "message_start",
     message: {
@@ -102,7 +106,7 @@ function anthropicReply(r: Rng, kinds: readonly (typeof ANTHROPIC_DELTAS)[number
         cache_read_input_tokens: r.int(0, 20_000),
         cache_creation_input_tokens: r.int(0, 2_000),
         // A placeholder, not a running count.
-        output_tokens: r.pick([0, 1]),
+        output_tokens: startOutputTokens,
       },
     },
   });
@@ -126,7 +130,7 @@ function anthropicReply(r: Rng, kinds: readonly (typeof ANTHROPIC_DELTAS)[number
   push({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: reportedTokens } });
   const reportedAt = frames.length - 1;
   push({ type: "message_stop" });
-  return { frames, outputBytes, reportedAt, reportedTokens };
+  return { frames, outputBytes, reportedAt, reportedTokens, startOutputTokens };
 }
 
 function openaiReply(r: Rng, kinds: readonly (typeof OPENAI_DELTAS)[number][]): Reply {
@@ -147,8 +151,6 @@ function openaiReply(r: Rng, kinds: readonly (typeof OPENAI_DELTAS)[number][]): 
 
 const anthropicBody = () =>
   readFile(new URL("../providers/coding-proxy/fixtures/anthropic-sdk-request.json", import.meta.url), "utf8");
-/** The fixture's max_tokens: what an Anthropic request's hold reserves output for. */
-const ANTHROPIC_MAX_OUTPUT = 4096;
 const OPENAI_MAX_OUTPUT = 2_000;
 /** A complete Anthropic stream: the reply a run with history completed before the cut. */
 const ANTHROPIC_COMPLETE = await readFile(
@@ -262,14 +264,14 @@ function checkSettled(c: CutCase, request: ProxyRequest | null) {
   // 2. Never above the request's worst case.
   const worst = Math.max(request!.reservationUsd, request!.ceilingUsd ?? 0);
   expect(request!.actualCostUsd!).toBeLessThanOrEqual(worst + EPSILON);
-  // 3. An unknown output settles at what the hold reserved for (no relayed output, no reported
-  //    count, no run history to estimate from).
-  if (!reported && relayed === 0 && !c.history) {
-    const maxOutput = c.protocol === "anthropic-messages" ? ANTHROPIC_MAX_OUTPUT : OPENAI_MAX_OUTPUT;
-    expect(output).toBe(maxOutput);
-    // With nothing read either (no message_start), that is the full hold.
-    const readStart = c.protocol === "anthropic-messages" && c.delivered >= 1;
-    if (!readStart) expect(request!.actualCostUsd!).toBeCloseTo(request!.reservationUsd, 9);
+  // 3. An unknown output (no relayed output, no reported count) settles at the run's median
+  //    completed reply, or at no output with no run history (#371); the input is still booked.
+  if (!reported && relayed === 0) {
+    // message_start's placeholder count, once read, is a floor (#425), never the estimate itself.
+    const floor = c.protocol === "anthropic-messages" && c.delivered >= 1 ? (c.reply.startOutputTokens ?? 0) : 0;
+    if (c.history) expect(output).toBeGreaterThan(0);
+    else expect(output).toBe(floor);
+    expect(request!.actualCostUsd!).toBeGreaterThan(0);
   }
 }
 
@@ -318,7 +320,7 @@ describe("metering under faults: the native gateway", () => {
   type Ledger = Parameters<typeof streamModel>[1];
   type Ctx = Parameters<typeof streamModel>[0];
 
-  function recordingLedger() {
+  function recordingLedger(median?: number) {
     const calls: Array<{ kind: string; usage?: { outputTokens: number; costUsd: number } }> = [];
     let reservationUsd = 0;
     const ledger = {
@@ -335,6 +337,7 @@ describe("metering under faults: the native gateway", () => {
       markUncertain: async (_s: string, _c: string, usage?: { outputTokens: number; costUsd: number }) => {
         calls.push({ kind: "uncertain", usage });
       },
+      medianOutputTokens: async () => median,
     };
     return { ledger: ledger as unknown as Ledger, calls, hold: () => reservationUsd };
   }
@@ -347,7 +350,7 @@ describe("metering under faults: the native gateway", () => {
     );
   }
 
-  function llmCutAfter(events: LlmStreamEvent[], cutAt: number, counting: boolean): LlmProvider {
+  function llmCutAfter(events: LlmStreamEvent[], cutAt: number, counting: boolean, started = true): LlmProvider {
     let counted = 0;
     return {
       countTokens: async (_model: string, messages: Array<{ content: unknown }>) => {
@@ -360,7 +363,8 @@ describe("metering under faults: the native gateway", () => {
       },
       priceUsd: (_model: string, usage: { inputTokens: number; outputTokens: number }) =>
         (usage.inputTokens * PRICE.inputPerMTok + usage.outputTokens * PRICE.outputPerMTok) / 1e6,
-      async *stream() {
+      async *stream(_req: unknown, _signal?: AbortSignal, hooks?: { onResponseStarted?: () => void }) {
+        if (started) hooks?.onResponseStarted?.();
         for (const event of events.slice(0, cutAt)) yield event;
         throw new Error("upstream reset");
       },
@@ -405,16 +409,31 @@ describe("metering under faults: the native gateway", () => {
     expect(cases).toBeGreaterThan(100);
   });
 
-  // FINDING: R1, unconfirmed; see regression-phase1-report.md. a provider stream cut before its first event (for example
-  // while an OpenAI reasoning model is still reasoning, which yields no event) is released as
-  // "billed nothing", so an unknown output settles at $0 instead of at the hold. The coding proxy
-  // settles the same case at the hold (the tests above).
-  it.fails("a cut before the first provider event keeps the hold (an unknown output settles at the hold)", async () => {
+  // Finding R1 is settled by #425 and the #371 rule: a call cut before its response started was
+  // billed nothing and releases its hold; once started, an unknown output settles at the run's
+  // median completed call, or at no output before the first one, and the input is still booked.
+  it("a cut before the response started releases the hold: the provider billed nothing", async () => {
+    const { ledger, calls } = recordingLedger();
+    await drain(streamModel(ctxFor(llmCutAfter([], 0, true, false)), ledger, "c-unstarted", params));
+    expect(calls).toEqual([{ kind: "release" }]);
+  });
+
+  it("a cut after the response started, before any event, books the input and no output with no history", async () => {
     const { ledger, calls, hold } = recordingLedger();
     await drain(streamModel(ctxFor(llmCutAfter([], 0, true)), ledger, "c-first", params));
-    // Kept in full: marked uncertain with no estimate, or at an estimate equal to the hold.
     expect(calls).toHaveLength(1);
     expect(calls[0].kind).toBe("uncertain");
-    if (calls[0].usage) expect(calls[0].usage.costUsd).toBeCloseTo(hold(), 9);
+    expect(calls[0].usage!.outputTokens).toBe(0);
+    expect(calls[0].usage!.costUsd).toBeGreaterThan(0);
+    expect(calls[0].usage!.costUsd).toBeLessThanOrEqual(hold() + EPSILON);
+  });
+
+  it("a cut after the response started, before any event, books the run's median output when there is one", async () => {
+    const { ledger, calls, hold } = recordingLedger(700);
+    await drain(streamModel(ctxFor(llmCutAfter([], 0, true)), ledger, "c-median", params));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].kind).toBe("uncertain");
+    expect(calls[0].usage!.outputTokens).toBe(700);
+    expect(calls[0].usage!.costUsd).toBeLessThanOrEqual(hold() + EPSILON);
   });
 });

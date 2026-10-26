@@ -26,14 +26,14 @@ const file = (filename: string, patchStatus: PullRequestFileView["patchStatus"])
 const view = (files: PullRequestFileView[]): PullRequestView =>
   ({ headSha: HEAD, files, fileListComplete: true }) as unknown as PullRequestView;
 
-describe("confirms N1 (production ReviewReadLedger, no host): a sinceSha read narrows what is gated", () => {
-  it("control plane: one ledger, the narrower page replaces the code set", () => {
+describe("N1 stays fixed (production ReviewReadLedger, no host): a sinceSha read never narrows what is gated", () => {
+  it("control plane: one ledger, a narrower page adds to the code set and never replaces it", () => {
     const reads = new ReviewReadLedger();
     reads.recordPage("o/r", 7, view([file("src/a.ts", "complete"), file("src/b.ts", "later_page")]), false);
     expect(reads.unreadCode("o/r", 7, HEAD)).toEqual(["src/b.ts"]);
     // repo_pr_read with sinceSha: a first page (no cursor) listing only what changed since.
     reads.recordPage("o/r", 7, view([file("src/a.ts", "complete")]), false);
-    expect(reads.unreadCode("o/r", 7, HEAD)).toEqual([]);
+    expect(reads.unreadCode("o/r", 7, HEAD)).toEqual(["src/b.ts"]);
   });
 
   it("sandbox: the gateway's per-request ledgers merged into the saved one keep src/b.ts gated", () => {

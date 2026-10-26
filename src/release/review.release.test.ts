@@ -262,12 +262,9 @@ describe("review completeness: sinceSha narrowing (finding N1)", () => {
   ] as const;
 
   for (const [mode, attemptFor] of MODES) {
-    // FINDING: N1, unconfirmed; see regression-phase1-report.md. in the control plane a
-    // repo_pr_read with sinceSha replaces the head's code-file set (ReviewReadLedger.recordPage),
-    // so files the full list showed but nobody read stop being gated. The sandbox merges the
-    // sets, so it still refuses. Both should refuse.
-    const test = mode === "control plane" ? it.fails : it;
-    test(`${mode}: files the full list showed stay gated after a narrower sinceSha read`, async () => {
+    // Finding N1, fixed by #414: a repo_pr_read with sinceSha only ever adds to the head's
+    // code-file set, so files the full list showed but nobody read stay gated in both modes.
+    it(`${mode}: files the full list showed stay gated after a narrower sinceSha read`, async () => {
       for (const total of [10, 120, 450]) {
         sweep = secretSweep(total);
         sweep.track("installation token", TOKEN);
