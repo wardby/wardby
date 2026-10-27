@@ -26,7 +26,9 @@ WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
-# The shared secret redactor (debug-trace.js); it imports nothing.
+# The shared secret redactor (debug-trace.js -> coding/redact.js), which imports
+# core/secret-spans.js and coding/protocol.js.
+COPY --from=build /build/dist/coding/redact.js ./coding/redact.js
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 # The driver's registry-mode setup (driver.js -> coding/registry/worker-config.js)
 # and its adapters. Their third-party imports are in src/coding-worker/package.json.
@@ -74,7 +76,7 @@ RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on
 # import, so this loads everything it imports rather than main.js itself.
-RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))' \
+RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors", "debug-trace", "skills", "task-note"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function") process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/registry-refusals.mjs"); if (typeof m.recentRefusals !== "function") process.exit(1)' \
     && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured"

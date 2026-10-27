@@ -41,13 +41,19 @@ COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 # Session-resume transcript capture (claude-coding-worker/transcript.js); neither imports anything.
 COPY --from=build /build/dist/coding/transcript/claude-code.js ./coding/transcript/claude-code.js
 COPY --from=build /build/dist/coding/transcript/format.js ./coding/transcript/format.js
-# The shared secret redactor (debug-trace.js); it imports nothing.
+# The shared secret redactor (debug-trace.js -> coding/redact.js), which imports
+# core/secret-spans.js and coding/protocol.js.
+COPY --from=build /build/dist/coding/redact.js ./coding/redact.js
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 COPY --from=build /build/dist/coding/registry/token.js ./coding/registry/token.js
 # tool-socket.js derives its wait for the tool runner's dependency cache from the module's own
 # timeouts (DEFAULT_TIMEOUTS); only its constants are read here, the tool runner runs it.
 COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs
 RUN node --input-type=module -e 'const m = await import("/opt/wardby/claude-coding-worker/tool-socket.js"); if (!(m.PREPARE_DEPENDENCIES_TIMEOUT_MS > 0)) process.exit(1)'
+# Fail the build, not every run, when a module the worker imports is missing (a missing COPY
+# otherwise exits every run at startup with ERR_MODULE_NOT_FOUND). main.js runs on import, so this
+# loads everything it imports rather than main.js itself.
+RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors"].map((name) => import(`/opt/wardby/${name}.js`)))'
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
