@@ -59,7 +59,7 @@ import {
   type ContainerRunSnapshot,
   type ProvisioningClaim,
 } from "./container.js";
-import type { RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
+import type { RecordResult, RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
 
 /**
  * The executor's operator log, captured. The persisted run error is a bare
@@ -627,7 +627,7 @@ describe("ContainerExecutor", () => {
     const CLAUDE_RUN = { sessionResume: true, provider: "claude-code" } as const;
     async function recorded(
       overrides: Partial<ContainerRunSnapshot>,
-      record: (input: RecordTranscriptInput) => Promise<TranscriptStatus>,
+      record: (input: RecordTranscriptInput) => Promise<RecordResult>,
       setup: (created: Awaited<ReturnType<typeof harness>>) => void = () => {},
     ) {
       const calls: RecordTranscriptInput[] = [];
@@ -698,6 +698,13 @@ describe("ContainerExecutor", () => {
     it("hands the recorder a reader that resolves undefined when the launcher cannot read", async () => {
       const { calls } = await recorded(CLAUDE_RUN, stored);
       expect(await calls[0].read(1)).toBeUndefined();
+    });
+
+    it("logs a lost transcript row as a fixed code with the run id only", async () => {
+      const { created } = await recorded(CLAUDE_RUN, async () => "row_write_failed");
+      expect(created.store.run.status).toBe("succeeded");
+      const line = logged.find((entry) => entry.payload.transcript === "row_write_failed");
+      expect(line?.payload).toEqual({ runId: "run-1", transcript: "row_write_failed" });
     });
 
     it("a rejecting recorder changes nothing about the run", async () => {

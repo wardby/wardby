@@ -4,6 +4,10 @@
  * SDK records (system prompt snapshots, environment, account and organisation, budget and queue
  * records) is dropped, as are thinking blocks: they may not replay on another account and earlier
  * turns' thinking is not needed to continue.
+ *
+ * Keep this file import-free, erasable TypeScript (types only, no enums or namespaces):
+ * src/claude-coding-worker/Dockerfile.compatibility copies this .ts as is and runs it directly with
+ * Node's type stripping, where an import would not resolve.
  */
 type JsonRecord = Record<string, unknown>;
 

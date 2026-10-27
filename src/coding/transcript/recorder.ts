@@ -7,6 +7,8 @@ import { sanitizeClaudeTranscript } from "./claude-code.js";
 import { formatTranscriptFile, MAX_TRANSCRIPT_BYTES, parseTranscriptFile } from "./format.js";
 
 export type TranscriptStatus = "stored" | "too_large" | "not_captured" | "failed";
+/** What `record` reports to its caller: the row's status, or that the row itself was lost. */
+export type RecordResult = TranscriptStatus | "row_write_failed";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -47,17 +49,26 @@ export interface RecordTranscriptInput {
 
 /**
  * Stores a coding run's session transcript for local resume. The worker's file is not trusted: it is
- * sanitised again here, then redacted by exact value against every secret the run was given, and only
- * that copy is stored. Rows carry fixed codes, never content. Never throws.
+ * sanitised again here, then every string in each record (values and object keys) is redacted by exact
+ * value against the agent's attached secret values (and their JSON-escaped forms); the run capability
+ * (rrp_) and the registry token (rrg_) are removed by their fixed token shape. Only that copy is stored.
+ * Rows carry fixed codes, never content. Never throws.
  */
 export class RunTranscriptRecorder {
   constructor(private readonly deps: RunTranscriptRecorderDeps) {}
 
-  async record(input: RecordTranscriptInput): Promise<TranscriptStatus> {
+  /**
+   * Returns the stored status, or `row_write_failed` when the row could not be written (the caller logs
+   * that code with the run id; the error itself is never surfaced, as it may quote content).
+   */
+  async record(input: RecordTranscriptInput): Promise<RecordResult> {
     const outcome = await this.capture(input).catch(() => ({ status: "failed" as const, reason: "unexpected" }));
-    await this.writeRow(input, outcome).catch(() => undefined);
+    const rowWritten = await this.writeRow(input, outcome).then(
+      () => true,
+      () => false,
+    );
     if (outcome.status === "stored") await this.pruneExpired().catch(() => 0);
-    return outcome.status;
+    return rowWritten ? outcome.status : "row_write_failed";
   }
 
   private async capture(input: RecordTranscriptInput): Promise<Outcome> {
@@ -89,7 +100,13 @@ export class RunTranscriptRecorder {
       return { status: "failed", reason: "secrets_unavailable" };
     }
     const escaped = withEscapedForms(secrets);
-    const lines = sanitized.lines.map((line) => redactSecrets(line, escaped));
+    let lines: string[];
+    try {
+      lines = sanitized.lines.map((line) => redactJsonLine(line, escaped));
+    } catch {
+      return { status: "failed", reason: "redaction_broke_record" };
+    }
+    // Guard: every stored line must still be one JSON record.
     for (const line of lines) {
       try {
         JSON.parse(line);
@@ -165,6 +182,26 @@ export class RunTranscriptRecorder {
     const { count } = await this.deps.db.runTranscript.deleteMany({ where: { runId: { in: deletable } } });
     return count;
   }
+}
+
+/**
+ * Redacts every string leaf of one JSON record, then re-serialises it. Redacting the serialised line
+ * instead lets token patterns consume JSON escapes (the Bearer pattern eats the backslash of `\"`).
+ */
+function redactJsonLine(line: string, secrets: readonly string[]): string {
+  return JSON.stringify(redactJsonValue(JSON.parse(line) as unknown, secrets));
+}
+
+function redactJsonValue(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, secrets));
+  if (value !== null && typeof value === "object") {
+    // A null-prototype object keeps a "__proto__" key as data.
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const [key, item] of Object.entries(value)) out[redactSecrets(key, secrets)] = redactJsonValue(item, secrets);
+    return out;
+  }
+  return value;
 }
 
 interface Outcome {

@@ -240,9 +240,48 @@ describe("RunTranscriptRecorder", () => {
     noLeak();
   });
 
-  it("never throws when the database fails", async () => {
-    fake.upsert.mockRejectedValue(new Error("db down"));
-    await expect(recorder().record(input())).resolves.toBe("stored");
+  it("never throws when the database fails, and reports a fixed code for the lost row", async () => {
+    fake.upsert.mockRejectedValue(new Error(`db down ${SECRET}`));
+    await expect(recorder().record(input())).resolves.toBe("row_write_failed");
+  });
+
+  it("stores a curl call with a Bearer header and removes the token after Bearer", async () => {
+    const token = "ghp_fakeTokenValue0000000000000000000001";
+    const command = `curl -H "Authorization: Bearer ${token}" https://x`;
+    const toolUse = workerFile([], "done").replace(
+      /"type":"tool_use"(.*?)"input":\{[^}]*\}/,
+      (_match, between: string) => `"type":"tool_use"${between}"input":${JSON.stringify({ command })}`,
+    );
+    expect(toolUse).toContain(JSON.stringify(command).slice(1, -1));
+    expect(await recorder({ secretValues: async () => [] }).record(input({ read: async () => toolUse }))).toBe(
+      "stored",
+    );
+    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    expect(text).not.toContain(token);
+    expect(text).toContain("Authorization: [REDACTED]");
+    expect(text).toContain("https://x");
+    for (const line of text.trim().split("\n")) JSON.parse(line);
+  });
+
+  it("redacts a secret planted in a nested object key and value", async () => {
+    const sanitized = sanitizeClaudeTranscript(FIXTURE)!;
+    const lines = sanitized.lines.map((line) => {
+      const rec = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
+      if (rec.type === "assistant" && Array.isArray(rec.message?.content)) {
+        for (const block of rec.message.content as Array<Record<string, unknown>>) {
+          if (block.type === "tool_use") block.input = { outer: { [`key-${SECRET}`]: [{ deep: `v ${RAW2}` }] } };
+        }
+      }
+      return JSON.stringify(rec);
+    });
+    const file = formatTranscriptFile(okHeader(sanitized.sessionId), lines);
+    expect(file).toContain(`key-${SECRET}`);
+    expect(await recorder().record(input({ read: async () => file }))).toBe("stored");
+    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(JSON.stringify(RAW2).slice(1, -1));
+    expect(text).toContain("key-[REDACTED]");
+    expect(text).toContain("v [REDACTED]");
   });
 
   it("keeps a row whose blob cannot be deleted but prunes the rest", async () => {
