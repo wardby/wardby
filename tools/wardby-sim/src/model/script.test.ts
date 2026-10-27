@@ -90,6 +90,14 @@ describe("scripted model", () => {
     });
   });
 
+  it("fills prior from wardby's continuation hint (the last one in the request)", () => {
+    const hint = (id: string) =>
+      `[This request is a follow-up on PR #1, originally opened by wardby run ${id}. If you delegate, ...]`;
+    const body = JSON.stringify({ instructions: `${hint("run-old")}\n\n${hint("run-9_x")}` });
+    expect(fillTemplates("{{prior}}", body)).toBe("run-9_x");
+    expect(fillTemplates("{{prior}}", "{}")).toBe("");
+  });
+
   it("replays each agent's turns in order, repeats the last, and refuses an unscripted request", () => {
     const model = new ScriptedModel();
     model.load([loadScript("builder.codex.json"), loadScript("delivery.codex.json")]);

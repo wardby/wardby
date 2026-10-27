@@ -3,11 +3,13 @@ import type { Inspect } from "../flow-g/checks.js";
 import type { RecordedCall } from "../state.js";
 import {
   checkBuilt,
+  checkFixRound,
   checkDuplicateAnswered,
   checkLedger,
   checkMergeWriteBack,
   checkOneRequestComment,
   checkPullRequestLinked,
+  checkSlackThread,
   checkTriggered,
   spendAmounts,
   unverifiedJiraEventsUsed,
@@ -198,6 +200,87 @@ describe("Flow J checks", () => {
     expect(problems.some((p) => p.includes("over its budget"))).toBe(true);
     expect(checkLedger(runs, "r1", "no spend\nwardby run r1", "WID-1")).toEqual([
       "the request comment has no spend line",
+    ]);
+  });
+
+  it("J6: changes requested, one fix round on the same PR, then approved", () => {
+    const comments = "/repos/acme/widgets/issues/1/comments";
+    const calls = [
+      call({ seq: 1, path: comments, body: { body: "<!-- wardby:review:r -->\n\n❌ **Changes requested**" } }),
+      call({ seq: 2, path: comments, body: { body: "🔁 Fix round 1 of 2: working on it." } }),
+      call({
+        seq: 3,
+        method: "PATCH",
+        path: "/repos/acme/widgets/issues/comments/7",
+        body: { body: "<!-- wardby:review:r -->\n\n✅ **Approved**" },
+      }),
+    ];
+    const gh: Inspect = {
+      ...github("x"),
+      checkRuns: [
+        { id: 1, name: "wardby review", headSha: "a", status: "completed", conclusion: "failure", appId: 1 },
+        { id: 2, name: "wardby review", headSha: "b", status: "completed", conclusion: "success", appId: 1 },
+      ],
+    };
+    const runs = [run({}), run({ id: "r4", attributionSource: "linked_pr" })];
+    const opts = { repo: "acme/widgets", delivery: "delivery", builder: "builder", issueKey: "WID-1", pushes: 2 };
+    expect(checkFixRound(gh, calls, 1, "wardby review", runs, opts)).toEqual([]);
+    const problems = checkFixRound({ ...gh, checkRuns: [] }, calls.slice(1, 2), 1, "wardby review", [run({})], {
+      ...opts,
+      pushes: 1,
+    });
+    expect(problems).toEqual([
+      "the first review text does not request changes",
+      "the last review text does not approve",
+      '"wardby review" checks concluded [], expected failure then success',
+      "expected two pushes (build, fix), got 1",
+      "expected one fix-round run of delivery, got 0",
+    ]);
+  });
+
+  it("Slack: one thread, one reply per event, the parent ending merged, the merge broadcast", () => {
+    const msg = (text: string, over: Record<string, unknown> = {}) => ({
+      channel: "C1",
+      ts: "1.000001",
+      threadTs: "1.000000",
+      text,
+      user: "U",
+      edits: [],
+      deleted: false,
+      ...over,
+    });
+    const pr = `<${PR}|acme/widgets#1>`;
+    const thread = [
+      msg(`<${URL}|WID-1> · Add — *merged ✅*`, {
+        ts: "1.000000",
+        threadTs: undefined,
+        edits: [{ text: "picked up" }],
+      }),
+      msg("🟢 Picked up by *delivery* (assigned to wardby)"),
+      msg(`🔀 PR ${pr} is ready — moved to In Review`),
+      msg(`✅ *reviewer* approved ${pr}`),
+      msg(`🎉 ${pr} merged — moved to Done`, { replyBroadcast: true }),
+    ];
+    const opts = {
+      issueUrl: URL,
+      prUrl: PR,
+      delivery: "delivery",
+      reviewer: "reviewer",
+      openedStatus: "In Review",
+      mergedStatus: "Done",
+      fixRound: false,
+    };
+    expect(checkSlackThread(thread, opts)).toEqual([]);
+    const doubled = [...thread, msg(`🔀 PR ${pr} is ready — moved to In Review`)];
+    expect(checkSlackThread(doubled, opts)).toEqual(['expected one "PR opened" reply, got 2']);
+    const noBroadcast = thread.map((m) => (m.text.startsWith("🎉") ? { ...m, replyBroadcast: false } : m));
+    expect(checkSlackThread(noBroadcast, opts)).toEqual(["the merge reply was not broadcast to the channel"]);
+    expect(checkSlackThread([...thread, msg("x", { ts: "2.0", threadTs: undefined })], opts)).toEqual([
+      "expected one thread parent in the channel, got 2",
+    ]);
+    expect(checkSlackThread(thread, { ...opts, fixRound: true })).toEqual([
+      'expected one "changes requested" reply, got 0',
+      'expected one "fix round" reply, got 0',
     ]);
   });
 

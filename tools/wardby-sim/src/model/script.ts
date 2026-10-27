@@ -14,6 +14,7 @@
 // reason. Each request of a matching agent takes the next turn; after the last, the last repeats.
 //
 // Templates in any string: {{runId}} (the coding worker's "The final JSON runId must be X."),
+// {{prior}} (the run a continuation hint names: "originally opened by wardby run <id>"),
 // {{last:<field>}} (the last value of a JSON string field named <field> anywhere in the request,
 // e.g. a tool result's headSha), {{lastNumber:<field>}} for a number field.
 export type ScriptProtocol = "openai-responses" | "anthropic-messages";
@@ -35,6 +36,8 @@ export interface TurnScript {
 }
 
 const RUN_ID = /The final JSON runId must be ([A-Za-z0-9][A-Za-z0-9_-]*)\./;
+/** wardby's continuation hint: "[This request is a follow-up on PR #N, originally opened by wardby run <id>. ...". */
+const PRIOR_RUN = /originally opened by wardby run ([A-Za-z0-9][A-Za-z0-9_-]*)/g;
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -43,8 +46,9 @@ function escapeRegExp(text: string): string {
 /** Fills the templates of every string in `value` from the request body. */
 export function fillTemplates(value: unknown, body: string): unknown {
   if (typeof value === "string") {
-    return value.replace(/\{\{(runId|last:[A-Za-z0-9_]+|lastNumber:[A-Za-z0-9_]+)\}\}/g, (_all, key: string) => {
+    return value.replace(/\{\{(runId|prior|last:[A-Za-z0-9_]+|lastNumber:[A-Za-z0-9_]+)\}\}/g, (_all, key: string) => {
       if (key === "runId") return RUN_ID.exec(body)?.[1] ?? "";
+      if (key === "prior") return [...body.matchAll(PRIOR_RUN)].at(-1)?.[1] ?? "";
       const [kind, field] = key.split(":");
       // Tool results arrive JSON-encoded inside JSON strings, so quotes may be escaped.
       const pattern =

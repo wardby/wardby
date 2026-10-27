@@ -5,6 +5,7 @@
 import { EVENTS } from "../routes.js";
 import type { RecordedCall } from "../state.js";
 import type { Inspect } from "../flow-g/checks.js";
+import type { SlackMessage } from "../slack/web.js";
 
 export interface JiraInspectIssue {
   key: string;
@@ -45,6 +46,12 @@ export interface RunRow {
   attributionSource: string | null;
 }
 
+/** A recorded GitHub comment write's `body` text. */
+const bodyText = (call: RecordedCall): string => {
+  const body = (call.body as { body?: unknown } | undefined)?.body;
+  return typeof body === "string" ? body : "";
+};
+
 const MERGED_COMMENT = /Pull request .* was merged\./;
 
 /** wardby's run-status footer as Jira shows it: the last line is `wardby run <id>`. */
@@ -65,10 +72,14 @@ export function checkTriggered(
   deliveryAgent: string,
   issueKey: string,
   statusRows: { runId: string; issueKey: string }[],
+  expectedRuns = 1,
 ): string[] {
   const problems: string[] = [];
+  // The first run is the one the Jira event started (a fix round's later run is the agent's too).
   const roots = runs.filter((r) => r.agent === deliveryAgent);
-  if (roots.length !== 1) problems.push(`expected one ${deliveryAgent} run, got ${roots.length}`);
+  if (roots.length !== expectedRuns)
+    problems.push(`expected ${expectedRuns === 1 ? "one" : expectedRuns} ${deliveryAgent} run, got ${roots.length}`);
+  if (statusRows.length !== 1) problems.push(`expected one RunIssueStatus row, got ${statusRows.length}`);
   const root = roots[0];
   if (!root) return problems;
   if (!statusRows.some((s) => s.runId === root.id && s.issueKey === issueKey))
@@ -123,10 +134,17 @@ export function checkOneRequestComment(
 }
 
 /** J3: the builder's run succeeded and pushed a branch (the PR head) holding the file it was scripted to write. */
-export function checkBuilt(runs: RunRow[], builderAgent: string, prFiles: string[], expectedFile: string): string[] {
+export function checkBuilt(
+  runs: RunRow[],
+  builderAgent: string,
+  prFiles: string[],
+  expectedFile: string,
+  expectedRuns = 1,
+): string[] {
   const problems: string[] = [];
   const built = runs.filter((r) => r.agent === builderAgent);
-  if (built.length !== 1) problems.push(`expected one ${builderAgent} run, got ${built.length}`);
+  if (built.length !== expectedRuns)
+    problems.push(`expected ${expectedRuns === 1 ? "one" : expectedRuns} ${builderAgent} run, got ${built.length}`);
   for (const run of built) if (run.status !== "succeeded") problems.push(`builder run ${run.id} ended ${run.status}`);
   if (!prFiles.includes(expectedFile))
     problems.push(`the PR does not change ${expectedFile} (files: ${prFiles.join(", ")})`);
@@ -182,6 +200,115 @@ export function checkMergeWriteBack(
     problems.push(`the merged comment does not say it moved the issue: ${merged[0].text.slice(0, 160)}`);
   if (opts.pairs.length !== 1 || opts.pairs[0].state !== "merged")
     problems.push(`IssuePullRequest rows: ${JSON.stringify(opts.pairs)} (expected one, merged)`);
+  return problems;
+}
+
+/**
+ * J6: the fix round. The first review requested changes, the review_fix round (a second run of
+ * the delivery agent, attributed to the issue through the PR) had the builder continue the same
+ * PR (a second push, no second PR), and the re-review approved: the last check is a success.
+ */
+export function checkFixRound(
+  github: Inspect,
+  calls: RecordedCall[],
+  pull: number,
+  checkName: string,
+  runs: RunRow[],
+  opts: { repo: string; delivery: string; builder: string; issueKey: string; pushes: number },
+): string[] {
+  const problems: string[] = [];
+  // wardby's review is a summary comment edited in place (and the check), not a GitHub review:
+  // its first text requests changes, its last approves.
+  const reviewTexts = calls
+    .filter(
+      (c) =>
+        (c.method === "POST" && c.path === `/repos/${opts.repo}/issues/${pull}/comments`) ||
+        (c.method === "PATCH" && c.path.startsWith(`/repos/${opts.repo}/issues/comments/`)),
+    )
+    .map((c) => bodyText(c))
+    .filter((body) => body.includes("<!-- wardby:review:"));
+  if (!reviewTexts[0]?.includes("Changes requested")) problems.push("the first review text does not request changes");
+  if (!reviewTexts.at(-1)?.includes("Approved")) problems.push("the last review text does not approve");
+  const checks = github.checkRuns.filter((r) => r.name === checkName).map((r) => r.conclusion);
+  if (checks[0] !== "failure" || checks.at(-1) !== "success")
+    problems.push(`"${checkName}" checks concluded ${JSON.stringify(checks)}, expected failure then success`);
+  if (opts.pushes !== 2) problems.push(`expected two pushes (build, fix), got ${opts.pushes}`);
+  if (github.pulls.length !== 1) problems.push(`expected the fix on the same PR, got ${github.pulls.length} PRs`);
+  const rounds = runs.filter((r) => r.agent === opts.delivery).slice(1);
+  if (rounds.length !== 1) problems.push(`expected one fix-round run of ${opts.delivery}, got ${rounds.length}`);
+  for (const round of rounds) {
+    if (round.status !== "succeeded") problems.push(`fix-round run ${round.id} ended ${round.status}`);
+    if (round.workItem !== `jira:${opts.issueKey}`)
+      problems.push(
+        `fix-round run ${round.id} is attributed to ${String(round.workItem)}, expected jira:${opts.issueKey}`,
+      );
+  }
+  const started = calls.filter(
+    (c) =>
+      c.method === "POST" &&
+      c.path === `/repos/${opts.repo}/issues/${pull}/comments` &&
+      bodyText(c).includes("Fix round 1 of"),
+  );
+  if (started.length !== 1)
+    problems.push(`expected one "Fix round 1" status comment on #${pull}, got ${started.length}`);
+  return problems;
+}
+
+/**
+ * Slack: one thread for the card (one top-level message, kept updated with the status, ending
+ * merged), and exactly one reply per lifecycle event — picked up, PR opened (with the Jira move),
+ * the review verdict(s), the fix round when there is one, and the merge (also broadcast to the
+ * channel) — each linking the PR or naming the agent, never a second post of the same event.
+ */
+export function checkSlackThread(
+  messages: SlackMessage[],
+  opts: {
+    issueUrl: string;
+    prUrl: string;
+    delivery: string;
+    reviewer: string;
+    openedStatus: string;
+    mergedStatus: string;
+    fixRound: boolean;
+  },
+): string[] {
+  const problems: string[] = [];
+  const live = messages.filter((m) => !m.deleted);
+  const parents = live.filter((m) => !m.threadTs);
+  if (parents.length !== 1) return [`expected one thread parent in the channel, got ${parents.length}`];
+  const parent = parents[0];
+  // The simulator keeps a message's current text in `text` and every earlier one in `edits`.
+  const parentText = parent.text;
+  if (!parentText.includes(opts.issueUrl)) problems.push("the thread parent does not link the Jira issue");
+  if (!parentText.includes("merged ✅"))
+    problems.push(`the thread parent ends "${parentText.slice(-40)}", expected merged ✅`);
+  if (parent.edits.length === 0) problems.push("the thread parent was never updated");
+  const replies = live.filter((m) => m.threadTs === parent.ts);
+  const expected: [string, (text: string) => boolean][] = [
+    ["picked up", (t) => t.startsWith(`🟢 Picked up by *${opts.delivery}*`)],
+    [
+      "PR opened",
+      (t) => t.startsWith("🔀 PR ") && t.includes(opts.prUrl) && t.includes(`moved to ${opts.openedStatus}`),
+    ],
+    ["approved", (t) => t.startsWith(`✅ *${opts.reviewer}* approved`) && t.includes(opts.prUrl)],
+    ["merged", (t) => t.startsWith("🎉 ") && t.includes(opts.prUrl) && t.includes(`moved to ${opts.mergedStatus}`)],
+  ];
+  if (opts.fixRound) {
+    expected.push(
+      ["changes requested", (t) => t.startsWith(`📝 *${opts.reviewer}* requested changes`)],
+      ["fix round", (t) => t.startsWith("🔁 Fix round 1 of")],
+    );
+  }
+  const matched = new Set<SlackMessage>();
+  for (const [name, test] of expected) {
+    const hits = replies.filter((m) => test(m.text));
+    hits.forEach((m) => matched.add(m));
+    if (hits.length !== 1) problems.push(`expected one "${name}" reply, got ${hits.length}`);
+  }
+  for (const extra of replies.filter((m) => !matched.has(m)))
+    problems.push(`unexpected reply: ${extra.text.slice(0, 120)}`);
+  const merged = replies.find((m) => m.text.startsWith("🎉 "));
+  if (merged && !merged.replyBroadcast) problems.push("the merge reply was not broadcast to the channel");
   return problems;
 }
 

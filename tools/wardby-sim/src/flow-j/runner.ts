@@ -3,7 +3,7 @@
 // `wardby serve` on the host, and real coding pods and the real coding proxy on the Flow G kind
 // cluster (deploy/kind-coding/flow-g-up.sh). Run through scripts/release/flow-j.mjs:
 //
-//   node scripts/release/flow-j.mjs --agent codex|claude [--variant default|duplicate|jira429] [--keep]
+//   node scripts/release/flow-j.mjs --agent codex|claude [--variant default|duplicate|jira429|fixround] [--slack] [--keep]
 //
 // In order: port-forwards the simulator; resets and seeds it (GitHub installation, repo,
 // collaborator and webhook subscription; a Jira project, issue WID-1 and a webhook subscription;
@@ -17,7 +17,9 @@
 //
 // Variants: default; duplicate (the assignment's delivery is sent again with the same
 // identifier: one run); jira429 (Jira answers the first comment write 429 with Retry-After:
-// wardby retries once, and one request comment results).
+// wardby retries once, and one request comment results); fixround (J6: the first review requests
+// changes, wardby's review_fix round has the delivery agent continue the builder's PR, the
+// re-review approves).
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,14 +35,17 @@ import {
   type Inspect,
 } from "../flow-g/checks.js";
 import { killTree, McpStdio, portOpen, psql, readEnvFile, simScript, sleep, waitFor } from "../flow-g/kit.js";
+import { SIM_SLACK_TOKEN, type SlackMessage } from "../slack/web.js";
 import { SIM_JIRA_BOT, SIM_JIRA_DEV, SIM_JIRA_SITE, SIM_JIRA_TOKEN } from "../jira/state.js";
 import {
   checkBuilt,
+  checkFixRound,
   checkDuplicateAnswered,
   checkLedger,
   checkMergeWriteBack,
   checkOneRequestComment,
   checkPullRequestLinked,
+  checkSlackThread,
   checkTriggered,
   unverifiedJiraEventsUsed,
   type JiraInspectIssue,
@@ -65,6 +70,7 @@ const FAKE_ANTHROPIC = "sk-ant-flowj-fake-anthropic-key";
 const CHECK_NAME = "wardby review";
 const OPENED_STATUS = "In Review";
 const MERGED_STATUS = "Done";
+const SLACK_CHANNEL = "C0FLOWJ01";
 const AGENTS = { builder: "flow-j-builder", delivery: "flow-j-delivery", reviewer: "flow-j-reviewer" };
 
 /**
@@ -97,8 +103,10 @@ function splitFindings(problems: Record<string, string[]>): Record<string, strin
 
 interface Options {
   agent: "codex" | "claude";
-  variant: "default" | "duplicate" | "jira429";
+  variant: "default" | "duplicate" | "jira429" | "fixround";
   keep: boolean;
+  /** Wire Slack notifications to the simulated workspace (a channel linked to the Jira project). */
+  slack: boolean;
   timeoutMin: number;
 }
 
@@ -110,12 +118,13 @@ function parseArgs(argv: string[]): Options {
   const agent = value("agent", "codex");
   const variant = value("variant", "default");
   if (agent !== "codex" && agent !== "claude") throw new Error("--agent must be codex or claude");
-  if (!["default", "duplicate", "jira429"].includes(variant))
-    throw new Error("--variant must be default, duplicate or jira429");
+  if (!["default", "duplicate", "jira429", "fixround"].includes(variant))
+    throw new Error("--variant must be default, duplicate, jira429 or fixround");
   return {
     agent,
     variant: variant as Options["variant"],
     keep: argv.includes("--keep"),
+    slack: argv.includes("--slack"),
     timeoutMin: Number(value("timeout-min", "20")),
   };
 }
@@ -257,17 +266,18 @@ async function main(): Promise<number> {
 
     const reset = await fetch(`${SIM}/__sim/reset`, { method: "POST" });
     if (reset.status !== 204) throw new Error(`simulator reset failed: ${reset.status}`);
-    const scripts = ["builder", "delivery", "reviewer"].map((agent) =>
-      JSON.parse(
-        readFileSync(
-          join(
-            ROOT,
-            `tools/wardby-sim/scripts/flow-j/${agent}.${agent === "builder" ? options.agent : native.proto}.json`,
-          ),
-          "utf8",
-        ),
-      ),
-    );
+    const fixRound = options.variant === "fixround";
+    const scripts = ["builder", "delivery", "reviewer"].map((agent) => {
+      const base = `tools/wardby-sim/scripts/flow-j/${agent}.${agent === "builder" ? options.agent : native.proto}`;
+      const loaded = JSON.parse(readFileSync(join(ROOT, `${base}.json`), "utf8"));
+      if (fixRound) {
+        // J6: the fix round's turns follow (builder, delivery) or precede (reviewer) each agent's own.
+        const fix = JSON.parse(readFileSync(join(ROOT, `${base}.fix.json`), "utf8"));
+        const kept = fix.dropTail ? loaded.turns.slice(0, -fix.dropTail) : loaded.turns;
+        loaded.turns = [...(fix.prepend ?? []), ...kept, ...(fix.append ?? [])];
+      }
+      return loaded;
+    });
     await script([
       { action: "github.install", account: "acme", id: 42 },
       {
@@ -298,6 +308,7 @@ async function main(): Promise<number> {
         secret: JIRA_WEBHOOK_SECRET,
       },
       { action: "model.load", scripts },
+      ...(options.slack ? [{ action: "slack.channel", id: SLACK_CHANNEL, name: "deliveries" }] : []),
     ]);
 
     // 3. The control plane's environment: nothing from any .env file (an empty project dir).
@@ -319,6 +330,8 @@ async function main(): Promise<number> {
       WARDBY_JIRA_API_BASE_URL: "https://api.atlassian.com/ex/jira/00000000-0000-4000-8000-000000000000",
       WARDBY_JIRA_API_TOKEN: SIM_JIRA_TOKEN,
       WARDBY_JIRA_WEBHOOK_SECRET: JIRA_WEBHOOK_SECRET,
+      // Slack against the simulator (the switch takes only an xoxb-sim- token).
+      ...(options.slack ? { WARDBY_SLACK_BOT_TOKEN: SIM_SLACK_TOKEN } : {}),
       OPENAI_API_KEY: FAKE_OPENAI,
       ANTHROPIC_API_KEY: FAKE_ANTHROPIC,
       SECRET_APP_KEY: hex("a"),
@@ -401,13 +414,14 @@ async function main(): Promise<number> {
       onPullRequestOpened: OPENED_STATUS,
       onPullRequestMerged: MERGED_STATUS,
     });
-    // The run tree's root (the delivery agent) carries mark-ready; no repository trigger: Jira starts it.
+    // The run tree's root (the delivery agent) carries mark-ready; no repository trigger (Jira starts
+    // it), except review_fix in the fix-round variant.
     await mcp.tool("link_repository", {
       agentId: idOf(delivery),
       provider: "github",
       repository: REPO,
       access: "write",
-      triggers: [],
+      triggers: fixRound ? ["review_fix"] : [],
       markReadyWhenPassing: true,
       adminOverride: true,
     });
@@ -421,6 +435,9 @@ async function main(): Promise<number> {
       markReadyWhenPassing: true,
       adminOverride: true,
     });
+    if (options.slack) {
+      await mcp.tool("link_notification_channel", { channel: SLACK_CHANNEL, projectKey: PROJECT, includeCost: true });
+    }
     killTree(stdio);
     log("agents created and linked");
 
@@ -477,8 +494,11 @@ async function main(): Promise<number> {
     const pull = (await githubInspect()).pulls[0].number;
     log(`pull request #${pull} opened`);
     // J5: the review check.
+    // (In the fix round, the approving re-review: the first review requests changes.)
     await waitFor("the review check", deadline, async () =>
-      (await githubInspect()).checkRuns.some((r) => r.name === CHECK_NAME && r.status === "completed")
+      (await githubInspect()).checkRuns.some(
+        (r) => r.name === CHECK_NAME && r.status === "completed" && (!fixRound || r.conclusion === "success"),
+      )
         ? true
         : undefined,
     );
@@ -534,7 +554,7 @@ async function main(): Promise<number> {
     const prFiles = await pullFiles(pull);
     const requestComment = issue.comments.find((c) => c.author === SIM_JIRA_BOT && !/was merged\./.test(c.text));
 
-    problems.J1 = checkTriggered(runs, AGENTS.delivery, ISSUE, statusRows);
+    problems.J1 = checkTriggered(runs, AGENTS.delivery, ISSUE, statusRows, fixRound ? 2 : 1);
     if (options.variant === "duplicate")
       problems.duplicate = checkDuplicateAnswered(duplicateAnswers, runsOf(AGENTS.delivery));
     problems.J2 = checkOneRequestComment(issue, SIM_JIRA_BOT, root?.id, prUrl);
@@ -554,7 +574,17 @@ async function main(): Promise<number> {
       problems.rate429 =
         posts[0] === 429 && posts[1] === 201 ? [] : [`comment writes answered ${JSON.stringify(posts)}`];
     }
-    problems.J3 = checkBuilt(runs, AGENTS.builder, prFiles, "jokes/flow-j.txt");
+    problems.J3 = checkBuilt(runs, AGENTS.builder, prFiles, "jokes/flow-j.txt", fixRound ? 2 : 1);
+    if (fixRound) {
+      const pushes = calls.filter((c) => c.service === "github-git" && c.path.endsWith("git-receive-pack"));
+      problems.J6 = checkFixRound(github, calls, pull, CHECK_NAME, runs, {
+        repo: REPO,
+        delivery: AGENTS.delivery,
+        builder: AGENTS.builder,
+        issueKey: ISSUE,
+        pushes: pushes.length,
+      });
+    }
     problems.J4 = checkPullRequestLinked(calls, github, beforeMerge, {
       repo: REPO,
       issueUrl: ISSUE_URL,
@@ -567,12 +597,32 @@ async function main(): Promise<number> {
     problems.J9 = checkLedger(runs, root?.id, requestComment?.text, ISSUE);
     for (const run of runs)
       if (run.status !== "succeeded") problems.J9.push(`run not succeeded: ${run.agent} ${run.status}`);
+    if (options.slack) {
+      const messages = (
+        (await script([{ action: "slack.messages", channel: SLACK_CHANNEL }]))[0] as {
+          messages: SlackMessage[];
+        }
+      ).messages;
+      problems.slack = checkSlackThread(messages, {
+        issueUrl: ISSUE_URL,
+        prUrl: `https://github.com/${REPO}/pull/${pull}`,
+        delivery: AGENTS.delivery,
+        reviewer: AGENTS.reviewer,
+        openedStatus: OPENED_STATUS,
+        mergedStatus: MERGED_STATUS,
+        fixRound,
+      });
+      notes.push(
+        `Slack: ${messages.map((m) => `${m.threadTs ? "  ↳" : "■"} ${m.text.replace(/\n+/g, " ⏎ ").slice(0, 160)}${m.edits.length ? ` (edited ${m.edits.length}×, before: ${m.edits.map((e) => e.text.replace(/^.*— /, "")).join(" → ")})` : ""}${m.replyBroadcast ? " [broadcast]" : ""}`).join(" | ")}`,
+      );
+    }
     problems.secrets = checkNoSecrets(calls, {
       openaiKey: FAKE_OPENAI,
       anthropicKey: FAKE_ANTHROPIC,
       githubWebhookSecret: GITHUB_WEBHOOK_SECRET,
       jiraWebhookSecret: JIRA_WEBHOOK_SECRET,
       jiraToken: SIM_JIRA_TOKEN,
+      slackToken: SIM_SLACK_TOKEN,
     });
     findings = splitFindings(problems);
     notes.push(
@@ -630,9 +680,9 @@ function writeRecord(
   const version = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { version: string }).version;
   const dir = join(ROOT, "docs/private/releases");
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${version}-flow-j-${options.agent}-${options.variant}.md`);
+  const file = join(dir, `${version}-flow-j-${options.agent}-${options.variant}${options.slack ? "-slack" : ""}.md`);
   const lines = [
-    `# Flow J (scripted) — ${options.agent}, ${options.variant}`,
+    `# Flow J (scripted) — ${options.agent}, ${options.variant}${options.slack ? ", with Slack" : ""}`,
     "",
     `- Version: ${version}; started ${startedAt.toISOString()}; finished ${new Date().toISOString()}.`,
     "- Every outside service was simulated: anything found here is UNCONFIRMED until reproduced without the simulator.",
