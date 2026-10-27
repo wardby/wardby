@@ -31,6 +31,7 @@ describe("CodingProfileSchema", () => {
       repoSkills: true,
       claudeBareMode: true,
       dependencyCache: false,
+      sessionResume: false,
     });
   });
 

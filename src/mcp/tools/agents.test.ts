@@ -9,7 +9,12 @@ import { Prisma } from "#prisma";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
-import { DEPENDENCY_CACHE_IMAGE_WARNING, registerAgentTools } from "./agents.js";
+import {
+  DEPENDENCY_CACHE_IMAGE_WARNING,
+  SESSION_RESUME_IMAGE_WARNING,
+  SESSION_RESUME_NO_STORE_WARNING,
+  registerAgentTools,
+} from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
@@ -1673,6 +1678,48 @@ describe("agent CRUD tools", () => {
     });
     expect(body(cacheOff).warnings).toBeUndefined();
     await client.close();
+  });
+
+  it("sessionResume round-trips via get_agent and warns about a custom image or a missing blob store", async () => {
+    const saved = process.env.BLOB_STORE;
+    delete process.env.BLOB_STORE;
+    try {
+      const db = fakeDb([codingAgentSeed()]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read", "agents:admin"], ["admin"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const body = (result: { content: unknown }) =>
+        JSON.parse((result.content as { text: string }[])[0].text) as {
+          codingProfile: { sessionResume?: boolean };
+          warnings?: string[];
+        };
+
+      const on = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { sessionResume: true } },
+      });
+      expect(on.isError).toBeFalsy();
+      expect(body(on).warnings).toEqual([SESSION_RESUME_NO_STORE_WARNING]);
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: "a1" } });
+      expect(body(fetched).codingProfile.sessionResume).toBe(true);
+
+      const withImage = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
+      });
+      expect(withImage.isError).toBeFalsy();
+      expect(body(withImage).warnings).toEqual([SESSION_RESUME_IMAGE_WARNING, SESSION_RESUME_NO_STORE_WARNING]);
+
+      const off = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { sessionResume: false } },
+      });
+      expect(body(off).warnings).toBeUndefined();
+      await client.close();
+    } finally {
+      if (saved !== undefined) process.env.BLOB_STORE = saved;
+    }
   });
 
   it("acceptedAdvisories needs packages:approve on create_agent and update_agent, and round-trips via get_agent", async () => {

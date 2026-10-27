@@ -18,7 +18,7 @@ import {
   MAX_DEBUG_TRACE_MAX_MB,
   isLocalRepository,
 } from "../../coding/protocol.js";
-import { loadContainerExecutorConfig } from "../../config/providers.js";
+import { loadBlobStoreConfig, loadContainerExecutorConfig } from "../../config/providers.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import {
@@ -134,9 +134,15 @@ function withOperatorMode<T extends { kind: string; nativeExecutionMode?: Native
 export const DEPENDENCY_CACHE_IMAGE_WARNING =
   "dependencyCache is on and this agent runs its own worker image (workerImageRef): rebuild that image FROM the wardby release that includes the dependency cache before its next run, or the run fails at input (worker_input_failed). See the dependency-cache help article.";
 
+export const SESSION_RESUME_IMAGE_WARNING =
+  "sessionResume is on and this agent runs its own worker image (workerImageRef): rebuild that image FROM the wardby release that includes session resume before its next run, or the run fails at input (worker_input_failed).";
+export const SESSION_RESUME_NO_STORE_WARNING =
+  "sessionResume is on but this server has no blob store (BLOB_STORE), so transcripts are not kept. See the resume-runs-locally help article.";
+
 /** The stored coding-profile fields the output warnings read. */
 interface WarnedProfile {
   dependencyCache: boolean;
+  sessionResume?: boolean;
   workerImageRef: string | null;
   packageAuditMode?: string | null;
   packageAuditUntil?: Date | null;
@@ -145,6 +151,9 @@ interface WarnedProfile {
 /** Non-blocking warnings about an agent's coding profile as stored. */
 function profileWarnings(profile: WarnedProfile | null, now: Date): string[] {
   const warnings = profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
+  if (profile?.sessionResume && profile.workerImageRef) warnings.push(SESSION_RESUME_IMAGE_WARNING);
+  if (profile?.sessionResume && loadBlobStoreConfig(process.env) === undefined)
+    warnings.push(SESSION_RESUME_NO_STORE_WARNING);
   if (profile && isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now))
     warnings.push(packageAuditActiveWarning(profile.packageAuditMode, profile.packageAuditUntil!));
   return warnings;
@@ -395,6 +404,11 @@ const profileJsonSchema = {
       description:
         "Restore npm node_modules from a snapshot the proxy re-approves; needs package approval (packages:approve or agents:admin). Default false. The worker images must be a release that includes the cache; with a workerImageRef the result carries a warning to rebuild that image from it.",
     },
+    sessionResume: {
+      type: "boolean",
+      description:
+        "Claude Code runs only. Keep each run's session transcript (redacted) so a developer can resume it in their own Claude Code CLI with `wardby resume`. Anyone who can read a run can then read everything its agent saw. Needs a blob store (BLOB_STORE) on the server. Default false.",
+    },
     packageAllowlist: {
       type: "object",
       description:
@@ -539,6 +553,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     repoSkills: profile.repoSkills,
     claudeBareMode: profile.claudeBareMode,
     dependencyCache: profile.dependencyCache,
+    sessionResume: profile.sessionResume,
   });
 }
 

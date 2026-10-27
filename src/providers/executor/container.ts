@@ -353,6 +353,8 @@ export interface ContainerRunSnapshot {
   claudeBareMode?: boolean;
   /** Dependency cache, fixed at dispatch (CodingRun.dependencyCache); absent on older snapshots = false. */
   dependencyCache?: boolean;
+  /** Session resume, fixed at dispatch (CodingRun.sessionResume); absent on older snapshots = false. */
+  sessionResume?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -550,6 +552,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
       dependencyCache: row.codingRun.dependencyCache,
+      sessionResume: row.codingRun.sessionResume,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -2611,6 +2614,8 @@ export class ContainerExecutor implements Executor {
         ...(run.dependencyCache
           ? { dependencyCache: true as const, diskMb: run.workspaceDiskMb ?? this.options.limits.diskMb }
           : {}),
+        // Only when on: every other run's input stays exactly what older workers expect.
+        ...(run.sessionResume ? { sessionResume: true as const } : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

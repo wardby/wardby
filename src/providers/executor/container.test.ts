@@ -1201,6 +1201,22 @@ describe("ContainerExecutor", () => {
     }
   });
 
+  it("hands the worker sessionResume only when the run has it on", async () => {
+    const launched = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launched({ sessionResume: true })).toMatchObject({ sessionResume: true });
+    for (const overrides of [{ sessionResume: false }, {}]) {
+      expect(await launched(overrides)).not.toHaveProperty("sessionResume");
+    }
+  });
+
   it("hands the worker debugTraceMaxMb only on a traced run that sets one", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

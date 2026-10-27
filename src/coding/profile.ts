@@ -175,6 +175,8 @@ const codingProfileFields = {
   claudeBareMode: z.boolean(),
   /** Restore npm node_modules from a snapshot the proxy re-approves (docs: dependency cache). */
   dependencyCache: z.boolean(),
+  /** Keep each run's redacted Claude Code session transcript so it can be resumed locally. */
+  sessionResume: z.boolean(),
 };
 
 export const CodingProfileSchema = z
@@ -199,6 +201,7 @@ export const CodingProfileSchema = z
     repoSkills: codingProfileFields.repoSkills.default(true),
     claudeBareMode: codingProfileFields.claudeBareMode.default(true),
     dependencyCache: codingProfileFields.dependencyCache.default(false),
+    sessionResume: codingProfileFields.sessionResume.default(false),
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -233,6 +236,7 @@ export const CodingProfilePatchSchema = z
     repoSkills: codingProfileFields.repoSkills.optional(),
     claudeBareMode: codingProfileFields.claudeBareMode.optional(),
     dependencyCache: codingProfileFields.dependencyCache.optional(),
+    sessionResume: codingProfileFields.sessionResume.optional(),
   })
   .strict();
 

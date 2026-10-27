@@ -785,6 +785,29 @@ describe("dispatchRun", () => {
     expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, dependencyCache: flag })]);
   });
 
+  it.each([true, false])("fixes sessionResume=%s on the run at dispatch from the agent profile", async (flag) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        sessionResume: flag,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, sessionResume: flag })]);
+  });
+
   it.each([
     ["a traced run with a cap", new Date("2026-09-26T12:30:00Z"), 20, 20],
     ["a traced run without one", new Date("2026-09-26T12:30:00Z"), null, null],
