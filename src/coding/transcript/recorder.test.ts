@@ -18,6 +18,7 @@ import {
 const FIXTURE = readFileSync(new URL("./fixtures/claude-session.jsonl", import.meta.url), "utf8");
 const SECRET = "fake-secret-value-0001";
 const CAPABILITY = "rrp_abcdefghijklmnop";
+const RAW2 = 'fake"sec\\ret-0002';
 const NOW = new Date("2026-03-01T00:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -37,7 +38,7 @@ function workerFile(extraBodyLines: string[] = []): string {
     const content = rec.message?.content;
     if (Array.isArray(content)) {
       for (const block of content as Array<Record<string, unknown>>) {
-        if (block.type === "tool_result") block.content = `output ${SECRET} end`;
+        if (block.type === "tool_result") block.content = `output ${SECRET} and ${RAW2} end`;
         if (block.type === "text" && rec.type === "assistant") block.text = `token ${CAPABILITY} here`;
       }
     }
@@ -76,6 +77,7 @@ describe("RunTranscriptRecorder", () => {
     fake = fakeDb();
   });
   afterEach(async () => {
+    noLeak();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -83,7 +85,7 @@ describe("RunTranscriptRecorder", () => {
     return new RunTranscriptRecorder({
       db: fake.db as unknown as RunTranscriptRecorderDeps["db"],
       blobs,
-      secretValues: async () => [SECRET],
+      secretValues: async () => [SECRET, RAW2],
       retentionDays: 30,
       now: () => NOW,
       ...over,
@@ -99,6 +101,7 @@ describe("RunTranscriptRecorder", () => {
   });
   const row = () => fake.rows.get("run1")!;
   const noLeak = () => {
+    expect(JSON.stringify(fake.upsert.mock.calls)).not.toContain(RAW2);
     const json = JSON.stringify(fake.upsert.mock.calls);
     expect(json).not.toContain(SECRET);
     expect(json).not.toContain(CAPABILITY);
@@ -112,6 +115,9 @@ describe("RunTranscriptRecorder", () => {
     const text = blob.toString("utf8");
     expect(text).not.toContain(SECRET);
     expect(text).toContain("[REDACTED]");
+    expect(text).not.toContain(CAPABILITY);
+    expect(text).not.toContain(RAW2);
+    expect(text).not.toContain(JSON.stringify(RAW2).slice(1, -1));
     for (const line of text.trim().split("\n")) JSON.parse(line);
     expect(row()).toMatchObject({
       status: "stored",
@@ -157,9 +163,10 @@ describe("RunTranscriptRecorder", () => {
   });
 
   it("maps header statuses and invalid files", async () => {
-    const hdr = (status: TranscriptHeader["status"]) => formatTranscriptFile({ ...okHeader("s1"), status }, []);
+    const hdr = (status: TranscriptHeader["status"]) =>
+      formatTranscriptFile({ ...okHeader("00000000-0000-4000-8000-000000000002"), status }, []);
     expect(await recorder().record(input({ read: async () => hdr("too_large") }))).toBe("too_large");
-    expect(row()).toMatchObject({ sessionId: "s1" });
+    expect(row()).toMatchObject({ sessionId: "00000000-0000-4000-8000-000000000002" });
     expect(await recorder().record(input({ read: async () => hdr("no_complete_turn") }))).toBe("not_captured");
     expect(row()).toMatchObject({ reason: "no_complete_turn" });
     expect(await recorder().record(input({ read: async () => "not json\n" }))).toBe("failed");
@@ -167,7 +174,9 @@ describe("RunTranscriptRecorder", () => {
   });
 
   it("fails closed without secrets", async () => {
-    expect(await recorder().record(input({ capability: undefined }))).toBe("failed");
+    const unread = vi.fn();
+    expect(await recorder().record(input({ capability: undefined, read: unread }))).toBe("failed");
+    expect(unread).not.toHaveBeenCalled();
     expect(row()).toMatchObject({ reason: "secrets_unavailable", blobKey: null });
     await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
     const rejecting = recorder({
@@ -194,6 +203,26 @@ describe("RunTranscriptRecorder", () => {
     expect(text).not.toContain("SYSTEM PROMPT TEXT");
   });
 
+  it("rejects a worker-controlled sessionId that is not a UUID", async () => {
+    const badHeader = formatTranscriptFile({ ...okHeader(SECRET) }, []);
+    for (const status of ["ok", "too_large", "no_complete_turn"] as const) {
+      const file = formatTranscriptFile({ ...okHeader(SECRET), status }, []);
+      expect(await recorder().record(input({ read: async () => file }))).toBe("failed");
+      expect(row()).toMatchObject({ reason: "invalid_file", sessionId: null });
+      noLeak();
+    }
+    expect(badHeader).toContain(SECRET);
+    const good = workerFile();
+    const planted = good.replaceAll("00000000-0000-4000-8000-000000000001", SECRET);
+    const body = planted.slice(planted.indexOf("\n") + 1);
+    const file = formatTranscriptFile(okHeader("00000000-0000-4000-8000-000000000001"), body.trim().split("\n"));
+    fake.rows.clear();
+    expect(await recorder().record(input({ read: async () => file }))).toBe("failed");
+    expect(row()).toMatchObject({ reason: "invalid_file", sessionId: null, blobKey: null });
+    noLeak();
+    await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
+  });
+
   it("does not support codex", async () => {
     expect(await recorder().record(input({ provider: "codex" }))).toBe("not_captured");
     expect(row()).toMatchObject({ reason: "provider_unsupported", provider: "codex" });
@@ -213,6 +242,20 @@ describe("RunTranscriptRecorder", () => {
   it("never throws when the database fails", async () => {
     fake.upsert.mockRejectedValue(new Error("db down"));
     await expect(recorder().record(input())).resolves.toBe("stored");
+  });
+
+  it("keeps a row whose blob cannot be deleted but prunes the rest", async () => {
+    const rec = recorder();
+    for (const id of ["a", "b", "c"]) await rec.record(input({ runId: id }));
+    const flaky = {
+      delete: async (key: string) => {
+        if (key === transcriptBlobKey("b")) throw new Error("denied");
+        await blobs.delete(key);
+      },
+    } as unknown as BlobStore;
+    const later = recorder({ blobs: flaky, now: () => new Date(NOW.getTime() + 31 * DAY) });
+    expect(await later.pruneExpired()).toBe(2);
+    expect([...fake.rows.keys()]).toEqual(["b"]);
   });
 
   it("prunes expired rows and blobs, tolerating not_found, up to the limit", async () => {

@@ -9,6 +9,7 @@ import { formatTranscriptFile } from "./format.js";
 import { RunTranscriptRecorder, transcriptBlobKey } from "./recorder.js";
 
 const db = createPrismaClient();
+const SID = "00000000-0000-4000-8000-000000000001";
 const agentIds: string[] = [];
 const dirs: string[] = [];
 
@@ -41,18 +42,18 @@ describe.skipIf(!process.env.DATABASE_URL)("RunTranscriptRecorder (PostgreSQL)",
       type: "user",
       uuid: "u1",
       parentUuid: null,
-      sessionId: "sess-1",
+      sessionId: SID,
       message: { role: "user", content: "hi" },
     });
     const assistant = JSON.stringify({
       type: "assistant",
       uuid: "a1",
       parentUuid: "u1",
-      sessionId: "sess-1",
+      sessionId: SID,
       message: { role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" },
     });
     const file = formatTranscriptFile(
-      { type: "wardby-transcript", version: 1, provider: "claude-code", sessionId: "sess-1", status: "ok" },
+      { type: "wardby-transcript", version: 1, provider: "claude-code", sessionId: SID, status: "ok" },
       [user, assistant],
     );
     const input = {
@@ -75,5 +76,11 @@ describe.skipIf(!process.env.DATABASE_URL)("RunTranscriptRecorder (PostgreSQL)",
     expect(await recorder.pruneExpired()).toBeGreaterThanOrEqual(1);
     expect(await db.runTranscript.count({ where: { runId: run.id } })).toBe(0);
     expect(await blobs.head(transcriptBlobKey(run.id))).toBeNull();
+
+    // Cascade: deleting the run removes a fresh row.
+    now = new Date();
+    expect(await recorder.record(input)).toBe("stored");
+    await db.run.delete({ where: { id: run.id } });
+    expect(await db.runTranscript.count({ where: { runId: run.id } })).toBe(0);
   });
 });
