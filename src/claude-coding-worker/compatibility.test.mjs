@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { sanitizeClaudeTranscript } from "./transcript/claude-code.ts";
 
 // The worker's default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS in src/coding/protocol.ts).
 const MAX_OUTPUT_TOKENS = "32000";
@@ -116,14 +117,14 @@ async function fakeAnthropic(handler) {
 
 async function runQuery(baseUrl, abortController = new AbortController(), tools = [], overrides = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-compat-workspace-"));
-  const config = await mkdtemp(join(tmpdir(), "wardby-claude-compat-config-"));
+  const config = overrides.configDir ?? (await mkdtemp(join(tmpdir(), "wardby-claude-compat-config-")));
   workspaces.push(workspace, config);
   const messages = [];
   const stream = query({
-    prompt: "Return the exact text compatibility-ok and do nothing else.",
+    prompt: overrides.prompt ?? "Return the exact text compatibility-ok and do nothing else.",
     options: {
       abortController,
-      cwd: workspace,
+      cwd: overrides.cwd ?? workspace,
       model: overrides.model ?? MODEL,
       maxTurns: overrides.maxTurns ?? (tools.length > 0 ? 2 : 1),
       maxBudgetUsd: 0.25,
@@ -148,7 +149,8 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
       permissionMode: "dontAsk",
       outputFormat: overrides.outputFormat,
       permissionPrompts: "none",
-      persistSession: false,
+      persistSession: overrides.persistSession ?? false,
+      ...(overrides.resume ? { resume: overrides.resume } : {}),
       env: {
         HOME: workspace,
         PATH: "/usr/local/bin:/usr/bin:/bin",
@@ -686,4 +688,116 @@ test("a repository skill's shell commands do not run when the tools list offers 
   });
   assert.equal(turns, 2, "the fake model was not asked a second time after the skill ran");
   assert.deepEqual(markers, [], "a repository skill's shell command ran");
+});
+
+function thinkingToolUseSse(id, name, input) {
+  const frames = [
+    {
+      type: "message_start",
+      message: {
+        id: "msg_thinking_compatibility",
+        type: "message",
+        role: "assistant",
+        model: MODEL,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 12, output_tokens: 0 },
+      },
+    },
+    { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "THINKING-PROBE" } },
+    { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "c2lnbmF0dXJl" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "content_block_start", index: 1, content_block: { type: "tool_use", id, name, input: {} } },
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } },
+    { type: "content_block_stop", index: 1 },
+    { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 7 } },
+    { type: "message_stop" },
+  ];
+  return frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join("");
+}
+
+test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
+  const FIRST_PROMPT = "First prompt FIRST-PROMPT-PROBE.";
+  const TOOL_RESULT = "TOOL-RESULT-PROBE";
+  const configDir = await mkdtemp(join(tmpdir(), "wardby-claude-compat-resume-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "wardby-claude-compat-resume-cwd-"));
+  workspaces.push(configDir, cwd);
+  const probeServer = () =>
+    createSdkMcpServer({
+      name: "wardby_tools",
+      tools: [
+        tool("run_command", "Run one bounded command.", { command: z.string() }, async () => ({
+          content: [{ type: "text", text: TOOL_RESULT }],
+        })),
+      ],
+    });
+  const common = {
+    configDir,
+    cwd,
+    persistSession: true,
+    maxTurns: 3,
+    allowedTools: ["mcp__wardby_tools__run_command"],
+  };
+  let turn = 0;
+  const first = await fakeAnthropic((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    response.end(
+      turn++ === 0
+        ? thinkingToolUseSse("toolu_resume_compatibility", "mcp__wardby_tools__run_command", { command: "true" })
+        : sse("first-session-done"),
+    );
+  });
+  let sessionId;
+  try {
+    const messages = await runQuery(first.baseUrl, new AbortController(), [], {
+      ...common,
+      prompt: FIRST_PROMPT,
+      mcpServers: { wardby_tools: probeServer() },
+    });
+    sessionId = messages.find((message) => typeof message.session_id === "string")?.session_id;
+  } finally {
+    await first.close();
+  }
+  assert(sessionId, "the first query reports a session id");
+
+  const projects = join(configDir, "projects");
+  const files = [];
+  for (const dir of await readdir(projects)) {
+    for (const name of await readdir(join(projects, dir))) {
+      if (name === `${sessionId}.jsonl`) files.push(join(projects, dir, name));
+    }
+  }
+  assert.equal(files.length, 1, "exactly one persisted transcript for the session");
+  const raw = await readFile(files[0], "utf8");
+  assert(raw.includes("THINKING-PROBE"), "the raw transcript holds the thinking block (the strip is exercised)");
+  const sanitized = sanitizeClaudeTranscript(raw);
+  assert(sanitized, "the transcript sanitises");
+  const cleaned = sanitized.lines.join("\n") + "\n";
+  assert(!cleaned.includes("THINKING-PROBE"));
+  await writeFile(files[0], cleaned);
+
+  const second = await fakeAnthropic((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    response.end(sse("resumed-ok"));
+  });
+  try {
+    const messages = await runQuery(second.baseUrl, new AbortController(), [], {
+      ...common,
+      prompt: "Second prompt.",
+      resume: sessionId,
+      mcpServers: { wardby_tools: probeServer() },
+    });
+    assert(messages.some((message) => message.type === "result" && message.subtype === "success"));
+    const bodies = second.requests.filter((request) => request.url === "/v1/messages?beta=true").map((r) => r.body);
+    assert.equal(bodies.length, 1);
+    assert(bodies[0].includes("FIRST-PROMPT-PROBE"), "the first prompt replays");
+    assert(bodies[0].includes(TOOL_RESULT), "the tool result replays");
+    assert(bodies[0].includes("Second prompt."), "the new prompt is sent");
+    assert(!bodies[0].includes('"type":"thinking"'), "no thinking block replays");
+    assert(!bodies[0].includes("THINKING-PROBE"));
+  } finally {
+    await second.close();
+  }
 });
