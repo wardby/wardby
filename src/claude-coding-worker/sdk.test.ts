@@ -15,12 +15,18 @@ function config(signal = new AbortController().signal): ClaudeQueryOptions {
     developerInstructions: "Fixed security instructions",
     contextDirectory: null,
     skills: false,
+    persistSession: false,
   };
 }
 
 describe("Claude SDK configuration", () => {
   it("passes the run's turn limit through to the SDK", () => {
     expect(buildClaudeSdkOptions({ ...config(), maxTurns: 40 }).maxTurns).toBe(40);
+  });
+
+  it("keeps the SDK session only when the run asks for it", () => {
+    expect(buildClaudeSdkOptions({ ...config(), persistSession: true }).persistSession).toBe(true);
+    expect(buildClaudeSdkOptions({ ...config(), persistSession: false }).persistSession).toBe(false);
   });
 
   it("allows only the private socket relay and no Claude built-in tools", () => {

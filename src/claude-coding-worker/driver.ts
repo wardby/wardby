@@ -87,6 +87,9 @@ function toolServerUnreachable(message: ClaudeSdkMessage): boolean {
   return !server || !TOOL_SERVER_USABLE.has(server.status);
 }
 
+/** Where Claude Code keeps its configuration and, on a session-resume run, the session file. */
+export const CLAUDE_CONFIG_DIR = "/tmp/claude-config";
+
 export interface ClaudeQueryOptions {
   prompt: string;
   model: string;
@@ -102,6 +105,8 @@ export interface ClaudeQueryOptions {
   contextDirectory: string | null;
   /** Native mode: the context includes at least one skill, so the Skill tool is enabled. */
   skills: boolean;
+  /** Session resume runs only (CodingTaskInput.sessionResume): keep the SDK's session file. */
+  persistSession: boolean;
   /** Set only on a traced run: receives Claude Code's own stderr output. */
   stderr?: (data: string) => void;
 }
@@ -115,6 +120,8 @@ export interface ClaudeWorkerRunOptions {
   signal: AbortSignal;
   createQuery: ClaudeQueryFactory;
   onProgress?: (event: WorkerProgressEvent) => void;
+  /** Receives the SDK session id from the init message (session resume). */
+  onSessionId?: (sessionId: string) => void;
   /** Where native mode writes the repository context; defaults to CONTEXT_ROOT (context.ts). */
   contextRoot?: string;
   /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
@@ -154,7 +161,7 @@ function agentEnvironment(
     LANG: "C.UTF-8",
     PATH: "/usr/local/bin:/usr/bin:/bin",
     TMPDIR: "/tmp",
-    CLAUDE_CONFIG_DIR: "/tmp/claude-config",
+    CLAUDE_CONFIG_DIR,
     ANTHROPIC_BASE_URL: proxyBaseUrl.replace(/\/$/, ""),
     ANTHROPIC_API_KEY: capability,
     // Bare mode is the hardening default. It also switches off Claude Code's own CLAUDE.md and
@@ -301,6 +308,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     developerInstructions,
     contextDirectory: context?.directory ?? null,
     skills: context?.skills ?? false,
+    persistSession: options.input.sessionResume === true,
     ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
   });
   let finalJson: string | undefined;
@@ -321,6 +329,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         break;
       }
       if (message.type === "system") {
+        const sessionId = (message as { session_id?: unknown }).session_id;
+        if (message.subtype === "init" && typeof sessionId === "string") options.onSessionId?.(sessionId);
         options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "turn_started" });
       } else if (message.type === "assistant") {
         options.onProgress?.({

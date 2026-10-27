@@ -38,6 +38,9 @@ COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-note.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# Session-resume transcript capture (claude-coding-worker/transcript.js); neither imports anything.
+COPY --from=build /build/dist/coding/transcript/claude-code.js ./coding/transcript/claude-code.js
+COPY --from=build /build/dist/coding/transcript/format.js ./coding/transcript/format.js
 # The shared secret redactor (debug-trace.js); it imports nothing.
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 COPY --from=build /build/dist/coding/registry/token.js ./coding/registry/token.js
