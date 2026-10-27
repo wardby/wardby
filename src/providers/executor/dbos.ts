@@ -361,10 +361,14 @@ export class DbosExecutor implements Executor {
   async close(): Promise<void> {
     if (!this.launched) return;
     this.launched = false;
-    if (activeExecutor === this) setActiveExecutor(undefined);
     try {
       await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
     } finally {
+      // Only now: shutdown first lets the queue runner finish the dispatch it is in, so a workflow
+      // the queue claimed just before (a takeover's fork, an adoption) still starts. Without its
+      // executor its body would throw, and DBOS could record that as the workflow's outcome: the
+      // next process would then mark a run failed that was only waiting to be taken over.
+      if (activeExecutor === this) setActiveExecutor(undefined);
       await endSystemPool();
     }
   }
