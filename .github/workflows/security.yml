@@ -61,22 +61,49 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # The browser download is cached per Playwright version; its system
-      # libraries still come from apt every run.
-      - id: playwright
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
-      - id: browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
-      - if: steps.browsers.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-      - if: steps.browsers.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
       - run: npm run prisma:generate
       - run: npm run prisma:migrate
-      - run: npm test
+      # The one browser test runs in browser-tests, in Playwright's image, so this job needs no
+      # browser or its system libraries (installing those from apt took up to 10 minutes a run).
+      - run: npm test -- --exclude src/mcp/auth/self-hosted/browser.test.ts
+
+  # The self-hosted sign-in page's browser test. Playwright's image ships Chromium with its
+  # system libraries, so nothing comes from apt. Bump the image (tag and digest) with the
+  # playwright package: the first step fails while they differ.
+  browser-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wardby
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: security
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      PLAYWRIGHT_IMAGE_VERSION: 1.63.0
+      DATABASE_URL: postgresql://wardby:test-only@postgres:5432/security
+      # Public deterministic fixture material for tests only; never a deployment key.
+      SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: The image's Playwright matches package-lock.json
+        run: |
+          installed="$(node -p "require('playwright/package.json').version")"
+          [ "$installed" = "$PLAYWRIGHT_IMAGE_VERSION" ] || {
+            echo "playwright $installed, image $PLAYWRIGHT_IMAGE_VERSION: bump the container image"; exit 1; }
+      - run: npm run prisma:generate
+      - run: npm run prisma:migrate
+      - run: npm run build:vendor && npx vitest run src/mcp/auth/self-hosted/browser.test.ts
 
   package:
     runs-on: ubuntu-latest
@@ -109,14 +136,14 @@ jobs:
 
   verify:
     if: always()
-    needs: [checks, tests, package]
+    needs: [checks, tests, browser-tests, package]
     runs-on: ubuntu-latest
     steps:
       - name: All verify jobs passed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "checks, tests, package: $RESULTS"
+          echo "checks, tests, browser-tests, package: $RESULTS"
           for result in $RESULTS; do [ "$result" = "success" ] || exit 1; done
 
   # The image jobs deliberately do not wait on verify. They use nothing it
