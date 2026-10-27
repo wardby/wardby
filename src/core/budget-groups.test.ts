@@ -8,6 +8,7 @@ import {
   periodStart,
   type BudgetGroupsDb,
 } from "./budget-groups.js";
+import { fakeBudgetDb, type FakeAgent, type FakeGroup, type FakeRun } from "./budget-groups.test-support.js";
 
 describe("periodStart", () => {
   it("day: truncates to UTC midnight", () => {
@@ -33,95 +34,8 @@ describe("periodStart", () => {
   });
 });
 
-interface FakeRun {
-  id?: string;
-  agentId: string;
-  costUsd: number;
-  startedAt: Date;
-  parentRunId?: string | null;
-  /** Defaults to a finished run. */
-  status?: string;
-  /** Defaults to NOW: a live run. */
-  heartbeatAt?: Date | null;
-  codingRun?: { budgetReservedUsd: number; timeoutSec?: number } | null;
-}
-interface FakeGroup {
-  id: string;
-  name: string;
-  dailyBudgetUsd: number | null;
-  weeklyBudgetUsd: number | null;
-  monthlyBudgetUsd: number | null;
-  warnThresholdRatio: number;
-  agentIds: string[];
-}
-interface FakeAgent {
-  id: string;
-  budgetGroupId: string | null;
-  budgetUsd: number;
-  allowedOverrunPercent?: number;
-}
-
-function fakeDb(groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []): BudgetGroupsDb {
-  const byId = new Map(groups.map((g) => [g.id, g]));
-  const agentsById = new Map(agents.map((a) => [a.id, a]));
-  const withDefaults = runs.map((r) => ({
-    status: "succeeded",
-    heartbeatAt: NOW,
-    ...r,
-    codingRun: r.codingRun ? { timeoutSec: 1800, ...r.codingRun } : null,
-  }));
-  const runsById = new Map(withDefaults.filter((r) => r.id).map((r) => [r.id!, r]));
-  return {
-    budgetGroup: {
-      findUnique: (async ({ where }: { where: { id: string } }) => {
-        const g = byId.get(where.id);
-        if (!g) return null;
-        return { ...g, agents: g.agentIds.map((id) => ({ id, budgetUsd: agentsById.get(id)?.budgetUsd ?? 0 })) };
-      }) as never,
-    },
-    agent: {
-      findUniqueOrThrow: (async ({ where }: { where: { id: string } }) => {
-        const a = agentsById.get(where.id);
-        if (!a) throw new Error(`fakeDb: no agent "${where.id}"`);
-        return a;
-      }) as never,
-    },
-    run: {
-      findUniqueOrThrow: (async ({ where }: { where: { id: string } }) => {
-        const r = runsById.get(where.id);
-        if (!r) throw new Error(`fakeDb: no run "${where.id}"`);
-        return r;
-      }) as never,
-      findMany: (async (opts: {
-        where: {
-          agentId?: { in: string[] };
-          startedAt?: { gte: Date };
-          parentRunId?: { in: string[] };
-          id?: { in: string[] };
-        };
-      }) => {
-        const { where } = opts;
-        if (where.agentId) {
-          return withDefaults.filter(
-            (r) => where.agentId!.in.includes(r.agentId) && r.startedAt >= where.startedAt!.gte,
-          );
-        }
-        if (where.parentRunId) {
-          return withDefaults.filter(
-            (r) => r.parentRunId !== undefined && where.parentRunId!.in.includes(r.parentRunId as string),
-          );
-        }
-        if (where.id) {
-          // Like the real relation: each tree row carries its agent's budgetUsd.
-          return withDefaults
-            .filter((r) => r.id && where.id!.in.includes(r.id))
-            .map((r) => ({ ...r, agent: { budgetUsd: agentsById.get(r.agentId)?.budgetUsd ?? 0 } }));
-        }
-        return [];
-      }) as never,
-    },
-  } as unknown as BudgetGroupsDb;
-}
+const fakeDb = (groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []): BudgetGroupsDb =>
+  fakeBudgetDb(groups, runs, agents, NOW);
 
 const NOW = new Date("2026-09-09T12:00:00.000Z"); // a Wednesday
 const TODAY_START = new Date("2026-09-09T00:00:00.000Z");

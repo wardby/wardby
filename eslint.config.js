@@ -22,7 +22,7 @@ export default tseslint.config(
     ],
   },
   {
-    files: ["src/**/*.ts"],
+    files: ["src/**/*.ts", "tools/**/*.ts"],
     extends: [js.configs.recommended, ...tseslint.configs.recommendedTypeChecked],
     languageOptions: {
       globals: globals.node,
@@ -81,7 +81,17 @@ export default tseslint.config(
     // CLI stdout, not server logging through pino -- plus
     // host-functions.test.ts's test that deliberately intercepts
     // console.log to verify secret redaction.
-    files: ["src/**/*.test.ts", "src/**/*.test-support.ts"],
+    files: [
+      "src/**/*.test.ts",
+      "src/**/*.test-support.ts",
+      "tools/**/*.test.ts",
+      "tools/**/*.test-support.ts",
+      // The Flow G and Flow J runners (and their shared kit) drive JSON-RPC and simulator JSON
+      // loosely, like a test harness.
+      "tools/wardby-sim/src/flow-g/runner.ts",
+      "tools/wardby-sim/src/flow-g/kit.ts",
+      "tools/wardby-sim/src/flow-j/runner.ts",
+    ],
     rules: {
       "@typescript-eslint/consistent-type-imports": "off",
       "no-console": "off",

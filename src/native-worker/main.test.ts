@@ -173,7 +173,10 @@ describe("native worker stderr redaction", () => {
   });
 
   it("redacts a value in a logger field that already holds JSON text (escaped twice on the line)", () => {
-    const value = 'fake"logged\\json-value-0012';
+    // Starts and ends with "~", which no other part of a logger line holds: the fragment check below
+    // flags any 3 characters a line shares with either end of the value, and a value ending in digits
+    // matched the line's own "time" and "pid" now and then (a pid of 5012x shares "012").
+    const value = '~fake"logged\\json-value~';
     const script = [
       'import { installStderrRedaction, rememberSecretValue } from "./src/native-worker/stderr-redaction.ts";',
       'import { logger } from "./src/core/logger.ts";',

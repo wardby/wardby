@@ -10,6 +10,7 @@ import { npmAdapter } from "../../../coding/registry/npm.js";
 import { RegistryError, type UpstreamFetch } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
 import type { AuditedVersion, WithheldAdvisory, WithheldVersions } from "./audit.js";
+import { fakeNpmRegistry, sriOf, tarballOf, tarballUrl, type FakeRegistry } from "./fake-registries.test-support.js";
 import { RegistryService, type RegistryResponse } from "./service.js";
 import { MemoryRegistryStore } from "./store.js";
 
@@ -18,59 +19,7 @@ const NOW = new Date("2026-09-25T00:00:00Z");
 const OLD = new Date(NOW.getTime() - 30 * DAY).toISOString();
 const NEW = new Date(NOW.getTime() - DAY).toISOString();
 
-interface FakeVersion {
-  deps?: Record<string, string>;
-  peer?: Record<string, string>;
-  optional?: Record<string, string>;
-  published?: string;
-  /** The registry's tarball URL, when not the standard one. */
-  tarball?: string;
-}
-type FakeRegistry = Record<string, Record<string, FakeVersion>>;
-
-const tarballOf = (name: string, version: string) => new TextEncoder().encode(`tarball ${name}@${version}`);
-const sriOf = (bytes: Uint8Array) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-const tarballUrl = (name: string, version: string) =>
-  `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
-
-function fakeNpm(registry: FakeRegistry) {
-  const calls: string[] = [];
-  const upstream: UpstreamFetch = async (url) => {
-    calls.push(url);
-    const tarball = Object.entries(registry)
-      .flatMap(([name, versions]) => Object.keys(versions).map((version) => ({ name, version })))
-      .find(({ name, version }) => tarballUrl(name, version) === url);
-    if (tarball) return new Response(tarballOf(tarball.name, tarball.version));
-    const match = url.match(/^https:\/\/registry\.npmjs\.org\/([^/]+)(?:\/([^/]+))?$/);
-    if (!match) return new Response("no route", { status: 404 });
-    const name = decodeURIComponent(match[1]);
-    const versions = registry[name];
-    if (!versions) return new Response("{}", { status: 404 });
-    const manifest = (version: string) => ({
-      name,
-      version,
-      dist: {
-        integrity: sriOf(tarballOf(name, version)),
-        tarball: versions[version].tarball ?? tarballUrl(name, version),
-      },
-      ...(versions[version].deps ? { dependencies: versions[version].deps } : {}),
-      ...(versions[version].peer ? { peerDependencies: versions[version].peer } : {}),
-      ...(versions[version].optional ? { optionalDependencies: versions[version].optional } : {}),
-    });
-    if (match[2]) {
-      const version = decodeURIComponent(match[2]);
-      return versions[version]
-        ? Response.json(manifest(version))
-        : new Response('"version not found"', { status: 404 });
-    }
-    return Response.json({
-      name,
-      versions: Object.fromEntries(Object.keys(versions).map((version) => [version, manifest(version)])),
-      time: Object.fromEntries(Object.entries(versions).map(([version, info]) => [version, info.published ?? OLD])),
-    });
-  };
-  return { upstream, calls };
-}
+const fakeNpm = (registry: FakeRegistry) => fakeNpmRegistry(registry, OLD);
 
 /** A lockfile entry for `name@version` as npm writes it, integrity from
  *  the fake registry unless overridden. */

@@ -5,11 +5,10 @@
  * names: no version is served from an approval, so every download keeps the
  * usual per-file checks.
  */
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
-import type { UpstreamFetch } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
+import { fakePypiRegistry, wheelBytes, wheelName, type FakePypi } from "./fake-registries.test-support.js";
 import { RegistryService } from "./service.js";
 import { MemoryRegistryStore } from "./store.js";
 
@@ -17,63 +16,7 @@ const DAY = 86_400_000;
 const NOW = new Date("2026-10-19T00:00:00Z");
 const OLD = new Date(NOW.getTime() - 30 * DAY).toISOString();
 const NEW = new Date(NOW.getTime() - DAY).toISOString();
-const wheelBytes = new TextEncoder().encode("wheel bytes");
-const sha256 = createHash("sha256").update(wheelBytes).digest("hex");
-
-interface FakeRelease {
-  requires?: string[];
-  uploaded?: string;
-  /** Only an sdist. */
-  sdistOnly?: boolean;
-}
-type FakePypi = Record<string, Record<string, FakeRelease>>;
-
-const wheelName = (name: string, version: string) => `${name.replace(/-/g, "_")}-${version}-py3-none-any.whl`;
-const fileUrl = (filename: string) => `https://files.pythonhosted.org/packages/ab/cd/${filename}`;
-
-function fakePypi(pypi: FakePypi) {
-  const calls: string[] = [];
-  const upstream: UpstreamFetch = async (url) => {
-    calls.push(url);
-    const json = url.match(/^https:\/\/pypi\.org\/pypi\/([^/]+)\/([^/]+)\/json$/);
-    if (json) {
-      const [name, version] = [decodeURIComponent(json[1]), decodeURIComponent(json[2])];
-      const release = pypi[name]?.[version];
-      if (!release) return new Response("{}", { status: 404 });
-      const files = release.sdistOnly
-        ? [{ packagetype: "sdist", filename: `${name}-${version}.tar.gz`, url: fileUrl(`${name}-${version}.tar.gz`) }]
-        : [
-            {
-              packagetype: "bdist_wheel",
-              filename: wheelName(name, version),
-              url: fileUrl(wheelName(name, version)),
-              yanked: false,
-              upload_time_iso_8601: release.uploaded ?? OLD,
-              digests: { sha256 },
-            },
-          ];
-      return Response.json({ info: { name, version, requires_dist: release.requires ?? null }, urls: files });
-    }
-    const simple = url.match(/^https:\/\/pypi\.org\/simple\/([^/]+)\/$/);
-    if (simple) {
-      const versions = pypi[simple[1]];
-      if (!versions) return new Response("{}", { status: 404 });
-      return Response.json({
-        name: simple[1],
-        files: Object.entries(versions).map(([version, release]) => ({
-          filename: release.sdistOnly ? `${simple[1]}-${version}.tar.gz` : wheelName(simple[1], version),
-          url: fileUrl(wheelName(simple[1], version)),
-          hashes: { sha256 },
-          "upload-time": release.uploaded ?? OLD,
-          size: wheelBytes.byteLength,
-        })),
-      });
-    }
-    if (url.startsWith("https://files.pythonhosted.org/")) return new Response(wheelBytes);
-    return new Response("no route", { status: 404 });
-  };
-  return { upstream, calls };
-}
+const fakePypi = (pypi: FakePypi) => fakePypiRegistry(pypi, OLD);
 
 function setup(pypi: FakePypi, allowlist: string[], policy: unknown = {}, packageAudit: "audit" | null = null) {
   const fake = fakePypi(pypi);

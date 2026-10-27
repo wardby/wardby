@@ -13,6 +13,7 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
+import { startupTestSimulators } from "../config/test-simulators.js";
 import {
   loadProviderConfig,
   loadMcpConfig,
@@ -298,6 +299,8 @@ export function warmUpExecutor(executor: Pick<McpProviders["executor"], "warmUp"
 /** The real CLI entry point: `wardby mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
+  // WARDBY_TEST_SIMULATORS (test only): refuses to start beside production configuration.
+  startupTestSimulators("server");
   // Parsed up front so a malformed value fails at startup, not at shutdown.
   const drainSeconds = loadShutdownDrainSeconds();
   // Parsed now so a malformed list stops startup instead of failing every event.

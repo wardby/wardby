@@ -1,0 +1,51 @@
+{
+  "agent": "reviewer",
+  "protocol": "openai-responses",
+  "match": "[flow-j:reviewer]",
+  "status": "unvalidated: shapes follow wardby's review tool schemas (repo_pr_read, repo_read_file, repo_publish_review); not yet replayed through the native runner. {{last:...}} reads the PR read's result back out of the request.",
+  "turns": [
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_r1",
+          "call_id": "call_flowj_r1",
+          "name": "repo_pr_read",
+          "arguments": "{\"repository\":\"acme/widgets\",\"prNumber\":1}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_r2",
+          "call_id": "call_flowj_r2",
+          "name": "repo_read_file",
+          "arguments": "{\"repository\":\"acme/widgets\",\"path\":\"jokes/flow-j.txt\",\"ref\":\"{{last:headSha}}\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_r3",
+          "call_id": "call_flowj_r3",
+          "name": "repo_publish_review",
+          "arguments": "{\"repository\":\"acme/widgets\",\"prNumber\":1,\"headSha\":\"{{last:headSha}}\",\"verdict\":\"APPROVE\",\"summary\":\"Looks good.\",\"body\":\"Read every file; the joke is fine.\",\"comments\":[]}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowj_r4",
+          "role": "assistant",
+          "content": [{ "type": "output_text", "annotations": [], "text": "Review published." }]
+        }
+      ]
+    }
+  ]
+}

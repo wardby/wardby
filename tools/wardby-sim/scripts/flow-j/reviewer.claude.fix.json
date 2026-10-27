@@ -1,0 +1,62 @@
+{
+  "note": "Flow J fix round (J6): the first review requests changes; prepended to reviewer.claude.json (whose APPROVE then answers the re-review).",
+  "prepend": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_rc1",
+          "name": "repo_pr_read",
+          "input": {
+            "repository": "acme/widgets",
+            "prNumber": 1
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_rc2",
+          "name": "repo_read_file",
+          "input": {
+            "repository": "acme/widgets",
+            "path": "jokes/flow-j.txt",
+            "ref": "{{last:headSha}}"
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_rc3",
+          "name": "repo_publish_review",
+          "input": {
+            "repository": "acme/widgets",
+            "prNumber": 1,
+            "headSha": "{{last:headSha}}",
+            "verdict": "CHANGES_REQUESTED",
+            "summary": "One MAJOR finding: the joke has no punchline.",
+            "body": "**MAJOR** jokes/flow-j.txt: the joke has no punchline. MUST_FIX: add one.",
+            "comments": []
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "Review published."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

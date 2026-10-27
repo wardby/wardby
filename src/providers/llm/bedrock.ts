@@ -10,6 +10,7 @@
  * Anthropic-native protocol for Claude models. A future non-Claude Bedrock
  * adapter gets its own name, not a rename of this one.
  */
+import { refuseBedrockUnderTestSimulators } from "../../config/test-simulators.js";
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { ClaudeLlmProvider } from "./claude-provider.js";
 import type { CatalogLookup } from "./catalog-lookup.js";
@@ -30,6 +31,8 @@ export class BedrockClaudeLlmProvider extends ClaudeLlmProvider {
     if (!client && !region) {
       throw new Error("BEDROCK_REGION (or AWS_REGION) is required by the Bedrock Claude LlmProvider adapter.");
     }
+    // WARDBY_TEST_SIMULATORS (test only) refuses Bedrock: AWS-signed calls cannot go to the simulator.
+    if (!client) refuseBedrockUnderTestSimulators();
     super(client ?? new AnthropicBedrock({ awsRegion: region }), lookup);
   }
 }

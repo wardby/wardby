@@ -1,0 +1,18 @@
+# TEST ONLY. See proxy-sim-env.yaml for why NODE_ENV is not "production" here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: NODE_ENV
+              value: test
+            - name: WARDBY_TEST_SIMULATORS
+              value: "1"
+            - name: WARDBY_SIM_BASE_URL
+              value: http://wardby-sim.wardby-sim.svc.cluster.local:8080

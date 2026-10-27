@@ -42,6 +42,11 @@ CMD ["npm", "run", "prisma:migrate"]
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 WORKDIR /app
+# Images are release images by default: they refuse the test-only WARDBY_TEST_SIMULATORS
+# switch (src/config/test-simulators.ts). Only a throwaway test cluster's build passes
+# --build-arg WARDBY_TEST_SIMULATORS_ALLOWED=1.
+ARG WARDBY_TEST_SIMULATORS_ALLOWED=0
+ENV WARDBY_TEST_SIMULATORS_ALLOWED=${WARDBY_TEST_SIMULATORS_ALLOWED}
 # git is not optional here: the coding executor prepares every run's workspace by
 # shelling out to the git binary (clone, commit, push) before the worker pod is
 # ever created, so without it every coding run is refused with

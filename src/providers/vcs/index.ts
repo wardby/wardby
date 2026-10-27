@@ -9,6 +9,7 @@ import { LocalRemote } from "./local-remote.js";
 import { RoutingVcsProvider } from "./routing.js";
 import type { VcsProvider } from "./types.js";
 import { logger } from "../../core/logger.js";
+import { testSimulatorBase } from "../../config/test-simulators.js";
 
 const vcsLog = logger.child({ module: "vcs" });
 
@@ -48,7 +49,13 @@ export function buildVcsProvider(
       privateKey: config.privateKey,
       apiVersion: config.apiVersion,
     });
-    github = new GitVcsProvider({ rootDir, remote: new GitHubRemote({ github: client }), ...limits });
+    // WARDBY_TEST_SIMULATORS (test only): clone from and push to the simulator's git server.
+    const simulatorGit = testSimulatorBase("github-git", env);
+    const remote = new GitHubRemote({
+      github: client,
+      ...(simulatorGit ? { cloneUrlForRepository: (repository: string) => `${simulatorGit}/${repository}.git` } : {}),
+    });
+    github = new GitVcsProvider({ rootDir, remote, ...limits });
   }
   let local: VcsProvider | null = null;
   if (loadLocalRepoRoots(env).roots.length > 0) {

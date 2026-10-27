@@ -1,0 +1,31 @@
+{
+  "agent": "delivery",
+  "protocol": "openai-responses",
+  "match": "[flow-g:delivery]",
+  "status": "unvalidated: shapes follow wardby's native tool schemas (delegate_to_<boundName> with task); not yet replayed through the native runner",
+  "turns": [
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowg_d1",
+          "call_id": "call_flowg_d1",
+          "name": "delegate_to_builder",
+          "arguments": "{\"task\":\"[flow-g:builder] Add jokes/flow-g.txt with one knock-knock joke and run npm test.\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowg_d2",
+          "role": "assistant",
+          "content": [
+            { "type": "output_text", "annotations": [], "text": "The builder opened a pull request for the issue." }
+          ]
+        }
+      ]
+    }
+  ]
+}

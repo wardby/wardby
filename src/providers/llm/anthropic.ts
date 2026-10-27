@@ -7,6 +7,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ClaudeLlmProvider } from "./claude-provider.js";
 import type { CatalogLookup } from "./catalog-lookup.js";
+import { simulatorModelClientOptions } from "../../config/test-simulators.js";
 
 export function anthropicCredentialsPresent(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.ANTHROPIC_API_KEY);
@@ -17,6 +18,9 @@ export class AnthropicLlmProvider extends ClaudeLlmProvider {
     if (!client && !apiKey) {
       throw new Error("ANTHROPIC_API_KEY is not set — required by the Anthropic LlmProvider adapter.");
     }
-    super(client ?? new Anthropic({ apiKey }), lookup);
+    // WARDBY_TEST_SIMULATORS (test only): the scripted model, with a placeholder key the
+    // credential-free fetch drops; the real key never goes there.
+    const simulator = client ? null : simulatorModelClientOptions("anthropic");
+    super(client ?? new Anthropic(simulator ?? { apiKey }), lookup);
   }
 }

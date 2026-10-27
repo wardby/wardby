@@ -1,0 +1,23 @@
+{
+  "agent": "delivery",
+  "protocol": "anthropic-messages",
+  "match": "[flow-g:delivery]",
+  "status": "unvalidated: shapes follow wardby's native tool schemas (delegate_to_<boundName> with task); not yet replayed through the native runner",
+  "turns": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowg_d1",
+          "name": "delegate_to_builder",
+          "input": { "task": "[flow-g:builder] Add jokes/flow-g.txt with one knock-knock joke and run npm test." }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [{ "type": "text", "text": "The builder opened a pull request for the issue." }],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

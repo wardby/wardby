@@ -1,0 +1,20 @@
+{
+  "note": "Flow J fix round (J6): appended to delivery.claude.json ({{prior}} = the run that opened the PR, from wardby's continuation hint).",
+  "append": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_d4",
+          "name": "delegate_to_builder",
+          "input": {
+            "task": "[flow-j:builder] Fix the review's MAJOR finding: give the joke a punchline, run npm test.",
+            "continuePriorRun": "{{prior}}"
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    { "content": [{ "type": "text", "text": "The builder fixed the review's finding." }], "stop_reason": "end_turn" }
+  ]
+}

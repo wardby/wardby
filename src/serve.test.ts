@@ -17,6 +17,16 @@ const notificationsMock = vi.hoisted(() => ({
 }));
 vi.mock("./core/notifications.js", () => notificationsMock);
 
+// The scheduler this file starts is a real leader on the shared test database, and its tick drains
+// deferred runs across the whole database: it would claim (and "start" with this file's no-op
+// executor) a deferred run that another test file is in the middle of checking. The drain itself
+// is covered by deferred.database.test.ts; here it only has to be called.
+const drainDeferredRuns = vi.hoisted(() => vi.fn(async () => ({ started: 0, stopped: 0 })));
+vi.mock("./providers/executor/deferred.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./providers/executor/deferred.js")>()),
+  drainDeferredRuns,
+}));
+
 // Captures the serve module's warn calls without silencing the real logger.
 const serveWarn = vi.hoisted(() => vi.fn());
 vi.mock("./core/logger.js", async (importOriginal) => {
@@ -217,6 +227,8 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
       const handle = await serveWith(fakePower({ sleepIfIdle }), "power-tick");
       try {
         expect(await until(() => sleepIfIdle.mock.calls.length >= 1, 14000)).toBe(true);
+        // The same tick drained deferred runs first.
+        expect(drainDeferredRuns).toHaveBeenCalled();
         expect(serveWarn).toHaveBeenCalledWith(
           expect.objectContaining({ err: expect.any(Error) }),
           "power_sleep_failed",

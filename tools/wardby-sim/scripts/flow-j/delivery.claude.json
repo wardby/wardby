@@ -1,0 +1,29 @@
+{
+  "agent": "delivery",
+  "protocol": "anthropic-messages",
+  "match": "[flow-j:delivery]",
+  "status": "Flow J: reads the Jira issue (jira_get_issue), delegates to the builder, then answers; shapes follow wardby's native tool schemas",
+  "turns": [
+    {
+      "content": [
+        { "type": "tool_use", "id": "toolu_flowj_d1", "name": "jira_get_issue", "input": { "issueKey": "WID-1" } }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_d2",
+          "name": "delegate_to_builder",
+          "input": { "task": "[flow-j:builder] Add jokes/flow-j.txt with one knock-knock joke and run npm test." }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [{ "type": "text", "text": "The builder opened a pull request for WID-1." }],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

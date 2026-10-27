@@ -1,6 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
+import { testSimulatorBase } from "../../config/test-simulators.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
 import {
   packageAuditRows,
@@ -861,7 +862,9 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   ) {
     if (!/^[1-9]\d*$/.test(config.appId)) throw new Error("github_app_id_invalid");
     if (!config.privateKey.trim()) throw new Error("github_app_private_key_invalid");
-    this.apiBaseUrl = normalizeApiBaseUrl(config.apiBaseUrl ?? DEFAULT_API_BASE_URL);
+    // WARDBY_TEST_SIMULATORS (test only, refused with production configuration): every call
+    // goes to the simulator instead, all or nothing.
+    this.apiBaseUrl = testSimulatorBase("github-api") ?? normalizeApiBaseUrl(config.apiBaseUrl ?? DEFAULT_API_BASE_URL);
     this.apiVersion = config.apiVersion ?? DEFAULT_API_VERSION;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(this.apiVersion)) throw new Error("github_api_version_invalid");
   }

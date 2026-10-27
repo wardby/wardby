@@ -2,6 +2,7 @@ import { PrismaClient } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../llm/types.js";
 import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
@@ -73,6 +74,36 @@ function fakeDatastore(): Datastore {
   };
 }
 const fakeCipher: SecretCipher = { keyId: () => "t", encrypt: async (s) => s, decrypt: async (s) => s };
+
+/** The SDK's own debug trigger points (dist/src/debugpoint.js), which its tests use to hold a code path open. */
+const dbosDebug = (() => {
+  const require = createRequire(import.meta.url);
+  return require(require.resolve("@dbos-inc/dbos-sdk").replace(/index\.js$/, "debugpoint.js")) as {
+    DEBUG_TRIGGER_WORKFLOW_QUEUE_START: string;
+    setDebugTrigger: (name: string, action: { callback?: () => void; awaitEvent?: Promise<void> }) => void;
+    clearDebugTriggers: () => void;
+  };
+})();
+
+/**
+ * Hold the next queue dispatch in this process after its claim: the workflows it claimed are
+ * PENDING under this executor, but none has been invoked yet. `claimed` resolves once a dispatch is
+ * held there; `release()` lets it go on and stops holding later ones.
+ */
+function holdNextQueueDispatch(): { claimed: Promise<void>; release: () => void } {
+  let onClaim!: () => void;
+  let open!: () => void;
+  const claimed = new Promise<void>((resolve) => (onClaim = resolve));
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  dbosDebug.setDebugTrigger(dbosDebug.DEBUG_TRIGGER_WORKFLOW_QUEUE_START, { callback: onClaim, awaitEvent: gate });
+  return {
+    claimed,
+    release: () => {
+      dbosDebug.clearDebugTriggers();
+      open();
+    },
+  };
+}
 
 describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
   const db = createPrismaClient();
@@ -243,6 +274,40 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.error).toContain("operator cancelled");
     expect(after.finishedAt).not.toBeNull();
   });
+
+  // FINDING: close() gives running workflows a 5 s drain, then DBOS ends its system database pool.
+  // A step that returns after that (an LLM turn that outlasts the drain) cannot record its output:
+  // DBOS.runStep throws "Cannot use a pool after calling end on the pool", and executeRun's backstop
+  // (failNativeRun) writes the run failed through the still-open app database. The run should be
+  // left running for the next process to adopt, as a run whose process died outright is. Expected
+  // to fail until that is fixed; it then passes and it.fails reports it, so drop the .fails.
+  it.fails(
+    "close(): a run still inside a step when the shutdown drain expires is left for the next process, not failed",
+    async () => {
+      await executor?.close();
+      let release!: () => void;
+      const open = new Promise<void>((resolve) => (release = resolve));
+      const llm = scriptedLlm([toolCall("t"), finalAnswer("never")], { turn: 1, open });
+      executor = buildWith(llm, `${executorId}-drain`);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+      const started = executor.start(run.id).then(
+        () => "resolved",
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+      await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+      // SIGTERM: the drain gives the run 5 s, the step is still open, and DBOS closes its database.
+      await executor.close();
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("running");
+      // The turn returns after the drain; start()'s handle settles once the body has written the run.
+      release();
+      await started;
+
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("running");
+    },
+    30_000,
+  );
 
   it("stop cancels the forked workflow named by executionWorkflowId, and workflowIdOf falls back to the run id", async () => {
     executor = build(scriptedLlm([finalAnswer("x")]));
@@ -1011,6 +1076,71 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       expect([...secondChildren.started, ...thirdChildren.started]).toEqual([]);
       expect(resumedLlm.calls).toHaveLength(1);
     } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
+  it("close(): a fork the queue claimed just before shutdown still runs here, and the next process takes it over", async () => {
+    const { run, childId, cleanup } = await leadWaitingAfterDeploy("close-claimed");
+    const hold = holdNextQueueDispatch();
+    try {
+      // The process that takes the run over records the heartbeats its workflow bodies write.
+      const dying = killableClient();
+      const beats: string[] = [];
+      const recording = new Proxy(dying.client, {
+        get(target, prop) {
+          if (prop !== "run") return Reflect.get(target, prop);
+          const model = target.run;
+          return new Proxy(model, {
+            get(m, key) {
+              if (key !== "update") return Reflect.get(m, key);
+              return (args: { data: { heartbeatAt?: unknown } }) => {
+                if (args.data.heartbeatAt !== undefined) beats.push(DBOS.workflowID ?? "?");
+                return m.update(args as never);
+              };
+            },
+          });
+        },
+      });
+      executor = buildWith(scriptedLlm([]), `${executorId}-close-1`, recording, recordingChildExecutor().fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+      const fork = (await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId!;
+
+      // The queue has claimed the fork (PENDING, owned here) and has not invoked it yet: SIGTERM now.
+      await hold.claimed;
+      expect((await DBOS.getWorkflowStatus(fork))?.status).toBe("PENDING");
+      const closing = executor.close();
+      hold.release();
+      await closing;
+      dying.kill();
+
+      // The claimed fork's body ran with its executor (its first act is a heartbeat), so it did not
+      // end the workflow with an error that would fail the run.
+      expect(beats).toContain(fork);
+      const [recorded] = await db.$queryRawUnsafe<{ status: string }[]>(
+        "SELECT status FROM dbos_test.workflow_status WHERE workflow_uuid = $1",
+        fork,
+      );
+      expect(recorded.status).toBe("PENDING");
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("running");
+
+      // The next process adopts the orphaned fork and finishes the run.
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-close-2`, db, recordingChildExecutor().fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: fork })).toEqual({ state: "active" });
+      await finishChildAndLead(run.id);
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect({ status: after.status, finalText: after.finalText }).toEqual({
+        status: "succeeded",
+        finalText: "lead done",
+      });
+      expect((await db.run.findMany({ where: { parentRunId: run.id } })).map((c) => c.id)).toEqual([childId]);
+    } finally {
+      hold.release();
       await cleanup();
     }
   }, 30_000);

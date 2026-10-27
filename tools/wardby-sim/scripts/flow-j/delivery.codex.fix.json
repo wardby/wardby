@@ -1,0 +1,26 @@
+{
+  "note": "Flow J fix round (J6): appended to delivery.codex.json. The delivery agent's review_fix run continues the builder's PR ({{prior}} = the run that opened it, from wardby's continuation hint).",
+  "append": [
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_d4",
+          "call_id": "call_flowj_d4",
+          "name": "delegate_to_builder",
+          "arguments": "{\"task\":\"[flow-j:builder] Fix the review's MAJOR finding: give the joke a punchline, run npm test.\",\"continuePriorRun\":\"{{prior}}\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowj_d5",
+          "role": "assistant",
+          "content": [{ "type": "output_text", "annotations": [], "text": "The builder fixed the review's finding." }]
+        }
+      ]
+    }
+  ]
+}

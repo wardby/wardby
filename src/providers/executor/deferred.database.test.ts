@@ -5,8 +5,29 @@ import { DeferredExecutor, drainDeferredRuns } from "./deferred.js";
 import type { Executor } from "./types.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("DeferredExecutor and drainDeferredRuns (database)", () => {
-  const db = createPrismaClient();
+  const client = createPrismaClient();
   const agentId = `def-agent-${randomUUID().slice(0, 8)}`;
+  /**
+   * The database as these tests see it: every run query is limited to this file's agent. The drain
+   * sweeps the whole database, which other test files share, so unscoped it would claim (and start
+   * with this file's fake executor) deferred runs another file is still working with.
+   */
+  const db = new Proxy(client, {
+    get(target, prop) {
+      if (prop !== "run") return Reflect.get(target, prop);
+      return new Proxy(target.run, {
+        get(model, key) {
+          const value: unknown = Reflect.get(model, key);
+          if (key !== "findMany" || typeof value !== "function") return value;
+          return (args: { where?: object } = {}) =>
+            (value as (a: unknown) => unknown).call(model, {
+              ...args,
+              where: { AND: [args.where ?? {}, { agentId }] },
+            });
+        },
+      });
+    },
+  });
 
   beforeAll(async () => {
     await db.agent.create({ data: { id: agentId, name: agentId, systemPrompt: "s", model: "m", budgetUsd: 1 } });
@@ -14,7 +35,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DeferredExecutor and drainDeferredRu
   afterAll(async () => {
     await db.run.deleteMany({ where: { agentId } });
     await db.agent.deleteMany({ where: { id: agentId } });
-    await db.$disconnect();
+    await client.$disconnect();
   });
 
   const pendingRun = () => db.run.create({ data: { agentId, executionManaged: true } });

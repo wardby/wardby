@@ -1,0 +1,54 @@
+{
+  "note": "Flow J fix round (J6): the first review requests changes; prepended to reviewer.codex.json (whose APPROVE then answers the re-review).",
+  "prepend": [
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_rc1",
+          "call_id": "call_flowj_rc1",
+          "name": "repo_pr_read",
+          "arguments": "{\"repository\":\"acme/widgets\",\"prNumber\":1}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_rc2",
+          "call_id": "call_flowj_rc2",
+          "name": "repo_read_file",
+          "arguments": "{\"repository\":\"acme/widgets\",\"path\":\"jokes/flow-j.txt\",\"ref\":\"{{last:headSha}}\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_rc3",
+          "call_id": "call_flowj_rc3",
+          "name": "repo_publish_review",
+          "arguments": "{\"repository\":\"acme/widgets\",\"prNumber\":1,\"headSha\":\"{{last:headSha}}\",\"verdict\":\"CHANGES_REQUESTED\",\"summary\":\"One MAJOR finding: the joke has no punchline.\",\"body\":\"**MAJOR** jokes/flow-j.txt: the joke has no punchline. MUST_FIX: add one.\",\"comments\":[]}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowj_rc4",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "annotations": [],
+              "text": "Review published."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
