@@ -20,6 +20,7 @@ const KEPT_FIELDS = [
   "entrypoint",
   "userType",
 ] as const;
+const MESSAGE_FIELDS = ["role", "content", "id", "type", "model", "stop_reason", "stop_sequence"] as const;
 const THINKING = new Set(["thinking", "redacted_thinking"]);
 
 export interface SanitizedTranscript {
@@ -37,7 +38,8 @@ export function sanitizeClaudeTranscript(jsonl: string): SanitizedTranscript | n
     const record = parseRecord(line);
     if (!record) continue;
     if (record.type === "ai-title" && typeof record.aiTitle === "string") {
-      title = { type: "ai-title", aiTitle: record.aiTitle, sessionId: record.sessionId };
+      title = { type: "ai-title", aiTitle: record.aiTitle };
+      if (typeof record.sessionId === "string") title.sessionId = record.sessionId;
       continue;
     }
     const conversation = (record.type === "user" || record.type === "assistant") && record.isSidechain !== true;
@@ -59,7 +61,13 @@ export function sanitizeClaudeTranscript(jsonl: string): SanitizedTranscript | n
   });
   if (end < 0 || !sessionId) return null;
   const records = kept.slice(0, end + 1);
-  if (title) records.push(title);
+  if (title) records.push({ ...title, sessionId: title.sessionId ?? sessionId });
+  const present = new Set(records.map((record) => record.uuid));
+  for (const record of records) {
+    if (record.type !== "ai-title" && record.parentUuid !== null && !present.has(record.parentUuid)) {
+      record.parentUuid = null;
+    }
+  }
   return { sessionId, lines: records.map((record) => JSON.stringify(record)) };
 }
 
@@ -87,14 +95,23 @@ function resolveParent(parent: string | null, dropped: ReadonlyMap<string, strin
   return parent;
 }
 
-/** The message without thinking blocks, or null when nothing is left. */
+/** The message rebuilt from an allowlist, without thinking blocks, or null when nothing is left. */
 function withoutThinking(message: unknown): JsonRecord | null {
   if (!message || typeof message !== "object") return null;
   const m = message as JsonRecord;
-  if (typeof m.content === "string") return m.content ? m : null;
-  if (!Array.isArray(m.content)) return null;
-  const content = m.content.filter((block) => !THINKING.has((block as JsonRecord | null)?.type as string));
-  return content.length > 0 ? { ...m, content } : null;
+  let content = m.content;
+  if (typeof content === "string") {
+    if (!content) return null;
+  } else if (Array.isArray(content)) {
+    content = content.filter((block) => !THINKING.has((block as JsonRecord | null)?.type as string));
+    if ((content as unknown[]).length === 0) return null;
+  } else {
+    return null;
+  }
+  const copy: JsonRecord = {};
+  for (const field of MESSAGE_FIELDS) if (field in m) copy[field] = m[field];
+  copy.content = content;
+  return copy;
 }
 
 /** An assistant record that asks for no tool: the history can end here and be continued. */
