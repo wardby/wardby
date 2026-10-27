@@ -130,6 +130,17 @@ describe("CodingProfileSchema", () => {
     ).toBeNull();
   });
 
+  it("accepts sessionResume on a Claude Code agent and refuses it on a Codex agent", () => {
+    const base = { repository: "openai/example" };
+    expect(CodingProfileSchema.parse({ ...base, provider: "claude-code", sessionResume: true }).sessionResume).toBe(
+      true,
+    );
+    const result = CodingProfileSchema.safeParse({ ...base, provider: "codex", sessionResume: true });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toMatch(/Claude Code/);
+    expect(CodingProfileSchema.parse({ ...base, provider: "codex", sessionResume: false }).sessionResume).toBe(false);
+  });
+
   it("accepts per-agent collection exclusions and rejects unsafe paths", () => {
     const base = { repository: "openai/example" };
     expect(CodingProfileSchema.parse({ ...base, collectExclude: ["web/dist", "web/dist"] }).collectExclude).toEqual([

@@ -2615,7 +2615,7 @@ export class ContainerExecutor implements Executor {
           ? { dependencyCache: true as const, diskMb: run.workspaceDiskMb ?? this.options.limits.diskMb }
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
-        ...(run.sessionResume ? { sessionResume: true as const } : {}),
+        ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

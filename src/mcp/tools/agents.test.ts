@@ -1684,7 +1684,8 @@ describe("agent CRUD tools", () => {
     const saved = process.env.BLOB_STORE;
     delete process.env.BLOB_STORE;
     try {
-      const db = fakeDb([codingAgentSeed()]);
+      const seed = codingAgentSeed();
+      const db = fakeDb([{ ...seed, codingProfile: { ...seed.codingProfile, provider: "claude-code" as const } }]);
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
       mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read", "agents:admin"], ["admin"]));
       registerAgentTools(mcp);

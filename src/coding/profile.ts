@@ -205,6 +205,13 @@ export const CodingProfileSchema = z
   })
   .strict()
   .superRefine((profile, ctx) => {
+    if (profile.sessionResume && profile.provider !== "claude-code") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sessionResume"],
+        message: "sessionResume applies to Claude Code agents only (provider claude-code); set it to false",
+      });
+    }
     if (profile.maxOutputTokens !== null && profile.provider !== "claude-code") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
