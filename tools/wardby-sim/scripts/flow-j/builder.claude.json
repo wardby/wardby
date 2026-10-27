@@ -1,0 +1,44 @@
+{
+  "agent": "builder",
+  "protocol": "anthropic-messages",
+  "match": "[flow-j:builder]",
+  "status": "follows the Claude Code worker's own tools (mcp__wardby_tools__run_command, StructuredOutput), as seen in a Flow J run; accepted and metered by the real coding proxy",
+  "turns": [
+    {
+      "content": [
+        { "type": "text", "text": "Adding the joke file and running the tests." },
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_1",
+          "name": "mcp__wardby_tools__run_command",
+          "input": {
+            "command": "mkdir -p jokes && printf 'Knock knock. Who'\\''s there? Flow J.\\n' > jokes/flow-j.txt && npm test"
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_2",
+          "name": "StructuredOutput",
+          "input": {
+            "schemaVersion": 1,
+            "runId": "{{runId}}",
+            "outcome": "changes_ready",
+            "summary": "Adds a Flow J joke.\n\n- [x] jokes/flow-j.txt\n\nHow to try it: read jokes/flow-j.txt.",
+            "tag": "flow-j",
+            "tests": [{ "command": "npm test", "outcome": "passed" }]
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [{ "type": "text", "text": "Done." }],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

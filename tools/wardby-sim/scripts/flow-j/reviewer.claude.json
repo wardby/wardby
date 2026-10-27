@@ -1,0 +1,53 @@
+{
+  "agent": "reviewer",
+  "protocol": "anthropic-messages",
+  "match": "[flow-j:reviewer]",
+  "status": "unvalidated: shapes follow wardby's review tool schemas (repo_pr_read, repo_read_file, repo_publish_review); not yet replayed through the native runner. {{last:...}} reads the PR read's result back out of the request.",
+  "turns": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_r1",
+          "name": "repo_pr_read",
+          "input": { "repository": "acme/widgets", "prNumber": 1 }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_r2",
+          "name": "repo_read_file",
+          "input": { "repository": "acme/widgets", "path": "jokes/flow-j.txt", "ref": "{{last:headSha}}" }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_flowj_r3",
+          "name": "repo_publish_review",
+          "input": {
+            "repository": "acme/widgets",
+            "prNumber": 1,
+            "headSha": "{{last:headSha}}",
+            "verdict": "APPROVE",
+            "summary": "Looks good.",
+            "body": "Read every file; the joke is fine.",
+            "comments": []
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "content": [{ "type": "text", "text": "Review published." }],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
