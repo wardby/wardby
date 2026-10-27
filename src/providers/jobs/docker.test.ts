@@ -649,6 +649,32 @@ describe("DockerJobLauncher", () => {
     });
   });
 
+  it("reads the session transcript from the keeper, bounded", async () => {
+    const created = await harness("docker-transcript", { provider: "claude-code", toolImage, limits: claudeLimits });
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.output = '{"a":1}\n';
+    await expect(created.launcher.readTranscript(handle, 1024)).resolves.toBe('{"a":1}\n');
+    expect(
+      created.docker.calls.some((c) => c.args.join(" ").includes(":/run/wardby/storage/output/session.jsonl")),
+    ).toBe(true);
+    await expect(created.launcher.readTranscript(handle, 3)).rejects.toThrow("transcript_too_large");
+  });
+
+  it("returns undefined for a transcript when the copy fails", async () => {
+    const created = await harness("docker-transcript-missing", {
+      provider: "claude-code",
+      toolImage,
+      limits: claudeLimits,
+    });
+    const handle = await created.launcher.launch(created.spec);
+    const run = created.docker.run.bind(created.docker);
+    created.docker.run = async (args, options) => {
+      if (args[0] === "container" && args[1] === "cp") throw new Error("no such file");
+      return run(args, options);
+    };
+    await expect(created.launcher.readTranscript(handle, 1024)).resolves.toBeUndefined();
+  });
+
   it("fails the composite job when the Claude tool runner exits", async () => {
     const created = await harness("docker-claude-tool-failure", {
       provider: "claude-code",

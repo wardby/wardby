@@ -129,6 +129,12 @@ export interface JobLauncher {
   launch: (spec: JobSpec) => Promise<JobHandle>;
   status: (handle: JobHandle) => Promise<JobStatus>;
   collect: (handle: JobHandle) => Promise<JobResult>;
+  /**
+   * The run's session transcript file (the worker's session.jsonl), at most `maxBytes`; undefined
+   * when there is none or the job's storage is gone (a stopped job). Throws `transcript_too_large`
+   * when larger. Never cached in the job record: it is not redacted yet. Call before `remove`.
+   */
+  readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   stop: (handle: JobHandle, reason?: string) => Promise<void>;
   remove: (handle: JobHandle) => Promise<void>;
 }

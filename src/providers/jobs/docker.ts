@@ -1260,6 +1260,29 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     await this.transfer.seedInput(record.spec.inputArtifact, keeper);
   }
 
+  async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    await this.ready;
+    const record = await this.findRecord(handle);
+    if (!record) return undefined;
+    const staging = await mkdtemp(join(this.stateRoot, ".wardby-transcript-"));
+    const target = join(staging, "session.jsonl");
+    try {
+      try {
+        await this.run([
+          "container",
+          "cp",
+          `${this.keeperName(record)}:/run/wardby/storage/output/session.jsonl`,
+          target,
+        ]);
+      } catch {
+        return undefined;
+      }
+      return await readBoundedRegularFile(target, maxBytes, "transcript_too_large");
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
   private async readResultArtifact(record: DockerJobRecord): Promise<string> {
     const staging = await mkdtemp(join(this.stateRoot, ".wardby-result-"));
     const target = join(staging, "result.json");

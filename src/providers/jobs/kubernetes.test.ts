@@ -373,6 +373,51 @@ describe("KubernetesJobLauncher", () => {
     await expect(h.launcher.collect(handle)).rejects.toThrow("kubernetes_result_artifact_invalid");
   });
 
+  describe("readTranscript", () => {
+    const PATH = "/run/wardby/storage/output/session.jsonl";
+    it("reads the keeper's session.jsonl, bounded, without touching the job record", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.fail(1);
+      const read = () =>
+        (h.launcher as unknown as { readRecord: (n: unknown) => Promise<unknown> }).readRecord(h.names);
+      const before = JSON.stringify(await read());
+      h.api.onExec = async ({ command, stdout }) => {
+        stdout?.end(command[0] === "head" ? '{"a":1}\n' : undefined);
+        return 0;
+      };
+      expect(await h.launcher.readTranscript(handle, 1024)).toBe('{"a":1}\n');
+      const call = h.api.execCalls.at(-1)!;
+      expect(call.container).toBe("keeper");
+      expect(call.command).toEqual(["head", "-c", "1025", PATH]);
+      expect(JSON.stringify(await read())).toBe(before);
+    });
+
+    it("returns undefined when the file is absent or the pod is gone", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.api.onExec = async ({ stdout }) => {
+        stdout?.end();
+        return 1;
+      };
+      expect(await h.launcher.readTranscript(handle, 1024)).toBeUndefined();
+      h.api.onExec = async () => {
+        throw new Error("pod gone");
+      };
+      expect(await h.launcher.readTranscript(handle, 1024)).toBeUndefined();
+    });
+
+    it("rejects a transcript larger than maxBytes", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.api.onExec = async ({ stdout }) => {
+        stdout?.end("x".repeat(11));
+        return 0;
+      };
+      await expect(h.launcher.readTranscript(handle, 10)).rejects.toThrow("transcript_too_large");
+    });
+  });
+
   it("materializes only a succeeded run, only into its exact workspace, via the strict extractor", async () => {
     const h = await harness();
     const handle = await h.launcher.launch(h.spec);
