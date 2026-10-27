@@ -148,12 +148,20 @@ interface WarnedProfile {
   packageAuditUntil?: Date | null;
 }
 
+/** For a warning only: a half-set BLOB_STORE (which throws) counts as none, and never fails the tool call. */
+function blobStoreConfigured(): boolean {
+  try {
+    return loadBlobStoreConfig(process.env) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 /** Non-blocking warnings about an agent's coding profile as stored. */
 function profileWarnings(profile: WarnedProfile | null, now: Date): string[] {
   const warnings = profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
   if (profile?.sessionResume && profile.workerImageRef) warnings.push(SESSION_RESUME_IMAGE_WARNING);
-  if (profile?.sessionResume && loadBlobStoreConfig(process.env) === undefined)
-    warnings.push(SESSION_RESUME_NO_STORE_WARNING);
+  if (profile?.sessionResume && !blobStoreConfigured()) warnings.push(SESSION_RESUME_NO_STORE_WARNING);
   if (profile && isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now))
     warnings.push(packageAuditActiveWarning(profile.packageAuditMode, profile.packageAuditUntil!));
   return warnings;
@@ -407,7 +415,7 @@ const profileJsonSchema = {
     sessionResume: {
       type: "boolean",
       description:
-        "Claude Code runs only. Keep each run's session transcript (redacted) so a developer can resume it in their own Claude Code CLI with `wardby resume`. Anyone who can read a run can then read everything its agent saw. Needs a blob store (BLOB_STORE) on the server. Default false.",
+        "Claude Code runs only. Keep each run's session transcript (redacted) on the server so the session can later be continued in a local Claude Code CLI. Once transcripts are served, anyone who can read a run can read everything its agent saw. Needs a blob store (BLOB_STORE) on the server. Default false.",
     },
     packageAllowlist: {
       type: "object",

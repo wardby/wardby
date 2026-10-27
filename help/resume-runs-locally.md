@@ -10,8 +10,10 @@ appliesTo: ">=0.7.0"
 # Keep Claude Code run transcripts for local resume
 
 `sessionResume` makes a Claude Code agent keep a redacted copy of each run's
-conversation, so a developer can later continue that session in their own
-Claude Code. It is off by default and is not available for Codex agents.
+conversation, so the session can be continued locally in Claude Code; the
+command that does this ships separately. It is off by default and is not
+available for Codex agents. It needs Claude Code worker images from Wardby
+0.7.0 or later.
 
 ## Turn it on
 
@@ -21,7 +23,8 @@ Claude Code. It is off by default and is not available for Codex agents.
 
 Use `update_agent` or `create_agent`. The server needs a blob store
 (`BLOB_STORE`, with `BLOB_STORE_LOCAL_DIR`, `BLOB_STORE_GCS_BUCKET`, or
-`BLOB_STORE_S3_BUCKET` and `BLOB_STORE_S3_REGION`) set on the **server
+`BLOB_STORE_S3_BUCKET` and `BLOB_STORE_S3_REGION`, plus the optional
+`BLOB_STORE_S3_ENDPOINT` for an S3-compatible store) set on the **server
 process** that launches coding runs, not only on the coding proxy. Without a
 blob store nothing is stored, and `update_agent` warns you.
 
@@ -39,10 +42,11 @@ blob store nothing is stored, and `update_agent` warns you.
   records a status (`stored`, `too_large`, `not_captured` or `failed`) with a
   reason code.
 
-## Who can read it
+## Who will be able to read it
 
-Anyone who can read the run can read its transcript, which includes what the
-agent saw in the repository and in command output. Redaction removes secret
+Transcripts are stored from the first run with `sessionResume` on. Once they
+are served, anyone who can read a run can read its transcript, which includes
+what the agent saw in the repository and in command output. Redaction removes secret
 values, not other sensitive text. Turn this on only for agents whose runs you
 are comfortable sharing with everyone who can read them.
 

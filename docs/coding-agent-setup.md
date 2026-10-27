@@ -690,8 +690,13 @@ default. Turn it on per agent:
 ```
 
 `sessionResume` applies to Claude Code agents only; `create_agent` and
-`update_agent` refuse it on a Codex agent. Wardby keeps transcripts for a
-resume command; this section covers what is stored and how to set it up.
+`update_agent` refuse it on a Codex agent. Wardby keeps each run's session
+so it can be continued locally; the command that does this ships separately.
+This section covers what is stored and how to set it up.
+
+Session resume needs Claude Code worker images from a release that supports
+it (Wardby 0.7.0 or later). An older pinned image rejects the input of a run
+whose agent sets `sessionResume` as invalid (`worker_input_failed`).
 
 **What is kept.** The conversation only: the user and assistant messages and
 the session title. Thinking blocks, the system prompt, the environment, and
@@ -704,15 +709,17 @@ cannot be loaded, nothing is stored.
 A run stopped with `stop_run` or ended by its timeout is not captured, because
 its worker is removed before the transcript can be collected.
 
-**Who can read it.** Anyone who can read the run can read its transcript, and
-so everything the agent saw and wrote, including file contents and command
-output from the repository. Redaction covers secret values, not other
-sensitive text. Enable `sessionResume` only for agents whose runs you are
-comfortable sharing with everyone who can read them.
+**Who will be able to read it.** Transcripts are stored from the first run
+with `sessionResume` on. Once they are served, anyone who can read a run can
+read its transcript, and so everything the agent saw and wrote, including file
+contents and command output from the repository. Redaction covers secret
+values, not other sensitive text. Enable `sessionResume` only for agents whose
+runs you are comfortable sharing with everyone who can read them.
 
 **Where it is stored.** In the server's blob store, under the
 `run-transcripts/` prefix, at most 10 MiB per run. A larger transcript is not
-stored. Each run records a status of `stored`, `too_large`, `not_captured` or
+stored. While the run works, its worker keeps the session in its own in-memory
+scratch of up to 80 MiB, which counts toward the run's memory. Each run records a status of `stored`, `too_large`, `not_captured` or
 `failed`, with a short reason code and no content.
 
 The blob store settings must be present on the **server process** (the
@@ -725,6 +732,7 @@ server also needs its secret cipher, which it has in a normal setup.
 | `BLOB_STORE_LOCAL_DIR`                         |         | Directory for `BLOB_STORE=local`.                           |
 | `BLOB_STORE_GCS_BUCKET`                        |         | Bucket for `BLOB_STORE=gcs`.                                |
 | `BLOB_STORE_S3_BUCKET`, `BLOB_STORE_S3_REGION` |         | Bucket and region for `BLOB_STORE=s3`.                      |
+| `BLOB_STORE_S3_ENDPOINT`                       |         | Optional: an S3-compatible endpoint for `BLOB_STORE=s3`.    |
 | `RUN_TRANSCRIPT_RETENTION_DAYS`                | `30`    | Days to keep a transcript, a whole number from 1 to 3650.   |
 
 **Retention.** Expired transcripts are pruned whenever a new one is stored.

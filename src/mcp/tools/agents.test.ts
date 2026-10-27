@@ -1723,6 +1723,47 @@ describe("agent CRUD tools", () => {
     }
   });
 
+  it("a half-set BLOB_STORE counts as no blob store for the warning and never breaks get_agent or update_agent", async () => {
+    vi.stubEnv("BLOB_STORE", "gcs");
+    vi.stubEnv("BLOB_STORE_GCS_BUCKET", "");
+    try {
+      const seed = codingAgentSeed();
+      const db = fakeDb([{ ...seed, codingProfile: { ...seed.codingProfile, provider: "claude-code" as const } }]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read", "agents:admin"], ["admin"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const body = (result: { content: unknown }) =>
+        JSON.parse((result.content as { text: string }[])[0].text) as { warnings?: string[] };
+      const on = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { sessionResume: true } },
+      });
+      expect(on.isError).toBeFalsy();
+      expect(body(on).warnings).toEqual([SESSION_RESUME_NO_STORE_WARNING]);
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: "a1" } });
+      expect(fetched.isError).toBeFalsy();
+      expect(body(fetched).warnings).toEqual([SESSION_RESUME_NO_STORE_WARNING]);
+      await client.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("describes sessionResume without promising a command this release does not ship", async () => {
+    const db = fakeDb([codingAgentSeed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const tools = await client.listTools();
+    const update = tools.tools.find((tool) => tool.name === "update_agent")!;
+    const text = JSON.stringify(update.inputSchema);
+    expect(text).toContain("sessionResume");
+    expect(text).not.toContain("wardby resume");
+    await client.close();
+  });
+
   it("acceptedAdvisories needs packages:approve on create_agent and update_agent, and round-trips via get_agent", async () => {
     const db = fakeDb([codingAgentSeed()]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
