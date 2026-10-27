@@ -7,6 +7,8 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
+  CLAUDE_CONFIG_PATH,
+  CLAUDE_CONFIG_SCRATCH_MIB,
   KUBERNETES_ISOLATION_ERROR,
   STORAGE_INIT_CONTAINER,
   STORAGE_ROOT,
@@ -1210,6 +1212,27 @@ describe("buildRunPod for Claude Code", () => {
       runAsNonRoot: true,
       capabilities: { drop: ["ALL"] },
     });
+  });
+
+  it("gives a session-resume run's Claude config dir its own memory-backed scratch, off /tmp's budget", () => {
+    const resumed = buildRunPod({ ...claude, sessionResume: true }, options);
+    expect(worker(resumed).volumeMounts).toContainEqual({ name: "claude-config", mountPath: CLAUDE_CONFIG_PATH });
+    expect(resumed.spec!.volumes).toContainEqual({
+      name: "claude-config",
+      emptyDir: { medium: "Memory", sizeLimit: `${CLAUDE_CONFIG_SCRATCH_MIB}Mi` },
+    });
+    // Only the worker mounts it, and only a session-resume run has it.
+    const mounting = [...resumed.spec!.initContainers!, ...resumed.spec!.containers]
+      .filter((c) => c.volumeMounts?.some((m) => m.name === "claude-config"))
+      .map((c) => c.name);
+    expect(mounting).toEqual(["worker"]);
+    expect(JSON.stringify(p())).not.toContain("claude-config");
+    expect(() => assertRunPodMatches(resumed, buildRunPod({ ...claude, sessionResume: true }, options))).not.toThrow();
+    expect(() => assertRunPodMatches(resumed, p())).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("refuses sessionResume on a Codex spec", () => {
+    expect(() => validateKubernetesSpec({ ...spec, sessionResume: true })).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 
   it("gives the tool runner its own scratch, never the worker's /tmp or home", () => {

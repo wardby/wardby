@@ -18,6 +18,8 @@ import type {
 import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
+  CLAUDE_CONFIG_PATH,
+  CLAUDE_CONFIG_SCRATCH_MIB,
   CLAUDE_TOOL_SETUP_ENV,
   CODING_PROXY_ALIAS,
   CODING_PROXY_DENY_PORT,
@@ -136,6 +138,9 @@ const STORAGE_DIRECTORIES = ["workspace", "input", "output"] as const;
  * sandbox (GKE Autopilot annotates it `share: pod`), so the agent's relay can connect.
  */
 const TOOL_SOCKET_VOLUME = "tool-socket";
+/** Session resume only: the Claude worker's SDK config dir (docker-isolation.ts CLAUDE_CONFIG_SCRATCH_MIB). */
+const CLAUDE_CONFIG_VOLUME = "claude-config";
+export { CLAUDE_CONFIG_PATH, CLAUDE_CONFIG_SCRATCH_MIB };
 const TOOL_SOCKET_VOLUME_MIB = 1;
 
 /**
@@ -219,6 +224,9 @@ export function validateKubernetesSpec(spec: JobSpec): void {
     if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256) throw isolationError("claude-limits-too-small");
   } else if (spec.toolImage !== undefined) {
     throw isolationError("tool-image-set");
+  }
+  if (spec.sessionResume !== undefined && (spec.sessionResume !== true || spec.provider !== "claude-code")) {
+    throw isolationError("session-resume-not-claude");
   }
   if (!isRegistryDigest(spec.image)) throw isolationError("image-not-registry-digest");
   if (spec.services !== undefined) {
@@ -403,6 +411,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
           { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
           { name: "tmp", mountPath: "/tmp" },
           { name: "home", mountPath: "/home/wardby" },
+          // Session resume: the SDK's config dir, where the session file grows, off /tmp's budget.
+          ...(spec.sessionResume ? [{ name: CLAUDE_CONFIG_VOLUME, mountPath: CLAUDE_CONFIG_PATH }] : []),
         ]
       : [
           { name: "storage", mountPath: "/workspace", subPath: "workspace" },
@@ -495,6 +505,14 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
               { name: TOOL_SOCKET_VOLUME, emptyDir: { medium: "Memory", sizeLimit: `${TOOL_SOCKET_VOLUME_MIB}Mi` } },
               { name: "tool-tmp", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
               { name: "tool-home", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
+              ...(spec.sessionResume
+                ? [
+                    {
+                      name: CLAUDE_CONFIG_VOLUME,
+                      emptyDir: { medium: "Memory", sizeLimit: `${CLAUDE_CONFIG_SCRATCH_MIB}Mi` },
+                    },
+                  ]
+                : []),
             ]
           : []),
         ...serviceVolumes(services),

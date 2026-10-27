@@ -2537,6 +2537,8 @@ export class ContainerExecutor implements Executor {
       inputArtifact,
       // Only when on: every other run's spec stays exactly what it was.
       ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
+      // Claude Code only: the launcher gives the SDK's config dir, where the session grows, its own scratch.
+      ...(run.sessionResume && provider === "claude-code" ? { sessionResume: true as const } : {}),
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},

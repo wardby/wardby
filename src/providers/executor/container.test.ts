@@ -1339,16 +1339,25 @@ describe("ContainerExecutor", () => {
         { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
       );
       let input: Record<string, unknown> | undefined;
+      let spec: Record<string, unknown> | undefined;
       created.jobs.onLaunch = () => {
         input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        spec = { ...created.jobs.lastSpec! };
       };
       await created.executor.start("run-1");
-      return input!;
+      return { input: input!, spec: spec! };
     };
-    expect(await launched({ sessionResume: true, provider: "claude-code" })).toMatchObject({ sessionResume: true });
-    expect(await launched({ sessionResume: true, provider: "codex" })).not.toHaveProperty("sessionResume");
+    const on = await launched({ sessionResume: true, provider: "claude-code" });
+    expect(on.input).toMatchObject({ sessionResume: true });
+    // The launcher gives the SDK's config dir (where the session is kept) its own scratch.
+    expect(on.spec).toMatchObject({ sessionResume: true });
+    const codex = await launched({ sessionResume: true, provider: "codex" });
+    expect(codex.input).not.toHaveProperty("sessionResume");
+    expect(codex.spec).not.toHaveProperty("sessionResume");
     for (const overrides of [{ sessionResume: false }, {}]) {
-      expect(await launched(overrides)).not.toHaveProperty("sessionResume");
+      const off = await launched(overrides);
+      expect(off.input).not.toHaveProperty("sessionResume");
+      expect(off.spec).not.toHaveProperty("sessionResume");
     }
   });
 

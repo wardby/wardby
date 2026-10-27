@@ -27,6 +27,12 @@ export interface JobSpec {
   inputArtifact: string;
   /** Set only when the run's dependency cache is on (CodingRun.dependencyCache); absent otherwise, never false. */
   dependencyCache?: true;
+  /**
+   * Claude Code only, set only when the run keeps its session (CodingRun.sessionResume); absent otherwise,
+   * never false. The worker's SDK config dir, where the session file grows, gets its own size-limited
+   * scratch so a long session never fills the worker's shared /tmp.
+   */
+  sessionResume?: true;
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;
