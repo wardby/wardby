@@ -88,6 +88,22 @@ describe("buildConfiguredExecutor", () => {
     );
   });
 
+  it("fails at composition time on a half-set blob store config", () => {
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "docker",
+          CODING_PROXY_CONTAINER: "proxy",
+          CODING_WORKER_IMAGE: LOCAL_IMAGE,
+          BLOB_STORE: "gcs",
+        },
+      }),
+    ).toThrow("BLOB_STORE_GCS_BUCKET is required when BLOB_STORE=gcs.");
+  });
+
   it("does not count half of the Claude Code pair as a configured provider", () => {
     expect(() =>
       buildConfiguredExecutor({

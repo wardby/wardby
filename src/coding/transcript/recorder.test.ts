@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
 import { LocalBlobStore } from "../../providers/storage/local.js";
+import { deriveRegistryToken } from "../registry/token.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
 import { formatTranscriptFile, type TranscriptHeader } from "./format.js";
 import {
@@ -31,7 +32,7 @@ const okHeader = (sessionId: string): TranscriptHeader => ({
 });
 
 /** Worker-shaped output for the fixture, with secrets planted in kept content. */
-function workerFile(extraBodyLines: string[] = []): string {
+function workerFile(extraBodyLines: string[] = [], assistantText = `token ${CAPABILITY} here`): string {
   const sanitized = sanitizeClaudeTranscript(FIXTURE)!;
   const lines = sanitized.lines.map((line) => {
     const rec = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
@@ -39,7 +40,7 @@ function workerFile(extraBodyLines: string[] = []): string {
     if (Array.isArray(content)) {
       for (const block of content as Array<Record<string, unknown>>) {
         if (block.type === "tool_result") block.content = `output ${SECRET} and ${RAW2} end`;
-        if (block.type === "text" && rec.type === "assistant") block.text = `token ${CAPABILITY} here`;
+        if (block.type === "text" && rec.type === "assistant") block.text = assistantText;
       }
     }
     return JSON.stringify(rec);
@@ -95,7 +96,6 @@ describe("RunTranscriptRecorder", () => {
     runId: "run1",
     agentId: "agent1",
     provider: "claude-code",
-    capability: CAPABILITY,
     read: async () => workerFile() as string | undefined,
     ...over,
   });
@@ -131,10 +131,15 @@ describe("RunTranscriptRecorder", () => {
     noLeak();
   });
 
-  it("redacts by exact value even when the capability is the only secret", async () => {
-    await recorder({ secretValues: async () => [CAPABILITY] }).record(input());
+  it("removes a realistic capability and registry token without being given either", async () => {
+    const capability = `rrp_${randomBytes(32).toString("base64url")}`;
+    const token = deriveRegistryToken(capability);
+    const text0 = workerFile([], `keys ${capability} and ${token}`);
+    expect(text0).toContain(capability);
+    await recorder({ secretValues: async () => [] }).record(input({ read: async () => text0 }));
     const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
-    expect(text).not.toContain(CAPABILITY);
+    expect(text).not.toContain(capability);
+    expect(text).not.toContain(token);
   });
 
   it("reports not_captured/no_blob_store without reading", async () => {
@@ -174,18 +179,14 @@ describe("RunTranscriptRecorder", () => {
   });
 
   it("fails closed without secrets", async () => {
-    const unread = vi.fn();
-    expect(await recorder().record(input({ capability: undefined, read: unread }))).toBe("failed");
-    expect(unread).not.toHaveBeenCalled();
-    expect(row()).toMatchObject({ reason: "secrets_unavailable", blobKey: null });
-    await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
     const rejecting = recorder({
       secretValues: async () => {
         throw new Error(`vault says ${SECRET}`);
       },
     });
-    expect(await rejecting.record(input())).toBe("failed");
-    expect(row()).toMatchObject({ reason: "secrets_unavailable" });
+    const unread = vi.fn(async () => workerFile() as string | undefined);
+    expect(await rejecting.record(input({ read: unread }))).toBe("failed");
+    expect(row()).toMatchObject({ reason: "secrets_unavailable", blobKey: null });
     await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
     noLeak();
   });

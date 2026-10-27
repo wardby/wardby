@@ -9,6 +9,7 @@ import {
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
+import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
 import { withBaseCommit } from "../../coding/base-commit.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
@@ -122,6 +123,9 @@ import {
 import { closingIssueNumber, descriptionSha256 } from "../vcs/pr-description.js";
 
 const containerLog = logger.child({ module: "container-executor" });
+
+/** A transcript read and store must not hold up the job's removal for long. */
+const TRANSCRIPT_RECORD_TIMEOUT_MS = 60_000;
 /** A logged context skip path is cut to this many characters: a refused import is reported as written. */
 const MAX_LOGGED_SKIP_PATH_CHARS = 256;
 
@@ -293,6 +297,7 @@ type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | n
 
 export interface ContainerRunSnapshot {
   runId: string;
+  agentId: string;
   status: string;
   agentKind: string;
   /** Human-readable agent name (e.g. "knock-knock-implement") -- surfaced in continuation status notifications. */
@@ -509,6 +514,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     if (!row?.codingRun) return null;
     return {
       runId: row.id,
+      agentId: row.agentId,
       status: row.status,
       agentKind: row.agent.kind,
       agentName: row.agent.name,
@@ -990,6 +996,8 @@ export class RunCapabilityVault {
 }
 
 export interface ContainerExecutorOptions {
+  /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
+  transcripts?: Pick<RunTranscriptRecorder, "record">;
   store: ContainerExecutionStore;
   jobs: WorkspaceJobLauncher;
   vcs: VcsProvider;
@@ -1755,6 +1763,7 @@ export class ContainerExecutor implements Executor {
         conflictMarkersPath = conflictMarkersPathFromError(error) ?? undefined;
       }
     } finally {
+      if (run.sessionResume) await this.recordTranscript(run, handle);
       await this.options.jobs.remove(handle).catch(() => undefined);
       const input = this.preflightForCleanup(run);
       const workspace =
@@ -2677,6 +2686,41 @@ export class ContainerExecutor implements Executor {
       headRef: run.headRef,
       continuation: { rootRunId: run.rootCodingRunId },
     };
+  }
+
+  /**
+   * Session resume: never throws, never changes the run's outcome. The recorder redacts; only a status
+   * code is logged. The run capability is already gone from the vault, so it is not passed (the recorder
+   * removes its fixed token shape).
+   */
+  private async recordTranscript(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
+    const recorder = this.options.transcripts;
+    if (!recorder) return;
+    const jobs = this.options.jobs;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const recording = Promise.resolve()
+        .then(() =>
+          recorder.record({
+            runId: run.runId,
+            agentId: run.agentId,
+            provider: run.provider,
+            read: (maxBytes) =>
+              jobs.readTranscript ? jobs.readTranscript(handle, maxBytes) : Promise.resolve(undefined),
+          }),
+        )
+        .catch(() => "failed" as const);
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), TRANSCRIPT_RECORD_TIMEOUT_MS);
+        timer.unref();
+      });
+      const result = await Promise.race([recording, timeout]);
+      if (result !== "stored") containerLog.info({ runId: run.runId, transcript: result }, "run transcript not stored");
+    } catch {
+      // never changes the run's outcome
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private preflightForCleanup(run: ContainerRunSnapshot): VcsPrepareInput | null {

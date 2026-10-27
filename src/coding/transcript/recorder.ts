@@ -28,8 +28,12 @@ export function loadTranscriptRetentionDays(env: NodeJS.ProcessEnv = process.env
 export interface RunTranscriptRecorderDeps {
   db: { runTranscript: Pick<PrismaClient["runTranscript"], "upsert" | "findMany" | "deleteMany"> };
   blobs: BlobStore | undefined;
-  /** Every secret value delivered to the run; rejects when any can't be loaded. */
-  secretValues: (agentId: string, capability: string) => Promise<string[]>;
+  /**
+   * The agent's attached secret values; rejects when any can't be loaded. The run capability (rrp_) and the
+   * registry token derived from it (rrg_) are not listed: they have fixed token shapes that redactSecrets
+   * (redact.ts) removes whatever their value, and the vault no longer holds the capability by now.
+   */
+  secretValues: (agentId: string) => Promise<string[]>;
   retentionDays: number;
   now?: () => Date;
 }
@@ -38,8 +42,6 @@ export interface RecordTranscriptInput {
   runId: string;
   agentId: string;
   provider: string;
-  /** The run capability, if the vault still holds it. */
-  capability: string | undefined;
   read: (maxBytes: number) => Promise<string | undefined>;
 }
 
@@ -61,7 +63,6 @@ export class RunTranscriptRecorder {
   private async capture(input: RecordTranscriptInput): Promise<Outcome> {
     const { blobs } = this.deps;
     if (!blobs) return { status: "not_captured", reason: "no_blob_store" };
-    if (!input.capability) return { status: "failed", reason: "secrets_unavailable" };
     if (input.provider !== "claude-code") return { status: "not_captured", reason: "provider_unsupported" };
     let text: string | undefined;
     try {
@@ -83,7 +84,7 @@ export class RunTranscriptRecorder {
     if (!SESSION_ID.test(sanitized.sessionId)) return { status: "failed", reason: "invalid_file" };
     let secrets: string[];
     try {
-      secrets = await this.deps.secretValues(input.agentId, input.capability);
+      secrets = await this.deps.secretValues(input.agentId);
     } catch {
       return { status: "failed", reason: "secrets_unavailable" };
     }
