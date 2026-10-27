@@ -679,6 +679,69 @@ release that supports them (Wardby 0.7.0 or later). An older pinned image still
 caps each reply at 4096 tokens, and rejects the input of a run whose agent sets
 `maxOutputTokens` as invalid.
 
+## Resume a run locally
+
+A Claude Code agent can keep a copy of each run's conversation so a developer
+can later continue that session in their own Claude Code. Keeping it is off by
+default. Turn it on per agent:
+
+```json
+{ "id": "<coding agent id>", "codingProfile": { "sessionResume": true } }
+```
+
+`sessionResume` applies to Claude Code agents only; `create_agent` and
+`update_agent` refuse it on a Codex agent. Wardby keeps transcripts for a
+resume command; this section covers what is stored and how to set it up.
+
+**What is kept.** The conversation only: the user and assistant messages and
+the session title. Thinking blocks, the system prompt, the environment, and
+account and budget data are removed. The content is then redacted against the
+values of the secrets attached to the agent, and the run's capability and
+registry token are redacted by their token shape. If the agent's secrets
+cannot be loaded, nothing is stored.
+
+**Which runs.** Claude Code runs that finish, stop at their budget, or fail.
+A run stopped with `stop_run` or ended by its timeout is not captured, because
+its worker is removed before the transcript can be collected.
+
+**Who can read it.** Anyone who can read the run can read its transcript, and
+so everything the agent saw and wrote, including file contents and command
+output from the repository. Redaction covers secret values, not other
+sensitive text. Enable `sessionResume` only for agents whose runs you are
+comfortable sharing with everyone who can read them.
+
+**Where it is stored.** In the server's blob store, under the
+`run-transcripts/` prefix, at most 10 MiB per run. A larger transcript is not
+stored. Each run records a status of `stored`, `too_large`, `not_captured` or
+`failed`, with a short reason code and no content.
+
+The blob store settings must be present on the **server process** (the
+control plane that launches coding runs), not only on the coding proxy. The
+server also needs its secret cipher, which it has in a normal setup.
+
+| Variable                                       | Default | Purpose                                                     |
+| ---------------------------------------------- | ------- | ----------------------------------------------------------- |
+| `BLOB_STORE`                                   |         | `local`, `gcs` or `s3`. Without it no transcript is stored. |
+| `BLOB_STORE_LOCAL_DIR`                         |         | Directory for `BLOB_STORE=local`.                           |
+| `BLOB_STORE_GCS_BUCKET`                        |         | Bucket for `BLOB_STORE=gcs`.                                |
+| `BLOB_STORE_S3_BUCKET`, `BLOB_STORE_S3_REGION` |         | Bucket and region for `BLOB_STORE=s3`.                      |
+| `RUN_TRANSCRIPT_RETENTION_DAYS`                | `30`    | Days to keep a transcript, a whole number from 1 to 3650.   |
+
+**Retention.** Expired transcripts are pruned whenever a new one is stored.
+For GCS and S3, also add a bucket lifecycle rule that deletes objects under
+the `run-transcripts/` prefix after the same number of days, so objects are
+removed even when no new run is stored.
+
+**Startup checks.** With `JOB_LAUNCHER` set to `docker` or `kubernetes`, a
+half-set `BLOB_STORE` (the kind set but its bucket or directory missing) or an
+invalid `RUN_TRANSCRIPT_RETENTION_DAYS` stops the server at startup with a
+message naming the variable.
+
+**Custom worker images.** An agent that sets `workerImageRef` must rebuild its
+image from a release that includes session resume. Until then its runs fail at
+input (`worker_input_failed`). `update_agent` warns about this when you turn
+`sessionResume` on, and also warns when the server has no blob store.
+
 ## Stop the setup
 
 ```sh

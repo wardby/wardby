@@ -44,6 +44,11 @@ the trusted coding proxy, and a narrowly installed GitHub App. The agent owner
 must have the required repository access, or an administrator must explicitly
 approve the repository.
 
+A Claude Code agent can also keep a redacted transcript of each run with
+`codingProfile.sessionResume`, for resuming the session locally; see
+[Resume a run locally](../docs/coding-agent-setup.md#resume-a-run-locally)
+(from 0.7.0, the `resume-runs-locally` help article).
+
 ## Choosing a model
 
 Both agent types take a `model` field naming an entry in wardby's model
