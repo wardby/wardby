@@ -28,6 +28,7 @@
  */
 
 import OpenAI from "openai";
+import { simulatorModelClientOptions } from "../../config/test-simulators.js";
 import { encode as encodeCl100kBase } from "gpt-tokenizer/encoding/cl100k_base";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmStreamHooks, LlmToolDef, LlmUsage } from "./types.js";
@@ -163,7 +164,9 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is not set — required by the OpenAI LlmProvider adapter.");
     }
-    this.client = new OpenAI({ apiKey });
+    // WARDBY_TEST_SIMULATORS (test only): the scripted model, with a placeholder key the
+    // credential-free fetch drops; the real key never goes there.
+    this.client = new OpenAI(simulatorModelClientOptions("openai") ?? { apiKey });
   }
 
   withEntry(entry: CatalogEntry): OpenAiLlmProvider {

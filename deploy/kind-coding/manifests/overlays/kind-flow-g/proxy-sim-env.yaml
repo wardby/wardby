@@ -1,0 +1,19 @@
+# TEST ONLY. NODE_ENV is not "production" here on purpose: WARDBY_TEST_SIMULATORS refuses to
+# start alongside NODE_ENV=production, and this test-only overlay is the one place that opts out.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          env:
+            - name: NODE_ENV
+              value: test
+            - name: WARDBY_TEST_SIMULATORS
+              value: "1"
+            - name: WARDBY_SIM_BASE_URL
+              value: http://wardby-sim.wardby-sim.svc.cluster.local:8080

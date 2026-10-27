@@ -1,0 +1,10 @@
+# TEST ONLY: the release regression suite's Flow G cluster (deploy/kind-coding/flow-g-up.sh).
+# The kind overlay plus WARDBY_TEST_SIMULATORS on the coding proxy and the native gateway, so
+# their model, registry and GitHub traffic goes to wardby-sim (deploy/kind-coding/sim.yaml),
+# and the egress that reaches it. Never apply this to a real deployment.
+resources:
+  - ../kind
+  - sim-egress.yaml
+patches:
+  - path: proxy-sim-env.yaml
+  - path: native-gateway-sim-env.yaml
