@@ -86,8 +86,11 @@ export default tseslint.config(
       "src/**/*.test-support.ts",
       "tools/**/*.test.ts",
       "tools/**/*.test-support.ts",
-      // The Flow G runner drives JSON-RPC and simulator JSON loosely, like a test harness.
+      // The Flow G and Flow J runners (and their shared kit) drive JSON-RPC and simulator JSON
+      // loosely, like a test harness.
       "tools/wardby-sim/src/flow-g/runner.ts",
+      "tools/wardby-sim/src/flow-g/kit.ts",
+      "tools/wardby-sim/src/flow-j/runner.ts",
     ],
     rules: {
       "@typescript-eslint/consistent-type-imports": "off",

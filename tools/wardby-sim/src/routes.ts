@@ -31,6 +31,8 @@ function unverified(service: string, method: string, pattern: string, note: stri
 const github = (method: string, pattern: string, note: string): RouteEntry =>
   unverified("github", method, pattern, note);
 
+const jira = (method: string, pattern: string, note: string): RouteEntry => unverified("jira", method, pattern, note);
+
 export const ROUTES: readonly RouteEntry[] = [
   // --- GitHub REST (github/rest.ts, github/graphql.ts) ---
   github("GET", "/app", "App JWT checked (RS256, iss, exp/iat); id, slug, owner. Docs only."),
@@ -209,6 +211,68 @@ export const ROUTES: readonly RouteEntry[] = [
     "message_not_found for an unknown or deleted ts; cant_update_message for another user's. Docs only.",
   ),
 
+  // --- Jira Cloud REST v3 (jira/rest.ts): Bearer token of the service account; writes fire webhooks ---
+  jira(
+    "GET",
+    "/rest/api/3/myself",
+    "accountId, accountType (app for the service account), displayName, locale. Docs only.",
+  ),
+  jira(
+    "GET",
+    "/rest/api/3/issue/{key}",
+    "`fields` limits the fields; ADF description; comment block {comments,total} unpaged; attachments always empty; " +
+      "404 for an unknown key (Jira's hidden-or-missing). Docs only.",
+  ),
+  jira(
+    "PUT",
+    "/rest/api/3/issue/{key}",
+    "labels/priority set; components and customfield_* accepted unmodelled; any other field 400; 204. Docs only.",
+  ),
+  jira("GET", "/rest/api/3/issue/{key}/editmeta", "Fixed: labels, priority, components. Docs only."),
+  jira("GET", "/rest/api/3/issue/{key}/comment", "startAt/maxResults paging, oldest first. Docs only."),
+  jira(
+    "POST",
+    "/rest/api/3/issue/{key}/comment",
+    "ADF doc required (400 otherwise); role visibility must name a project role; 201; fires comment_created. " +
+      "Error bodies approximated.",
+  ),
+  jira("GET", "/rest/api/3/issue/{key}/comment/{id}", "404 for an unknown id. Docs only."),
+  jira(
+    "PUT",
+    "/rest/api/3/issue/{key}/comment/{id}",
+    "The author only (403 otherwise: Edit Own Comments, not Edit All); ADF required; fires comment_updated.",
+  ),
+  jira(
+    "GET",
+    "/rest/api/3/issue/{key}/transitions",
+    "Simplified workflow: every other status, transition named after its target; never a screen. Docs only.",
+  ),
+  jira(
+    "POST",
+    "/rest/api/3/issue/{key}/transitions",
+    "204; 400 for a transition not offered; fires jira:issue_updated with a status changelog. Docs only.",
+  ),
+  jira("GET", "/rest/api/3/issue/{key}/remotelink", "Links with globalId and object. Docs only."),
+  jira(
+    "POST",
+    "/rest/api/3/issue/{key}/remotelink",
+    "Upsert by globalId: 201 new, 200 update; object.url and object.title required; status.resolved kept. Docs only.",
+  ),
+  jira("GET", "/rest/api/3/issue/{key}/properties/{property}", "{key,value}, 404 when unset. Docs only."),
+  jira(
+    "PUT",
+    "/rest/api/3/issue/{key}/properties/{property}",
+    "Any JSON up to 32 KiB; 201 new, 200 update, empty body. Docs only.",
+  ),
+  jira(
+    "POST",
+    "/rest/api/3/search/jql",
+    "A JQL subset (jql.ts): AND/OR/NOT, =, !=, ~, in, is EMPTY over common fields; unknown field 400; " +
+      "nextPageToken paging; newest first. Not Jira's full JQL.",
+  ),
+  jira("GET", "/rest/api/3/issueLinkType", "Blocks, Duplicate, Relates. Docs only."),
+  jira("POST", "/rest/api/3/issueLink", "201 empty; 404 for an unknown type or issue. Docs only."),
+
   // --- npm registry (registry/npm.ts, npm-model.ts) ---
   unverified(
     "npm",
@@ -332,6 +396,40 @@ export const EVENTS: readonly EventEntry[] = [
     actions: ["rerequested"],
     verified: false,
     note: "scripted only (github.check_rerequest). Docs only.",
+  },
+  {
+    service: "jira",
+    event: "jira:issue_created",
+    actions: [],
+    verified: false,
+    note:
+      "user, issue (description as wiki markup by default, or ADF), epoch-ms timestamp; X-Hub-Signature sha256, " +
+      "X-Atlassian-Webhook-Identifier kept on retries. Docs only.",
+  },
+  {
+    service: "jira",
+    event: "jira:issue_updated",
+    actions: ["issue_assigned", "issue_updated", "issue_generic"],
+    verified: false,
+    note:
+      "changelog items for assignee (to = accountId), labels (space-separated from/toString) and status; the " +
+      "service account's own writes fire it too, with it as the user. Docs only.",
+  },
+  {
+    service: "jira",
+    event: "comment_created",
+    actions: [],
+    verified: false,
+    note:
+      "comment (author, updateAuthor; body as wiki markup with [~accountid:...] mentions by default, or ADF), " +
+      "issue summary/status. Whether real deliveries carry wiki or ADF bodies is unverified. Docs only.",
+  },
+  {
+    service: "jira",
+    event: "comment_updated",
+    actions: [],
+    verified: false,
+    note: "as comment_created; updateAuthor is the editor. Docs only.",
   },
 ];
 

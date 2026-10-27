@@ -439,17 +439,21 @@ export function createGitHubSim(options: GitHubSimOptions = {}): GitHubSim {
         issues: [...gh.issues.values()]
           .filter((i) => i.repo === key)
           .map((i) => ({ number: i.number, state: i.state, isPull: i.isPull, title: i.title, labels: i.labels })),
-        pulls: [...gh.pulls.values()]
-          .filter((p) => p.repo === key)
-          .map((p) => ({
-            number: p.number,
-            state: p.state,
-            draft: p.draft,
-            merged: p.merged,
-            head: p.headRef,
-            base: p.baseRef,
-            body: p.body,
-          })),
+        pulls: await Promise.all(
+          [...gh.pulls.values()]
+            .filter((p) => p.repo === key)
+            .map(async (p) => ({
+              number: p.number,
+              state: p.state,
+              draft: p.draft,
+              merged: p.merged,
+              head: p.headRef,
+              base: p.baseRef,
+              body: p.body,
+              // The changed file names, only when asked (`files: true`): a diff per pull.
+              ...(args.files === true ? { files: (await pullFiles(gh, p)).map((f) => f.filename) } : {}),
+            })),
+        ),
         comments: [...gh.comments.values()]
           .filter((c) => c.repo === key)
           .map((c) => ({ id: c.id, issue: c.issueNumber, user: c.user.login, body: c.body })),

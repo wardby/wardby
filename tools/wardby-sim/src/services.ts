@@ -8,6 +8,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGitHubSim } from "./github/service.js";
+import { createJiraService } from "./jira/service.js";
 import { createModelService } from "./model/service.js";
 import { createNpmService } from "./registry/npm.js";
 import { createOsvService } from "./registry/osv.js";
@@ -33,6 +34,7 @@ export function buildServices(config: SimConfig): SimService[] {
     github.service,
     github.gitService,
     createSlackService(),
+    createJiraService(),
     createNpmService(),
     ...createPypiServices(),
     createOsvService(),

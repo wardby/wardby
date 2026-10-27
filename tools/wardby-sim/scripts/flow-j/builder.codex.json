@@ -1,0 +1,41 @@
+{
+  "agent": "builder",
+  "protocol": "openai-responses",
+  "match": "[flow-j:builder]",
+  "status": "validated: real Codex (pinned SDK) through the real coding proxy, model gpt-5.6-terra (responses-lite code mode)",
+  "turns": [
+    {
+      "items": [
+        {
+          "type": "reasoning",
+          "id": "rs_flowj_1",
+          "summary": [{ "type": "summary_text", "text": "Add the joke file, then run the tests." }],
+          "encrypted_content": "gAAAA-flow-j"
+        },
+        {
+          "type": "custom_tool_call",
+          "id": "ctc_flowj_1",
+          "call_id": "call_flowj_1",
+          "name": "exec",
+          "input": "await tools.apply_patch(\"*** Begin Patch\\n*** Add File: jokes/flow-j.txt\\n+Knock knock. Who's there? Flow J.\\n*** End Patch\\n\");\nconst r = await tools.exec_command({ cmd: \"npm test\" });\ntext(r.output);"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowj_final",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "annotations": [],
+              "text": "{\"schemaVersion\":1,\"runId\":\"{{runId}}\",\"outcome\":\"changes_ready\",\"summary\":\"Adds a Flow J joke.\\n\\n- [x] jokes/flow-j.txt\\n\\nHow to try it: read jokes/flow-j.txt.\",\"tag\":\"flow-j\",\"tests\":[{\"command\":\"npm test\",\"outcome\":\"passed\"}]}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

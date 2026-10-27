@@ -1,0 +1,42 @@
+{
+  "agent": "delivery",
+  "protocol": "openai-responses",
+  "match": "[flow-j:delivery]",
+  "status": "Flow J: reads the Jira issue (jira_get_issue), delegates to the builder, then answers; shapes follow wardby's native tool schemas",
+  "turns": [
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_d1",
+          "call_id": "call_flowj_d1",
+          "name": "jira_get_issue",
+          "arguments": "{\"issueKey\":\"WID-1\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "function_call",
+          "id": "fc_flowj_d2",
+          "call_id": "call_flowj_d2",
+          "name": "delegate_to_builder",
+          "arguments": "{\"task\":\"[flow-j:builder] Add jokes/flow-j.txt with one knock-knock joke and run npm test.\"}"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "type": "message",
+          "id": "msg_flowj_d3",
+          "role": "assistant",
+          "content": [
+            { "type": "output_text", "annotations": [], "text": "The builder opened a pull request for WID-1." }
+          ]
+        }
+      ]
+    }
+  ]
+}
