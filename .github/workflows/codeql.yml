@@ -33,6 +33,14 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
+          # The release suite's Flow G and Flow J runners (test-only, never shipped) write their own
+          # run reports from the local simulator's responses, which js/http-to-file-access flags on
+          # every change (#33, #34). Only these two files are left out; the rest of tools/wardby-sim
+          # is still analyzed.
+          config: |
+            paths-ignore:
+              - tools/wardby-sim/src/flow-g/runner.ts
+              - tools/wardby-sim/src/flow-j/runner.ts
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /language:${{ matrix.language }}
