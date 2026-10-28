@@ -131,7 +131,14 @@ export async function resumeCommand(argv: string[], deps: ResumeDeps = {}): Prom
     const args = claudeArgs({
       sessionFile: session.path,
       mcpConfigPath: configPath,
-      note: moveNote({ runId: meta.runId, ref: checkout.ref, from, checkout: checkout.dir }),
+      note: moveNote({
+        runId: meta.runId,
+        ref: checkout.ref,
+        from,
+        checkout: checkout.dir,
+        // prepareCheckout checks out the base commit only when the run's branch is missing.
+        runChanges: checkout.outcome === "here" ? undefined : checkout.ref !== meta.baseSha,
+      }),
       version,
     });
 

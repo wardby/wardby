@@ -892,11 +892,12 @@ logs. It works only for the run and person it was made for, and only while
 that person can still read the run. Over the HTTP transport it points at the
 server's own address (`MCP_CANONICAL_URI`'s origin). Over stdio it points at a
 local port the MCP server opens on `127.0.0.1` while links are in use, so
-your MCP client must stay connected until the download finishes. A
-multi-instance HTTP deployment needs `REQUEST_STATE_KEY` set to the same
-value on every instance, so a link made on one instance works on another; a
-link made by a stdio server is never accepted by the HTTP route, even with a
-shared key. `wardby resume` sends the link only over HTTPS, or over plain
+your MCP client must stay connected until the download finishes. On a
+multi-instance HTTP deployment a link made on one instance works on every
+other: each instance derives the key that signs links from `SECRET_APP_KEY`,
+which they already share (set `REQUEST_STATE_KEY`, 32 bytes of hex, the same
+on every instance, to use a key of your own instead). A link made by a stdio
+server is never accepted by the HTTP route. `wardby resume` sends the link only over HTTPS, or over plain
 HTTP to this machine.
 
 The token is in the link's query string (as with the secret-entry form's

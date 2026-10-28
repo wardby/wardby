@@ -30,14 +30,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function setup(repo = makeRepo()) {
+async function setup(repo = makeRepo(), resultBranch: string | null = "wardby/run-x") {
   const gzip = transcriptGzip();
   const served = await serveTranscript({
     gzip,
-    meta: meta(
-      { repository: `local:${repo.dir}`, headRef: "main", resultBranch: "wardby/run-x", baseSha: repo.base },
-      gzip,
-    ),
+    meta: meta({ repository: `local:${repo.dir}`, headRef: "main", resultBranch, baseSha: repo.base }, gzip),
   });
   server = served.server;
   const lines: string[] = [];
@@ -82,12 +79,33 @@ describe("wardby resume", () => {
       "off",
     ]);
     expect(launches[0].args[6]).toBe("--append-system-prompt");
-    expect(launches[0].args[7]).toBe(moveNote({ runId: RUN_ID, ref: "wardby/run-x", from: "/workspace", checkout }));
+    expect(launches[0].args[7]).toBe(
+      moveNote({ runId: RUN_ID, ref: "wardby/run-x", from: "/workspace", checkout, runChanges: true }),
+    );
+    expect(launches[0].args[7]).toContain("already contains the run's changes");
     const output = allOutput(lines, stdout);
     expect(output).toContain(`Session file: ${sessionFile}`);
     expect(output).toContain(`Checkout:     ${checkout} at wardby/run-x`);
     expect(output).not.toContain(FAKE_TOKEN);
     expect(output).not.toContain(encodeURIComponent(FAKE_TOKEN));
+  });
+
+  it("the move note says the run's changes are missing when the checkout fell back to the base commit", async () => {
+    const repo = makeRepo();
+    const { link, launches, deps } = await setup(repo, "wardby/run-gone");
+    expect(await resumeCommand([link], deps)).toBe(0);
+    const note = launches[0].args[7];
+    expect(note).toContain(`checked out at ${repo.base}`);
+    expect(note).toContain("the run's changes are not in it");
+    expect(note).not.toContain("already contains");
+  });
+
+  it("--here leaves the run's changes out of the move note", async () => {
+    const { link, launches, deps } = await setup();
+    expect(await resumeCommand([link, "--here"], deps)).toBe(0);
+    const note = launches[0].args[7];
+    expect(note).not.toContain("already contains");
+    expect(note).not.toContain("changes are not in it");
   });
 
   it("--print prints the command instead of starting claude, and so does a missing claude", async () => {
