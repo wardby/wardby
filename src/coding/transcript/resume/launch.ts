@@ -41,10 +41,27 @@ export function wardbyBinPath(): string {
   return fileURLToPath(new URL("../../../../bin/wardby.js", import.meta.url));
 }
 
-export function moveNote(opts: { runId: string; ref: string; from: string; checkout: string }): string {
+/**
+ * `runChanges`: true when the checkout is at the run's branch, false when it fell back to the base
+ * commit, undefined for --here (the importer did not choose what is checked out).
+ */
+export function moveNote(opts: {
+  runId: string;
+  ref: string;
+  from: string;
+  checkout: string;
+  runChanges?: boolean;
+}): string {
+  const changes =
+    opts.runChanges === true
+      ? "This checkout already contains the run's changes: do not redo them. "
+      : opts.runChanges === false
+        ? "This checkout is at the run's base commit: the run's changes are not in it. "
+        : "";
   return (
     `This conversation was moved from wardby run ${opts.runId} to the user's machine. ` +
     `The worker path ${opts.from} is now ${opts.checkout} (checked out at ${opts.ref}). ` +
+    changes +
     `The run_command tool only worked inside the worker and is gone: use your local tools (Bash, Read, Edit) in ${opts.checkout}.`
   );
 }
