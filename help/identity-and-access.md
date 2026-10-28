@@ -47,4 +47,4 @@ Read [`docs/getting-started-identity-provider.md`](../docs/getting-started-ident
 for the required claims, scope list, role mapping, provider examples, and
 client registration.
 
-To share an agent with one person or with everyone signed in, see [Share an agent, or make it public](sharing-agents.md).
+From Wardby 0.7.0, to share an agent with one person or with everyone signed in, see the help article `sharing-agents`.
