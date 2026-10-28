@@ -22,7 +22,9 @@ import {
 export async function readBoundedRegularFile(path: string, maxBytes: number, errorCode: string): Promise<string> {
   let file;
   try {
-    file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    // The mode only applies to a created file, and this open never creates one; an owner-only mode
+    // states that, so CodeQL's temporary-file rule doesn't read the open as a world-readable create.
+    file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
   } catch (error) {
     // ELOOP: the path is a symlink.
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(errorCode, { cause: error });
