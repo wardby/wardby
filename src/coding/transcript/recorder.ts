@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import type { PrismaClient } from "#prisma";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
 import { withEscapedForms } from "../../core/secret-spans.js";
@@ -15,6 +16,8 @@ import {
 export type TranscriptStatus = "stored" | "too_large" | "not_captured" | "failed";
 /** What `record` reports to its caller: the row's status, or that the row itself was lost. */
 export type RecordResult = TranscriptStatus | "row_write_failed";
+
+const gzipAsync = promisify(gzip);
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -151,7 +154,8 @@ export class RunTranscriptRecorder {
       ),
     );
     if (body.byteLength > this.deps.maxBytes) return { status: "too_large", sessionId: sanitized.sessionId };
-    const stored = gzipSync(body);
+    // Async, so compressing a large transcript does not block the server's event loop.
+    const stored = await gzipAsync(body);
     const blobKey = transcriptBlobKey(input.runId);
     try {
       await blobs.put(blobKey, stored, { contentType: "application/gzip" });
