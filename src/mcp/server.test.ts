@@ -279,6 +279,52 @@ describe("buildMcpServer", () => {
     await expect(b.verifyRequestState(token)).resolves.toEqual({ ok: true, step: "cross-instance" });
   });
 
+  describe("REQUEST_STATE_KEY unset, derived from SECRET_APP_KEY over HTTP", () => {
+    const build = (env: NodeJS.ProcessEnv, deriveRequestStateKey: boolean) =>
+      buildMcpServer({
+        providers: fakeProviders,
+        db: fakeDb,
+        config: { canonicalUri: "https://host/mcp" },
+        env,
+        deriveRequestStateKey,
+      });
+    const appKey = "11".repeat(32);
+
+    it("two HTTP instances sharing SECRET_APP_KEY verify each other's tokens", async () => {
+      const token = await build({ SECRET_APP_KEY: appKey }, true).mintRequestState({ ok: true });
+      await expect(build({ SECRET_APP_KEY: appKey }, true).verifyRequestState(token)).resolves.toEqual({ ok: true });
+    });
+
+    it("a different SECRET_APP_KEY does not verify", async () => {
+      const token = await build({ SECRET_APP_KEY: appKey }, true).mintRequestState({ ok: true });
+      await expect(build({ SECRET_APP_KEY: "22".repeat(32) }, true).verifyRequestState(token)).rejects.toThrow();
+    });
+
+    it("the derived key is not SECRET_APP_KEY itself", async () => {
+      const token = await build({ SECRET_APP_KEY: appKey }, true).mintRequestState({ ok: true });
+      await expect(build({ REQUEST_STATE_KEY: appKey }, false).verifyRequestState(token)).rejects.toThrow();
+    });
+
+    it("a stdio server (no derivation) keeps a key of its own, so its tokens never verify over HTTP", async () => {
+      const token = await build({ SECRET_APP_KEY: appKey }, false).mintRequestState({ ok: true });
+      await expect(build({ SECRET_APP_KEY: appKey }, true).verifyRequestState(token)).rejects.toThrow();
+    });
+
+    it("REQUEST_STATE_KEY still wins over the derived key", async () => {
+      const env = { SECRET_APP_KEY: appKey, REQUEST_STATE_KEY: "aa".repeat(32) };
+      const token = await build(env, true).mintRequestState({ ok: true });
+      await expect(build({ REQUEST_STATE_KEY: "aa".repeat(32) }, false).verifyRequestState(token)).resolves.toEqual({
+        ok: true,
+      });
+      await expect(build({ SECRET_APP_KEY: appKey }, true).verifyRequestState(token)).rejects.toThrow();
+    });
+
+    it("a malformed SECRET_APP_KEY falls back to a random key", async () => {
+      const token = await build({ SECRET_APP_KEY: "abcd" }, true).mintRequestState({ ok: true });
+      await expect(build({ SECRET_APP_KEY: "abcd" }, true).verifyRequestState(token)).rejects.toThrow();
+    });
+  });
+
   it("a malformed REQUEST_STATE_KEY (wrong byte length) throws at construction", () => {
     expect(() =>
       buildMcpServer({

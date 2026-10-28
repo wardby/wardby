@@ -41,7 +41,7 @@ wardby:
   confidence: high
 ---
 
-Secret entry can mint a link, accept the browser submission, and poll the result on different HTTP replicas. Outcomes are stored in Postgres, but request-state verification still requires the same `REQUEST_STATE_KEY` on those replicas; the unset fallback generates an independent random key per process.[^key][^codec][^outcome]
+Secret entry can mint a link, accept the browser submission, and poll the result on different HTTP replicas. Outcomes are stored in Postgres, but request-state verification still requires the same signing key on those replicas: `REQUEST_STATE_KEY` when set, otherwise a key each HTTP replica derives from the `SECRET_APP_KEY` they share (a stdio server keeps a random key of its own).[^key][^codec][^outcome]
 
 **What to do:** preserve both shared verification and shared outcome storage when scaling this flow. Database sharing alone leaves browser links unverifiable on another replica. [Secrets and tools](../tool-secrets.md) already describes browser entry; this concept records the replica contract.
 

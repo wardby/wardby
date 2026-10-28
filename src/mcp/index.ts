@@ -404,7 +404,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const authProvider = buildAuthProvider(providerConfig.auth, authConfig, prisma);
   const selfHosted = authProviderKind === "self-hosted" ? (authProvider as SelfHostedAuthProvider) : undefined;
 
-  const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: mcpConfig.canonicalUri } });
+  const mcp = buildMcpServer({
+    providers,
+    db: prisma,
+    config: { canonicalUri: mcpConfig.canonicalUri },
+    deriveRequestStateKey: true,
+  });
   const httpOrigin = canonicalUrl(mcpConfig.canonicalUri).origin;
   registerAllTools(mcp, {
     secretElicitationUrl: (token) =>
