@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
 import { withEscapedForms } from "../../core/secret-spans.js";
-import { redactSecrets } from "../redact.js";
+import { REDACTED, redactSecrets } from "../redact.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
 import { formatTranscriptFile, MAX_TRANSCRIPT_BYTES, parseTranscriptFile } from "./format.js";
 
@@ -189,7 +189,27 @@ export class RunTranscriptRecorder {
  * instead lets token patterns consume JSON escapes (the Bearer pattern eats the backslash of `\"`).
  */
 function redactJsonLine(line: string, secrets: readonly string[]): string {
-  return JSON.stringify(redactJsonValue(JSON.parse(line) as unknown, secrets));
+  return JSON.stringify(redactJsonValue(parseNumbersAsSource(line, secrets), secrets));
+}
+
+type SourceReviver = (key: string, value: unknown, context: { source?: string }) => unknown;
+
+const NUMERIC = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+
+/**
+ * Parses one record, replacing any number that holds a secret (a digits-only value written as a
+ * JSON number) with the marker. Checks the source text and the numeric value: the sanitiser has
+ * already re-serialised the record, so a number too long for a double arrives rounded.
+ */
+function parseNumbersAsSource(line: string, secrets: readonly string[]): unknown {
+  const numericSecrets = secrets.filter((secret) => NUMERIC.test(secret)).map(Number);
+  const reviver: SourceReviver = (_key, value, context) => {
+    if (typeof value !== "number") return value;
+    const source = context.source ?? String(value);
+    if (redactSecrets(source, secrets) !== source || numericSecrets.includes(value)) return REDACTED;
+    return value;
+  };
+  return JSON.parse(line, reviver as Parameters<typeof JSON.parse>[1]) as unknown;
 }
 
 function redactJsonValue(value: unknown, secrets: readonly string[]): unknown {

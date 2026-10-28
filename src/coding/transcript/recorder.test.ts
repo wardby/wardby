@@ -284,6 +284,32 @@ describe("RunTranscriptRecorder", () => {
     expect(text).toContain("v [REDACTED]");
   });
 
+  it("redacts a digits-only secret written as a JSON number, including one too long for a double", async () => {
+    const pin = "48213907";
+    const longPin = "98765432109876543210";
+    const sanitized = sanitizeClaudeTranscript(FIXTURE)!;
+    const lines = sanitized.lines.map((line) => {
+      const rec = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
+      if (rec.type === "assistant" && Array.isArray(rec.message?.content)) {
+        for (const block of rec.message.content as Array<Record<string, unknown>>) {
+          if (block.type === "tool_use") block.input = { account: 0, other: 0, count: 3 };
+        }
+      }
+      return JSON.stringify(rec).replace('"account":0', `"account":${pin}`).replace('"other":0', `"other":${longPin}`);
+    });
+    const file = formatTranscriptFile(okHeader(sanitized.sessionId), lines);
+    expect(file).toContain(`"account":${pin}`);
+    expect(file).toContain(`"other":${longPin}`);
+    const rec = recorder({ secretValues: async () => [SECRET, RAW2, pin, longPin] });
+    expect(await rec.record(input({ read: async () => file }))).toBe("stored");
+    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    expect(text).not.toContain(pin);
+    expect(text).not.toContain(longPin.slice(0, 15));
+    expect(text).toContain('"account":"[REDACTED]"');
+    expect(text).toContain('"other":"[REDACTED]"');
+    expect(text).toContain('"count":3');
+  });
+
   it("keeps a row whose blob cannot be deleted but prunes the rest", async () => {
     const rec = recorder();
     for (const id of ["a", "b", "c"]) await rec.record(input({ runId: id }));
