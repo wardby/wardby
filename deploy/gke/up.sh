@@ -8,6 +8,8 @@
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
+#   WARDBY_SESSION_TRANSCRIPTS=true   # optional: store sessionResume transcripts on the control plane (default false; needs session_transcripts_enabled in terraform.tfvars)
+#   RUN_TRANSCRIPT_MAX_BYTES=20971520   # optional: largest transcript stored, with WARDBY_SESSION_TRANSCRIPTS=true (default 10 MiB)
 #   CODING_MAX_DISK_MB=8192   # optional: largest per-agent workspaceDiskMb the control plane accepts (default 2048)
 #   CODING_MEMORY_MB=6144   # optional: memory for each coding run's pod, in MiB (default 2048)
 #   CODING_CPUS=2   # optional: CPUs for each coding run's pod (default 1)
@@ -225,6 +227,74 @@ inject_dependency_cache_env() {
 }
 # --- end WARDBY_DEPENDENCY_CACHE proxy env ---
 
+# --- WARDBY_SESSION_TRANSCRIPTS check ---
+# Optional: true makes the control plane store the session transcripts of agents
+# with sessionResume. It needs the bucket from deploy/gke/session-transcripts.tf
+# (session_transcripts_enabled = true in terraform.tfvars). Empty = false, and
+# then no blob-store env reaches the control plane. RUN_TRANSCRIPT_MAX_BYTES
+# (optional) caps a transcript's size before compression.
+WARDBY_SESSION_TRANSCRIPTS="${WARDBY_SESSION_TRANSCRIPTS:-false}"
+case "$WARDBY_SESSION_TRANSCRIPTS" in
+  true | false) ;;
+  *)
+    echo "up.sh: WARDBY_SESSION_TRANSCRIPTS must be true or false (got \"$WARDBY_SESSION_TRANSCRIPTS\")." >&2
+    exit 1
+    ;;
+esac
+RUN_TRANSCRIPT_MAX_BYTES="${RUN_TRANSCRIPT_MAX_BYTES:-}"
+if [[ -n "$RUN_TRANSCRIPT_MAX_BYTES" ]]; then
+  if ! [[ "$RUN_TRANSCRIPT_MAX_BYTES" =~ ^[1-9][0-9]{6,7}$ ]] \
+    || ((RUN_TRANSCRIPT_MAX_BYTES < 1048576 || RUN_TRANSCRIPT_MAX_BYTES > 67108864)); then
+    echo "up.sh: RUN_TRANSCRIPT_MAX_BYTES must be an integer between 1048576 and 67108864 (got \"$RUN_TRANSCRIPT_MAX_BYTES\")." >&2
+    exit 1
+  fi
+fi
+if [[ "$WARDBY_SESSION_TRANSCRIPTS" = true ]]; then
+  echo "up.sh: session transcripts are on."
+else
+  echo "up.sh: session transcripts are off."
+  if [[ -n "$RUN_TRANSCRIPT_MAX_BYTES" ]]; then
+    echo "up.sh: RUN_TRANSCRIPT_MAX_BYTES is ignored while WARDBY_SESSION_TRANSCRIPTS is not true."
+  fi
+fi
+# --- end WARDBY_SESSION_TRANSCRIPTS check ---
+
+# --- WARDBY_SESSION_TRANSCRIPTS control-plane env ---
+# Adds the blob-store env to the control plane's container, right after its
+# WARDBY_MOBILE_ENABLED entry (a placeholder only the control plane has), in its
+# own indentation. Does nothing unless transcripts are on. The bucket and the
+# retention days come from terraform (SESSION_TRANSCRIPTS_BUCKET and
+# SESSION_TRANSCRIPTS_RETENTION_DAYS, read after the apply), so the bucket's
+# lifecycle rule and the control plane's RUN_TRANSCRIPT_RETENTION_DAYS always
+# agree. Only the control plane gets it, because only the control plane's
+# service account can reach the bucket; the coding proxy keeps its own
+# (dependency cache) blob store, if any.
+inject_session_transcripts_env() {
+  if [[ "$WARDBY_SESSION_TRANSCRIPTS" != true ]]; then
+    cat
+    return
+  fi
+  if ! [[ "${SESSION_TRANSCRIPTS_BUCKET:-}" =~ ^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$ ]]; then
+    echo "up.sh: WARDBY_SESSION_TRANSCRIPTS=true but terraform has no session transcripts bucket (got \"${SESSION_TRANSCRIPTS_BUCKET:-}\"); set session_transcripts_enabled and session_transcripts_bucket_name in ${TF_DIR:-deploy/gke}/terraform.tfvars and re-run." >&2
+    exit 1
+  fi
+  if ! [[ "${SESSION_TRANSCRIPTS_RETENTION_DAYS:-}" =~ ^[1-9][0-9]{0,3}$ ]] \
+    || ((SESSION_TRANSCRIPTS_RETENTION_DAYS > 3650)); then
+    echo "up.sh: terraform's session_transcripts_retention_days output is not a whole number from 1 to 3650 (got \"${SESSION_TRANSCRIPTS_RETENTION_DAYS:-}\")." >&2
+    exit 1
+  fi
+  awk -v bucket="$SESSION_TRANSCRIPTS_BUCKET" -v days="$SESSION_TRANSCRIPTS_RETENTION_DAYS" -v max_bytes="$RUN_TRANSCRIPT_MAX_BYTES" '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      print item_indent "- name: BLOB_STORE";                     print value_indent "value: \"gcs\""
+      print item_indent "- name: BLOB_STORE_GCS_BUCKET";          print value_indent "value: \"" bucket "\""
+      print item_indent "- name: RUN_TRANSCRIPT_RETENTION_DAYS";  print value_indent "value: \"" days "\""
+      if (max_bytes != "") { print item_indent "- name: RUN_TRANSCRIPT_MAX_BYTES"; print value_indent "value: \"" max_bytes "\"" }
+    }'
+}
+# --- end WARDBY_SESSION_TRANSCRIPTS control-plane env ---
+
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
 terraform -chdir="$TF_DIR" apply -input=false -auto-approve
@@ -251,6 +321,9 @@ GATEWAY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw gateway_servic
 GATEWAY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw gateway_database_user)"
 # Empty unless dependency_cache_enabled; only consulted when WARDBY_DEPENDENCY_CACHE=true.
 DEPENDENCY_CACHE_BUCKET="$(terraform -chdir="$TF_DIR" output -raw dependency_cache_bucket 2>/dev/null || true)"
+# Empty unless session_transcripts_enabled; only consulted when WARDBY_SESSION_TRANSCRIPTS=true.
+SESSION_TRANSCRIPTS_BUCKET="$(terraform -chdir="$TF_DIR" output -raw session_transcripts_bucket 2>/dev/null || true)"
+SESSION_TRANSCRIPTS_RETENTION_DAYS="$(terraform -chdir="$TF_DIR" output -raw session_transcripts_retention_days 2>/dev/null || true)"
 for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
            PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER \
            GATEWAY_SERVICE_ACCOUNT GATEWAY_DATABASE_USER; do
@@ -604,6 +677,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # end lost, as they would without the durable executor).
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_dependency_cache_env \
+  | inject_session_transcripts_env \
   | inject_coding_max_disk_env \
   | inject_coding_resources_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
