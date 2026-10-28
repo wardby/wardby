@@ -9,7 +9,7 @@ sources:
   - id: deny
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/datastore/scoped.ts#L33-L52
   - id: wiring
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L1368-L1388
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/core/runner.ts#L1590-L1610
   - id: shared
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/datastores.ts#L119-L151
 wardby:
@@ -27,9 +27,9 @@ wardby:
     - id: wiring
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1368, 1388]
+      lines: [1590, 1610]
       symbol: createNativeRunTools.scopedHost
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:61bb446c6ed2a1fde4c53951680588ac75de28d6b3219eebb8ae801cd4438816
     - id: shared
       repo: github:wardby/wardby
@@ -49,6 +49,6 @@ The private wrapper therefore rejects every shared method, including reads, even
 
 [^deny]: src/providers/datastore/scoped.ts, lines 33-52.
 
-[^wiring]: src/core/runner.ts, lines 1368-1388.
+[^wiring]: src/core/runner.ts, lines 1590-1610.
 
 [^shared]: src/core/datastores.ts, lines 119-151.

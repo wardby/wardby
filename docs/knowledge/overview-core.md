@@ -9,11 +9,11 @@ sources:
   - id: schedule
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/scheduler.ts#L55-L82
   - id: dispatch
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/dispatch.ts#L634-L684
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/core/dispatch.ts#L674-L724
   - id: engine
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/engine-native.ts#L90-L156
   - id: finish
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L499-L516
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/core/runner.ts#L507-L524
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -29,9 +29,9 @@ wardby:
     - id: dispatch
       repo: github:wardby/wardby
       path: src/core/dispatch.ts
-      lines: [634, 684]
+      lines: [674, 724]
       symbol: dispatchRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:2e9f0d8d431b6e7d2571f0126a39763be2f87f8ff2f0147a17c7fb69f144054e
     - id: engine
       repo: github:wardby/wardby
@@ -43,9 +43,9 @@ wardby:
     - id: finish
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [499, 516]
+      lines: [507, 524]
       symbol: finishRunClaimed
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:258b0ccb1bf328fef95a5e459858eb3f02ecc3d600f6ff4a7aae562a6416936c
   confidence: high
 ---
@@ -65,8 +65,8 @@ Core orchestrates Run, delegation edges, budget reservations and integration sta
 
 [^schedule]: src/core/scheduler.ts, lines 55-82.
 
-[^dispatch]: src/core/dispatch.ts, lines 634-684.
+[^dispatch]: src/core/dispatch.ts, lines 674-724.
 
 [^engine]: src/core/engine-native.ts, lines 90-156.
 
-[^finish]: src/core/runner.ts, lines 499-516.
+[^finish]: src/core/runner.ts, lines 507-524.

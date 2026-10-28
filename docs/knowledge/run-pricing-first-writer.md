@@ -9,7 +9,7 @@ sources:
   - id: pin
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/run-pricing.ts#L45-L69
   - id: adapter
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/llm/routing.ts#L74-L79
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/providers/llm/routing.ts#L82-L87
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -25,9 +25,9 @@ wardby:
     - id: adapter
       repo: github:wardby/wardby
       path: src/providers/llm/routing.ts
-      lines: [74, 79]
+      lines: [82, 87]
       symbol: RoutingLlmProvider.forRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:5511b7ed50630042519c07b0ef699eaa44cf10951933aeb1db69434f5160f278
   confidence: high
 ---
@@ -40,4 +40,4 @@ The router can bind an adapter to the stored entry, so request shaping and price
 
 [^pin]: src/core/run-pricing.ts, lines 45-69.
 
-[^adapter]: src/providers/llm/routing.ts, lines 74-79.
+[^adapter]: src/providers/llm/routing.ts, lines 82-87.

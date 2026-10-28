@@ -13,7 +13,7 @@ sources:
   - id: metrics
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/observability/metrics-server.ts#L21-L43
   - id: knowledge
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/knowledge/check.ts#L68-L86
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/knowledge/check.ts#L69-L87
   - id: fixtures
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/tools/codex-request-shape.ts#L48-L76
 wardby:
@@ -45,9 +45,9 @@ wardby:
     - id: knowledge
       repo: github:wardby/wardby
       path: src/knowledge/check.ts
-      lines: [68, 86]
+      lines: [69, 87]
       symbol: checkBundle
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:819ec7779ed8ce9529dfe3364d02936c31f88d98125ad3429094729510151bf1
     - id: fixtures
       repo: github:wardby/wardby
@@ -78,6 +78,6 @@ The area owns API schemas, projections, stream subscriptions, metric registries 
 
 [^metrics]: src/observability/metrics-server.ts, lines 21-43.
 
-[^knowledge]: src/knowledge/check.ts, lines 68-86.
+[^knowledge]: src/knowledge/check.ts, lines 69-87.
 
 [^fixtures]: src/tools/codex-request-shape.ts, lines 48-76.
