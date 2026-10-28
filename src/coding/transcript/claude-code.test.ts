@@ -264,6 +264,75 @@ describe("sanitizeClaudeTranscript: record kinds", () => {
     expect(out.map((r) => r.uuid)).toEqual(["u", "a"]);
   });
 
+  it("keeps the run's final StructuredOutput call and its result, so resume sees the answer was given", () => {
+    const call = (uuid: string, parent: string, id: string, name: string) =>
+      rec({
+        type: "assistant",
+        uuid,
+        parentUuid: parent,
+        message: { role: "assistant", content: [{ type: "tool_use", id, name, input: { summary: "done" } }] },
+      });
+    const result = (uuid: string, parent: string, id: string) =>
+      user(uuid, parent, [
+        { type: "tool_result", tool_use_id: id, content: "Structured output provided successfully" },
+      ]);
+    const lines = [
+      user("u", null, "go"),
+      reply("a", "u", "Let me provide the final summary:"),
+      call("so", "a", "toolu_so", "StructuredOutput"),
+      result("r", "so", "toolu_so"),
+    ];
+    expect(parse(sanitizeClaudeTranscript(lines.join("\n"))!.lines).map((r) => r.uuid)).toEqual(["u", "a", "so", "r"]);
+    // A run that only ever called tools still settles on its last answered call.
+    const toolsOnly = [
+      user("u", null, "go"),
+      call("c1", "u", "toolu_1", "mcp__wardby_tools__run_command"),
+      result("r1", "c1", "toolu_1"),
+      call("so", "r1", "toolu_so", "StructuredOutput"),
+      result("r2", "so", "toolu_so"),
+    ];
+    expect(parse(sanitizeClaudeTranscript(toolsOnly.join("\n"))!.lines).map((r) => r.uuid)).toEqual([
+      "u",
+      "c1",
+      "r1",
+      "so",
+      "r2",
+    ]);
+  });
+
+  it("cuts a tool call left without a result, back to the last point where nothing was waiting", () => {
+    const call = (uuid: string, parent: string, ids: string[]) =>
+      rec({
+        type: "assistant",
+        uuid,
+        parentUuid: parent,
+        message: {
+          role: "assistant",
+          content: ids.map((id) => ({
+            type: "tool_use",
+            id,
+            name: "mcp__wardby_tools__run_command",
+            input: { command: "true" },
+          })),
+        },
+      });
+    const result = (uuid: string, parent: string, ids: string[]) =>
+      user(
+        uuid,
+        parent,
+        ids.map((id) => ({ type: "tool_result", tool_use_id: id, content: "ok" })),
+      );
+    const lines = [
+      user("u", null, "go"),
+      call("c1", "u", ["t1"]),
+      result("r1", "c1", ["t1"]),
+      call("c2", "r1", ["t2", "t3"]),
+      result("r2", "c2", ["t2"]),
+      call("c3", "r2", ["t4"]),
+    ];
+    expect(parse(sanitizeClaudeTranscript(lines.join("\n"))!.lines).map((r) => r.uuid)).toEqual(["u", "c1", "r1"]);
+  });
+
   it("adds the fallback title only when the session has none", () => {
     const lines = [user("u", null, "go"), reply("a", "u", "ok")];
     const titled = parse(sanitizeClaudeTranscript(lines.join("\n"), "wardby run r1: add discounts")!.lines);

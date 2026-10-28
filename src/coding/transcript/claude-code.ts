@@ -39,6 +39,8 @@ export const KEPT_ATTACHMENTS = new Set([
   "queued_command",
   "read_truncation_notice",
   "skill_listing",
+  // A copy of the run's final StructuredOutput answer, tied to that call (not shown to the model).
+  "structured_output",
   "task_reminder",
   "task_status",
 ]);
@@ -97,10 +99,7 @@ export function sanitizeClaudeTranscript(jsonl: string, fallbackTitle?: string):
     kept.push(copy);
   }
   for (const record of kept) record.parentUuid = resolveParent(parentOf(record), droppedParent);
-  let end = -1;
-  kept.forEach((record, index) => {
-    if (isCompleteAssistant(record)) end = index;
-  });
+  const end = lastSettled(kept);
   if (end < 0 || !sessionId) return null;
   let records = kept.slice(0, end + 1);
   let present = new Set(records.map((record) => record.uuid));
@@ -251,9 +250,33 @@ function withoutThinking(message: unknown): JsonRecord | null {
   return content.length === m.content.length ? m : { ...m, content };
 }
 
-/** An assistant record that asks for no tool: the history can end here and be continued. */
-function isCompleteAssistant(record: JsonRecord): boolean {
-  if (record.type !== "assistant" || record.isSidechain === true) return false;
-  const content = (record.message as JsonRecord).content;
-  return !Array.isArray(content) || !content.some((block) => (block as JsonRecord | null)?.type === "tool_use");
+/**
+ * The index the history can end at and be continued: the last main-chain record after which no tool
+ * call is waiting for its result. That is a reply that asks for no tool, or a tool result that answers
+ * the last open call (a run's final StructuredOutput call and its result end this way). A call left
+ * without a result (the run was cut off mid-command) is cut, with everything after the last such point.
+ * -1 when the history never settles.
+ */
+function lastSettled(records: readonly JsonRecord[]): number {
+  let end = -1;
+  const waiting = new Set<unknown>();
+  records.forEach((record, index) => {
+    if (record.isSidechain === true || (record.type !== "user" && record.type !== "assistant")) return;
+    const content = (record.message as JsonRecord).content;
+    const blocks = Array.isArray(content) ? (content as Array<JsonRecord | null>) : [];
+    if (record.type === "assistant") {
+      const calls = blocks.filter((block) => block?.type === "tool_use");
+      // A reply that asks for no tool settles everything before it.
+      if (calls.length === 0) {
+        waiting.clear();
+        end = index;
+      }
+      for (const call of calls) waiting.add(call?.id);
+      return;
+    }
+    const results = blocks.filter((block) => block?.type === "tool_result");
+    for (const result of results) waiting.delete(result?.tool_use_id);
+    if (results.length > 0 && waiting.size === 0) end = index;
+  });
+  return end;
 }

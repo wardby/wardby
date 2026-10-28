@@ -746,7 +746,8 @@ test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
     response.end(
       turn++ === 0
         ? thinkingToolUseSse("toolu_resume_compatibility", "mcp__wardby_tools__run_command", { command: "true" })
-        : sse("first-session-done"),
+        : // Like a worker run, the session ends on its StructuredOutput call and that call's result.
+          toolUseSse("toolu_final_answer_probe", "StructuredOutput", { outcome: "FINAL-ANSWER-PROBE" }),
     );
   });
   let sessionId;
@@ -755,6 +756,15 @@ test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
       ...common,
       prompt: FIRST_PROMPT,
       mcpServers: { wardby_tools: probeServer() },
+      outputFormat: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: { outcome: { type: "string" } },
+          required: ["outcome"],
+          additionalProperties: false,
+        },
+      },
     });
     sessionId = messages.find((message) => typeof message.session_id === "string")?.session_id;
   } finally {
@@ -794,6 +804,7 @@ test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
   assert(sanitized, "the transcript sanitises");
   const cleaned = sanitized.lines.join("\n") + "\n";
   assert(!cleaned.includes("THINKING-PROBE"));
+  assert(cleaned.includes("FINAL-ANSWER-PROBE"), "the sanitised transcript keeps the final answer");
   await writeFile(files[0], cleaned);
 
   const second = await fakeAnthropic((_request, response) => {
@@ -812,6 +823,8 @@ test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
     assert.equal(bodies.length, 1);
     assert(bodies[0].includes("FIRST-PROMPT-PROBE"), "the first prompt replays");
     assert(bodies[0].includes(TOOL_RESULT), "the tool result replays");
+    assert(bodies[0].includes("FINAL-ANSWER-PROBE"), "the final StructuredOutput call replays");
+    assert(bodies[0].includes('"tool_use_id":"toolu_final_answer_probe"'), "and so does its result");
     assert(bodies[0].includes("Second prompt."), "the new prompt is sent");
     assert(!bodies[0].includes('"type":"thinking"'), "no thinking block replays");
     assert(!bodies[0].includes("THINKING-PROBE"));
