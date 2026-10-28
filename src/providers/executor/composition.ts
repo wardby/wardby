@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { PrismaClient } from "#prisma";
 import {
+  loadBlobStoreConfig,
   loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,
   loadGitHubVcsConfig,
@@ -32,6 +33,13 @@ import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js"
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
+import {
+  RunTranscriptRecorder,
+  loadTranscriptMaxBytes,
+  loadTranscriptRetentionDays,
+} from "../../coding/transcript/recorder.js";
+import { loadAgentSecretValues } from "../../core/secret-guard.js";
+import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
@@ -86,6 +94,8 @@ export interface ConfiguredExecutorOptions {
    * launcher (wakes the coding proxy before a run); absent: `DISABLED_POWER`.
    */
   power?: Power;
+  /** Decrypts agent secrets for transcript redaction (session resume). Absent: transcripts are never stored. */
+  secretCipher?: Parameters<typeof loadAgentSecretValues>[1];
 }
 
 /**
@@ -202,7 +212,21 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   // The release and terminal hooks need the composed RoutingExecutor, which only exists
   // after the ContainerExecutor it wraps is built. The closure reads
   // `composed` only when a run finishes, which is after this function returns.
+  const blobStoreConfig = loadBlobStoreConfig(env);
+  const cipher = options.secretCipher;
+  const transcripts = new RunTranscriptRecorder({
+    db: options.db,
+    blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,
+    secretValues: async (agentId) => {
+      if (!cipher) throw new Error("transcript_secrets_unavailable");
+      const named = await loadAgentSecretValues(options.db, cipher, agentId);
+      return named.flatMap((entry) => entry.values);
+    },
+    retentionDays: loadTranscriptRetentionDays(env),
+    maxBytes: loadTranscriptMaxBytes(env),
+  });
   const coding = new ContainerExecutor({
+    transcripts,
     store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
     jobs,
     vcs,

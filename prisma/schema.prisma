@@ -371,6 +371,7 @@ model Run {
   /// native runs from before the field existed, which run in the control plane.
   nativeExecutionMode  NativeExecutionMode?
   codingRun            CodingRun?
+  transcript           RunTranscript?
   hostCheck            RunHostCheck?
   hostStatus           RunHostStatus?
   issueStatus          RunIssueStatus?
@@ -479,6 +480,9 @@ model CodingAgentProfile {
   /// Restore node_modules from a cached snapshot (written only by trusted wardby code before the
   /// agent starts) instead of a full install. Owner-set; off by default.
   dependencyCache          Boolean           @default(false)
+  /// Keep each Claude Code run's session transcript so it can be resumed in a local CLI
+  /// (docs/coding-agent-setup.md#resume-a-run-locally). Owner-set; off by default.
+  sessionResume            Boolean           @default(false)
   /// Owner-set package audit mode (docs/coding-packages.md#package-audit-mode); active while now < packageAuditUntil.
   packageAuditMode         PackageAuditMode?
   /// End of the audit window; null = off.
@@ -582,6 +586,8 @@ model CodingRun {
   prDescriptionOutcome  String?
   /// Fixed at dispatch from the profile's dependencyCache.
   dependencyCache       Boolean             @default(false)
+  /// Fixed at dispatch from the profile's sessionResume.
+  sessionResume         Boolean             @default(false)
   /// What the run's dependency cache did, written by the control plane when it collects the run:
   /// { result, key?, sizeBytes?, restoreMs?, installMs?, reason? }. Null = not used or not reported.
   dependencyCacheResult Json?
@@ -613,6 +619,27 @@ model CodingRun {
   @@index([queuedAt])
   @@index([rootCodingRunId])
   @@index([mergeOrder])
+}
+
+/// A coding run's session transcript for local resume: metadata only. The redacted content lives in
+/// the blob store under blobKey; the unredacted transcript is never stored.
+model RunTranscript {
+  runId     String   @id
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// "claude-code" (Codex later).
+  provider  String
+  /// stored | too_large | not_captured | failed
+  status    String
+  /// Fixed code for a status other than stored (e.g. missing, no_blob_store, secrets_unavailable); never content.
+  reason    String?
+  sessionId String?
+  blobKey   String?
+  sizeBytes Int?
+  sha256    String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([expiresAt])
 }
 
 /// Coding-run services (docs/coding-services.md): the catalog a repository's

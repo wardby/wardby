@@ -59,6 +59,7 @@ import {
   type ContainerRunSnapshot,
   type ProvisioningClaim,
 } from "./container.js";
+import type { RecordResult, RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
 
 /**
  * The executor's operator log, captured. The persisted run error is a bare
@@ -114,6 +115,7 @@ const LOCAL_REPOSITORY = "local:/srv/repos/example";
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
   return {
     runId: "run-1",
+    agentId: "agent-1",
     status: "running",
     agentKind: "coding",
     agentName: "knock-knock-implement",
@@ -382,6 +384,8 @@ class FakeJobs implements WorkspaceJobLauncher {
     this.removals += 1;
     this.events.push("remove");
   }
+  /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
+  readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   async materializeWorkspace(): Promise<void> {
     this.materializations += 1;
     this.events.push("materialize");
@@ -619,6 +623,129 @@ beforeEach(() => {
 });
 
 describe("ContainerExecutor", () => {
+  describe("session transcripts", () => {
+    const CLAUDE_RUN = { sessionResume: true, provider: "claude-code" } as const;
+    async function recorded(
+      overrides: Partial<ContainerRunSnapshot>,
+      record: (input: RecordTranscriptInput) => Promise<RecordResult>,
+      setup: (created: Awaited<ReturnType<typeof harness>>) => void = () => {},
+    ) {
+      const calls: RecordTranscriptInput[] = [];
+      const created = await harness(
+        { model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, ...overrides },
+        IMAGE,
+        undefined,
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+        {
+          transcripts: {
+            record: async (input) => {
+              created.events.push("record");
+              calls.push(input);
+              return record(input);
+            },
+          },
+        },
+      );
+      setup(created);
+      await created.executor.start("run-1");
+      return { created, calls };
+    }
+    const stored = async () => "stored" as const;
+
+    it("records before the job is removed for a succeeded session-resume run", async () => {
+      const { created, calls } = await recorded(CLAUDE_RUN, stored, (c) => {
+        c.jobs.readTranscript = async (_handle, maxBytes) => `file:${maxBytes}`;
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ runId: "run-1", agentId: "agent-1", provider: "claude-code" });
+      expect(calls[0]).not.toHaveProperty("capability");
+      expect(await calls[0].read(123)).toBe("file:123");
+      expect(created.events.indexOf("record")).toBeGreaterThan(-1);
+      expect(created.events.indexOf("record")).toBeLessThan(created.events.indexOf("remove"));
+    });
+
+    it("records for a failed job", async () => {
+      const { created, calls } = await recorded(CLAUDE_RUN, stored, (c) => {
+        c.jobs.statusValue = { state: "failed" };
+        c.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      });
+      expect(created.store.run.status).toBe("failed");
+      expect(calls).toHaveLength(1);
+      expect(created.events.indexOf("record")).toBeLessThan(created.events.indexOf("remove"));
+    });
+
+    it("records for a budget-stopped run", async () => {
+      const { created, calls } = await recorded({ ...CLAUDE_RUN, budgetUsd: 0.005 }, stored, (c) => {
+        c.jobs.result.resultArtifact = JSON.stringify({
+          schemaVersion: 1,
+          runId: "run-1",
+          outcome: "budget_exhausted",
+          summary: "Ran out.",
+          tests: [],
+        });
+        c.vcs.finalizeEmpty = true;
+      });
+      expect(calls).toHaveLength(1);
+      expect(created.events.indexOf("record")).toBeLessThan(created.events.indexOf("remove"));
+    });
+
+    it("does not record a run without session resume", async () => {
+      const { calls } = await recorded({ ...CLAUDE_RUN, sessionResume: false }, stored);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("hands the recorder a reader that resolves undefined when the launcher cannot read", async () => {
+      const { calls } = await recorded(CLAUDE_RUN, stored);
+      expect(await calls[0].read(1)).toBeUndefined();
+    });
+
+    it("logs a lost transcript row as a fixed code with the run id only", async () => {
+      const { created } = await recorded(CLAUDE_RUN, async () => "row_write_failed");
+      expect(created.store.run.status).toBe("succeeded");
+      const line = logged.find((entry) => entry.payload.transcript === "row_write_failed");
+      expect(line?.payload).toEqual({ runId: "run-1", transcript: "row_write_failed" });
+    });
+
+    it("a rejecting recorder changes nothing about the run", async () => {
+      const { created } = await recorded(CLAUDE_RUN, async () => {
+        throw new Error("boom");
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("a hanging recorder is abandoned after the timeout", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const calls: RecordTranscriptInput[] = [];
+        const created = await harness(
+          { model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, ...CLAUDE_RUN },
+          IMAGE,
+          undefined,
+          { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+          {
+            transcripts: {
+              record: (input) => {
+                calls.push(input);
+                return new Promise<TranscriptStatus>(() => {});
+              },
+            },
+          },
+        );
+        const running = created.executor.start("run-1");
+        await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 3000, interval: 5 });
+        await vi.advanceTimersByTimeAsync(61_000);
+        await running;
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.jobs.removals).toBe(1);
+        expect(calls).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("coding-run services", () => {
     const POSTGRES = resolvedFromDefinition(
       BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
@@ -1198,6 +1325,39 @@ describe("ContainerExecutor", () => {
       expect(off.input).not.toHaveProperty("dependencyCache");
       expect(off.input).not.toHaveProperty("diskMb");
       expect(off.spec).not.toHaveProperty("dependencyCache");
+    }
+  });
+
+  it("hands the worker sessionResume only when the run has it on", async () => {
+    const launched = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(
+        overrides.provider === "claude-code"
+          ? { model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, ...overrides }
+          : overrides,
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      );
+      let input: Record<string, unknown> | undefined;
+      let spec: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        spec = { ...created.jobs.lastSpec! };
+      };
+      await created.executor.start("run-1");
+      return { input: input!, spec: spec! };
+    };
+    const on = await launched({ sessionResume: true, provider: "claude-code" });
+    expect(on.input).toMatchObject({ sessionResume: true });
+    // The launcher gives the SDK's config dir (where the session is kept) its own scratch.
+    expect(on.spec).toMatchObject({ sessionResume: true });
+    const codex = await launched({ sessionResume: true, provider: "codex" });
+    expect(codex.input).not.toHaveProperty("sessionResume");
+    expect(codex.spec).not.toHaveProperty("sessionResume");
+    for (const overrides of [{ sessionResume: false }, {}]) {
+      const off = await launched(overrides);
+      expect(off.input).not.toHaveProperty("sessionResume");
+      expect(off.spec).not.toHaveProperty("sessionResume");
     }
   });
 

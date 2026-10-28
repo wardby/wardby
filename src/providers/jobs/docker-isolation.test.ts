@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { CLAUDE_CONFIG_DIR } from "../../claude-coding-worker/driver.js";
 import {
   assertDockerHostSupportsIsolation,
   assertClaudeAgentContainerInspection,
@@ -8,6 +9,8 @@ import {
   assertNetworkKeeperContainerInspection,
   buildClaudeAgentCreateArgs,
   buildClaudeToolRunnerCreateArgs,
+  CLAUDE_CONFIG_PATH,
+  CLAUDE_CONFIG_SCRATCH_MIB,
   buildNetworkKeeperCreateArgs,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
@@ -178,6 +181,26 @@ describe("Docker isolation policy", () => {
     expect(tools.join(" ")).not.toContain("WARDBY_RUN_CAPABILITY");
     expect(tools[tools.indexOf("--network") + 1]).toBe(isolationNames(claude.runId).network);
     expect(tools.filter((_value, index) => tools[index - 1] === "--env")).toEqual(["WARDBY_TOOL_SETUP"]);
+  });
+
+  it("gives a session-resume run's Claude config dir its own tmpfs, off /tmp's budget", () => {
+    const claude = {
+      ...spec,
+      provider: "claude-code" as const,
+      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 128 },
+    };
+    const tmpfs = (args: string[]) => args.filter((_value, index) => args[index - 1] === "--tmpfs");
+    const resumed = tmpfs(buildClaudeAgentCreateArgs({ ...claude, sessionResume: true }));
+    expect(resumed).toContain(
+      `${CLAUDE_CONFIG_PATH}:rw,noexec,nosuid,nodev,size=${CLAUDE_CONFIG_SCRATCH_MIB}m,uid=10001,gid=10001,mode=0700`,
+    );
+    expect(tmpfs(buildClaudeAgentCreateArgs(claude)).join(" ")).not.toContain(CLAUDE_CONFIG_PATH);
+    expect(tmpfs(buildClaudeToolRunnerCreateArgs({ ...claude, sessionResume: true })).join(" ")).not.toContain(
+      CLAUDE_CONFIG_PATH,
+    );
+    expect(() => buildWorkerCreateArgs({ ...spec, sessionResume: true })).toThrow("docker_isolation_unsupported");
+    expect(CLAUDE_CONFIG_PATH).toBe(CLAUDE_CONFIG_DIR);
   });
 
   it("gives Claude's tool runner 64 PIDs and refuses a run that would leave the agent fewer than 32", () => {

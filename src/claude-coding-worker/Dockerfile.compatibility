@@ -12,6 +12,8 @@ COPY src/claude-coding-worker/package.json src/claude-coding-worker/package-lock
 RUN npm ci --ignore-scripts \
     && npm cache clean --force
 COPY src/claude-coding-worker/compatibility.test.mjs ./
+# The real sanitiser source (erasable TypeScript, no imports); Node strips the types itself.
+COPY src/coding/transcript/claude-code.ts ./transcript/claude-code.ts
 
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby

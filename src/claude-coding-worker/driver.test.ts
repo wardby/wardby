@@ -74,6 +74,39 @@ describe("runClaudeCodingWorker", () => {
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("wardby_tools MCP tool");
   });
 
+  it("keeps the session and reports its id only on a session-resume run", async () => {
+    const persist: boolean[] = [];
+    const createQuery: ClaudeQueryFactory = (options) => {
+      persist.push(options.persistSession);
+      return (async function* () {
+        yield {
+          type: "system",
+          subtype: "init",
+          session_id: "s-1",
+          mcp_servers: [{ name: "wardby_tools", status: "connected" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "None.",
+            tests: [],
+          }),
+        };
+      })();
+    };
+    const base = { proxyBaseUrl: "http://proxy", capability: "cap", signal: new AbortController().signal, createQuery };
+    const onSessionId = vi.fn();
+    await runClaudeCodingWorker({ ...base, input: { ...input, sessionResume: true }, onSessionId });
+    expect(onSessionId).toHaveBeenCalledTimes(1);
+    expect(onSessionId).toHaveBeenCalledWith("s-1");
+    await runClaudeCodingWorker({ ...base, input });
+    expect(persist).toEqual([true, false]);
+  });
+
   it("uses the run's turn limit, or the worker default when the agent sets none", async () => {
     const seen: number[] = [];
     const createQuery: ClaudeQueryFactory = (options) => {

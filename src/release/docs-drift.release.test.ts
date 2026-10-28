@@ -181,7 +181,7 @@ const INTERNAL_ENV: Record<string, string> = {
 
 /** Operator-facing variables named nowhere in the operator docs when this suite was written: finding D3. */
 const KNOWN_UNDOCUMENTED_ENV = new Set<string>([
-  ...["BLOB_STORE_S3_ENDPOINT", "EMAIL_PROVIDER", "SECRET_CIPHER", "DATASTORE", "ENGINE", "VCS_PROVIDER"],
+  ...["EMAIL_PROVIDER", "SECRET_CIPHER", "DATASTORE", "ENGINE", "VCS_PROVIDER"],
   ...["GITHUB_API_VERSION", "VCS_MAX_CHANGED_FILES", "VCS_MAX_DIFF_BYTES", "KUBERNETES_PREFLIGHT_TIMEOUT_MS"],
   ...["MCP_SECRET_ELICITATION_PROTOCOL", "LOG_LEVEL", "METRICS_ALLOW_NON_LOOPBACK", "BEDROCK_REGION"],
   ...["WARDBY_LOAD_MOCK_JITTER_MS"],

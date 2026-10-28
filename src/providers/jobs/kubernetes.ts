@@ -261,6 +261,7 @@ const TOKEN = /^[a-f0-9]{20}$/;
 const WORKSPACE_STORAGE = `${STORAGE_ROOT}/workspace`;
 const INPUT_STORAGE = `${STORAGE_ROOT}/input`;
 const RESULT_PATH = `${STORAGE_ROOT}/output/result.json`;
+const TRANSCRIPT_PATH = `${STORAGE_ROOT}/output/session.jsonl`;
 /** Stands in for the proxy ClusterIP when building a pod only to count its resources. */
 const QUOTA_PROBE_PROXY_IP = "10.0.0.1";
 
@@ -1245,6 +1246,32 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       if (diagnostic) return diagnostic;
     }
     return undefined;
+  }
+
+  async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    const names = this.namesFor(handle);
+    const found = names && (await this.readRecord(names));
+    if (!names || !found) return undefined;
+    const collector = new BoundedCollector(maxBytes);
+    let exitCode: number;
+    try {
+      exitCode = await this.api.exec(
+        this.namespace,
+        names.pod,
+        KEEPER_CONTAINER,
+        ["head", "-c", String(maxBytes + 1), TRANSCRIPT_PATH],
+        { stdout: collector, timeoutMs: SHORT_EXEC_TIMEOUT_MS },
+      );
+      if (!collector.writableEnded) collector.end();
+      await finished(collector);
+    } catch {
+      // The pod is gone (a stopped run) or unreachable: there is nothing to collect.
+      collector.destroy();
+      return undefined;
+    }
+    if (exitCode !== 0) return undefined;
+    if (collector.exceeded) throw new Error("transcript_too_large");
+    return collector.text();
   }
 
   private async readResultArtifact(names: RunNames, runId: string): Promise<string> {

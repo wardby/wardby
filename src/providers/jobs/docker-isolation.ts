@@ -33,6 +33,15 @@ export const CODING_PROXY_DENY_PORT = 8788;
 export const DOCKER_ISOLATION_ERROR = "docker_isolation_unsupported";
 export const WORKER_STOP_GRACE_SECONDS = 10;
 
+/** The Claude worker's SDK config dir (claude-coding-worker/driver.ts CLAUDE_CONFIG_DIR). */
+export const CLAUDE_CONFIG_PATH = "/tmp/claude-config";
+/**
+ * Its own memory-backed scratch on a session-resume run: room for a session file up to the largest the
+ * control plane reads (coding/protocol.ts MAX_RAW_TRANSCRIPT_BYTES, 64 MiB) plus the SDK's small config
+ * files. Past it the SDK's writes there fail with ENOSPC, as /tmp's would; /tmp itself keeps its room.
+ */
+export const CLAUDE_CONFIG_SCRATCH_MIB = 80;
+
 export const WORKER_PATHS = {
   workspace: "/workspace",
   git: "/workspace/.git",
@@ -225,6 +234,9 @@ function validateSpec(spec: JobSpec): void {
     if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < CLAUDE_MIN_PIDS)
       throw isolationError();
   } else if (spec.toolImage !== undefined) {
+    throw isolationError();
+  }
+  if (spec.sessionResume !== undefined && (spec.sessionResume !== true || spec.provider !== "claude-code")) {
     throw isolationError();
   }
   if (spec.services !== undefined) {
@@ -583,6 +595,12 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
     `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
     "--tmpfs",
     `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    ...(spec.sessionResume
+      ? [
+          "--tmpfs",
+          `${CLAUDE_CONFIG_PATH}:rw,noexec,nosuid,nodev,size=${CLAUDE_CONFIG_SCRATCH_MIB}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+        ]
+      : []),
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.input},volume-subpath=input,volume-nocopy,readonly`,
     "--mount",

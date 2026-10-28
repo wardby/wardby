@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { modulesMissingFromImage, relativeImportClosure } from "./image-closure.test-support.js";
 
 describe("coding worker image policy", () => {
   it("Dockerfile.driver pins every stage and installs only language-agnostic base tooling", async () => {
@@ -53,5 +54,13 @@ describe("coding worker image policy", () => {
     for (const executable of ["docker", "ssh", "curl", "wget", "sudo", "gcc", "make", "pip", "pip3"]) {
       expect(dockerfile).toContain(`test ! -e /usr/bin/${executable}`);
     }
+  });
+
+  it("Dockerfile.driver copies every module the driver's entry point imports", async () => {
+    const dockerfile = await readFile(new URL("./Dockerfile.driver", import.meta.url), "utf8");
+    const closure = relativeImportClosure(["coding-worker/main.ts"]);
+    expect(closure).toContain("coding/redact.ts");
+    expect(modulesMissingFromImage(dockerfile, closure)).toEqual([]);
+    expect(dockerfile).toContain('"debug-trace"');
   });
 });

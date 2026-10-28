@@ -894,6 +894,7 @@ async function scheduler(args: string[]): Promise<void> {
     providerConfig: config,
     repoAccess,
     power,
+    secretCipher: nativeProviders.secrets,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
     nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
   });

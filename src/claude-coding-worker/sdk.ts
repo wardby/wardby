@@ -47,7 +47,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },
     permissionMode: "dontAsk",
-    persistSession: false,
+    // Only a session-resume run keeps the session file (under CLAUDE_CONFIG_DIR) for transcript capture.
+    persistSession: config.persistSession,
     env: config.environment,
     // Only on a traced run; otherwise the SDK's default handling is unchanged.
     ...(config.stderr ? { stderr: config.stderr } : {}),

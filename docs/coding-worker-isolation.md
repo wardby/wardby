@@ -754,6 +754,10 @@ One pod per run, built by the canonical, deny-by-default policy in
   that points at the workspace's `.cache/tmp` on the disk-backed `storage`
   volume instead, so it scales with `workspaceDiskMb` rather than this tiny
   in-memory scratch.
+- A Claude Code run with `sessionResume` on also gives the worker's Claude
+  Code config directory (`/tmp/claude-config`, where the session file grows)
+  its own 80 MiB `medium: Memory` `emptyDir` (a tmpfs of the same size under
+  Docker), so a long session never fills `/tmp`. Only the worker mounts it.
 - `dnsPolicy: None` with `dnsConfig.nameservers: ["127.0.0.1"]` — **no DNS is
   configured for worker/agent pods at all.** The proxy is reached by name
   (`WARDBY_PROXY_URL=http://wardby-proxy:8787` — `CODING_PROXY_ALIAS` in

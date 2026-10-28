@@ -542,6 +542,12 @@ export const CodingTaskInputSchema = z
      */
     dependencyCache: z.literal(true).optional(),
     /**
+     * Session resume (CodingAgentProfile.sessionResume, fixed on the run at dispatch): the worker keeps
+     * Claude Code's session and writes a sanitised transcript next to its result. Written only when
+     * true, so other runs' input is unchanged for workers that predate it.
+     */
+    sessionResume: z.literal(true).optional(),
+    /**
      * The run's workspace volume size in MiB (the job's limits.diskMb), so the dependency cache can
      * stay inside it: on Kubernetes the emptyDir sizeLimit is invisible to statfs. Written only with
      * dependencyCache, so every other input is unchanged for workers that predate it.

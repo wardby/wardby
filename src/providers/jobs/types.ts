@@ -27,6 +27,12 @@ export interface JobSpec {
   inputArtifact: string;
   /** Set only when the run's dependency cache is on (CodingRun.dependencyCache); absent otherwise, never false. */
   dependencyCache?: true;
+  /**
+   * Claude Code only, set only when the run keeps its session (CodingRun.sessionResume); absent otherwise,
+   * never false. The worker's SDK config dir, where the session file grows, gets its own size-limited
+   * scratch so a long session never fills the worker's shared /tmp.
+   */
+  sessionResume?: true;
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;
@@ -129,6 +135,12 @@ export interface JobLauncher {
   launch: (spec: JobSpec) => Promise<JobHandle>;
   status: (handle: JobHandle) => Promise<JobStatus>;
   collect: (handle: JobHandle) => Promise<JobResult>;
+  /**
+   * The run's session transcript file (the worker's session.jsonl), at most `maxBytes`; undefined
+   * when there is none or the job's storage is gone (a stopped job). Throws `transcript_too_large`
+   * when larger. Never cached in the job record: it is not redacted yet. Call before `remove`.
+   */
+  readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   stop: (handle: JobHandle, reason?: string) => Promise<void>;
   remove: (handle: JobHandle) => Promise<void>;
 }

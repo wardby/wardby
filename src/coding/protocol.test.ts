@@ -133,6 +133,12 @@ describe("CodingTaskInputSchema", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, dependencyCache: false })).toThrow();
   });
 
+  it("accepts an optional sessionResume that is only ever true", () => {
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("sessionResume");
+    expect(CodingTaskInputSchema.parse({ ...input, sessionResume: true })).toMatchObject({ sessionResume: true });
+    expect(() => CodingTaskInputSchema.parse({ ...input, sessionResume: false })).toThrow();
+  });
+
   it("accepts an optional debugTraceMaxMb between 1 and 64", () => {
     expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("debugTraceMaxMb");
     expect(CodingTaskInputSchema.parse({ ...input, debugTraceMaxMb: 20 })).toMatchObject({ debugTraceMaxMb: 20 });
