@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download, openapi, api contract]
+tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download, openapi, api contract, sign-in]
 appliesTo: ">=0.4.0"
 ---
 
@@ -35,6 +35,25 @@ A desktop viewer for macOS is included in the source tree (`apps/viewer`). Add
 your server's canonical URI, sign in with an `admin` user in the browser, and it
 shows the live graph. Each GitHub release has an unsigned macOS build of the viewer attached (see the README for opening it past Gatekeeper). Its README covers setup, and what an external identity
 provider client needs when the server runs in delegating mode.
+
+## Viewer sign-in with an external identity provider
+
+In delegating mode, the viewer signs in through your identity provider's
+public (native) client. That client must:
+
+- register the exact redirect URI `http://127.0.0.1:8585/callback`. The viewer
+  always listens on port 8585, and some providers (Okta, for example) match a
+  loopback redirect by its exact port, so a port-less or wildcard loopback
+  entry may not match;
+- allow the `admin:view` scope for the Wardby resource;
+- enable the refresh-token grant and allow the `offline_access` scope. The
+  viewer requests it so the provider returns a refresh token, and sign-in
+  fails with "server issued no refresh token" without one.
+
+The viewer prints its callback URL to stderr at startup. If sign-in reports
+that it could not open the local callback listener on `127.0.0.1:8585`,
+another program is using that port: close it and sign in again. In
+self-hosted mode the viewer registers itself, so there is no client to set up.
 
 From Wardby 0.6.0, admins can also sign in to a mobile app for the same read-only live view; see the help article `mobile-app`.
 

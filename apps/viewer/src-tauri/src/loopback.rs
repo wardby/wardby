@@ -14,6 +14,13 @@ use url::Url;
 use crate::error::AppError;
 
 pub const CALLBACK_PATH: &str = "/callback";
+/// Fixed loopback port for the OAuth redirect. A constant rather than an
+/// ephemeral port so a single Login redirect URI can be registered up-front
+/// with the IdP: some authorization servers (e.g. Okta) match a loopback
+/// redirect by its exact port instead of the RFC 8252 §7.3 port-agnostic rule,
+/// and a fresh random port every sign-in can never match one registration.
+/// Operators register `http://127.0.0.1:8585/callback` as the redirect URI.
+pub const CALLBACK_PORT: u16 = 8585;
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONNECTIONS: usize = 32;
@@ -25,9 +32,18 @@ pub struct Callback {
 }
 
 pub async fn bind() -> Result<(Callback, TcpListener), AppError> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|_| AppError::Network("could not open the local callback listener".to_string()))?;
+    bind_on(CALLBACK_PORT).await
+}
+
+/// Binds the callback listener on `port`. Production uses [`CALLBACK_PORT`] via
+/// [`bind`]; tests pass `0` for an ephemeral port so they never collide on the
+/// fixed one.
+pub(crate) async fn bind_on(port: u16) -> Result<(Callback, TcpListener), AppError> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|_| {
+        AppError::Network(format!(
+            "could not open the local callback listener on 127.0.0.1:{port} (already in use?)"
+        ))
+    })?;
     let port = listener
         .local_addr()
         .map_err(|_| AppError::Network("could not read the local callback port".to_string()))?
@@ -288,7 +304,7 @@ mod tests {
         require_iss: bool,
         timeout: Duration,
     ) -> (std::net::SocketAddr, Waiter) {
-        let (_, listener) = bind().await.unwrap();
+        let (_, listener) = bind_on(0).await.unwrap();
         let addr = listener.local_addr().unwrap();
         (
             addr,
@@ -304,12 +320,24 @@ mod tests {
 
     #[tokio::test]
     async fn binds_loopback_and_reports_redirect() {
-        let (cb, l) = bind().await.unwrap();
+        let (cb, l) = bind_on(0).await.unwrap();
         let addr = l.local_addr().unwrap();
         assert!(addr.ip().is_loopback());
         assert_eq!(
             cb.redirect_uri,
             format!("http://127.0.0.1:{}/callback", addr.port())
+        );
+    }
+
+    #[tokio::test]
+    async fn production_bind_uses_the_fixed_registered_port() {
+        // The IdP registration is `http://127.0.0.1:8585/callback`; bind() must
+        // honour that exact port, not an ephemeral one.
+        let (cb, l) = bind().await.unwrap();
+        assert_eq!(l.local_addr().unwrap().port(), CALLBACK_PORT);
+        assert_eq!(
+            cb.redirect_uri,
+            format!("http://127.0.0.1:{CALLBACK_PORT}/callback")
         );
     }
 

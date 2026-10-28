@@ -637,6 +637,7 @@ async fn sign_in_flow(
     hooks: SignInHooks,
     store: Arc<dyn RefreshStore>,
     timeout: Duration,
+    callback_port: u16,
 ) -> Result<SignedIn, AppError> {
     let http = oauth::http_client()?;
     let auth = oauth::discover(&http, server_url).await?;
@@ -649,7 +650,7 @@ async fn sign_in_flow(
         }
     };
 
-    let (callback, listener) = loopback::bind().await?;
+    let (callback, listener) = loopback::bind_on(callback_port).await?;
     let pkce = oauth::new_pkce();
     let state = oauth::new_state();
     let url = oauth::authorize_url(&auth, &client_id, &callback.redirect_uri, &pkce, &state);
@@ -814,6 +815,7 @@ pub async fn sign_in(
                 hooks,
                 store.clone(),
                 SIGN_IN_TIMEOUT,
+                loopback::CALLBACK_PORT,
             )
             .await?;
             // The server may have been removed during the browser step.
@@ -1684,7 +1686,7 @@ mod tests {
         move |authorize: &str| {
             let u = url::Url::parse(authorize).unwrap();
             let q: HashMap<_, _> = u.query_pairs().into_owned().collect();
-            assert_eq!(q["scope"], "admin:view");
+            assert_eq!(q["scope"], "admin:view offline_access");
             assert_eq!(q["code_challenge_method"], "S256");
             assert!(q["redirect_uri"].starts_with("http://127.0.0.1:"));
             let mut cb = url::Url::parse(&q["redirect_uri"]).unwrap();
@@ -1747,6 +1749,7 @@ mod tests {
             ),
             store.clone(),
             Duration::from_secs(10),
+            0,
         )
         .await
         .unwrap();
@@ -1777,6 +1780,7 @@ mod tests {
             }),
             MemStore::with("x"),
             Duration::from_secs(1),
+            0,
         )
         .await
         .err()
@@ -1801,6 +1805,7 @@ mod tests {
             hooks(|_| Ok(())),
             MemStore::with("x"),
             Duration::from_millis(150),
+            0,
         )
         .await
         .err()
@@ -1931,6 +1936,7 @@ mod tests {
             ),
             MemStore::with("x"),
             Duration::from_millis(150),
+            0,
         )
         .await
         .err()
@@ -1945,6 +1951,7 @@ mod tests {
             hooks(|_| Ok(())),
             MemStore::with("x"),
             Duration::from_millis(150),
+            0,
         )
         .await
         .err()
@@ -2002,6 +2009,7 @@ mod tests {
                         }),
                         MemStore::with("x"),
                         Duration::from_secs(60),
+                        0,
                     )
                     .await
                     .map(|_| ())

@@ -15,6 +15,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(commands::AppState::default())
         .setup(|app| {
+            eprintln!(
+                "wardby-viewer: OAuth callback URL is http://127.0.0.1:{}{}",
+                loopback::CALLBACK_PORT,
+                loopback::CALLBACK_PATH
+            );
             let handle = app.handle();
             let current = appearance::load(handle);
             app.set_menu(appearance::build_menu(handle, current)?)?;
