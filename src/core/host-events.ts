@@ -89,6 +89,12 @@ export interface RouteHostEventDeps {
   repoAccess: RepoAccessGate;
   /** Issue trackers for moving/commenting on the issue a closed PR was opened for; absent → pr_closed is ignored. */
   issueTrackers?: IssueTrackerRegistry;
+  /**
+   * False (WARDBY_MENTION_EXPLANATIONS=false): a mention that starts nothing gets no
+   * reply saying why. The reply is a comment anyone who can see the repository reads,
+   * so a deployment may keep what is linked there to itself. Absent = true.
+   */
+  mentionExplanations?: boolean;
 }
 
 /** What starting a review needs: everything routing needs except the mention handle. */
@@ -534,6 +540,36 @@ export function unknownPriorRunBody(priorRunId: string): string {
     "deployment has no record of that run opening this pull request (another wardby deployment may have opened it). " +
     "Ask the deployment that opened it, or make the change on this branch by hand."
   );
+}
+
+/** Why a mention from someone allowed to use wardby started nothing; posted so they are not left guessing. */
+export type MentionDeclineReason =
+  "no_responder" | "no_reviewer" | "agent_not_authorized" | "pull_request_not_reviewable";
+
+/**
+ * Never names the App's handle: this comment is posted by the App, and a
+ * body that mentioned it could be matched as a mention of itself.
+ */
+export function mentionDeclinedBody(reason: MentionDeclineReason): string {
+  switch (reason) {
+    case "no_responder":
+      return (
+        `ℹ️ I didn't start a run: no agent on this repository is set up to answer mentions. ` +
+        'An agent owner can link one with the `mention` trigger (`link_repository`, `triggers: ["mention"]`).'
+      );
+    case "no_reviewer":
+      return (
+        `ℹ️ I didn't start a review: no reviewer agent is linked to this repository. ` +
+        "An agent owner can link one with the `pull_request` trigger and a `checkName` (`link_repository`)."
+      );
+    case "agent_not_authorized":
+      return (
+        "ℹ️ I didn't start a run: the agent linked here can no longer use this repository. " +
+        "Its owner's GitHub account needs access to it again; they can re-authorize it or re-link the agent."
+      );
+    case "pull_request_not_reviewable":
+      return "ℹ️ I didn't start a review: this pull request is closed or comes from a fork, and wardby reviews only open pull requests from branches of this repository.";
+  }
 }
 
 export interface ReviewTarget {
@@ -1650,11 +1686,14 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
       const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
-      if (candidates.length === 0) return none;
+      // Explanations off and nothing to start: say nothing, and skip the author lookup.
+      if (candidates.length === 0 && deps.mentionExplanations === false) return none;
       // H5-3: a mention drives a write-capable agent holding its owner's
       // tools and secrets, so its author needs real push access to the
       // repository (author_association, checked upstream, is only a
-      // pre-filter). Checked by the author's immutable id.
+      // pre-filter). Checked by the author's immutable id. Checked before
+      // anything is said back: someone without write access gets no reply at
+      // all, so a mention can never be used to probe what is linked here.
       const author = await deps.repoAccess.authorizeHostUser({
         provider: event.provider,
         repository: event.repository,
@@ -1686,11 +1725,30 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         };
         return { runIds: [], followUps: [refuse] };
       }
+      // The author may use wardby here, so tell them why nothing started
+      // instead of leaving the mention unanswered.
+      const decline = (reason: MentionDeclineReason): RouteResult => {
+        log.info({ repository: event.repository, number: event.number, reason }, "mention declined");
+        if (deps.mentionExplanations === false) return none;
+        const reply = async () => {
+          await host
+            .comment(event.repository, {
+              number: event.number,
+              body: mentionDeclinedBody(reason),
+              ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+            })
+            .catch((err: unknown) => {
+              log.warn({ err, repository: event.repository, number: event.number }, "could not post the explanation");
+            });
+        };
+        return { runIds: [], followUps: [reply] };
+      };
+      if (candidates.length === 0) return decline(reviewCommand ? "no_reviewer" : "no_responder");
       const allowed = await authorizedLinks(deps, event, candidates);
-      if (allowed.length === 0) return none;
+      if (allowed.length === 0) return decline("agent_not_authorized");
       if (reviewCommand) {
         const head = await host.pullRequestHead(event.repository, event.number);
-        if (head.isFork || head.state !== "open") return none;
+        if (head.isFork || head.state !== "open") return decline("pull_request_not_reviewable");
         return {
           runIds: await startReviews(deps, host, event.repository, event.number, head.headSha, reviewTargets(allowed)),
           followUps: [react],

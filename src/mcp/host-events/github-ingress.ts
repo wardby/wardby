@@ -36,6 +36,8 @@ export interface GitHubIngressDeps {
   appIdentity: (opts?: { fresh?: boolean }) => Promise<{ id: number; slug: string; ownerLogin: string }>;
   /** Accounts served in addition to the App's owner (WARDBY_GITHUB_ALLOWED_ACCOUNTS). */
   allowedAccounts: () => ReadonlySet<string>;
+  /** False = no reply explaining why a mention started nothing (WARDBY_MENTION_EXPLANATIONS). */
+  mentionExplanations?: boolean;
   /** Removes the App from an installation on an account that isn't served; absent = ignore only. */
   uninstallInstallation?: (installationId: number) => Promise<void>;
   now?: () => Date;
@@ -190,6 +192,7 @@ export async function handleGitHubEventIngress(
       repoAccess: deps.repoAccess,
       ...(deps.issueTrackers ? { issueTrackers: deps.issueTrackers } : {}),
       mentionHandle: app.slug,
+      ...(deps.mentionExplanations === false ? { mentionExplanations: false } : {}),
     });
     log.info(
       { event: event.kind, repository: event.repository, deliveryId, runIds: routed.runIds },

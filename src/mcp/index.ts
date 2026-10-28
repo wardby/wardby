@@ -444,6 +444,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (opts?: { fresh?: boolean }) => githubApp.appIdentity(opts),
             allowedAccounts: () => allowedAccounts,
+            mentionExplanations: eventConfig.mentionExplanations,
             uninstallInstallation: (id: number) => githubApp.deleteInstallation(id),
           },
         }

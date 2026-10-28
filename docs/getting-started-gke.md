@@ -213,6 +213,11 @@ sign-in off. It works for normal and low-power deploys. White-label builds that
 use their own redirect URI add `WARDBY_MOBILE_REDIRECT_URI` to the control
 plane's `env` themselves. See the help article `mobile-app`.
 
+`WARDBY_MENTION_EXPLANATIONS=false` (optional, not a secret) stops the GitHub
+App replying to say why a mention started nothing; pass it to `up.sh` on every
+run, the same way. See
+[What a linked review agent does](code-review-agents.md#what-a-linked-review-agent-does).
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh

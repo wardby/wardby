@@ -143,8 +143,31 @@ A mention inside Markdown code is not a request. Text in an inline code span
 skipped, so you can document the App's commands in an issue, pull request or
 comment without starting a run. This applies to `@<app-slug> review` too.
 
-If a mention from someone with write access gets no reaction, check the
-server log for `mention ignored`. Older versions dropped `CONTRIBUTOR` and
+When someone with write access mentions the App and nothing starts, the App
+replies on the issue or pull request (in the review thread, if the mention was
+in one) instead of leaving the mention unanswered. It says which of these applies, with no 👀
+reaction:
+
+- **No agent answers mentions on the repository** — no agent is linked with
+  the `mention` trigger. Link one (see [Linking an
+  agent](#linking-an-agent-to-a-repository)).
+- **No reviewer is linked** — `@<app-slug> review` was used, but no agent is
+  linked with the `pull_request` trigger and a `checkName`.
+- **The linked agent can no longer use the repository** — the agent owner's
+  GitHub account lost access, or its authorization lapsed. The owner
+  re-authorizes or re-links the agent.
+- **The pull request is closed or comes from a fork** — wardby reviews only
+  open pull requests from branches of the repository.
+
+The reply never names the App, so it cannot be read as a mention of itself.
+
+The reply is a comment that anyone who can see the repository reads, so on a
+public repository it shows what is (or isn't) linked there. To keep that to
+yourself, set `WARDBY_MENTION_EXPLANATIONS=false` on the server: a mention that
+starts nothing then gets no reply at all. The default is `true`.
+
+If a mention from someone with write access gets no reaction or reply, check
+the server log for `mention ignored` or `mention declined`. Older versions dropped `CONTRIBUTOR` and
 `NONE` authors before the permission check. On those versions, make the
 organization membership public or post the mention as a comment.
 
