@@ -1,7 +1,7 @@
 import type { NativeExecutionMode } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
-import { McpError } from "../errors.js";
-import { agentAccess, requireAgentAccess } from "../auth/access.js";
+import { requireAgentAccess } from "../auth/access.js";
+import { findReadableRun } from "./run-access.js";
 import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
@@ -68,15 +68,9 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
-      const run = await ctx.db.run.findUnique({ where: { id: args.runId } });
-      const notFound = new McpError(404, `Run "${args.runId}" not found.`);
-      if (!run) throw notFound;
       // Its triggerer keeps seeing it even after losing access to the agent;
       // otherwise only the agent's owner. read on the agent is not enough.
-      if (run.triggeredById !== ctx.principal.id) {
-        const agent = await ctx.db.agent.findUnique({ where: { id: run.agentId } });
-        if (!agent || (await agentAccess(ctx, agent)) !== "owner") throw notFound;
-      }
+      const run = await findReadableRun(ctx, args.runId);
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },
         select: {

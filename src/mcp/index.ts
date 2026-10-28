@@ -22,6 +22,7 @@ import {
   loadGitHubEventConfig,
   loadJiraConfig,
   loadGitHubVcsConfig,
+  loadBlobStoreConfig,
 } from "../config/providers.js";
 import { prisma } from "../core/db.js";
 import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
@@ -82,7 +83,12 @@ import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
-import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
+import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
+import { createStdioLinkHost } from "./transport/stdio-link-host.js";
+import { registerRunTranscriptTool } from "./tools/run-transcript.js";
+import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";
+import { createBlobStore } from "../providers/storage/index.js";
+import type { BlobStore } from "../providers/storage/types.js";
 import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
 import { installWorkflowEventRecorder } from "../core/notifications.js";
 import { logger } from "../core/logger.js";
@@ -137,6 +143,10 @@ export function registerAllTools(
   opts: {
     secretElicitationUrl: SecretElicitationUrlBuilder;
     secretElicitationProtocol: boolean;
+    /** Builds a get_run_transcript download URL for a minted token; absent = transcripts are not served. */
+    runTranscriptUrl?: (token: string) => Promise<string>;
+    /** Whether a blob store is configured to serve run transcripts from. */
+    blobStoreConfigured?: boolean;
     /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
     refreshModelCatalog?: () => Promise<void>;
   },
@@ -151,6 +161,11 @@ export function registerAllTools(
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);
   registerRunTools(mcp);
+  const runTranscriptUrl = opts.runTranscriptUrl;
+  registerRunTranscriptTool(mcp, {
+    downloadUrl: runTranscriptUrl ?? (() => Promise.reject(new Error("run transcripts are not served here"))),
+    blobStoreConfigured: runTranscriptUrl !== undefined && opts.blobStoreConfigured === true,
+  });
   registerStopRunTool(mcp);
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
@@ -325,15 +340,30 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // Zod 3 compatibility window: one warning per custom tool the next release breaks. In the background.
   void logZod3ToolWarnings(prisma, mcpLog);
 
+  // Run transcripts (get_run_transcript) are served from the blob store they were stored in.
+  const blobStoreConfig = loadBlobStoreConfig();
+  const blobs: BlobStore | undefined = blobStoreConfig ? createBlobStore(blobStoreConfig) : undefined;
+
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
-    const secretElicitationHost = createStdioSecretElicitationHost({
-      verify: (token) => mcp.verifyRequestState(token),
-      secrets: providers.secrets,
-      db: prisma,
+    // One loopback server for every signed link a stdio tool hands out.
+    const linkHost = createStdioLinkHost({
+      [STDIO_SECRET_PATH]: secretFormRoute({
+        verify: (token) => mcp.verifyRequestState(token),
+        secrets: providers.secrets,
+        db: prisma,
+      }),
+      [RUN_TRANSCRIPT_DOWNLOAD_PATH]: (req, res, token) =>
+        handleRunTranscriptDownload(req.method, token, res, {
+          verify: (t) => mcp.verifyRequestState(t),
+          db: prisma,
+          blobs,
+        }),
     });
     registerAllTools(mcp, {
-      secretElicitationUrl: (token) => secretElicitationHost.urlFor(token),
+      secretElicitationUrl: (token) => linkHost.urlFor(STDIO_SECRET_PATH, token),
+      runTranscriptUrl: (token) => linkHost.urlFor(RUN_TRANSCRIPT_DOWNLOAD_PATH, token),
+      blobStoreConfigured: blobs !== undefined,
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
       refreshModelCatalog: () => modelCatalog.refreshNow(),
     });
@@ -374,6 +404,9 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   registerAllTools(mcp, {
     secretElicitationUrl: (token) =>
       Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
+    runTranscriptUrl: (token) =>
+      Promise.resolve(`${httpOrigin}${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`),
+    blobStoreConfigured: blobs !== undefined,
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
     refreshModelCatalog: () => modelCatalog.refreshNow(),
   });
@@ -485,6 +518,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     hostEvents,
     hostUserAuth,
     viewer,
+    blobs,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {
