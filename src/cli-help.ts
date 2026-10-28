@@ -5,6 +5,7 @@ export const CLI_USAGE = `usage:
   wardby logs [--tail N] [--follow]
   wardby down [--volumes]
   wardby knowledge check [dir] [--root <dir>] [--strict] [--json]   Validate a knowledge bundle (offline)
+  wardby resume '<link>' [--dir <path> | --here] [--force] [--print]   Continue a coding run's Claude Code session locally (link from get_run_transcript)
   wardby help [list]
   wardby help search <terms>
   wardby help open <article-id>

@@ -17,16 +17,24 @@ import type { PrismaClient } from "#prisma";
 import type { BlobStore } from "../../providers/storage/types.js";
 import { canReadRun } from "./run-access.js";
 
-/** The HTTP-transport route path (see streamable-http.ts); stdio's loopback server uses the same path. */
-export const RUN_TRANSCRIPT_DOWNLOAD_PATH = "/run-transcripts/download";
-/** How long a download link works (the requestState codec's own TTL is the same 10 minutes). */
-export const RUN_TRANSCRIPT_LINK_TTL_MS = 10 * 60_000;
+import {
+  RUN_TRANSCRIPT_DOWNLOAD_PATH,
+  RUN_TRANSCRIPT_LINK_TTL_MS,
+  TRANSCRIPT_META_HEADER,
+  TRANSCRIPT_SESSION_HEADER,
+  TRANSCRIPT_SHA256_HEADER,
+  type DownloadRefusal,
+  type TranscriptDownloadMeta,
+} from "../../coding/transcript/download-protocol.js";
 
-/** Response headers the importer reads (documented in docs/coding-agent-setup.md). */
-export const TRANSCRIPT_SHA256_HEADER = "x-wardby-sha256";
-export const TRANSCRIPT_SESSION_HEADER = "x-wardby-session-id";
-/** base64url of the TranscriptDownloadMeta JSON. */
-export const TRANSCRIPT_META_HEADER = "x-wardby-transcript-meta";
+// The route path and headers are shared with `wardby resume` (download-protocol.ts).
+export {
+  RUN_TRANSCRIPT_DOWNLOAD_PATH,
+  RUN_TRANSCRIPT_LINK_TTL_MS,
+  TRANSCRIPT_META_HEADER,
+  TRANSCRIPT_SESSION_HEADER,
+  TRANSCRIPT_SHA256_HEADER,
+};
 
 export interface RunTranscriptLinkPayload {
   kind: "run-transcript";
@@ -38,28 +46,12 @@ export interface RunTranscriptLinkPayload {
   exp: number;
 }
 
-/** What the importer needs besides the bytes: where to check the run out. Ids and refs only, never content. */
-export interface TranscriptDownloadMeta {
-  runId: string;
-  sessionId: string;
-  provider: string;
-  repository: string;
-  headRef: string;
-  resultBranch: string | null;
-  baseSha: string | null;
-  sha256: string;
-}
-
 export interface RunTranscriptDownloadDeps {
   verify: (token: string) => Promise<unknown>;
   db: Pick<PrismaClient, "run" | "agent" | "resourceGrant" | "codingRun" | "runTranscript">;
   blobs: BlobStore | undefined;
   now?: () => Date;
 }
-
-/** Fixed refusal codes; the body never carries the token or any content. */
-export type DownloadRefusal =
-  "link_invalid" | "not_found" | "transcript_expired" | "transcript_unavailable" | "transcript_corrupt";
 
 const STATUS: Record<DownloadRefusal, number> = {
   link_invalid: 403,

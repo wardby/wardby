@@ -40,6 +40,14 @@ async function main(): Promise<void> {
     // database client, or HTTP runtime just to search documentation.
     const { helpCommand } = await import("./help/cli.js");
     await helpCommand(process.argv.slice(3));
+  } else if (command === "resume") {
+    // Runs on a developer's machine: no environment, database, or server runtime.
+    const { resumeCommand } = await import("./coding/transcript/resume/command.js");
+    process.exitCode = await resumeCommand(process.argv.slice(3));
+  } else if (command === "resume-tools") {
+    // Hidden: the stand-in tool server `wardby resume` configures Claude Code to start.
+    const { resumeToolsCommand } = await import("./coding/transcript/resume/stand-in.js");
+    await resumeToolsCommand(process.argv.slice(3));
   } else if (command === "knowledge") {
     // Offline bundle validation: no environment, database, or HTTP runtime.
     const { knowledgeCommand } = await import("./knowledge/cli.js");
