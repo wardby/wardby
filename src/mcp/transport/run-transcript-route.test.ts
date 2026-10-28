@@ -39,11 +39,21 @@ async function start(db: PrismaClient) {
   });
   const token = await mcp.mintRequestState<RunTranscriptLinkPayload>({
     kind: "run-transcript",
+    aud: "http",
     runId: "r1",
     principalId: "trig",
     exp: Date.now() + 60_000,
   });
-  return { url: `http://127.0.0.1:${port}${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`, token };
+  const stdioOperatorToken = await mcp.mintRequestState<RunTranscriptLinkPayload>({
+    kind: "run-transcript",
+    aud: "stdio",
+    runId: "r1",
+    principalId: "trig",
+    operator: true,
+    exp: Date.now() + 60_000,
+  });
+  const base = `http://127.0.0.1:${port}${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=`;
+  return { url: base + encodeURIComponent(token), token, stdioUrl: base + encodeURIComponent(stdioOperatorToken) };
 }
 
 const runRow = {
@@ -67,6 +77,13 @@ describe("HTTP transport: run transcript download route", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("x-wardby-sha256")).toBe(stored.sha256);
     expect(Buffer.from(await res.arrayBuffer()).equals(stored.bytes)).toBe(true);
+  });
+
+  it("refuses a stdio (operator) link, even one signed with the shared key", async () => {
+    const { stdioUrl } = await start(fakeTranscriptDb([{ id: "a1", ownerId: "owner" }], [runRow]));
+    const res = await fetch(stdioUrl);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe(JSON.stringify({ error: "link_invalid" }));
   });
 
   it("never logs the link token or echoes it in an error, even when the request fails", async () => {

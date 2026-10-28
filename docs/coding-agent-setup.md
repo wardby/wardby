@@ -781,24 +781,33 @@ returns:
   deleted).
 - `download.url` and `download.expiresAt`: a signed download link that works
   for 10 minutes.
-- `command`: `npx wardby resume '<link>'`.
+- `command`: `npx wardby resume -`. It asks for the link; paste
+  `download.url`.
 
 The transcript itself never enters your MCP client's conversation, only the
-link. Run the command in a terminal:
+link. Run the command in a terminal. You can also pass the link as an
+argument (`npx wardby resume '<link>'`) or pipe it in, but an argument stays
+in your shell history and in the process list while Claude Code runs, so
+pasting it at the prompt is the safer default.
 
 - For a GitHub repository, run it inside a clone of that repository. It
   fetches the run's branch from the remote that points at the repository and
   adds a detached git worktree next to the clone, named
   `<clone>-run-<last 8 characters of the run id>`.
-- For a `local:` repository, run it anywhere. The worktree is added from that
-  repository, next to it.
+- For a `local:` repository, run it anywhere on the server's machine. The
+  worktree is added from that repository, next to it. A `local:` path names
+  a folder on the server's machine, so it is used only when the link comes
+  from this machine (`127.0.0.1`, `localhost` or `[::1]`, as with a stdio MCP
+  server). For a link from any other server the command stops with
+  `local_repository_refused` unless you pass `--here`, or `--dir <path>` to
+  check the run out from that folder anyway.
 - A detached worktree works even while the branch is checked out somewhere
   else. When the branch no longer exists (for example a failed run that
   pushed nothing), the run's base commit is checked out instead, with a
   warning that the run's changes are not in it.
 
 ```text
-npx wardby resume '<link>' [--dir <path> | --here] [--force] [--print]
+npx wardby resume - [--dir <path> | --here] [--force] [--print]
 ```
 
 | Option         | Effect                                                                             |
@@ -823,19 +832,25 @@ claude --resume ~/.wardby/sessions/<run id>/<session id>.jsonl \
 - **The move note** tells the model the session moved from the worker:
   `/workspace` (where the run's commands ran) is now the worktree, and the
   worker's tool is gone. `--system-prompt-snapshot off` makes Claude Code
-  apply the note to a resumed conversation; it is passed only to Claude Code
-  versions that support it (2.1.257 and later).
+  apply the note to a resumed conversation. It needs Claude Code 2.1.257 or
+  later; for an older version that `claude --version` reports, it is left
+  out. When the version cannot be read (for example `claude` is not on
+  `PATH`), the printed command includes it and says so: remove it if your
+  Claude Code is older than 2.1.257.
 - **The stand-in tool server.** Every command in a run went through the
   worker's `run_command` tool (`wardby_tools`). The MCP config starts a
   stand-in with the same name and input schema from the same wardby install,
-  so the resumed session shows the run's calls and their output. The stand-in
+  so the resumed session shows the run's calls and their output. Under `npx`,
+  `mcp-config.json` points into the npx cache; if that cache has been
+  cleaned, run `wardby resume` again to rewrite it. The stand-in
   runs nothing: any call answers that the session moved and to use the local
   Bash, Read and Edit tools in the worktree.
 - **Importing again.** An identical session file is reused. A file that has
   grown because you continued the session locally is kept, so running the
   command again picks up where you left off. Any other different file is
   refused unless you pass `--force`. An existing worktree of the same
-  repository at the target path is reused.
+  repository at the target path is reused as it is, with a warning when it
+  is at a different commit from the run's.
 - **Removing an import.** Delete `~/.wardby/sessions/<run id>/` and remove
   the worktree with `git worktree remove <path>`. The command prints both.
 - Only Claude Code runs can be resumed; for other runs the tool returns
@@ -849,8 +864,15 @@ server's own address (`MCP_CANONICAL_URI`'s origin). Over stdio it points at a
 local port the MCP server opens on `127.0.0.1` while links are in use, so
 your MCP client must stay connected until the download finishes. A
 multi-instance HTTP deployment needs `REQUEST_STATE_KEY` set to the same
-value on every instance, so a link made on one instance works on another. `wardby
-resume` sends the link only over HTTPS, or over plain HTTP to this machine.
+value on every instance, so a link made on one instance works on another; a
+link made by a stdio server is never accepted by the HTTP route, even with a
+shared key. `wardby resume` sends the link only over HTTPS, or over plain
+HTTP to this machine.
+
+The token is in the link's query string (as with the secret-entry form's
+links). Exclude `/run-transcripts/download` (and `/elicit/secret`) from
+load-balancer, ingress and proxy access logs, or log those paths without
+their query string.
 
 The download responds with the gzip-compressed transcript and the headers
 `x-wardby-sha256`, `x-wardby-session-id` and `x-wardby-transcript-meta` (the

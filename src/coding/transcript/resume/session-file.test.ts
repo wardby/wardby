@@ -19,7 +19,6 @@ describe("writeSessionFile", () => {
     expect(result.outcome).toBe("written");
     expect(readFileSync(result.path, "utf8")).toBe(BODY);
     expect(statSync(result.path).mode & 0o777).toBe(0o600);
-    expect(result.recordCwd).toBe("/opt/wardby/context");
     // No temp file left behind.
     expect(readdirSync(join(dir, RUN_ID))).toEqual([`${SESSION_ID}.jsonl`]);
   });

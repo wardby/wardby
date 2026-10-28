@@ -15,6 +15,9 @@
  * `--system-prompt-snapshot off` (v2.1.257 and later) rebuilds the prompt on
  * every request, so the note applies. Older versions did not record it
  * while a system prompt flag was passed, so the note applies without it.
+ * When the version cannot be read, the flag is included (every current
+ * release has it) and the output says to remove it for a version before
+ * 2.1.257.
  */
 import { execFile, spawn } from "node:child_process";
 import { constants } from "node:fs";
@@ -92,14 +95,18 @@ export async function claudeVersion(): Promise<string | undefined> {
   }
 }
 
+export const UNKNOWN_VERSION_NOTE =
+  "Could not read the Claude Code version: the command includes --system-prompt-snapshot off (Claude Code 2.1.257 or later); remove that flag for an older version.";
+
 export function claudeArgs(opts: {
   sessionFile: string;
   mcpConfigPath: string;
   note: string;
   version: [number, number, number] | undefined;
 }): string[] {
+  // Unknown version (claude missing or unparseable): include it, as every current release supports it.
   const snapshot =
-    opts.version && atLeast(opts.version, SNAPSHOT_FLAG_SINCE) ? ["--system-prompt-snapshot", "off"] : [];
+    !opts.version || atLeast(opts.version, SNAPSHOT_FLAG_SINCE) ? ["--system-prompt-snapshot", "off"] : [];
   return [
     "--resume",
     opts.sessionFile,

@@ -36,11 +36,19 @@ export {
   TRANSCRIPT_SHA256_HEADER,
 };
 
+/**
+ * Which host serves a link. A stdio link (which may carry the operator flag) is never accepted by
+ * the HTTP route, even when REQUEST_STATE_KEY is shared and its signature verifies there.
+ */
+export type RunTranscriptLinkAudience = "stdio" | "http";
+
 export interface RunTranscriptLinkPayload {
   kind: "run-transcript";
   runId: string;
   principalId: string;
-  /** The stdio local operator: owner of every run for access checks. */
+  /** The host that minted the link, and the only one that serves it. */
+  aud: RunTranscriptLinkAudience;
+  /** The stdio local operator: owner of every run for access checks. Only ever on a stdio link. */
   operator?: boolean;
   /** Epoch ms after which the link is refused. */
   exp: number;
@@ -48,6 +56,8 @@ export interface RunTranscriptLinkPayload {
 
 export interface RunTranscriptDownloadDeps {
   verify: (token: string) => Promise<unknown>;
+  /** The host serving this route: only links minted for it are accepted. */
+  audience: RunTranscriptLinkAudience;
   db: Pick<PrismaClient, "run" | "agent" | "resourceGrant" | "codingRun" | "runTranscript">;
   blobs: BlobStore | undefined;
   now?: () => Date;
@@ -79,7 +89,10 @@ function isPayload(value: unknown): value is RunTranscriptLinkPayload {
     typeof v.runId === "string" &&
     typeof v.principalId === "string" &&
     typeof v.exp === "number" &&
-    (v.operator === undefined || typeof v.operator === "boolean")
+    (v.aud === "stdio" || v.aud === "http") &&
+    (v.operator === undefined || typeof v.operator === "boolean") &&
+    // The operator flag belongs to stdio only.
+    !(v.aud === "http" && v.operator !== undefined)
   );
 }
 
@@ -102,7 +115,7 @@ export async function handleRunTranscriptDownload(
     refuse(res, "link_invalid");
     return;
   }
-  if (!isPayload(payload) || payload.exp <= now.getTime()) {
+  if (!isPayload(payload) || payload.aud !== deps.audience || payload.exp <= now.getTime()) {
     refuse(res, "link_invalid");
     return;
   }

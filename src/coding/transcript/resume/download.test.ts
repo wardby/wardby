@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { downloadTranscript, parseResumeLink, ResumeError } from "./download.js";
 import { FAKE_TOKEN, meta, serveTranscript, transcriptGzip } from "./resume.test-support.js";
 
@@ -86,6 +87,47 @@ describe("downloadTranscript", () => {
     const served = await serveTranscript({ meta: meta({ runId: "../../etc" }) });
     server = served.server;
     await expectRefusal(downloadTranscript(parseResumeLink(served.link)), /invalid run details/);
+  });
+
+  it("refuses a provider or other field a terminal could misread", async () => {
+    for (const bad of [
+      meta({ provider: "claude-code\u001b[2J" }),
+      meta({ provider: "Claude Code" }),
+      meta({ headRef: "main\u0007" }),
+      meta({ repository: "your-org/your-repo\u009b31m" }),
+    ]) {
+      const served = await serveTranscript({ meta: bad });
+      await expectRefusal(downloadTranscript(parseResumeLink(served.link)), /invalid run details/);
+      served.server.close();
+    }
+  });
+
+  it("stops reading a chunked body past the size cap", async () => {
+    let sent = 0;
+    const big = createServer((_req, res) => {
+      // No Content-Length: chunked, and it never ends on its own.
+      res.writeHead(200, { "content-type": "application/gzip" });
+      const timer = setInterval(() => {
+        sent += 64 * 1024;
+        res.write(Buffer.alloc(64 * 1024));
+      }, 1);
+      res.once("close", () => clearInterval(timer));
+    });
+    await new Promise<void>((resolve) => big.listen(0, "127.0.0.1", resolve));
+    server = big;
+    const port = (big.address() as AddressInfo).port;
+    const link = parseResumeLink(`http://127.0.0.1:${port}/run-transcripts/download?t=${FAKE_TOKEN}`);
+    await expectRefusal(downloadTranscript(link, globalThis.fetch, 1024 * 1024), /larger than wardby resume accepts/);
+    expect(sent).toBeLessThan(16 * 1024 * 1024);
+  });
+
+  it("refuses a Content-Length that is not a number", async () => {
+    const fake: typeof globalThis.fetch = () =>
+      Promise.resolve(new Response("x", { status: 200, headers: { "content-length": "lots" } }));
+    await expectRefusal(
+      downloadTranscript(parseResumeLink(`https://w.example/run-transcripts/download?t=${FAKE_TOKEN}`), fake),
+      /invalid length/,
+    );
   });
 
   it("says when the server cannot be reached", async () => {

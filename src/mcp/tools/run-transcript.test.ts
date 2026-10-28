@@ -55,7 +55,11 @@ function storedRun(overrides: Partial<FakeTranscriptRun> = {}): FakeTranscriptRu
 
 const AGENTS = [{ id: "a1", ownerId: "owner" }];
 
-async function setup(db: PrismaClient, principalId: string, opts: { operator?: boolean; blobs?: boolean } = {}) {
+async function setup(
+  db: PrismaClient,
+  principalId: string,
+  opts: { operator?: boolean; blobs?: boolean; audience?: "stdio" | "http" } = {},
+) {
   const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
   mcp.setFixedContext(fakeCtx(db, principalId, opts.operator));
   registerRunTools(mcp);
@@ -66,6 +70,7 @@ async function setup(db: PrismaClient, principalId: string, opts: { operator?: b
       return `https://host${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`;
     },
     blobStoreConfigured: opts.blobs ?? true,
+    audience: opts.audience ?? (opts.operator ? "stdio" : "http"),
   });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -101,7 +106,9 @@ describe("get_run_transcript", () => {
     });
     expect(tokens).toHaveLength(1);
     expect(body.download.url).toContain(encodeURIComponent(tokens[0]));
-    expect(body.command).toBe(`npx wardby resume '${body.download.url}'`);
+    // The command reads the link from stdin, so it stays out of shell history and the process list.
+    expect(body.command).toBe("npx wardby resume -");
+    expect(body.command).not.toContain(tokens[0]);
     expect(result.text).not.toContain("hello");
   });
 
@@ -212,10 +219,12 @@ describe("run transcript download", () => {
     token: string | null,
     store = blobs(),
     now?: () => Date,
+    audience: "stdio" | "http" = "http",
   ) {
     const { res, out } = captureResponse();
     await handleRunTranscriptDownload("GET", token, res, {
       verify: (t) => mcp.verifyRequestState(t),
+      audience,
       db,
       blobs: store,
       now,
@@ -249,7 +258,37 @@ describe("run transcript download", () => {
   it("works for the stdio operator's link", async () => {
     const db = fakeTranscriptDb([{ id: "a1", ownerId: null }], [storedRun({ triggeredById: null })]);
     const { mcp, token } = await mintFor(db, "local", true);
-    expect((await download(mcp, db, token)).status).toBe(200);
+    expect((await download(mcp, db, token, blobs(), undefined, "stdio")).status).toBe(200);
+  });
+
+  it("serves a link only on the host it was minted for; the HTTP route never takes an operator link", async () => {
+    const db = fakeTranscriptDb([{ id: "a1", ownerId: null }], [storedRun({ triggeredById: null })]);
+    // A stdio operator link, signed with a key the HTTP host shares (REQUEST_STATE_KEY).
+    const { mcp, token } = await mintFor(db, "local", true);
+    const onHttp = await download(mcp, db, token, blobs(), undefined, "http");
+    expect(onHttp.status).toBe(403);
+    expect(JSON.parse(onHttp.body.toString())).toEqual({ error: "link_invalid" });
+    // An HTTP-audience payload claiming the operator flag is refused everywhere.
+    const forged = await mcp.mintRequestState({
+      kind: "run-transcript",
+      aud: "http",
+      runId: "r1",
+      principalId: "local",
+      operator: true,
+      exp: Date.now() + 60_000,
+    });
+    expect((await download(mcp, db, forged, blobs(), undefined, "http")).status).toBe(403);
+    // An HTTP link is not served by the stdio host either.
+    const httpLink = await mcp.mintRequestState<RunTranscriptLinkPayload>({
+      kind: "run-transcript",
+      aud: "http",
+      runId: "r1",
+      principalId: "trig",
+      exp: Date.now() + 60_000,
+    });
+    const owned = fakeTranscriptDb(AGENTS, [storedRun()]);
+    expect((await download(mcp, owned, httpLink, blobs(), undefined, "http")).status).toBe(200);
+    expect((await download(mcp, owned, httpLink, blobs(), undefined, "stdio")).status).toBe(403);
   });
 
   it("refuses a missing, tampered, foreign or expired token with no content", async () => {
@@ -259,6 +298,7 @@ describe("run transcript download", () => {
     const forged = await mcp.mintRequestState({ kind: "create", ownerId: "trig", secretName: "X" });
     const expired = await mcp.mintRequestState<RunTranscriptLinkPayload>({
       kind: "run-transcript",
+      aud: "http",
       runId: "r1",
       principalId: "trig",
       exp: Date.now() - 1,
@@ -266,6 +306,7 @@ describe("run transcript download", () => {
     const otherServer = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
     const otherKey = await otherServer.mintRequestState<RunTranscriptLinkPayload>({
       kind: "run-transcript",
+      aud: "http",
       runId: "r1",
       principalId: "trig",
       exp: Date.now() + 60_000,
@@ -285,12 +326,14 @@ describe("run transcript download", () => {
     const { mcp } = await mintFor(db, "trig");
     const otherUser = await mcp.mintRequestState<RunTranscriptLinkPayload>({
       kind: "run-transcript",
+      aud: "http",
       runId: "r1",
       principalId: "stranger",
       exp: Date.now() + 60_000,
     });
     const otherRun = await mcp.mintRequestState<RunTranscriptLinkPayload>({
       kind: "run-transcript",
+      aud: "http",
       runId: "r2",
       principalId: "trig",
       exp: Date.now() + 60_000,
@@ -330,6 +373,7 @@ describe("run transcript download", () => {
     const { res, out } = captureResponse();
     await handleRunTranscriptDownload("POST", token, res, {
       verify: (t) => mcp.verifyRequestState(t),
+      audience: "http",
       db,
       blobs: blobs(),
     });
@@ -358,12 +402,14 @@ describe("stdio link host", () => {
       [RUN_TRANSCRIPT_DOWNLOAD_PATH]: (req, res, token) =>
         handleRunTranscriptDownload(req.method, token, res, {
           verify: (t) => mcp.verifyRequestState(t),
+          audience: "stdio",
           db,
           blobs: fakeBlobs({ "run-transcripts/r1.jsonl.gz": stored.bytes }),
         }),
     });
     const token = await mcp.mintRequestState<RunTranscriptLinkPayload>({
       kind: "run-transcript",
+      aud: "stdio",
       runId: "r1",
       principalId: "trig",
       exp: Date.now() + 60_000,

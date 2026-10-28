@@ -30,22 +30,6 @@ export interface SessionFile {
   dir: string;
   /** "written": new; "same": identical file already there; "continued": a local continuation kept; "replaced": --force. */
   outcome: "written" | "same" | "continued" | "replaced";
-  /** The worker path in the records' `cwd`, when one is present. */
-  recordCwd: string | undefined;
-}
-
-/** The first `cwd` a record carries: Claude Code's working directory in the worker. */
-function firstCwd(body: string): string | undefined {
-  for (const line of body.split("\n")) {
-    if (!line) continue;
-    try {
-      const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
-      if (typeof cwd === "string" && cwd.startsWith("/")) return cwd;
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
 }
 
 export async function writeSessionFile(
@@ -79,12 +63,11 @@ export async function writeSessionFile(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const recordCwd = firstCwd(file.body);
   if (existing) {
-    if (existing.equals(body)) return { path, dir, outcome: "same", recordCwd };
+    if (existing.equals(body)) return { path, dir, outcome: "same" };
     // Claude Code appends the continued conversation to the file it resumed.
     if (!opts.force && existing.byteLength > body.byteLength && existing.subarray(0, body.byteLength).equals(body)) {
-      return { path, dir, outcome: "continued", recordCwd };
+      return { path, dir, outcome: "continued" };
     }
     if (!opts.force) {
       throw new ResumeError(
@@ -105,5 +88,5 @@ export async function writeSessionFile(
   }
   await handle.close();
   await rename(temp, path);
-  return { path, dir, outcome: existing ? "replaced" : "written", recordCwd };
+  return { path, dir, outcome: existing ? "replaced" : "written" };
 }

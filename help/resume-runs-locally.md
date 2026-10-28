@@ -65,9 +65,11 @@ are comfortable sharing with everyone who can read them.
    that works for 10 minutes and the command to run; otherwise the status
    (`none`, `too_large`, `not_captured`, `failed`, `expired`, `unavailable`,
    `unsupported`) and what it means.
-2. Run the command in a terminal: `npx wardby resume '<link>'`. For a GitHub
-   repository, run it inside a clone of that repository; for a `local:`
-   repository, anywhere.
+2. Run the command in a terminal, `npx wardby resume -`, and paste the link
+   when it asks. (A link given as an argument stays in shell history and the
+   process list.) For a GitHub repository, run it inside a clone of that
+   repository. A `local:` repository is used only when the link comes from
+   this machine (a stdio MCP server); otherwise pass `--here` or `--dir`.
 
 It verifies the download's SHA-256, writes the session to
 `~/.wardby/sessions/<run id>/<session id>.jsonl` (mode 0600, never into
@@ -79,11 +81,17 @@ and a note tells the model `/workspace` is now the worktree.
 
 Options: `--dir <path>` (worktree location), `--here` (no checkout),
 `--force` (replace a different imported session file), `--print` (print the
-`claude` command instead of starting it).
+`claude` command instead of starting it). The command passes
+`--system-prompt-snapshot off` so the move note applies; remove it for a
+Claude Code older than 2.1.257 when the version could not be read. Under
+`npx`, the MCP config points into the npx cache: run `wardby resume` again if
+the cache was cleaned.
 
 The link is a credential until it expires: do not share it. Over stdio it
 points at a local port the MCP server opens, so keep your MCP client
-connected until the download finishes. Refusals:
+connected until the download finishes. The token is in the link's query
+string: keep `/run-transcripts/download` out of load-balancer and ingress
+access logs. Refusals:
 [Run transcript download refused](errors/run-transcript-download.md).
 
 ## Retention

@@ -187,6 +187,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       // token is never logged (open-request tracking keeps the path only).
       await handleRunTranscriptDownload(req.method, url.searchParams.get("t"), res, {
         verify: (token) => opts.mcp.verifyRequestState(token),
+        audience: "http",
         db: opts.auth.db,
         blobs: opts.blobs,
       });

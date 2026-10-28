@@ -53,6 +53,12 @@ export interface CheckoutOptions {
   dir?: string;
   /** --here: use cwd as it is; no checkout. */
   here?: boolean;
+  /**
+   * Whether the link came from this machine (a loopback origin). A `local:` repository names a path on
+   * the server's machine; from any other origin, checking it out would let that server point the
+   * importer at any repository here, so it is refused unless the user chose --dir or --here.
+   */
+  linkIsLoopback?: boolean;
   git?: Git;
 }
 
@@ -107,14 +113,35 @@ async function commonDir(git: Git, dir: string): Promise<string | undefined> {
   return out ? realpathSync(out) : undefined;
 }
 
-/** Creates the worktree, or reuses one an earlier import made for the same repository. */
-async function addWorktree(git: Git, repoDir: string, dir: string, commit: string): Promise<"created" | "reused"> {
+/**
+ * Creates the worktree, or reuses one an earlier import made for the same repository. A reused
+ * worktree is left as it is (it may hold local work), with a warning when its HEAD is elsewhere.
+ */
+async function addWorktree(
+  git: Git,
+  repoDir: string,
+  dir: string,
+  commit: string,
+  warnings: string[],
+): Promise<"created" | "reused"> {
   if (existsSync(dir)) {
     const [mine, theirs] = await Promise.all([commonDir(git, repoDir), commonDir(git, dir)]);
-    if (mine && theirs && mine === theirs) return "reused";
-    throw new ResumeError(
-      `${dir} already exists and is not a checkout of this repository. Pass --dir <path> or --here.`,
-    );
+    if (!mine || !theirs || mine !== theirs) {
+      throw new ResumeError(
+        `${dir} already exists and is not a checkout of this repository. Pass --dir <path> or --here.`,
+      );
+    }
+    const [head, wanted] = await Promise.all([
+      tryGit(git, ["rev-parse", "--verify", "--quiet", "HEAD"], dir),
+      tryGit(git, ["rev-parse", "--verify", "--quiet", `${commit}^{commit}`], repoDir),
+    ]);
+    if (!head || !wanted || head !== wanted) {
+      warnings.push(
+        `The existing worktree at ${dir} is at ${head ?? "an unknown commit"}, not the run's ${wanted ?? commit}. ` +
+          "It was left as it is (it may hold your local work); check out the run's commit there, or pass --dir <path>.",
+      );
+    }
+    return "reused";
   }
   try {
     await git(["worktree", "add", "--detach", dir, commit], repoDir);
@@ -126,6 +153,9 @@ async function addWorktree(git: Git, repoDir: string, dir: string, commit: strin
   return "created";
 }
 
+/** Fixed code: a remote server named a local: repository on this machine. */
+export const LOCAL_REPOSITORY_REFUSED = "local_repository_refused";
+
 export async function prepareCheckout(meta: TranscriptMeta, opts: CheckoutOptions): Promise<Checkout> {
   const git = opts.git ?? realGit;
   const branch = validRef(meta.resultBranch ?? meta.headRef);
@@ -136,6 +166,13 @@ export async function prepareCheckout(meta: TranscriptMeta, opts: CheckoutOption
     `${why}; checked out the run's base commit ${baseSha} instead. The run's changes are not in this checkout.`;
 
   if (isLocalRepository(meta.repository)) {
+    if (!opts.linkIsLoopback && opts.dir === undefined) {
+      throw new ResumeError(
+        `${LOCAL_REPOSITORY_REFUSED}: the run's repository is a local: folder on the server's machine, but this ` +
+          "link is from another machine. Pass --here to continue in the current directory, or --dir <path> to " +
+          "check the run out from that folder here anyway.",
+      );
+    }
     let repoDir: string;
     try {
       repoDir = normalizeLocalRepository(meta.repository).slice("local:".length);
@@ -158,7 +195,7 @@ export async function prepareCheckout(meta: TranscriptMeta, opts: CheckoutOption
     const dir = opts.dir
       ? resolve(opts.cwd, opts.dir)
       : join(dirname(repoDir), `${basename(repoDir)}-run-${shortRunId(meta.runId)}`);
-    const outcome = await addWorktree(git, repoDir, dir, commit);
+    const outcome = await addWorktree(git, repoDir, dir, commit, warnings);
     return { dir, ref: ref!, outcome, warnings };
   }
 
@@ -212,6 +249,6 @@ export async function prepareCheckout(meta: TranscriptMeta, opts: CheckoutOption
       ? opts.dir
       : resolve(opts.cwd, opts.dir)
     : join(dirname(top), `${basename(top)}-run-${shortRunId(meta.runId)}`);
-  const outcome = await addWorktree(git, top, dir, commit);
+  const outcome = await addWorktree(git, top, dir, commit, warnings);
   return { dir, ref: ref!, outcome, warnings };
 }

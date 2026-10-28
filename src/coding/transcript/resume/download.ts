@@ -38,6 +38,17 @@ export interface DownloadedTranscript {
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+/** Largest refusal body read (a JSON error code). */
+const MAX_ERROR_BYTES = 4096;
+const PROVIDER = /^[a-z0-9-]{1,40}$/;
+/** C0, DEL and C1 controls: never printed from server data (terminal escapes). */
+// eslint-disable-next-line no-control-regex -- refusing untrusted control characters.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Whether the link points at this machine. */
+export function isLoopbackLink(link: URL): boolean {
+  return LOOPBACK.has(link.hostname);
+}
 
 /** Checks the link's shape without echoing it. */
 export function parseResumeLink(raw: string): URL {
@@ -81,7 +92,8 @@ function parseMeta(header: string | null): TranscriptMeta {
       "The server's response is missing the run's details. Is the server running a matching wardby version?",
     );
   }
-  const str = (v: unknown) => typeof v === "string";
+  // Every string here may be printed or reach git: no control characters.
+  const str = (v: unknown): v is string => typeof v === "string" && !CONTROL.test(v);
   const optional = (v: unknown) => v === null || str(v);
   if (
     !meta ||
@@ -90,6 +102,7 @@ function parseMeta(header: string | null): TranscriptMeta {
     !str(meta.sessionId) ||
     !SESSION_ID.test(meta.sessionId) ||
     !str(meta.provider) ||
+    !PROVIDER.test(meta.provider) ||
     !str(meta.repository) ||
     !str(meta.headRef) ||
     !optional(meta.resultBranch) ||
@@ -105,6 +118,7 @@ function parseMeta(header: string | null): TranscriptMeta {
 export async function downloadTranscript(
   link: URL,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  maxBytes = MAX_DOWNLOAD_BYTES,
 ): Promise<DownloadedTranscript> {
   let res: Response;
   try {
@@ -117,18 +131,16 @@ export async function downloadTranscript(
   if (!res.ok) {
     let code = "";
     try {
-      code = ((await res.json()) as { error?: unknown }).error as string;
+      const body = await readBounded(res, MAX_ERROR_BYTES);
+      code = (JSON.parse(body.toString("utf8")) as { error?: unknown }).error as string;
     } catch {
       // Not a wardby refusal body.
     }
-    const message = Object.hasOwn(REFUSALS, code) ? REFUSALS[code as DownloadRefusal] : undefined;
+    const message =
+      typeof code === "string" && Object.hasOwn(REFUSALS, code) ? REFUSALS[code as DownloadRefusal] : undefined;
     throw new ResumeError(message ?? `The server refused the download (HTTP ${res.status}).`);
   }
-  const length = Number(res.headers.get("content-length") ?? "0");
-  if (length > MAX_DOWNLOAD_BYTES) throw new ResumeError("The transcript is larger than wardby resume accepts.");
-  const gzip = Buffer.from(await res.arrayBuffer());
-  if (gzip.byteLength > MAX_DOWNLOAD_BYTES)
-    throw new ResumeError("The transcript is larger than wardby resume accepts.");
+  const gzip = await readBounded(res, maxBytes);
   const meta = parseMeta(res.headers.get(META_HEADER));
   const sha = createHash("sha256").update(gzip).digest("hex");
   if (res.headers.get(SHA256_HEADER) !== meta.sha256 || sha !== meta.sha256) {
@@ -140,4 +152,39 @@ export async function downloadTranscript(
     throw new ResumeError("The server's response has invalid run details.");
   }
   return { meta, gzip };
+}
+
+/**
+ * Reads a response body up to `max` bytes, streaming, so a missing or false Content-Length cannot
+ * make it read an unbounded body. Refuses a Content-Length that is not a whole number.
+ */
+export async function readBounded(res: Response, max: number): Promise<Buffer> {
+  const declared = res.headers.get("content-length");
+  if (declared !== null && !/^\d+$/.test(declared.trim())) {
+    throw new ResumeError("The server's response has an invalid length.");
+  }
+  if (declared !== null && Number(declared) > max) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new ResumeError("The transcript is larger than wardby resume accepts.");
+  }
+  if (!res.body) return Buffer.alloc(0);
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    let chunk: { done: boolean; value?: Uint8Array };
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw new ResumeError("The download was interrupted. Try again.");
+    }
+    if (chunk.done || !chunk.value) break;
+    total += chunk.value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      throw new ResumeError("The transcript is larger than wardby resume accepts.");
+    }
+    chunks.push(chunk.value);
+  }
+  return Buffer.concat(chunks);
 }

@@ -147,6 +147,8 @@ export function registerAllTools(
     runTranscriptUrl?: (token: string) => Promise<string>;
     /** Whether a blob store is configured to serve run transcripts from. */
     blobStoreConfigured?: boolean;
+    /** Which host serves those links (default http). */
+    runTranscriptAudience?: "stdio" | "http";
     /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
     refreshModelCatalog?: () => Promise<void>;
   },
@@ -165,6 +167,7 @@ export function registerAllTools(
   registerRunTranscriptTool(mcp, {
     downloadUrl: runTranscriptUrl ?? (() => Promise.reject(new Error("run transcripts are not served here"))),
     blobStoreConfigured: runTranscriptUrl !== undefined && opts.blobStoreConfigured === true,
+    audience: opts.runTranscriptAudience ?? "http",
   });
   registerStopRunTool(mcp);
   registerCostReportTools(mcp);
@@ -356,6 +359,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       [RUN_TRANSCRIPT_DOWNLOAD_PATH]: (req, res, token) =>
         handleRunTranscriptDownload(req.method, token, res, {
           verify: (t) => mcp.verifyRequestState(t),
+          audience: "stdio",
           db: prisma,
           blobs,
         }),
@@ -363,6 +367,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     registerAllTools(mcp, {
       secretElicitationUrl: (token) => linkHost.urlFor(STDIO_SECRET_PATH, token),
       runTranscriptUrl: (token) => linkHost.urlFor(RUN_TRANSCRIPT_DOWNLOAD_PATH, token),
+      runTranscriptAudience: "stdio",
       blobStoreConfigured: blobs !== undefined,
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
       refreshModelCatalog: () => modelCatalog.refreshNow(),

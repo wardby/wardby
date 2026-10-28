@@ -30,6 +30,7 @@ describe("prepareCheckout: local repositories", () => {
       meta({ repository: `local:${dir}`, headRef: "main", resultBranch: "wardby/run-x" }),
       {
         cwd: tmpdir(),
+        linkIsLoopback: true,
       },
     );
     expect(result.outcome).toBe("created");
@@ -41,7 +42,7 @@ describe("prepareCheckout: local repositories", () => {
     // A second import reuses the worktree.
     const again = await prepareCheckout(
       meta({ repository: `local:${dir}`, headRef: "main", resultBranch: "wardby/run-x" }),
-      { cwd: tmpdir() },
+      { cwd: tmpdir(), linkIsLoopback: true },
     );
     expect(again.outcome).toBe("reused");
   });
@@ -51,7 +52,7 @@ describe("prepareCheckout: local repositories", () => {
     const target = join(dir, "..", "custom");
     const result = await prepareCheckout(
       meta({ repository: `local:${dir}`, headRef: "main", resultBranch: "wardby/never-pushed", baseSha: base }),
-      { cwd: tmpdir(), dir: target },
+      { cwd: tmpdir(), dir: target, linkIsLoopback: true },
     );
     expect(result.dir).toBe(target);
     expect(result.ref).toBe(base);
@@ -74,6 +75,31 @@ describe("prepareCheckout: local repositories", () => {
     const cwd = mkdtempSync(join(tmpdir(), "here-"));
     const result = await prepareCheckout(meta(), { cwd, here: true });
     expect(result).toMatchObject({ dir: cwd, outcome: "here" });
+  });
+
+  it("refuses a local: repository named by a link from another machine, unless --dir or --here", async () => {
+    const { dir, head } = makeRepo();
+    const remoteMeta = meta({ repository: `local:${dir}`, headRef: "main", resultBranch: "wardby/run-x" });
+    await expect(prepareCheckout(remoteMeta, { cwd: tmpdir(), linkIsLoopback: false })).rejects.toThrow(
+      /^local_repository_refused: /,
+    );
+    expect(git(dir, "worktree", "list").split("\n")).toHaveLength(1);
+    const here = await prepareCheckout(remoteMeta, { cwd: tmpdir(), here: true, linkIsLoopback: false });
+    expect(here.outcome).toBe("here");
+    const target = join(dir, "..", "chosen");
+    const chosen = await prepareCheckout(remoteMeta, { cwd: tmpdir(), dir: target, linkIsLoopback: false });
+    expect(git(chosen.dir, "rev-parse", "HEAD")).toBe(head);
+  });
+
+  it("warns when a reused worktree is at a different commit, and leaves it as it is", async () => {
+    const { dir, base, head } = makeRepo();
+    const m = meta({ repository: `local:${dir}`, headRef: "main", resultBranch: "wardby/run-x" });
+    const first = await prepareCheckout(m, { cwd: tmpdir(), linkIsLoopback: true });
+    git(first.dir, "checkout", "-q", "--detach", base);
+    const again = await prepareCheckout(m, { cwd: tmpdir(), linkIsLoopback: true });
+    expect(again.outcome).toBe("reused");
+    expect(again.warnings[0]).toContain(`is at ${base}, not the run's ${head}`);
+    expect(git(first.dir, "rev-parse", "HEAD")).toBe(base);
   });
 });
 

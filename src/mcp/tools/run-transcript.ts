@@ -2,12 +2,16 @@
  * get_run_transcript: the way to continue a coding run's session locally.
  * The transcript itself never enters the caller's context: the tool returns
  * a short-lived signed download link and the command that imports it
- * (`npx wardby resume '<link>'`). Same access as get_run.
+ * (`npx wardby resume -`, which reads the link from standard input). Same access as get_run.
  */
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 import { findReadableRun } from "./run-access.js";
-import { RUN_TRANSCRIPT_LINK_TTL_MS, type RunTranscriptLinkPayload } from "./run-transcript-download.js";
+import {
+  RUN_TRANSCRIPT_LINK_TTL_MS,
+  type RunTranscriptLinkAudience,
+  type RunTranscriptLinkPayload,
+} from "./run-transcript-download.js";
 
 /** Builds the download URL for a minted token (HTTP: the canonical origin; stdio: the loopback server). */
 export type RunTranscriptUrlBuilder = (token: string) => Promise<string>;
@@ -16,6 +20,8 @@ export interface RunTranscriptToolOptions {
   downloadUrl: RunTranscriptUrlBuilder;
   /** Whether the server has a blob store to serve transcripts from. */
   blobStoreConfigured: boolean;
+  /** The host that serves the links this server mints (stdio's loopback server, or the HTTP route). */
+  audience: RunTranscriptLinkAudience;
   now?: () => Date;
 }
 
@@ -39,7 +45,7 @@ export function registerRunTranscriptTool(mcp: WardbyMcpServer, opts: RunTranscr
   mcp.registerTool({
     name: "get_run_transcript",
     description:
-      "Get a short-lived download link for a Claude Code coding run's session transcript, and the command that continues the session locally (npx wardby resume '<link>'). Give the command to the user to run in a terminal inside a clone of the run's repository; do not fetch the link yourself. Same access as get_run. The link works for 10 minutes.",
+      "Get a short-lived download link for a Claude Code coding run's session transcript, and the command that continues the session locally (npx wardby resume -, which asks for the link). Give the user the command and the link to run in a terminal inside a clone of the run's repository; do not fetch the link yourself. Same access as get_run. The link works for 10 minutes.",
     scope: "agents:read",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
@@ -62,7 +68,8 @@ export function registerRunTranscriptTool(mcp: WardbyMcpServer, opts: RunTranscr
         kind: "run-transcript",
         runId: run.id,
         principalId: ctx.principal.id,
-        ...(ctx.operator ? { operator: true } : {}),
+        aud: opts.audience,
+        ...(ctx.operator && opts.audience === "stdio" ? { operator: true } : {}),
         exp,
       };
       const url = await opts.downloadUrl(await mcp.mintRequestState(payload));
@@ -78,8 +85,8 @@ export function registerRunTranscriptTool(mcp: WardbyMcpServer, opts: RunTranscr
         sizeBytes: row.sizeBytes,
         expiresAt: row.expiresAt.toISOString(),
         download: { url, expiresAt: linkExpiresAt },
-        command: `npx wardby resume '${url}'`,
-        note: "Run the command in a terminal, inside a clone of the repository (not needed for a local: repository). The link is a credential for this transcript until it expires: do not share it.",
+        command: "npx wardby resume -",
+        note: "Run the command in a terminal, inside a clone of the repository (not needed for a local: repository), and paste download.url when it asks. Reading the link this way keeps it out of shell history and the process list. The link is a credential for this transcript until it expires: do not share it.",
       });
     },
   });
