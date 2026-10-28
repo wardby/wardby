@@ -385,6 +385,16 @@ Deletes the `wardby` cluster and removes the `kind-registry` container. Both
 steps tolerate the cluster/registry already being gone. This does not touch
 your local Postgres (`deploy/local`) or anything in `.env.local`.
 
+## Session transcripts on the kind harness
+
+Claude Code agents with `sessionResume` on store their transcripts from the
+control plane (see
+[Resume a run locally](../../docs/coding-agent-setup.md#resume-a-run-locally)).
+The kind control plane runs on your host, so nothing in the cluster changes:
+set `BLOB_STORE=local` and `BLOB_STORE_LOCAL_DIR` (a directory on your host) in
+the environment you start the control plane with. This is separate from the
+coding proxy's dependency cache store below.
+
 ## Run dependency cache on the kind harness
 
 See [Dependency cache](../../docs/coding-packages.md#dependency-cache) for what it does.

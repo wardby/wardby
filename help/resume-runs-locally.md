@@ -3,7 +3,7 @@ id: resume-runs-locally
 title: Resume Claude Code runs locally (sessionResume, get_run_transcript, wardby resume)
 summary: Keep each Claude Code run's redacted conversation with sessionResume, then continue it on your machine with get_run_transcript and npx wardby resume.
 audience: operator
-tags: [sessionResume, resume, wardby resume, get_run_transcript, transcript, blob-store, RUN_TRANSCRIPT_MAX_BYTES]
+tags: [sessionResume, wardby resume, get_run_transcript, transcript, blob-store, WARDBY_SESSION_TRANSCRIPTS]
 appliesTo: ">=0.7.0"
 ---
 
@@ -99,6 +99,23 @@ access logs. Refusals:
 `RUN_TRANSCRIPT_RETENTION_DAYS` is a whole number from 1 to 3650 (default 30).
 Expired transcripts are pruned when new ones are stored. On GCS or S3 also add
 a bucket lifecycle rule on the `run-transcripts/` prefix.
+
+## Set it up per deployment
+
+Give transcripts a bucket of their own, not the dependency cache bucket, that
+only the control plane can use.
+
+- GKE: `session_transcripts_enabled` and `session_transcripts_bucket_name` in
+  Terraform (optionally `session_transcripts_retention_days`), then
+  `WARDBY_SESSION_TRANSCRIPTS=true deploy/gke/up.sh`. Terraform adds the
+  lifecycle rule; `up.sh` passes the same retention to the control plane.
+- AWS: the same Terraform variables, then give the control plane `BLOB_STORE=s3`,
+  the `session_transcripts_bucket` output as `BLOB_STORE_S3_BUCKET`,
+  `BLOB_STORE_S3_REGION`, and the `session_transcripts_retention_days` output as
+  `RUN_TRANSCRIPT_RETENTION_DAYS`.
+- kind harness and Docker quickstart: the server runs on your host. Set
+  `BLOB_STORE=local` and `BLOB_STORE_LOCAL_DIR` in its environment (for the
+  quickstart, in `.wardby/.env`).
 
 ## Startup and custom images
 

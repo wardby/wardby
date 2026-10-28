@@ -755,7 +755,37 @@ server also needs its secret cipher, which it has in a normal setup.
 **Retention.** Expired transcripts are pruned whenever a new one is stored.
 For GCS and S3, also add a bucket lifecycle rule that deletes objects under
 the `run-transcripts/` prefix after the same number of days, so objects are
-removed even when no new run is stored.
+removed even when no new run is stored. The reference GKE and AWS modules
+create that rule for you (below).
+
+**Set it up per deployment.** Use a bucket of its own for transcripts, not the
+dependency cache bucket, and give access to the control plane only: a
+transcript holds everything the run saw, and the coding proxy and workers have
+no need for it.
+
+- **GKE**: set `session_transcripts_enabled = true` and a unique
+  `session_transcripts_bucket_name` (optionally
+  `session_transcripts_retention_days`, default 30) in `terraform.tfvars`, and
+  deploy with `WARDBY_SESSION_TRANSCRIPTS=true deploy/gke/up.sh`. Terraform
+  creates the bucket and its lifecycle rule and grants the control plane's
+  service account alone; `up.sh` gives the control plane `BLOB_STORE=gcs`, the
+  bucket and the matching `RUN_TRANSCRIPT_RETENTION_DAYS`. See
+  [`deploy/gke/README.md`](../deploy/gke/README.md#session-transcripts).
+- **AWS (EKS)**: set the Terraform variables of the same names, then give the
+  control plane container `BLOB_STORE=s3`, `BLOB_STORE_S3_BUCKET` (the
+  `session_transcripts_bucket` output), `BLOB_STORE_S3_REGION` and
+  `RUN_TRANSCRIPT_RETENTION_DAYS` (the `session_transcripts_retention_days`
+  output). See
+  [`deploy/aws/README.md`](../deploy/aws/README.md#session-transcripts).
+- **kind harness**: the control plane runs on your host, so set
+  `BLOB_STORE=local` and `BLOB_STORE_LOCAL_DIR` (a directory on your host) in
+  the environment you start it with. Nothing changes in the cluster.
+- **Docker quickstart**: the server runs on your host. Add `BLOB_STORE=local`
+  and `BLOB_STORE_LOCAL_DIR` (an absolute directory on your host) to
+  `.wardby/.env` and restart. The coding proxy container keeps its own
+  dependency cache store and is not affected. A local directory has no
+  lifecycle rule, so expired transcripts are removed only when new ones are
+  stored.
 
 **Startup checks.** With `JOB_LAUNCHER` set to `docker` or `kubernetes`, a
 half-set `BLOB_STORE` (the kind set but its bucket or directory missing), or an

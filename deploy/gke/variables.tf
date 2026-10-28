@@ -168,3 +168,26 @@ variable "dependency_cache_max_age_days" {
     error_message = "dependency_cache_max_age_days must be a whole number of days, at least 1."
   }
 }
+
+variable "session_transcripts_enabled" {
+  description = "Create the session transcripts bucket (for agents with sessionResume) and let the control plane (only) use it. Off by default. Storing transcripts also needs WARDBY_SESSION_TRANSCRIPTS=true on deploy/gke/up.sh."
+  type        = bool
+  default     = false
+}
+
+variable "session_transcripts_bucket_name" {
+  description = "Name of the session transcripts bucket. Bucket names are global across Google Cloud, so include something unique to you. Use a different bucket from the dependency cache. Required when session_transcripts_enabled is true."
+  type        = string
+  default     = ""
+}
+
+variable "session_transcripts_retention_days" {
+  description = "Days to keep a session transcript. The bucket deletes run-transcripts/ objects older than this, and deploy/gke/up.sh passes the same number to the control plane as RUN_TRANSCRIPT_RETENTION_DAYS."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.session_transcripts_retention_days >= 1 && var.session_transcripts_retention_days <= 3650 && floor(var.session_transcripts_retention_days) == var.session_transcripts_retention_days
+    error_message = "session_transcripts_retention_days must be a whole number of days from 1 to 3650."
+  }
+}

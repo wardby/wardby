@@ -126,6 +126,48 @@ them. The proxy also needs `wardby_proxy` access to the `DependencySnapshot`
 table, which `up.sh` grants before the rollout (see
 [Upgrading an existing deployment](../../docs/getting-started-gke.md#upgrading-an-existing-deployment)).
 
+## Session transcripts
+
+Off by default. Claude Code agents with `sessionResume` on keep each run's
+redacted session transcript (see
+[Resume a run locally](../../docs/coding-agent-setup.md#resume-a-run-locally)).
+The control plane stores them in a private Cloud Storage bucket of their own.
+A transcript holds the run's whole conversation, including file contents and
+command output, so it never shares the dependency cache bucket. In
+`terraform.tfvars` set:
+
+```
+session_transcripts_enabled        = true
+session_transcripts_bucket_name    = "your-unique-session-transcripts-bucket"
+session_transcripts_retention_days = 30
+```
+
+Bucket names are global, so pick one unique to you. It must differ from
+`dependency_cache_bucket_name`. Terraform creates the bucket (uniform access,
+public access prevention enforced, no versioning). It grants
+`roles/storage.objectAdmin` on that bucket to the control plane's Google
+service account only: the coding proxy, migrator, gateway and worker pods get
+none. A lifecycle rule deletes objects under `run-transcripts/` older than
+`session_transcripts_retention_days` (a whole number from 1 to 3650, default
+30), so transcripts are removed on schedule even when no new run is stored.
+
+Then deploy with `WARDBY_SESSION_TRANSCRIPTS=true deploy/gke/up.sh`. That adds
+these variables to the control plane only:
+
+- `BLOB_STORE=gcs`.
+- `BLOB_STORE_GCS_BUCKET`, from the `session_transcripts_bucket` output.
+- `RUN_TRANSCRIPT_RETENTION_DAYS`, from the
+  `session_transcripts_retention_days` output, so the server's retention and
+  the bucket's lifecycle rule always agree.
+
+To change the size cap, also pass `RUN_TRANSCRIPT_MAX_BYTES` (1048576 to
+67108864, default 10 MiB) to `up.sh`; it is added only while transcripts are
+on. Pass both on every deploy: a later deploy without
+`WARDBY_SESSION_TRANSCRIPTS=true` stops storing new transcripts but keeps the
+bucket and what is in it. `up.sh` stops if the variable is `true` but no bucket
+exists. No extra database grant is needed: the control plane's role already
+covers the `RunTranscript` table.
+
 ## Coding workspace disk
 
 A coding run's workspace is 2048 MiB unless the agent sets `workspaceDiskMb`,
