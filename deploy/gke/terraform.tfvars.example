@@ -40,3 +40,12 @@ connector_enforcement = "REQUIRED"
 # dependency_cache_enabled      = true
 # dependency_cache_bucket_name  = "your-unique-dependency-cache-bucket"
 # dependency_cache_max_age_days = 14
+
+# Session transcripts for agents with sessionResume (off by default). Creates a
+# private bucket only the control plane can use -- not the dependency cache
+# bucket. Bucket names are global: pick one unique to you. The bucket deletes
+# transcripts after retention_days, and up.sh passes the same number to the
+# control plane. Then deploy with WARDBY_SESSION_TRANSCRIPTS=true.
+# session_transcripts_enabled        = true
+# session_transcripts_bucket_name    = "your-unique-session-transcripts-bucket"
+# session_transcripts_retention_days = 30

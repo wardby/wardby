@@ -763,6 +763,19 @@ table before the rollout; see
 `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14). Details:
 [`deploy/gke/README.md`](../deploy/gke/README.md#run-dependency-cache).
 
+### Session transcripts
+
+Off by default. To keep the transcripts of Claude Code agents with
+`sessionResume` on (see
+[Resume a run locally](coding-agent-setup.md#resume-a-run-locally)), set
+`session_transcripts_enabled = true` and a unique
+`session_transcripts_bucket_name` in `terraform.tfvars`, and deploy with
+`WARDBY_SESSION_TRANSCRIPTS=true deploy/gke/up.sh`. The bucket is separate from
+the dependency cache bucket and only the control plane can use it; its
+lifecycle rule and the control plane's `RUN_TRANSCRIPT_RETENTION_DAYS` both
+come from `session_transcripts_retention_days` (default 30). Details:
+[`deploy/gke/README.md`](../deploy/gke/README.md#session-transcripts).
+
 ### Roll back
 
 Images are pinned by digest, so undoing a rollout restores exactly what ran

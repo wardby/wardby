@@ -492,3 +492,28 @@ variable "dependency_cache_max_age_days" {
     error_message = "dependency_cache_max_age_days must be a whole number of days, at least 1."
   }
 }
+
+# --- Session transcripts -------------------------------------------------------
+
+variable "session_transcripts_enabled" {
+  description = "Create the session transcripts bucket (for agents with sessionResume) and let the control plane (only) use it. Off by default. The deployment also has to set BLOB_STORE=s3, BLOB_STORE_S3_BUCKET, BLOB_STORE_S3_REGION and RUN_TRANSCRIPT_RETENTION_DAYS on the control plane."
+  type        = bool
+  default     = false
+}
+
+variable "session_transcripts_bucket_name" {
+  description = "Name of the session transcripts bucket. S3 bucket names are global, so include something unique to you. Use a different bucket from the dependency cache. Required when session_transcripts_enabled is true."
+  type        = string
+  default     = ""
+}
+
+variable "session_transcripts_retention_days" {
+  description = "Days to keep a session transcript. The bucket deletes run-transcripts/ objects older than this; give the control plane the same number as RUN_TRANSCRIPT_RETENTION_DAYS (the session_transcripts_retention_days output)."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.session_transcripts_retention_days >= 1 && var.session_transcripts_retention_days <= 3650 && floor(var.session_transcripts_retention_days) == var.session_transcripts_retention_days
+    error_message = "session_transcripts_retention_days must be a whole number of days from 1 to 3650."
+  }
+}

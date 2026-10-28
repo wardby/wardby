@@ -89,3 +89,13 @@ output "dependency_cache_bucket" {
   description = "Name of the run dependency cache bucket; empty when dependency_cache_enabled is false."
   value       = try(google_storage_bucket.dependency_cache[0].name, "")
 }
+
+output "session_transcripts_bucket" {
+  description = "Name of the session transcripts bucket; empty when session_transcripts_enabled is false."
+  value       = try(google_storage_bucket.session_transcripts[0].name, "")
+}
+
+output "session_transcripts_retention_days" {
+  description = "Days the session transcripts bucket keeps a transcript; deploy/gke/up.sh passes it to the control plane as RUN_TRANSCRIPT_RETENTION_DAYS."
+  value       = var.session_transcripts_retention_days
+}
