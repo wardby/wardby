@@ -723,25 +723,33 @@ contents and command output from the repository. Redaction covers secret
 values, not other sensitive text. Enable `sessionResume` only for agents whose
 runs you are comfortable sharing with everyone who can read them.
 
-**Where it is stored.** In the server's blob store, under the
-`run-transcripts/` prefix, at most 10 MiB per run. A larger transcript is not
-stored. While the run works, its worker keeps the session in its own in-memory
-scratch of up to 80 MiB, which counts toward the run's memory. Each run
-records a status of `stored`, `too_large`, `not_captured` or
-`failed`, with a short reason code and no content.
+**Where it is stored.** In the server's blob store, as a gzip-compressed
+object under the `run-transcripts/` prefix. When a run's context was
+compacted, only what a resume loads is kept: the last compaction's summary,
+the messages that compaction kept, and everything after it. Earlier history
+is never loaded on resume, so it is not stored.
+
+**Size limits.** `RUN_TRANSCRIPT_MAX_BYTES` caps the stored transcript,
+measured before compression (default 10 MiB, at most 64 MiB). A larger
+transcript is not stored. While the run works, its worker keeps the raw
+session in its own in-memory scratch of up to 80 MiB, which counts toward the
+run's memory, and reads at most 64 MiB of it when the run ends. Each run
+records a status of `stored`, `too_large`, `not_captured` or `failed`, with a
+short reason code and no content.
 
 The blob store settings must be present on the **server process** (the
 control plane that launches coding runs), not only on the coding proxy. The
 server also needs its secret cipher, which it has in a normal setup.
 
-| Variable                                       | Default | Purpose                                                     |
-| ---------------------------------------------- | ------- | ----------------------------------------------------------- |
-| `BLOB_STORE`                                   |         | `local`, `gcs` or `s3`. Without it no transcript is stored. |
-| `BLOB_STORE_LOCAL_DIR`                         |         | Directory for `BLOB_STORE=local`.                           |
-| `BLOB_STORE_GCS_BUCKET`                        |         | Bucket for `BLOB_STORE=gcs`.                                |
-| `BLOB_STORE_S3_BUCKET`, `BLOB_STORE_S3_REGION` |         | Bucket and region for `BLOB_STORE=s3`.                      |
-| `BLOB_STORE_S3_ENDPOINT`                       |         | Optional: an S3-compatible endpoint for `BLOB_STORE=s3`.    |
-| `RUN_TRANSCRIPT_RETENTION_DAYS`                | `30`    | Days to keep a transcript, a whole number from 1 to 3650.   |
+| Variable                                       | Default | Purpose                                                                           |
+| ---------------------------------------------- | ------- | --------------------------------------------------------------------------------- |
+| `BLOB_STORE`                                   |         | `local`, `gcs` or `s3`. Without it no transcript is stored.                       |
+| `BLOB_STORE_LOCAL_DIR`                         |         | Directory for `BLOB_STORE=local`.                                                 |
+| `BLOB_STORE_GCS_BUCKET`                        |         | Bucket for `BLOB_STORE=gcs`.                                                      |
+| `BLOB_STORE_S3_BUCKET`, `BLOB_STORE_S3_REGION` |         | Bucket and region for `BLOB_STORE=s3`.                                            |
+| `BLOB_STORE_S3_ENDPOINT`                       |         | Optional: an S3-compatible endpoint for `BLOB_STORE=s3`.                          |
+| `RUN_TRANSCRIPT_RETENTION_DAYS`                | `30`    | Days to keep a transcript, a whole number from 1 to 3650.                         |
+| `RUN_TRANSCRIPT_MAX_BYTES`                     | 10 MiB  | Largest transcript stored, in bytes before compression, from 1048576 to 67108864. |
 
 **Retention.** Expired transcripts are pruned whenever a new one is stored.
 For GCS and S3, also add a bucket lifecycle rule that deletes objects under
@@ -749,8 +757,8 @@ the `run-transcripts/` prefix after the same number of days, so objects are
 removed even when no new run is stored.
 
 **Startup checks.** With `JOB_LAUNCHER` set to `docker` or `kubernetes`, a
-half-set `BLOB_STORE` (the kind set but its bucket or directory missing) or an
-invalid `RUN_TRANSCRIPT_RETENTION_DAYS` stops the server at startup with a
+half-set `BLOB_STORE` (the kind set but its bucket or directory missing), or an
+invalid `RUN_TRANSCRIPT_RETENTION_DAYS` or `RUN_TRANSCRIPT_MAX_BYTES`, stops the server at startup with a
 message naming the variable.
 
 **Custom worker images.** An agent that sets `workerImageRef` must rebuild its

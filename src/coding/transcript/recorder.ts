@@ -1,10 +1,16 @@
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import type { PrismaClient } from "#prisma";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
 import { withEscapedForms } from "../../core/secret-spans.js";
 import { REDACTED, redactSecrets } from "../redact.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
-import { formatTranscriptFile, MAX_TRANSCRIPT_BYTES, parseTranscriptFile } from "./format.js";
+import {
+  DEFAULT_TRANSCRIPT_MAX_BYTES,
+  formatTranscriptFile,
+  MAX_TRANSCRIPT_BYTES,
+  parseTranscriptFile,
+} from "./format.js";
 
 export type TranscriptStatus = "stored" | "too_large" | "not_captured" | "failed";
 /** What `record` reports to its caller: the row's status, or that the row itself was lost. */
@@ -13,8 +19,24 @@ export type RecordResult = TranscriptStatus | "row_write_failed";
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The stored object: the transcript file, gzip-compressed. */
 export function transcriptBlobKey(runId: string): string {
-  return `run-transcripts/${runId}.jsonl`;
+  return `run-transcripts/${runId}.jsonl.gz`;
+}
+
+const MIN_TRANSCRIPT_MAX_BYTES = 1024 * 1024;
+
+/** RUN_TRANSCRIPT_MAX_BYTES: the largest transcript stored, measured before compression. */
+export function loadTranscriptMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.RUN_TRANSCRIPT_MAX_BYTES?.trim();
+  if (!raw) return DEFAULT_TRANSCRIPT_MAX_BYTES;
+  const bytes = Number(raw);
+  if (!Number.isInteger(bytes) || bytes < MIN_TRANSCRIPT_MAX_BYTES || bytes > MAX_TRANSCRIPT_BYTES) {
+    throw new Error(
+      `RUN_TRANSCRIPT_MAX_BYTES must be a whole number of bytes from ${MIN_TRANSCRIPT_MAX_BYTES} to ${MAX_TRANSCRIPT_BYTES}.`,
+    );
+  }
+  return bytes;
 }
 
 export function loadTranscriptRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
@@ -37,6 +59,8 @@ export interface RunTranscriptRecorderDeps {
    */
   secretValues: (agentId: string) => Promise<string[]>;
   retentionDays: number;
+  /** The largest transcript stored, before compression (loadTranscriptMaxBytes). */
+  maxBytes: number;
   now?: () => Date;
 }
 
@@ -77,7 +101,7 @@ export class RunTranscriptRecorder {
     if (input.provider !== "claude-code") return { status: "not_captured", reason: "provider_unsupported" };
     let text: string | undefined;
     try {
-      text = await input.read(MAX_TRANSCRIPT_BYTES);
+      text = await input.read(this.deps.maxBytes);
     } catch (error) {
       const tooLarge = error instanceof Error && error.message === "transcript_too_large";
       return tooLarge ? { status: "too_large" } : { status: "not_captured", reason: "unreadable" };
@@ -126,19 +150,21 @@ export class RunTranscriptRecorder {
         lines,
       ),
     );
-    if (body.byteLength > MAX_TRANSCRIPT_BYTES) return { status: "too_large", sessionId: sanitized.sessionId };
+    if (body.byteLength > this.deps.maxBytes) return { status: "too_large", sessionId: sanitized.sessionId };
+    const stored = gzipSync(body);
     const blobKey = transcriptBlobKey(input.runId);
     try {
-      await blobs.put(blobKey, body, { contentType: "application/x-ndjson" });
+      await blobs.put(blobKey, stored, { contentType: "application/gzip" });
     } catch {
       return { status: "failed", reason: "store_failed", sessionId: sanitized.sessionId };
     }
+    // Size and hash are of the stored (compressed) bytes, for the importer to verify its download.
     return {
       status: "stored",
       sessionId: sanitized.sessionId,
       blobKey,
-      sizeBytes: body.byteLength,
-      sha256: createHash("sha256").update(body).digest("hex"),
+      sizeBytes: stored.byteLength,
+      sha256: createHash("sha256").update(stored).digest("hex"),
     };
   }
 

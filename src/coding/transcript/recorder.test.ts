@@ -1,3 +1,4 @@
+import { gunzipSync } from "node:zlib";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -10,6 +11,7 @@ import { deriveRegistryToken } from "../registry/token.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
 import { formatTranscriptFile, type TranscriptHeader } from "./format.js";
 import {
+  loadTranscriptMaxBytes,
   loadTranscriptRetentionDays,
   RunTranscriptRecorder,
   transcriptBlobKey,
@@ -88,6 +90,7 @@ describe("RunTranscriptRecorder", () => {
       blobs,
       secretValues: async () => [SECRET, RAW2],
       retentionDays: 30,
+      maxBytes: 10 * 1024 * 1024,
       now: () => NOW,
       ...over,
     });
@@ -112,7 +115,7 @@ describe("RunTranscriptRecorder", () => {
     const status = await recorder().record(input());
     expect(status).toBe("stored");
     const blob = await blobs.get(transcriptBlobKey("run1"));
-    const text = blob.toString("utf8");
+    const text = gunzipSync(blob).toString("utf8");
     expect(text).not.toContain(SECRET);
     expect(text).toContain("[REDACTED]");
     expect(text).not.toContain(CAPABILITY);
@@ -125,7 +128,7 @@ describe("RunTranscriptRecorder", () => {
       sizeBytes: blob.byteLength,
       sha256: createHash("sha256").update(blob).digest("hex"),
       sessionId: "00000000-0000-4000-8000-000000000001",
-      blobKey: "run-transcripts/run1.jsonl",
+      blobKey: "run-transcripts/run1.jsonl.gz",
       expiresAt: new Date(NOW.getTime() + 30 * DAY),
     });
     noLeak();
@@ -137,9 +140,30 @@ describe("RunTranscriptRecorder", () => {
     const text0 = workerFile([], `keys ${capability} and ${token}`);
     expect(text0).toContain(capability);
     await recorder({ secretValues: async () => [] }).record(input({ read: async () => text0 }));
-    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    const text = gunzipSync(await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
     expect(text).not.toContain(capability);
     expect(text).not.toContain(token);
+  });
+
+  it("reads and stores up to the configured cap, measured before compression", async () => {
+    const file = workerFile();
+    const asked: number[] = [];
+    const small = recorder({ maxBytes: 64 });
+    const read = async (max: number) => {
+      asked.push(max);
+      return file;
+    };
+    expect(await small.record(input({ read }))).toBe("too_large");
+    expect(asked).toEqual([64]);
+    await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
+    expect(await recorder().record(input({ read }))).toBe("stored");
+    const stored = await blobs.get(transcriptBlobKey("run1"));
+    expect(stored.subarray(0, 2)).toEqual(Buffer.from([0x1f, 0x8b]));
+    expect(row()).toMatchObject({
+      status: "stored",
+      blobKey: "run-transcripts/run1.jsonl.gz",
+      sizeBytes: stored.byteLength,
+    });
   });
 
   it("reports not_captured/no_blob_store without reading", async () => {
@@ -200,7 +224,7 @@ describe("RunTranscriptRecorder", () => {
       attachment: { type: "prompt_snapshot", systemPrompt: ["SYSTEM PROMPT TEXT"] },
     });
     expect(await recorder().record(input({ read: async () => workerFile([planted]) }))).toBe("stored");
-    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    const text = gunzipSync(await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
     expect(text).not.toContain("SYSTEM PROMPT TEXT");
   });
 
@@ -256,7 +280,7 @@ describe("RunTranscriptRecorder", () => {
     expect(await recorder({ secretValues: async () => [] }).record(input({ read: async () => toolUse }))).toBe(
       "stored",
     );
-    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    const text = gunzipSync(await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
     expect(text).not.toContain(token);
     expect(text).toContain("Authorization: [REDACTED]");
     expect(text).toContain("https://x");
@@ -277,7 +301,7 @@ describe("RunTranscriptRecorder", () => {
     const file = formatTranscriptFile(okHeader(sanitized.sessionId), lines);
     expect(file).toContain(`key-${SECRET}`);
     expect(await recorder().record(input({ read: async () => file }))).toBe("stored");
-    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    const text = gunzipSync(await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain(JSON.stringify(RAW2).slice(1, -1));
     expect(text).toContain("key-[REDACTED]");
@@ -302,7 +326,7 @@ describe("RunTranscriptRecorder", () => {
     expect(file).toContain(`"other":${longPin}`);
     const rec = recorder({ secretValues: async () => [SECRET, RAW2, pin, longPin] });
     expect(await rec.record(input({ read: async () => file }))).toBe("stored");
-    const text = (await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
+    const text = gunzipSync(await blobs.get(transcriptBlobKey("run1"))).toString("utf8");
     expect(text).not.toContain(pin);
     expect(text).not.toContain(longPin.slice(0, 15));
     expect(text).toContain('"account":"[REDACTED]"');
@@ -337,6 +361,16 @@ describe("RunTranscriptRecorder", () => {
     expect(fake.rows.size).toBe(0);
     await expect(blobs.get(transcriptBlobKey("b"))).rejects.toBeInstanceOf(BlobStoreError);
     expect(await later.pruneExpired()).toBe(0);
+  });
+});
+
+describe("loadTranscriptMaxBytes", () => {
+  it("defaults to 10 MiB and validates against 1 MiB to 64 MiB", () => {
+    expect(loadTranscriptMaxBytes({})).toBe(10 * 1024 * 1024);
+    expect(loadTranscriptMaxBytes({ RUN_TRANSCRIPT_MAX_BYTES: "33554432" })).toBe(32 * 1024 * 1024);
+    for (const bad of ["1048575", String(64 * 1024 * 1024 + 1), "1.5", "abc", "-1"]) {
+      expect(() => loadTranscriptMaxBytes({ RUN_TRANSCRIPT_MAX_BYTES: bad })).toThrow();
+    }
   });
 });
 

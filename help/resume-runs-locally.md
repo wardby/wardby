@@ -3,7 +3,7 @@ id: resume-runs-locally
 title: Keep Claude Code run transcripts for local resume
 summary: Turn on sessionResume for a Claude Code agent so each run's redacted conversation is stored on the server, and set up the blob store and retention it needs.
 audience: operator
-tags: [sessionResume, resume, transcript, claude-code, blob-store, RUN_TRANSCRIPT_RETENTION_DAYS, retention, redaction]
+tags: [sessionResume, resume, transcript, blob-store, RUN_TRANSCRIPT_MAX_BYTES, RUN_TRANSCRIPT_RETENTION_DAYS]
 appliesTo: ">=0.7.0"
 ---
 
@@ -42,9 +42,12 @@ blob store nothing is stored, and `update_agent` warns you.
   cannot be loaded, nothing is stored.
 - Stored for runs that finish, stop at their budget, or fail. Not stored for
   runs stopped with `stop_run` or ended by their timeout.
-- At most 10 MiB per run, under the `run-transcripts/` prefix. Each run
-  records a status (`stored`, `too_large`, `not_captured` or `failed`) with a
-  reason code.
+- Stored gzip-compressed under the `run-transcripts/` prefix. When the run's
+  context was compacted, only what a resume loads is kept: the last
+  compaction's summary, the messages it kept, and everything after it.
+- At most `RUN_TRANSCRIPT_MAX_BYTES` per run, measured before compression
+  (default 10 MiB, at most 64 MiB). Each run records a status (`stored`,
+  `too_large`, `not_captured` or `failed`) with a reason code.
 
 ## Who will be able to read it
 
@@ -63,7 +66,8 @@ a bucket lifecycle rule on the `run-transcripts/` prefix.
 ## Startup and custom images
 
 With `JOB_LAUNCHER` set to `docker` or `kubernetes`, a half-set `BLOB_STORE`
-or an invalid `RUN_TRANSCRIPT_RETENTION_DAYS` stops the server at startup,
+or an invalid `RUN_TRANSCRIPT_RETENTION_DAYS` or `RUN_TRANSCRIPT_MAX_BYTES` stops
+the server at startup,
 naming the variable. An agent with its own `workerImageRef` image must rebuild
 it from a release that includes session resume (see
 [Build a tool runner image for a Claude Code agent](help://build-claude-code-image)),

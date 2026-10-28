@@ -1,5 +1,8 @@
 export const TRANSCRIPT_FORMAT_VERSION = 1;
-export const MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024;
+/** The largest sanitised transcript file the worker writes (uncompressed). */
+export const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+/** The default cap on a stored transcript before compression (RUN_TRANSCRIPT_MAX_BYTES). */
+export const DEFAULT_TRANSCRIPT_MAX_BYTES = 10 * 1024 * 1024;
 export const MAX_RAW_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 export type TranscriptProvider = "claude-code";

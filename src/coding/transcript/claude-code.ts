@@ -8,7 +8,8 @@
  * assistant messages, compaction boundaries, titles, and the attachments that belong to the
  * conversation. Dropped: the run's system prompt, its pod environment and budget reminders, the
  * account and organisation, billing, queue and request records. A dropped record's children are
- * relinked to its parent. Two fields that hold the account's plan and rate-limit state are removed
+ * relinked to its parent. History before the last compaction is not kept (resume never loads it).
+ * Two fields that hold the account's plan and rate-limit state are removed
  * from every kept record.
  *
  * Keep this file import-free, erasable TypeScript (types only, no enums or namespaces):
@@ -101,14 +102,16 @@ export function sanitizeClaudeTranscript(jsonl: string, fallbackTitle?: string):
     if (isCompleteAssistant(record)) end = index;
   });
   if (end < 0 || !sessionId) return null;
-  const records = kept.slice(0, end + 1);
-  const present = new Set(records.map((record) => record.uuid));
+  let records = kept.slice(0, end + 1);
+  let present = new Set(records.map((record) => record.uuid));
+  for (const record of records) {
+    if (record.type === "system") repointCompaction(record, present, rawParent, droppedParent);
+  }
+  records = fromLastCompaction(records);
+  present = new Set(records.map((record) => record.uuid));
   for (const record of records) {
     // A compaction boundary starts a new chain on purpose (its link back is logicalParentUuid).
     if (record.parentUuid !== null && !present.has(record.parentUuid)) record.parentUuid = null;
-  }
-  for (const record of records) {
-    if (record.type === "system") repointCompaction(record, present, rawParent, droppedParent);
   }
   for (const title of titles) {
     if (title.type === "summary" && !present.has(title.leafUuid)) continue;
@@ -161,6 +164,37 @@ function resolveParent(parent: string | null, dropped: ReadonlyMap<string, strin
     parent = dropped.get(parent) ?? null;
   }
   return parent;
+}
+
+/**
+ * Only what a resume loads: the last compaction boundary, everything after it, and the messages it
+ * kept word for word. Resume never loads what that compaction summarised (Claude Code continues
+ * "with the last compaction's summary, the messages that compaction left unsummarized, and every
+ * message since"), so the earlier history is not stored. Without a compaction, everything is kept.
+ */
+function fromLastCompaction(records: JsonRecord[]): JsonRecord[] {
+  let last = -1;
+  records.forEach((record, index) => {
+    if (record.type === "system" && record.subtype === "compact_boundary") last = index;
+  });
+  if (last <= 0) return records;
+  const metadata = (records[last].compactMetadata ?? {}) as JsonRecord;
+  const keep = new Set<unknown>();
+  const segment = metadata.preservedSegment as JsonRecord | undefined;
+  if (segment && typeof segment === "object") {
+    const byId = new Map(records.map((record) => [record.uuid, record]));
+    let id: unknown = segment.tailUuid;
+    while (typeof id === "string" && byId.has(id) && !keep.has(id)) {
+      keep.add(id);
+      if (id === segment.headUuid) break;
+      id = byId.get(id)?.parentUuid;
+    }
+  }
+  const messages = metadata.preservedMessages as JsonRecord | undefined;
+  for (const list of [messages?.uuids, messages?.allUuids]) {
+    if (Array.isArray(list)) for (const id of list) keep.add(id);
+  }
+  return records.filter((record, index) => index >= last || keep.has(record.uuid));
 }
 
 /**

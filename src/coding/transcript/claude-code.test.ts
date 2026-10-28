@@ -158,6 +158,39 @@ describe("sanitizeClaudeTranscript: record kinds", () => {
     expect(out.find((r) => r.uuid === "n1")!.parentUuid).toBe("k2");
   });
 
+  it("keeps only what a resume loads: the last compaction, the messages it preserved, and what follows", () => {
+    const boundary = (uuid: string, head: string, anchor: string, tail: string) =>
+      rec({
+        type: "system",
+        subtype: "compact_boundary",
+        uuid,
+        parentUuid: null,
+        compactMetadata: {
+          trigger: "auto",
+          preservedSegment: { headUuid: head, anchorUuid: anchor, tailUuid: tail },
+          preservedMessages: { anchorUuid: anchor, uuids: [head, tail], allUuids: [head, tail] },
+        },
+      });
+    const lines = [
+      user("o1", null, "oldest"),
+      reply("o2", "o1", "oldest reply"),
+      boundary("cb1", "o1", "s1", "o2"),
+      user("s1", "cb1", "first summary", { isCompactSummary: true }),
+      user("m1", "o2", "middle"),
+      reply("m2", "m1", "middle reply"),
+      user("m3", "m2", "later"),
+      reply("m4", "m3", "later reply"),
+      boundary("cb2", "m3", "s2", "m4"),
+      user("s2", "cb2", "second summary", { isCompactSummary: true }),
+      user("n1", "m4", "newest"),
+      reply("n2", "n1", "newest reply"),
+    ];
+    const out = parse(sanitizeClaudeTranscript(lines.join("\n"))!.lines);
+    expect(out.map((r) => r.uuid)).toEqual(["m3", "m4", "cb2", "s2", "n1", "n2"]);
+    expect(out[0].parentUuid).toBeNull();
+    expect(out.find((r) => r.uuid === "n1")!.parentUuid).toBe("m4");
+  });
+
   it("removes a preserved segment when nothing in it is kept", () => {
     const lines = [
       user("q", null, "question"),

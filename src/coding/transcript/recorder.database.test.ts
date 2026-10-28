@@ -36,6 +36,7 @@ describe.skipIf(!process.env.DATABASE_URL)("RunTranscriptRecorder (PostgreSQL)",
       blobs,
       secretValues: async () => ["s3cret-value"],
       retentionDays: 1,
+      maxBytes: 10 * 1024 * 1024,
       now: () => now,
     });
     const user = JSON.stringify({

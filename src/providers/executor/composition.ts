@@ -33,7 +33,11 @@ import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js"
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
-import { RunTranscriptRecorder, loadTranscriptRetentionDays } from "../../coding/transcript/recorder.js";
+import {
+  RunTranscriptRecorder,
+  loadTranscriptMaxBytes,
+  loadTranscriptRetentionDays,
+} from "../../coding/transcript/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
 import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
@@ -219,6 +223,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       return named.flatMap((entry) => entry.values);
     },
     retentionDays: loadTranscriptRetentionDays(env),
+    maxBytes: loadTranscriptMaxBytes(env),
   });
   const coding = new ContainerExecutor({
     transcripts,
