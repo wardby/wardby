@@ -45,7 +45,8 @@ must have the required repository access, or an administrator must explicitly
 approve the repository.
 
 A Claude Code agent can also keep a redacted transcript of each run with
-`codingProfile.sessionResume`, for resuming the session locally; see
+`codingProfile.sessionResume`, and continue a run on your machine with
+`get_run_transcript` and `npx wardby resume`; see
 [Resume a run locally](../docs/coding-agent-setup.md#resume-a-run-locally)
 (from 0.7.0, the `resume-runs-locally` help article).
 

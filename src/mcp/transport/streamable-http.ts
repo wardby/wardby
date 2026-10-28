@@ -16,6 +16,8 @@ import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-event
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
+import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "../tools/run-transcript-download.js";
+import type { BlobStore } from "../../providers/storage/types.js";
 import { logger } from "../../core/logger.js";
 import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
 
@@ -49,6 +51,8 @@ export interface StartHttpServerOptions {
   hostUserAuth?: { github?: HostUserCallbackDeps };
   /** The admin viewer API (/admin/api/*); absent = those paths answer 404. */
   viewer?: ViewerApi;
+  /** The blob store run transcripts are served from (get_run_transcript links); absent = they answer 503. */
+  blobs?: BlobStore;
   /** How long close() lets open requests finish before cutting them (default CLOSE_GRACE_MS). */
   closeGraceMs?: number;
 }
@@ -176,6 +180,17 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
           db: opts.auth.db,
         },
       );
+      return;
+    }
+    if (url.pathname === RUN_TRANSCRIPT_DOWNLOAD_PATH) {
+      // The signed link is the credential (no Authorization header); the
+      // token is never logged (open-request tracking keeps the path only).
+      await handleRunTranscriptDownload(req.method, url.searchParams.get("t"), res, {
+        verify: (token) => opts.mcp.verifyRequestState(token),
+        audience: "http",
+        db: opts.auth.db,
+        blobs: opts.blobs,
+      });
       return;
     }
     if (oauth && (await oauth(req, res, url, body))) return;

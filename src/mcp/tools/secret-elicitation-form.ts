@@ -176,6 +176,11 @@ export async function handleSecretElicitationForm(
   try {
     if (!token) throw new Error("missing token");
     payload = await deps.verify(token);
+    // Other links share the signing key (a run transcript download, a tool's
+    // requestState): only a secret link's kind opens this form.
+    if (payload.kind !== undefined && payload.kind !== "create" && payload.kind !== "unbroker") {
+      throw new Error("not a secret link");
+    }
   } catch {
     html(
       res,
