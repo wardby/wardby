@@ -46,3 +46,5 @@ that request every advertised scope otherwise fail with `invalid_scope`.
 Read [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)
 for the required claims, scope list, role mapping, provider examples, and
 client registration.
+
+From Wardby 0.7.0, to share an agent with one person or with everyone signed in, see the help article `sharing-agents`.

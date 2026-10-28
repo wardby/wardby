@@ -15,7 +15,15 @@
  *   datastores and repositories never reach another owner's agent.
  */
 import type { Prisma, PrismaClient } from "#prisma";
-import { atLeast, effectiveAccess, grantedAccessMap, grantedIds, type Access, type Level } from "../../core/grants.js";
+import {
+  atLeast,
+  effectiveAccess,
+  grantedAccessMap,
+  grantedIds,
+  isPublicWritable,
+  type Access,
+  type Level,
+} from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 
@@ -84,6 +92,25 @@ export function requireBindingOwner(ctx: McpRequestContext, agent: AgentRef): vo
   }
   if (agent.ownerId !== ctx.principal.id) {
     throw new McpError(403, `Only the owner of agent "${agent.id}" can change its bindings.`);
+  }
+}
+
+/**
+ * requireBindingOwner, plus: nothing owner-held may be bound to an agent
+ * everyone can write (anyone could then rewrite it to use the binding).
+ */
+export async function requireBindable(ctx: McpRequestContext, agent: AgentRef, db: GrantDb = ctx.db): Promise<void> {
+  requireBindingOwner(ctx, agent);
+  await requireNotPublicWritable(agent, db);
+}
+
+/** The public-write half of requireBindable, for paths that skip the owner check (an admin's adminOverride). */
+export async function requireNotPublicWritable(agent: AgentRef, db: GrantDb): Promise<void> {
+  if (await isPublicWritable(db, agent.id)) {
+    throw new McpError(
+      409,
+      `Agent "${agent.id}" is writable by everyone, so nothing can be bound to it; revoke or lower the everyone grant first.`,
+    );
   }
 }
 

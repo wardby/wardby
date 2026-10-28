@@ -2,7 +2,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
 import { requireOwnedDatastore, canRead, assertCanMutate } from "../auth/ownership.js";
-import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
+import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   createDatastore,
   listDatastores,
@@ -126,7 +126,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       // read it: strictly the agent owner's own datastore on the owner's
       // own agent (A2/S2-2). Not even the stdio operator crosses owners.
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
-      requireBindingOwner(ctx, agent);
+      await requireBindable(ctx, agent);
       const datastore = await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
       if (datastore.ownerId !== agent.ownerId) {
         throw new McpError(403, "Only a datastore owned by the agent's owner can be attached to it.");

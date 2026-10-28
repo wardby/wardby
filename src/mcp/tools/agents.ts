@@ -47,7 +47,14 @@ import {
   readableAgentsWhere,
   requireAgentAccess,
 } from "../auth/access.js";
-import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } from "../../core/grants.js";
+import {
+  EVERYONE_KEY,
+  atLeast,
+  canDelegate,
+  deleteGrantsFor,
+  effectiveAccess,
+  isPublicWritable,
+} from "../../core/grants.js";
 import { projectTool } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
@@ -913,6 +920,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           }
 
           const nextKind = args.kind ?? existing.kind;
+          // A coding repository is an owner binding (agentOwnerBindings): an
+          // agent everyone can write never gets one, as attach_* refuse theirs.
+          if (
+            ((nextKind === "coding" && existing.kind !== "coding") || repositoryChanges(existing)) &&
+            (await isPublicWritable(tx, existing.id))
+          ) {
+            throw new McpError(
+              409,
+              `Agent "${args.id}" is writable by everyone, so it can't become a coding agent or get a repository; revoke or lower the everyone grant first.`,
+            );
+          }
           if (nextKind === "native" && args.codingProfile) {
             throw new McpError(400, "A coding profile is only valid for coding agents.");
           }
@@ -1067,6 +1085,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_agents",
     scope: "agents:read",
+    description:
+      "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args: Record<string, never>, ctx) => {
       const [where, accessOf] = await Promise.all([readableAgentsWhere(ctx), agentAccessResolver(ctx)]);

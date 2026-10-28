@@ -17,11 +17,27 @@ interface Row {
   ownerId: string | null;
 }
 
-function fakeDb(agents: Row[], principals: string[], grants: FakeGrantSeed[] = []) {
+function fakeDb(
+  agents: Row[],
+  principals: string[],
+  grants: FakeGrantSeed[] = [],
+  bindings: Partial<
+    Record<
+      "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile",
+      number
+    >
+  > = {},
+) {
   const byId = new Map(agents.map((a) => [a.id, a]));
   const people = principals.map((id) => ({ id, subject: `sub-${id}`, createdAt: new Date() }));
   const db: any = {
     resourceGrant: fakeResourceGrants(grants),
+    agentSecret: { count: async () => bindings.agentSecret ?? 0 },
+    agentDatastore: { count: async () => bindings.agentDatastore ?? 0 },
+    agentRepository: { count: async () => bindings.agentRepository ?? 0 },
+    agentSubAgent: { count: async () => bindings.agentSubAgent ?? 0 },
+    agentTool: { count: async () => bindings.agentTool ?? 0 },
+    codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
     agent: {
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => {
@@ -213,7 +229,7 @@ describe("grant_access / revoke_access / list_access", () => {
     await grantee.client.close();
   });
 
-  it("refuses self-grants, everyone above execute, unknown subjects, bad levels and other types", async () => {
+  it("refuses self-grants, unknown subjects, bad levels and other types", async () => {
     const db = fakeDb(agents, people);
     const { client } = await connect(db, ctx(db, "owner"));
     const call = (args: Record<string, unknown>) =>
@@ -221,9 +237,6 @@ describe("grant_access / revoke_access / list_access", () => {
 
     const self = await call({ grantee: { principalId: "owner" }, level: "read" });
     expect(text(self)).toMatch(/owner already/i);
-    const everyoneWrite = await call({ grantee: "everyone", level: "write" });
-    expect(everyoneWrite.isError).toBe(true);
-    expect(text(everyoneWrite)).toMatch(/execute/);
     const unknown = await call({ grantee: { subject: "nobody" }, level: "read" });
     expect(unknown.isError).toBe(true);
     expect(text(unknown)).toMatch(/not found/i);
@@ -244,6 +257,53 @@ describe("grant_access / revoke_access / list_access", () => {
       granteeKey: "everyone",
       level: "execute",
     });
+    await client.close();
+  });
+
+  it("lets the owner make an agent writable by everyone while it holds no bindings", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const result = await client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level: "write" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(db.resourceGrant.rows[0]).toMatchObject({ granteeKey: "everyone", level: "write" });
+    await client.close();
+  });
+
+  it.each([
+    "agentSecret",
+    "agentDatastore",
+    "agentRepository",
+    "agentSubAgent",
+    "agentTool",
+    "codingAgentProfile",
+  ] as const)("refuses write for everyone on an agent that holds %s, but still allows execute", async (binding) => {
+    const db = fakeDb(agents, people, [], { [binding]: 1 });
+    const { client } = await connect(db, ctx(db, "owner"));
+    const call = (level: string) =>
+      client.callTool({
+        name: "grant_access",
+        arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level },
+      });
+    const refused = await call("write");
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/Detach them first/);
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    expect((await call("execute")).isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("names every kind of binding the agent holds when it refuses write for everyone", async () => {
+    const db = fakeDb(agents, people, [], { agentSecret: 2, agentSubAgent: 1, codingAgentProfile: 1 });
+    const { client } = await connect(db, ctx(db, "owner"));
+    const refused = await client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level: "write" },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/holds secrets, sub-agents, a coding repository:/);
     await client.close();
   });
 
