@@ -16,6 +16,18 @@ interface WriteOptions {
   configDir: string;
   sessionId: string;
   outputPath: string;
+  /** Used when Claude Code wrote no title (the worker turns off the background call that makes one). */
+  title?: string;
+}
+
+const MAX_TITLE_CHARS = 80;
+
+/** "wardby run <runId>: <first line of the request>", for the session picker. */
+export function runTitle(runId: string, task: string): string {
+  const request = task.includes("\n\nRequest:\n") ? task.slice(task.lastIndexOf("\n\nRequest:\n") + 11) : task;
+  const firstLine = request.split("\n").find((line) => line.trim()) ?? "";
+  const title = `wardby run ${runId}: ${firstLine.trim().replace(/\s+/g, " ")}`;
+  return title.length > MAX_TITLE_CHARS ? `${title.slice(0, MAX_TITLE_CHARS - 1)}…` : title;
 }
 
 /**
@@ -40,7 +52,7 @@ export async function writeWorkerTranscriptWithLimit(options: WriteOptions, maxB
   let file: string;
   try {
     const raw = await readBoundedRegularFile(source, MAX_RAW_TRANSCRIPT_BYTES, "transcript_too_large");
-    const sanitized = sanitizeClaudeTranscript(raw);
+    const sanitized = sanitizeClaudeTranscript(raw, options.title);
     file = sanitized
       ? formatTranscriptFile(header("ok"), sanitized.lines)
       : formatTranscriptFile(header("no_complete_turn"), []);

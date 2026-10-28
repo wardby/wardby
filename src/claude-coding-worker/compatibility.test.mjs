@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { sanitizeClaudeTranscript } from "./transcript/claude-code.ts";
+import { DROPPED_ATTACHMENTS, KEPT_ATTACHMENTS, sanitizeClaudeTranscript } from "./transcript/claude-code.ts";
 
 // The worker's default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS in src/coding/protocol.ts).
 const MAX_OUTPUT_TOKENS = "32000";
@@ -772,6 +772,24 @@ test("a sanitised persisted transcript resumes on the pinned SDK", async () => {
   assert.equal(files.length, 1, "exactly one persisted transcript for the session");
   const raw = await readFile(files[0], "utf8");
   assert(raw.includes("THINKING-PROBE"), "the raw transcript holds the thinking block (the strip is exercised)");
+  // Every record type and attachment kind this SDK writes must have been reviewed: a new one is
+  // dropped by the sanitiser until it is listed as kept or dropped.
+  const reviewedTypes = new Set([
+    ...["user", "assistant", "attachment", "system", "ai-title", "custom-title", "summary"],
+    ...["queue-operation", "last-prompt", "atis-latch", "cost-state", "mode", "permission-mode"],
+    ...["api-request", "api-request-blob", "api-request-shape", "tools-used"],
+  ]);
+  for (const line of raw.split("\n").filter(Boolean)) {
+    const record = JSON.parse(line);
+    assert(reviewedTypes.has(record.type), `unreviewed transcript record type: ${record.type}`);
+    if (record.type === "attachment") {
+      const kind = record.attachment?.type;
+      assert(
+        KEPT_ATTACHMENTS.has(kind) || DROPPED_ATTACHMENTS.has(kind),
+        `unreviewed transcript attachment kind: ${kind}`,
+      );
+    }
+  }
   const sanitized = sanitizeClaudeTranscript(raw);
   assert(sanitized, "the transcript sanitises");
   const cleaned = sanitized.lines.join("\n") + "\n";

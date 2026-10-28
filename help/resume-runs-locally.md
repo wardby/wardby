@@ -30,9 +30,13 @@ blob store nothing is stored, and `update_agent` warns you.
 
 ## What is stored
 
-- The conversation only: user and assistant messages and the session title.
-- Removed: thinking blocks, the system prompt, the environment, and account
-  and budget data.
+- The conversation as Claude Code recorded it: user and assistant messages,
+  tool calls and their results, compaction summaries, files and skills the
+  agent loaded, and a session title (`wardby run <id>: <task>` when Claude
+  Code made none).
+- Removed: thinking blocks, the system prompt, the worker's environment, date
+  and budget reminders, account and organisation details, and billing
+  records.
 - Redacted: the values of the agent's attached secrets, plus the run's
   capability and registry token by their token shape. If the agent's secrets
   cannot be loaded, nothing is stored.

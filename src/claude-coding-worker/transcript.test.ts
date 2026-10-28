@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseTranscriptFile } from "../coding/transcript/format.js";
-import { writeWorkerTranscript, writeWorkerTranscriptWithLimit } from "./transcript.js";
+import { runTitle, writeWorkerTranscript, writeWorkerTranscriptWithLimit } from "./transcript.js";
 
 const SESSION = "00000000-0000-4000-8000-000000000001";
 const fixture = await readFile(new URL("../coding/transcript/fixtures/claude-session.jsonl", import.meta.url), "utf8");
@@ -65,5 +65,19 @@ describe("writeWorkerTranscript", () => {
     const { configDir, outDir, outputPath } = await setup(fixture);
     await writeWorkerTranscript({ configDir, sessionId: SESSION, outputPath });
     expect(await readdir(outDir)).toEqual(["session.jsonl"]);
+  });
+});
+
+describe("runTitle", () => {
+  it("uses the first line of the request after the standing instructions", () => {
+    const task =
+      "Standing instructions for this coding agent:\nBe careful.\n\nRequest:\n\nAdd discount codes.\n\n1. more";
+    expect(runTitle("run1", task)).toBe("wardby run run1: Add discount codes.");
+  });
+  it("uses the task's first line when there are no standing instructions, and caps the length", () => {
+    expect(runTitle("run1", "Fix   the bug\nmore")).toBe("wardby run run1: Fix the bug");
+    const long = runTitle("run1", "x".repeat(200));
+    expect(long).toHaveLength(80);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

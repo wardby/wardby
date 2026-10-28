@@ -6,7 +6,7 @@ import type { CodingTaskInput } from "../coding/protocol.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
 import { assertToolRunnerReachable, callPrepareDependencies } from "./tool-socket.js";
-import { TRANSCRIPT_OUTPUT_PATH, writeWorkerTranscript } from "./transcript.js";
+import { runTitle, TRANSCRIPT_OUTPUT_PATH, writeWorkerTranscript } from "./transcript.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
 const OUTPUT_PATH = "/run/wardby/output/result.json";
@@ -67,6 +67,7 @@ if (input?.sessionResume && sessionId && !controller.signal.aborted) {
     configDir: CLAUDE_CONFIG_DIR,
     sessionId,
     outputPath: TRANSCRIPT_OUTPUT_PATH,
+    title: runTitle(input.runId, input.task),
   }).catch(() => {
     process.stderr.write(`${JSON.stringify({ warning: "transcript_capture_failed" })}\n`);
   });

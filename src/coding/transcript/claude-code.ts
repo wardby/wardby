@@ -1,9 +1,15 @@
 /**
  * Claude Code session transcripts (the Agent SDK's persistSession JSONL), reduced to what `claude
- * --resume` needs: user and assistant messages on the main chain plus the title. Everything else the
- * SDK records (system prompt snapshots, environment, account and organisation, budget and queue
- * records) is dropped, as are thinking blocks: they may not replay on another account and earlier
- * turns' thinking is not needed to continue.
+ * --resume` needs. Records are kept whole and unedited (the format is internal to Claude Code and
+ * changes between versions), except that thinking blocks are removed: on another account they are
+ * dropped or rejected, and redaction changes the history they are bound to.
+ *
+ * Only known record types are kept, so a new type is dropped until it is reviewed: the user and
+ * assistant messages, compaction boundaries, titles, and the attachments that belong to the
+ * conversation. Dropped: the run's system prompt, its pod environment and budget reminders, the
+ * account and organisation, billing, queue and request records. A dropped record's children are
+ * relinked to its parent. Two fields that hold the account's plan and rate-limit state are removed
+ * from every kept record.
  *
  * Keep this file import-free, erasable TypeScript (types only, no enums or namespaces):
  * src/claude-coding-worker/Dockerfile.compatibility copies this .ts as is and runs it directly with
@@ -11,51 +17,82 @@
  */
 type JsonRecord = Record<string, unknown>;
 
-const KEPT_FIELDS = [
-  "type",
-  "uuid",
-  "parentUuid",
-  "isSidechain",
-  "sessionId",
-  "timestamp",
-  "cwd",
-  "gitBranch",
-  "version",
-  "entrypoint",
-  "userType",
-] as const;
-const MESSAGE_FIELDS = ["role", "content", "id", "type", "model", "stop_reason", "stop_sequence"] as const;
+const KEPT_TYPES = new Set(["user", "assistant", "attachment", "system", "ai-title", "custom-title", "summary"]);
+/** System records kept: a compaction boundary decides which history a resume loads. */
+const KEPT_SYSTEM = new Set(["compact_boundary"]);
+/** Attachments that are part of the conversation the model saw and still applies on a laptop. */
+export const KEPT_ATTACHMENTS = new Set([
+  "agent_listing_delta",
+  "compact_file_reference",
+  "deferred_tools_delta",
+  "deferred_tools_record",
+  "dynamic_skill",
+  "edited_text_file",
+  "file",
+  "hook_additional_context",
+  "hook_success",
+  "instructions",
+  "invoked_skills",
+  "mcp_instructions_delta",
+  "nested_memory",
+  "queued_command",
+  "read_truncation_notice",
+  "skill_listing",
+  "task_reminder",
+  "task_status",
+]);
+/**
+ * Attachments dropped on purpose: the run's system prompt, account, organisation, pod and budget
+ * state. Listed so the compatibility test can tell a reviewed kind from a new one.
+ */
+export const DROPPED_ATTACHMENTS = new Set([
+  "auto_mode",
+  "budget_usd",
+  "command_permissions",
+  "credential_org",
+  "date",
+  "environment",
+  "model",
+  "prompt_snapshot",
+  "remote_session_change",
+  "session_context",
+  "session_cron_carry",
+  "silent_turn_reminder",
+  "thinking_drop",
+  "total_tokens_reminder",
+]);
 const THINKING = new Set(["thinking", "redacted_thinking"]);
+/** Fields removed from any kept record: the account's plan and rate-limit state. */
+const DROPPED_FIELDS = ["quotaLimits", "usageLimitNote"] as const;
 
 export interface SanitizedTranscript {
   sessionId: string;
   lines: string[];
 }
 
-export function sanitizeClaudeTranscript(jsonl: string): SanitizedTranscript | null {
+/** `fallbackTitle` is used when the session has no title of its own. */
+export function sanitizeClaudeTranscript(jsonl: string, fallbackTitle?: string): SanitizedTranscript | null {
   const kept: JsonRecord[] = [];
+  const titles: JsonRecord[] = [];
   // A dropped record's uuid -> its parent, so kept children can be relinked past it.
   const droppedParent = new Map<string, string | null>();
-  let title: JsonRecord | undefined;
+  // Every record's parent as written, for walking a compaction's preserved segment.
+  const rawParent = new Map<string, string | null>();
   let sessionId: string | undefined;
   for (const line of jsonl.split("\n")) {
     const record = parseRecord(line);
     if (!record) continue;
-    if (record.type === "ai-title" && typeof record.aiTitle === "string") {
-      title = { type: "ai-title", aiTitle: record.aiTitle };
-      if (typeof record.sessionId === "string") title.sessionId = record.sessionId;
+    if (typeof record.uuid === "string") rawParent.set(record.uuid, parentOf(record));
+    if (record.type === "ai-title" || record.type === "custom-title" || record.type === "summary") {
+      titles.push(record);
       continue;
     }
-    const conversation = (record.type === "user" || record.type === "assistant") && record.isSidechain !== true;
-    const message = conversation ? withoutThinking(record.message) : null;
-    if (!message) {
+    const copy = keptRecord(record);
+    if (!copy) {
       if (typeof record.uuid === "string") droppedParent.set(record.uuid, parentOf(record));
       continue;
     }
-    if (typeof record.sessionId === "string") sessionId ??= record.sessionId;
-    const copy: JsonRecord = {};
-    for (const field of KEPT_FIELDS) if (field in record) copy[field] = record[field];
-    copy.message = message;
+    if (typeof record.sessionId === "string" && record.isSidechain !== true) sessionId ??= record.sessionId;
     kept.push(copy);
   }
   for (const record of kept) record.parentUuid = resolveParent(parentOf(record), droppedParent);
@@ -65,14 +102,41 @@ export function sanitizeClaudeTranscript(jsonl: string): SanitizedTranscript | n
   });
   if (end < 0 || !sessionId) return null;
   const records = kept.slice(0, end + 1);
-  if (title) records.push({ ...title, sessionId: title.sessionId ?? sessionId });
   const present = new Set(records.map((record) => record.uuid));
   for (const record of records) {
-    if (record.type !== "ai-title" && record.parentUuid !== null && !present.has(record.parentUuid)) {
-      record.parentUuid = null;
-    }
+    // A compaction boundary starts a new chain on purpose (its link back is logicalParentUuid).
+    if (record.parentUuid !== null && !present.has(record.parentUuid)) record.parentUuid = null;
+  }
+  for (const record of records) {
+    if (record.type === "system") repointCompaction(record, present, rawParent, droppedParent);
+  }
+  for (const title of titles) {
+    if (title.type === "summary" && !present.has(title.leafUuid)) continue;
+    records.push(title.type === "summary" ? title : { ...title, sessionId });
+  }
+  if (!titles.some((title) => title.type !== "summary") && fallbackTitle) {
+    records.push({ type: "ai-title", aiTitle: fallbackTitle, sessionId });
   }
   return { sessionId, lines: records.map((record) => JSON.stringify(record)) };
+}
+
+/** The record as stored, or null when it is dropped. Only thinking and account fields are edited out. */
+function keptRecord(record: JsonRecord): JsonRecord | null {
+  const copy = keptRecordWithFields(record);
+  if (copy) for (const field of DROPPED_FIELDS) delete copy[field];
+  return copy;
+}
+
+function keptRecordWithFields(record: JsonRecord): JsonRecord | null {
+  const type = record.type;
+  if (typeof type !== "string" || !KEPT_TYPES.has(type)) return null;
+  if (type === "system") return KEPT_SYSTEM.has(record.subtype as string) ? { ...record } : null;
+  if (type === "attachment") {
+    const kind = (record.attachment as JsonRecord | null)?.type;
+    return typeof kind === "string" && KEPT_ATTACHMENTS.has(kind) ? { ...record } : null;
+  }
+  const message = withoutThinking(record.message);
+  return message ? { ...record, message } : null;
 }
 
 function parseRecord(line: string): JsonRecord | null {
@@ -99,28 +163,63 @@ function resolveParent(parent: string | null, dropped: ReadonlyMap<string, strin
   return parent;
 }
 
-/** The message rebuilt from an allowlist, without thinking blocks, or null when nothing is left. */
+/**
+ * A compaction boundary names the messages it kept word for word (`preservedSegment`, from head to
+ * tail, and `preservedMessages`). Resume splices that segment back in after the summary, so ids of
+ * dropped records are moved to the nearest kept record inside the segment, or the segment is removed
+ * when nothing in it is kept.
+ */
+function repointCompaction(
+  boundary: JsonRecord,
+  present: ReadonlySet<unknown>,
+  rawParent: ReadonlyMap<string, string | null>,
+  droppedParent: ReadonlyMap<string, string | null>,
+): void {
+  if (typeof boundary.logicalParentUuid === "string") {
+    boundary.logicalParentUuid = resolveParent(boundary.logicalParentUuid, droppedParent);
+  }
+  const metadata = boundary.compactMetadata;
+  if (!metadata || typeof metadata !== "object") return;
+  const copy: JsonRecord = { ...(metadata as JsonRecord) };
+  boundary.compactMetadata = copy;
+  const segment = copy.preservedSegment as JsonRecord | undefined;
+  if (segment && typeof segment === "object") {
+    // Walk tail -> head along the links as written; the kept records on that path are the segment.
+    const path: string[] = [];
+    let id = typeof segment.tailUuid === "string" ? segment.tailUuid : null;
+    while (id !== null && !path.includes(id)) {
+      path.push(id);
+      if (id === segment.headUuid) break;
+      id = rawParent.get(id) ?? null;
+    }
+    const kept = path.filter((uuid) => present.has(uuid));
+    if (path.at(-1) !== segment.headUuid || kept.length === 0) {
+      delete copy.preservedSegment;
+    } else {
+      copy.preservedSegment = { ...segment, tailUuid: kept[0], headUuid: kept.at(-1) };
+    }
+  }
+  const messages = copy.preservedMessages as JsonRecord | undefined;
+  if (messages && typeof messages === "object") {
+    const keep = (list: unknown) => (Array.isArray(list) ? list.filter((uuid) => present.has(uuid)) : list);
+    copy.preservedMessages = { ...messages, uuids: keep(messages.uuids), allUuids: keep(messages.allUuids) };
+  }
+}
+
+/** The message without thinking blocks, or null when nothing is left. */
 function withoutThinking(message: unknown): JsonRecord | null {
   if (!message || typeof message !== "object") return null;
   const m = message as JsonRecord;
-  let content = m.content;
-  if (typeof content === "string") {
-    if (!content) return null;
-  } else if (Array.isArray(content)) {
-    content = content.filter((block) => !THINKING.has((block as JsonRecord | null)?.type as string));
-    if ((content as unknown[]).length === 0) return null;
-  } else {
-    return null;
-  }
-  const copy: JsonRecord = {};
-  for (const field of MESSAGE_FIELDS) if (field in m) copy[field] = m[field];
-  copy.content = content;
-  return copy;
+  if (typeof m.content === "string") return m.content ? m : null;
+  if (!Array.isArray(m.content)) return null;
+  const content = m.content.filter((block) => !THINKING.has((block as JsonRecord | null)?.type as string));
+  if (content.length === 0) return null;
+  return content.length === m.content.length ? m : { ...m, content };
 }
 
 /** An assistant record that asks for no tool: the history can end here and be continued. */
 function isCompleteAssistant(record: JsonRecord): boolean {
-  if (record.type !== "assistant") return false;
+  if (record.type !== "assistant" || record.isSidechain === true) return false;
   const content = (record.message as JsonRecord).content;
   return !Array.isArray(content) || !content.some((block) => (block as JsonRecord | null)?.type === "tool_use");
 }
