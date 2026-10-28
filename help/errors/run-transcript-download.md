@@ -1,0 +1,32 @@
+---
+id: errors/run-transcript-download
+title: Run transcript download refused
+summary: What each refusal from a get_run_transcript download link means (link_invalid, not_found, transcript_expired, transcript_unavailable, transcript_corrupt) and what to do.
+audience: operator
+tags: [wardby resume, get_run_transcript, link_invalid, transcript_expired, transcript_corrupt, download]
+appliesTo: ">=0.7.0"
+---
+
+# Run transcript download refused
+
+`wardby resume` downloads a run's transcript from the link
+`get_run_transcript` returned. When the server refuses, it answers with JSON
+`{ "error": "<code>" }`, and `wardby resume` prints what the code means.
+Nothing is written to your machine.
+
+| Code                     | HTTP | Meaning and what to do                                                                                                                                                                                                                  |
+| ------------------------ | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `link_invalid`           | 403  | The link is malformed, was changed, was made by another server, or is older than 10 minutes. Call `get_run_transcript` again for a new link. A multi-instance HTTP deployment needs `REQUEST_STATE_KEY` set the same on every instance. |
+| `not_found`              | 404  | The person the link was made for can no longer read the run, or the run has no stored transcript.                                                                                                                                       |
+| `transcript_expired`     | 410  | The transcript was deleted after `RUN_TRANSCRIPT_RETENTION_DAYS`.                                                                                                                                                                       |
+| `transcript_unavailable` | 503  | The server has no blob store configured (`BLOB_STORE`), or could not read the object. Check the blob store settings on the server process.                                                                                              |
+| `transcript_corrupt`     | 500  | The stored object no longer matches the SHA-256 recorded when it was stored, so the server refused to send it.                                                                                                                          |
+
+`wardby resume` also refuses a download whose bytes do not match the
+server's SHA-256 header, and never writes a partial file.
+
+Over stdio, the link points at a local port the MCP server opens while links
+are in use: if `wardby resume` cannot reach it, keep your MCP client
+connected and request a new link.
+
+See [Resume Claude Code runs locally](../resume-runs-locally.md).

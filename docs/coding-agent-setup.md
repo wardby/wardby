@@ -690,9 +690,10 @@ default. Turn it on per agent:
 ```
 
 `sessionResume` applies to Claude Code agents only; `create_agent` and
-`update_agent` refuse it on a Codex agent. Wardby keeps each run's session
-so it can be continued locally; the command that does this ships separately.
-This section covers what is stored and how to set it up.
+`update_agent` refuse it on a Codex agent. Wardby keeps each run's session,
+and `get_run_transcript` plus `npx wardby resume` continue it on a
+developer's machine (see [Continue a run on your machine](#continue-a-run-on-your-machine)).
+This section covers what is stored, how to set it up, and how to resume.
 
 Session resume needs Claude Code worker images from a release that supports
 it (Wardby 0.7.0 or later). An older pinned image rejects the input of a run
@@ -716,9 +717,9 @@ cannot be loaded, nothing is stored.
 A run stopped with `stop_run` or ended by its timeout is not captured, because
 its worker is removed before the transcript can be collected.
 
-**Who will be able to read it.** Transcripts are stored from the first run
-with `sessionResume` on. Once they are served, anyone who can read a run can
-read its transcript, and so everything the agent saw and wrote, including file
+**Who can read it.** Transcripts are stored from the first run
+with `sessionResume` on. Anyone who can read a run (its triggerer and the
+agent's owner, as for `get_run`) can download its transcript, and so everything the agent saw and wrote, including file
 contents and command output from the repository. Redaction covers secret
 values, not other sensitive text. Enable `sessionResume` only for agents whose
 runs you are comfortable sharing with everyone who can read them.
@@ -765,6 +766,97 @@ message naming the variable.
 image from a release that includes session resume. Until then its runs fail at
 input (`worker_input_failed`). `update_agent` warns about this when you turn
 `sessionResume` on, and also warns when the server has no blob store.
+
+### Continue a run on your machine
+
+Ask your MCP client to call `get_run_transcript` with the run's id. It takes
+the same access as `get_run` (the run's triggerer or the agent's owner) and
+returns:
+
+- `status`: `stored` when the transcript can be resumed. Otherwise the status
+  (`none`, `too_large`, `not_captured`, `failed`, `expired`, `unavailable` or
+  `unsupported`), its `reason`, and what it means; no link.
+- `sessionId`, `repository`, `branch` (the branch the run pushed, or its head
+  branch), `baseSha`, `sizeBytes` and `expiresAt` (when the transcript is
+  deleted).
+- `download.url` and `download.expiresAt`: a signed download link that works
+  for 10 minutes.
+- `command`: `npx wardby resume '<link>'`.
+
+The transcript itself never enters your MCP client's conversation, only the
+link. Run the command in a terminal:
+
+- For a GitHub repository, run it inside a clone of that repository. It
+  fetches the run's branch from the remote that points at the repository and
+  adds a detached git worktree next to the clone, named
+  `<clone>-run-<last 8 characters of the run id>`.
+- For a `local:` repository, run it anywhere. The worktree is added from that
+  repository, next to it.
+- A detached worktree works even while the branch is checked out somewhere
+  else. When the branch no longer exists (for example a failed run that
+  pushed nothing), the run's base commit is checked out instead, with a
+  warning that the run's changes are not in it.
+
+```text
+npx wardby resume '<link>' [--dir <path> | --here] [--force] [--print]
+```
+
+| Option         | Effect                                                                             |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `--dir <path>` | Put the worktree at `<path>` instead of the default.                               |
+| `--here`       | Skip the checkout and continue in the current directory as it is.                  |
+| `--force`      | Replace a different session file already imported for this run.                    |
+| `--print`      | Print the `claude` command instead of starting it (also when `claude` is missing). |
+
+The command downloads the transcript and checks its SHA-256 against the
+server's before writing anything. It writes two files, both readable only by
+you, under `~/.wardby/sessions/<run id>/`: the session as
+`<session id>.jsonl`, and `mcp-config.json`. It never writes to Claude Code's
+own configuration directory. It then starts Claude Code in the worktree:
+
+```text
+claude --resume ~/.wardby/sessions/<run id>/<session id>.jsonl \
+  --mcp-config ~/.wardby/sessions/<run id>/mcp-config.json \
+  --system-prompt-snapshot off --append-system-prompt '<move note>'
+```
+
+- **The move note** tells the model the session moved from the worker:
+  `/workspace` (where the run's commands ran) is now the worktree, and the
+  worker's tool is gone. `--system-prompt-snapshot off` makes Claude Code
+  apply the note to a resumed conversation; it is passed only to Claude Code
+  versions that support it (2.1.257 and later).
+- **The stand-in tool server.** Every command in a run went through the
+  worker's `run_command` tool (`wardby_tools`). The MCP config starts a
+  stand-in with the same name and input schema from the same wardby install,
+  so the resumed session shows the run's calls and their output. The stand-in
+  runs nothing: any call answers that the session moved and to use the local
+  Bash, Read and Edit tools in the worktree.
+- **Importing again.** An identical session file is reused. A file that has
+  grown because you continued the session locally is kept, so running the
+  command again picks up where you left off. Any other different file is
+  refused unless you pass `--force`. An existing worktree of the same
+  repository at the target path is reused.
+- **Removing an import.** Delete `~/.wardby/sessions/<run id>/` and remove
+  the worktree with `git worktree remove <path>`. The command prints both.
+- Only Claude Code runs can be resumed; for other runs the tool returns
+  `unsupported`.
+
+**The link is a credential.** Anyone who has it can download the transcript
+until it expires, without signing in. Do not paste it into chats, issues or
+logs. It works only for the run and person it was made for, and only while
+that person can still read the run. Over the HTTP transport it points at the
+server's own address (`MCP_CANONICAL_URI`'s origin). Over stdio it points at a
+local port the MCP server opens on `127.0.0.1` while links are in use, so
+your MCP client must stay connected until the download finishes. A
+multi-instance HTTP deployment needs `REQUEST_STATE_KEY` set to the same
+value on every instance, so a link made on one instance works on another. `wardby
+resume` sends the link only over HTTPS, or over plain HTTP to this machine.
+
+The download responds with the gzip-compressed transcript and the headers
+`x-wardby-sha256`, `x-wardby-session-id` and `x-wardby-transcript-meta` (the
+run's repository and refs, as base64url JSON). A refused download returns
+JSON `{ "error": "<code>" }`; `wardby resume` explains each code (see the
+`errors/run-transcript-download` help article).
 
 ## Stop the setup
 

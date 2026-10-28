@@ -1,17 +1,17 @@
 ---
 id: resume-runs-locally
-title: Keep Claude Code run transcripts for local resume
-summary: Turn on sessionResume for a Claude Code agent so each run's redacted conversation is stored on the server, and set up the blob store and retention it needs.
+title: Resume Claude Code runs locally (sessionResume, get_run_transcript, wardby resume)
+summary: Keep each Claude Code run's redacted conversation with sessionResume, then continue it on your machine with get_run_transcript and npx wardby resume.
 audience: operator
-tags: [sessionResume, resume, transcript, blob-store, RUN_TRANSCRIPT_MAX_BYTES, RUN_TRANSCRIPT_RETENTION_DAYS]
+tags: [sessionResume, resume, wardby resume, get_run_transcript, transcript, blob-store, RUN_TRANSCRIPT_MAX_BYTES]
 appliesTo: ">=0.7.0"
 ---
 
-# Keep Claude Code run transcripts for local resume
+# Resume Claude Code runs locally
 
 `sessionResume` makes a Claude Code agent keep a redacted copy of each run's
-conversation, so the session can be continued locally in Claude Code; the
-command that does this ships separately. It is off by default and is not
+conversation, so the session can be continued locally in Claude Code with
+`get_run_transcript` and `npx wardby resume`. It is off by default and is not
 available for Codex agents. It needs Claude Code worker images from Wardby
 0.7.0 or later.
 
@@ -49,13 +49,42 @@ blob store nothing is stored, and `update_agent` warns you.
   (default 10 MiB, at most 64 MiB). Each run records a status (`stored`,
   `too_large`, `not_captured` or `failed`) with a reason code.
 
-## Who will be able to read it
+## Who can read it
 
-Transcripts are stored from the first run with `sessionResume` on. Once they
-are served, anyone who can read a run can read its transcript, which includes
+Transcripts are stored from the first run with `sessionResume` on. Anyone
+who can read a run (its triggerer and the agent's owner, as for `get_run`)
+can download its transcript, which includes
 what the agent saw in the repository and in command output. Redaction removes secret
 values, not other sensitive text. Turn this on only for agents whose runs you
 are comfortable sharing with everyone who can read them.
+
+## Continue a run on your machine
+
+1. Ask your MCP client to call `get_run_transcript` with the run id (same
+   access as `get_run`). For a stored transcript it returns a download link
+   that works for 10 minutes and the command to run; otherwise the status
+   (`none`, `too_large`, `not_captured`, `failed`, `expired`, `unavailable`,
+   `unsupported`) and what it means.
+2. Run the command in a terminal: `npx wardby resume '<link>'`. For a GitHub
+   repository, run it inside a clone of that repository; for a `local:`
+   repository, anywhere.
+
+It verifies the download's SHA-256, writes the session to
+`~/.wardby/sessions/<run id>/<session id>.jsonl` (mode 0600, never into
+Claude Code's own config directory), adds a detached git worktree of the
+run's branch next to the repository (the base commit, with a warning, when
+the branch is gone), and starts `claude --resume` there. A stand-in
+`wardby_tools` server shows the run's `run_command` calls but runs nothing,
+and a note tells the model `/workspace` is now the worktree.
+
+Options: `--dir <path>` (worktree location), `--here` (no checkout),
+`--force` (replace a different imported session file), `--print` (print the
+`claude` command instead of starting it).
+
+The link is a credential until it expires: do not share it. Over stdio it
+points at a local port the MCP server opens, so keep your MCP client
+connected until the download finishes. Refusals:
+[Run transcript download refused](errors/run-transcript-download.md).
 
 ## Retention
 
