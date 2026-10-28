@@ -116,13 +116,24 @@ export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHu
   };
 }
 
-/** GitHub App webhook settings for the code-review host ingress; unset = ingress disabled. */
-export function loadGitHubEventConfig(env: NodeJS.ProcessEnv = process.env): { webhookSecret?: string } {
+/**
+ * GitHub App webhook settings for the code-review host ingress; unset = ingress disabled.
+ * `mentionExplanations` (WARDBY_MENTION_EXPLANATIONS, default true): false = a mention that
+ * starts nothing gets no reply saying why.
+ */
+export function loadGitHubEventConfig(env: NodeJS.ProcessEnv = process.env): {
+  webhookSecret?: string;
+  mentionExplanations: boolean;
+} {
   const secret = env.GITHUB_APP_WEBHOOK_SECRET?.trim();
   if (secret !== undefined && secret !== "" && secret.length < 20) {
     throw new Error("GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.");
   }
-  return { webhookSecret: secret || undefined };
+  const explanations = env.WARDBY_MENTION_EXPLANATIONS?.trim() ?? "";
+  if (explanations !== "" && explanations !== "true" && explanations !== "false") {
+    throw new Error("WARDBY_MENTION_EXPLANATIONS must be true or false.");
+  }
+  return { webhookSecret: secret || undefined, mentionExplanations: explanations !== "false" };
 }
 
 /**

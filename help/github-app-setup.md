@@ -110,6 +110,7 @@ Wardby can check their repository access. In the App's **General** settings:
 | `GITHUB_APP_CLIENT_ID`           | The Client ID from step 5 (set together with the client secret, or neither) |
 | `GITHUB_APP_CLIENT_SECRET`       | The client secret from step 5                                               |
 | `WARDBY_GITHUB_ALLOWED_ACCOUNTS` | Optional: accounts other than the App's owner to serve, comma-separated     |
+| `WARDBY_MENTION_EXPLANATIONS`    | Optional: `false` = no reply saying why a mention started nothing           |
 
 Restart the server after setting them. Without `GITHUB_APP_ID` and
 `GITHUB_APP_PRIVATE_KEY`, coding runs on GitHub repositories fail with

@@ -757,6 +757,43 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
       });
     });
 
+    it.each<[string, Parameters<typeof deps>[0]]>([
+      ["nothing is linked", []],
+      [
+        "the linked agents don't answer mentions",
+        [{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }],
+      ],
+    ])("stays silent when %s and WARDBY_MENTION_EXPLANATIONS is false", async (_label, links) => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = { ...deps(links), mentionExplanations: false };
+      expect(await routeHostEvent(mention("@wardby hi"), d)).toEqual({ runIds: [], followUps: [] });
+      expect(d.repoAccess.authorizeHostUser).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).not.toHaveBeenCalled();
+    });
+
+    it("stays silent on a review it can't start when WARDBY_MENTION_EXPLANATIONS is false", async () => {
+      const h = host();
+      h.pullRequestHead = vi.fn(async () => ({ headSha: SHA, isFork: true, state: "open" }));
+      const d = {
+        ...deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], h),
+        mentionExplanations: false,
+      };
+      expect(await routeHostEvent(mention("@wardby review"), d)).toEqual({ runIds: [], followUps: [] });
+      expect(d.hosts.github.comment).not.toHaveBeenCalled();
+    });
+
+    it("when the agents linked to the repository don't answer mentions", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
+      await post(await routeHostEvent(mention("@wardby hi"), d));
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.acknowledge).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+        number: 7,
+        body: expect.stringContaining("no agent on this repository is set up to answer mentions"),
+      });
+    });
+
     it("when a review is asked for and no reviewer is linked", async () => {
       const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
       await post(await routeHostEvent(mention("@wardby review"), d));
@@ -797,7 +834,7 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
     });
 
     it("in the review thread when the mention was in one", async () => {
-      const d = deps([]);
+      const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
       await post(
         await routeHostEvent(
           {

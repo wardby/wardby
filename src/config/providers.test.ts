@@ -417,14 +417,16 @@ describe("loadGitHubEventConfig", () => {
   const VALID = "0123456789abcdef0123";
 
   it("is disabled when unset, empty, or whitespace", () => {
-    expect(loadGitHubEventConfig({})).toEqual({ webhookSecret: undefined });
-    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "" })).toEqual({ webhookSecret: undefined });
-    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "   \n" })).toEqual({ webhookSecret: undefined });
+    expect(loadGitHubEventConfig({})).toEqual({ webhookSecret: undefined, mentionExplanations: true });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "" })).toMatchObject({ webhookSecret: undefined });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "   \n" })).toMatchObject({ webhookSecret: undefined });
   });
 
   it("trims and passes a valid secret through", () => {
-    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: VALID })).toEqual({ webhookSecret: VALID });
-    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: `  ${VALID}\n` })).toEqual({ webhookSecret: VALID });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: VALID })).toMatchObject({ webhookSecret: VALID });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: `  ${VALID}\n` })).toMatchObject({
+      webhookSecret: VALID,
+    });
   });
 
   it("throws on a secret shorter than 20 characters after trimming", () => {
@@ -432,6 +434,18 @@ describe("loadGitHubEventConfig", () => {
       "GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.",
     );
     expect(() => loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: ` ${VALID.slice(0, 19)} ` })).toThrow();
+  });
+
+  it("reads WARDBY_MENTION_EXPLANATIONS as true or false, empty = true", () => {
+    expect(loadGitHubEventConfig({}).mentionExplanations).toBe(true);
+    expect(loadGitHubEventConfig({ WARDBY_MENTION_EXPLANATIONS: "" }).mentionExplanations).toBe(true);
+    expect(loadGitHubEventConfig({ WARDBY_MENTION_EXPLANATIONS: "true" }).mentionExplanations).toBe(true);
+    expect(loadGitHubEventConfig({ WARDBY_MENTION_EXPLANATIONS: " false\n" }).mentionExplanations).toBe(false);
+    for (const bad of ["no", "0", "FALSE"]) {
+      expect(() => loadGitHubEventConfig({ WARDBY_MENTION_EXPLANATIONS: bad })).toThrow(
+        "WARDBY_MENTION_EXPLANATIONS must be true or false.",
+      );
+    }
   });
 });
 

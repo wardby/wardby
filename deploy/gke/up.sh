@@ -7,6 +7,7 @@
 #   WARDBY_LOW_POWER=1 WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh   # low-power mode
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
+#   WARDBY_MENTION_EXPLANATIONS=false   # optional: no reply saying why a mention started nothing (default true)
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
 #   WARDBY_SESSION_TRANSCRIPTS=true   # optional: store sessionResume transcripts on the control plane (default false; needs session_transcripts_enabled in terraform.tfvars)
 #   RUN_TRANSCRIPT_MAX_BYTES=20971520   # optional: largest transcript stored, with WARDBY_SESSION_TRANSCRIPTS=true (default 10 MiB)
@@ -107,6 +108,42 @@ else
   echo "up.sh: mobile sign-in is off."
 fi
 # --- end WARDBY_MOBILE_ENABLED check ---
+
+# --- WARDBY_MENTION_EXPLANATIONS check ---
+# Optional: false stops the GitHub App replying to say why a mention started
+# nothing (the reply is a comment anyone who can see the repository reads).
+# Empty = true, the server's default.
+WARDBY_MENTION_EXPLANATIONS="${WARDBY_MENTION_EXPLANATIONS:-true}"
+case "$WARDBY_MENTION_EXPLANATIONS" in
+  true | false) ;;
+  *)
+    echo "up.sh: WARDBY_MENTION_EXPLANATIONS must be true or false (got \"$WARDBY_MENTION_EXPLANATIONS\")." >&2
+    exit 1
+    ;;
+esac
+if [[ "$WARDBY_MENTION_EXPLANATIONS" = false ]]; then
+  echo "up.sh: mentions that start nothing get no explanation."
+fi
+# --- end WARDBY_MENTION_EXPLANATIONS check ---
+
+# --- WARDBY_MENTION_EXPLANATIONS control-plane env ---
+# Adds WARDBY_MENTION_EXPLANATIONS to the control plane's container, right
+# after its WARDBY_MOBILE_ENABLED entry, like CODING_MAX_DISK_MB below. Only
+# when false: true is the server's default. The control plane receives the
+# GitHub webhooks, so it is the only container that reads it.
+inject_mention_explanations_env() {
+  if [[ "$WARDBY_MENTION_EXPLANATIONS" != false ]]; then
+    cat
+    return
+  fi
+  awk '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      print item_indent "- name: WARDBY_MENTION_EXPLANATIONS"; print value_indent "value: \"false\""
+    }'
+}
+# --- end WARDBY_MENTION_EXPLANATIONS control-plane env ---
 
 # --- CODING_MAX_DISK_MB check ---
 # Optional: the largest workspace (MiB) an agent's workspaceDiskMb may ask for.
@@ -678,6 +715,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_dependency_cache_env \
   | inject_session_transcripts_env \
+  | inject_mention_explanations_env \
   | inject_coding_max_disk_env \
   | inject_coding_resources_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \

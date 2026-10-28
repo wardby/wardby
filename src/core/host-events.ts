@@ -89,6 +89,12 @@ export interface RouteHostEventDeps {
   repoAccess: RepoAccessGate;
   /** Issue trackers for moving/commenting on the issue a closed PR was opened for; absent → pr_closed is ignored. */
   issueTrackers?: IssueTrackerRegistry;
+  /**
+   * False (WARDBY_MENTION_EXPLANATIONS=false): a mention that starts nothing gets no
+   * reply saying why. The reply is a comment anyone who can see the repository reads,
+   * so a deployment may keep what is linked there to itself. Absent = true.
+   */
+  mentionExplanations?: boolean;
 }
 
 /** What starting a review needs: everything routing needs except the mention handle. */
@@ -1680,6 +1686,8 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
       const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
+      // Explanations off and nothing to start: say nothing, and skip the author lookup.
+      if (candidates.length === 0 && deps.mentionExplanations === false) return none;
       // H5-3: a mention drives a write-capable agent holding its owner's
       // tools and secrets, so its author needs real push access to the
       // repository (author_association, checked upstream, is only a
@@ -1721,6 +1729,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       // instead of leaving the mention unanswered.
       const decline = (reason: MentionDeclineReason): RouteResult => {
         log.info({ repository: event.repository, number: event.number, reason }, "mention declined");
+        if (deps.mentionExplanations === false) return none;
         const reply = async () => {
           await host
             .comment(event.repository, {

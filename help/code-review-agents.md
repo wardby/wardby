@@ -46,12 +46,25 @@ a mention needs write access; anyone else, including a stranger on a public
 repository, is ignored silently. A private organization member, whom GitHub labels
 `CONTRIBUTOR` or `NONE`, is still checked and can start runs. A mention inside
 Markdown code (an inline code span or a code block) is not a request, so
-quoting `` `@<app-slug>` `` in an issue or comment starts nothing. When someone
-with write access mentions the App and nothing starts (no agent linked for mentions or reviews, the linked agent's owner
-lost access to the repository, or the pull request is closed or from a fork), the
-App replies with the reason instead of staying silent. Repository links require the
-agent owner's linked GitHub access, or an explicitly recorded administrator
-approval.
+quoting `` `@<app-slug>` `` in an issue or comment starts nothing. Repository links
+require the agent owner's linked GitHub access, or an explicitly recorded
+administrator approval.
+
+## When a mention starts nothing
+
+When someone with write access mentions the App and no run starts, the App
+replies with the reason instead of staying silent:
+
+- no agent is linked to the repository with the `mention` trigger;
+- `@<app-slug> review` was used, but no reviewer agent (`pull_request` trigger
+  and a `checkName`) is linked;
+- the linked agent's owner lost access to the repository, or its authorization
+  lapsed: the owner re-authorizes or re-links the agent;
+- the pull request is closed or comes from a fork.
+
+Mentions from people without write access never get this reply. The reply is a
+comment anyone who can see the repository reads; to turn it off, for example on
+public repositories, set `WARDBY_MENTION_EXPLANATIONS=false` on the server.
 
 ## When a review starts
 

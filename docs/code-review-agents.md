@@ -161,6 +161,11 @@ reaction:
 
 The reply never names the App, so it cannot be read as a mention of itself.
 
+The reply is a comment that anyone who can see the repository reads, so on a
+public repository it shows what is (or isn't) linked there. To keep that to
+yourself, set `WARDBY_MENTION_EXPLANATIONS=false` on the server: a mention that
+starts nothing then gets no reply at all. The default is `true`.
+
 If a mention from someone with write access gets no reaction or reply, check
 the server log for `mention ignored` or `mention declined`. Older versions dropped `CONTRIBUTOR` and
 `NONE` authors before the permission check. On those versions, make the
