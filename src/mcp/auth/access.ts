@@ -101,6 +101,11 @@ export function requireBindingOwner(ctx: McpRequestContext, agent: AgentRef): vo
  */
 export async function requireBindable(ctx: McpRequestContext, agent: AgentRef, db: GrantDb = ctx.db): Promise<void> {
   requireBindingOwner(ctx, agent);
+  await requireNotPublicWritable(agent, db);
+}
+
+/** The public-write half of requireBindable, for paths that skip the owner check (an admin's adminOverride). */
+export async function requireNotPublicWritable(agent: AgentRef, db: GrantDb): Promise<void> {
   if (await isPublicWritable(db, agent.id)) {
     throw new McpError(
       409,

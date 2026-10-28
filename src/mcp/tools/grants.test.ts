@@ -22,7 +22,10 @@ function fakeDb(
   principals: string[],
   grants: FakeGrantSeed[] = [],
   bindings: Partial<
-    Record<"agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool", number>
+    Record<
+      "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile",
+      number
+    >
   > = {},
 ) {
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -34,6 +37,7 @@ function fakeDb(
     agentRepository: { count: async () => bindings.agentRepository ?? 0 },
     agentSubAgent: { count: async () => bindings.agentSubAgent ?? 0 },
     agentTool: { count: async () => bindings.agentTool ?? 0 },
+    codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
     agent: {
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => {
@@ -268,24 +272,40 @@ describe("grant_access / revoke_access / list_access", () => {
     await client.close();
   });
 
-  it.each(["agentSecret", "agentDatastore", "agentRepository", "agentSubAgent", "agentTool"] as const)(
-    "refuses write for everyone on an agent that holds %s, but still allows execute",
-    async (binding) => {
-      const db = fakeDb(agents, people, [], { [binding]: 1 });
-      const { client } = await connect(db, ctx(db, "owner"));
-      const call = (level: string) =>
-        client.callTool({
-          name: "grant_access",
-          arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level },
-        });
-      const refused = await call("write");
-      expect(refused.isError).toBe(true);
-      expect(text(refused)).toMatch(/Detach them first/);
-      expect(db.resourceGrant.rows).toHaveLength(0);
-      expect((await call("execute")).isError).toBeFalsy();
-      await client.close();
-    },
-  );
+  it.each([
+    "agentSecret",
+    "agentDatastore",
+    "agentRepository",
+    "agentSubAgent",
+    "agentTool",
+    "codingAgentProfile",
+  ] as const)("refuses write for everyone on an agent that holds %s, but still allows execute", async (binding) => {
+    const db = fakeDb(agents, people, [], { [binding]: 1 });
+    const { client } = await connect(db, ctx(db, "owner"));
+    const call = (level: string) =>
+      client.callTool({
+        name: "grant_access",
+        arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level },
+      });
+    const refused = await call("write");
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/Detach them first/);
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    expect((await call("execute")).isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("names every kind of binding the agent holds when it refuses write for everyone", async () => {
+    const db = fakeDb(agents, people, [], { agentSecret: 2, agentSubAgent: 1, codingAgentProfile: 1 });
+    const { client } = await connect(db, ctx(db, "owner"));
+    const refused = await client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: "everyone", level: "write" },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/holds secrets, sub-agents, a coding repository:/);
+    await client.close();
+  });
 
   it("after revoke: trigger is refused, and the delegation edge is refused at run time", async () => {
     const db = fakeDb(

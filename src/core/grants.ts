@@ -179,22 +179,38 @@ export async function deleteGrantsFor(db: GrantDb, type: ResourceType, resourceI
 
 type BindingDb = Pick<
   PrismaClient,
-  "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool"
+  "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile"
 >;
 
 /**
  * The owner-only bindings an agent holds, by kind (empty = none). An agent
  * may be public-write only while this is empty; binding a secret, datastore,
  * repository, sub-agent or owner-granted tool capability to a public-write
- * agent is refused for the same reason.
+ * agent is refused for the same reason. A coding profile counts: its
+ * repository is the owner's GitHub access, and the prompt is part of every
+ * coding task.
  */
 export async function agentOwnerBindings(db: BindingDb, agentId: string): Promise<string[]> {
-  const [secrets, datastores, repositories, subagents, capabilityTools] = await Promise.all([
+  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles] = await Promise.all([
     db.agentSecret.count({ where: { agentId } }),
     db.agentDatastore.count({ where: { agentId } }),
     db.agentRepository.count({ where: { agentId } }),
     db.agentSubAgent.count({ where: { parentAgentId: agentId } }),
-    db.agentTool.count({ where: { agentId, capabilitiesGrantedById: { not: null } } }),
+    // The owner's attach_tool stamps its consent even when it grants nothing:
+    // only an attachment that carries a capability counts.
+    db.agentTool.count({
+      where: {
+        agentId,
+        capabilitiesGrantedById: { not: null },
+        NOT: {
+          allowedSecrets: { equals: [] },
+          allowedDatastorePrefixes: { equals: [] },
+          allowedHosts: { equals: [] },
+          allowedSharedDatastorePrefixes: { equals: {} },
+        },
+      },
+    }),
+    db.codingAgentProfile.count({ where: { agentId } }),
   ]);
   return Object.entries({
     secrets,
@@ -202,6 +218,7 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
     repositories,
     "sub-agents": subagents,
     "tool capabilities": capabilityTools,
+    "a coding repository": codingProfiles,
   })
     .filter(([, count]) => count > 0)
     .map(([kind]) => kind);

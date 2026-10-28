@@ -26,12 +26,13 @@ Grant `everyone` at `read` or `execute` for an agent anyone can see or run.
 Grant `everyone` at `write` for an agent anyone can also edit.
 
 Everyone-`write` is refused while the agent holds any of its owner's bindings:
-secrets, datastores, repositories, sub-agents or tool capabilities. Otherwise
-anyone could rewrite its prompt and use them. Detach them first, or grant
-`execute` instead. The reverse holds too: `attach_secret`, `attach_datastore`,
-`link_repository`, `attach_subagent` and `attach_tool` with capabilities are
-refused on an agent everyone can write. Revoke or lower the everyone grant
-first.
+secrets, datastores, repositories, sub-agents, tool capabilities, or a coding
+repository, so a coding agent can't be public-write. Otherwise anyone could
+rewrite its prompt and use them. Detach them first, or grant `execute` instead.
+The reverse holds too: `attach_secret`, `attach_datastore`, `link_repository`,
+`attach_subagent`, `attach_tool` with capabilities, and `update_agent` making
+it a coding agent are refused on an agent everyone can write. Revoke or lower
+the everyone grant first.
 
 ### Cap what a public-write agent can spend
 

@@ -268,11 +268,13 @@ would hand every run's data to another agent.
 
 **Everyone** (any signed-in principal) can be granted up to `write`, a
 public agent anyone can list, run and edit, but only while the agent holds
-none of its owner's bindings: secrets, datastores, repositories, sub-agents or
-tool capabilities. `grant_access` refuses everyone-`write` on an agent that has
+none of its owner's bindings: secrets, datastores, repositories, sub-agents,
+tool capabilities, or a coding repository (so a coding agent is never
+public-write). `grant_access` refuses everyone-`write` on an agent that has
 any, and the binding tools (`attach_secret`, `attach_datastore`,
-`link_repository`, `attach_subagent`, and `attach_tool` with capabilities)
-refuse to add one to an agent everyone can write. Otherwise anyone could
+`link_repository` including an admin's `adminOverride`, `attach_subagent`,
+and `attach_tool` with capabilities) refuse to add one to an agent everyone
+can write, as `update_agent` refuses making it a coding agent. Otherwise anyone could
 rewrite the prompt of an agent that uses your secrets. Detach the bindings
 first, or grant everyone `execute` instead.
 
