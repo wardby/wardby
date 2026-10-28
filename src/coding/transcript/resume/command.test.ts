@@ -68,9 +68,9 @@ describe("wardby resume", () => {
     const sessionFile = join(sessionsRoot, RUN_ID, `${SESSION_ID}.jsonl`);
     expect(readFileSync(sessionFile, "utf8")).toBe(BODY);
     const configPath = join(sessionsRoot, RUN_ID, "mcp-config.json");
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
     const checkout = join(repo.dir, "..", `app-run-${RUN_ID.slice(-8)}`);
     expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(mcpConfig({ checkout, from: "/workspace" }));
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
     expect(launches).toHaveLength(1);
     expect(launches[0].cwd).toBe(checkout);
     expect(launches[0].args.slice(0, 6)).toEqual([
