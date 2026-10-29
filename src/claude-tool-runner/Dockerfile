@@ -1,10 +1,10 @@
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS dependencies
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS dependencies
 WORKDIR /runner
 COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # The tool runner every Claude Code run uses; the two targets below add only their toolchain.
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS base
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS base
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade perl-base \

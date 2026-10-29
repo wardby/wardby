@@ -1,7 +1,7 @@
 # Built on the builder's own platform: only plain JavaScript leaves this stage, so an arm64 machine
 # compiles natively. The dependency and runtime stages stay on the target platform (the SDK ships
 # platform-specific pieces).
-FROM --platform=$BUILDPLATFORM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+FROM --platform=$BUILDPLATFORM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
 WORKDIR /build
 COPY package.json package-lock.json .
 RUN npm ci --ignore-scripts
@@ -12,12 +12,12 @@ COPY help ./help
 COPY src ./src
 RUN npm run build
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS worker-dependencies
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS worker-dependencies
 WORKDIR /worker
 COPY src/claude-coding-worker/package.json src/claude-coding-worker/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS runtime
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates perl-base \

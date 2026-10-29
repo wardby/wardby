@@ -1,4 +1,4 @@
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
@@ -9,12 +9,12 @@ COPY help ./help
 COPY src ./src
 RUN npm run build
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS worker-dependencies
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS worker-dependencies
 WORKDIR /worker
 COPY src/coding-worker/package.json src/coding-worker/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4
 LABEL org.opencontainers.image.source="https://github.com/wardby/wardby"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
