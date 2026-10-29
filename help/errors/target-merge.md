@@ -4,7 +4,7 @@ title: Target branch could not be merged
 summary: A follow-up run could not fetch or merge its pull request's target branch, so it stopped before the agent started.
 audience: operator
 tags: [error, coding-agents, vcs, merge-conflict, target-branch, pull-requests]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Target branch could not be merged

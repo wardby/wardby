@@ -4,7 +4,7 @@ title: Run stopped out of budget (budget_exhausted)
 summary: A coding run stopped because its next model request did not fit what was left of its budget; get_run's budgetEvents says which limit and why.
 audience: operator
 tags: [budget, budget_exhausted, coding_budget_exhausted, overrun, allowedOverrunPercent, overrun_unavailable, draft]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Run stopped out of budget

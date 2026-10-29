@@ -76,13 +76,13 @@ link set up for it, CI on the pushed head still running (see [Review after
 CI (`waitForCi`)](#review-after-ci-waitforci) below). Either can delay the
 check that reports the review's result; neither changes what the review
 itself reports once it runs. A large diff is read in pages (see [Large pull
-requests](#large-pull-requests)). From Wardby 0.6.1, a push to a draft is also held
+requests](#large-pull-requests)). From Wardby 0.7.0, a push to a draft is also held
 while the coding run that pushed it is still running, and, when a lead
 delegated that run (a follow-up request, say), until that lead finishes.
 
 ## Large pull requests
 
-From Wardby 0.6.1, `repo_pr_read` pages a large diff: all files share one
+From Wardby 0.7.0, `repo_pr_read` pages a large diff: all files share one
 budget per call (`maxPatchChars`, default 60,000, at most 200,000), with
 source, test and config files first. Each file has a `patchStatus`
 (`complete`, `partial`, `later_page`, `earlier_page`, `unavailable` or
@@ -111,7 +111,7 @@ and `COMMENT` still publish.
 
 ## Drafts stopped at their budget
 
-From Wardby 0.6.1, a pull request that is still a draft, whose latest commit
+From Wardby 0.7.0, a pull request that is still a draft, whose latest commit
 came from a coding run that stopped at its budget, is not reviewed automatically. Its check
 completes as neutral, "Skipped: stopped at its budget", and no automatic fix
 round follows. Marking the pull request ready for review or pushing a new
@@ -121,7 +121,7 @@ its work.
 
 ## Follow-ups on an issue
 
-From Wardby 0.6.1, a mention on a GitHub issue that already has an open pull request Wardby
+From Wardby 0.7.0, a mention on a GitHub issue that already has an open pull request Wardby
 opened tells the agent that pull request and the run id to pass as
 `continuePriorRun`, so the work continues on the same branch instead of
 opening a second pull request. Jira issues behave the same way (see
@@ -144,7 +144,7 @@ Wardby's coding sandbox, which may have had an incomplete install (see the
 **Dependency install incomplete** warning). Checks still running are reported
 as pending.
 
-From Wardby 0.6.1, a Wardby pull request whose run had package audit mode on
+From Wardby 0.7.0, a Wardby pull request whose run had package audit mode on
 (the `package-audit-mode` help article) carries a caution banner: **Packages outside the allowlist** lists what the
 registry installed that the agent's allowlist doesn't cover, and **Served
 despite advisories** (in `full` mode) lists versions with high or critical

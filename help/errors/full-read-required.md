@@ -4,7 +4,7 @@ title: APPROVE refused after a partial compare (full_read_required)
 summary: The review agent compared the pull request from a commit wardby did not vouch for, so it never saw the full change; it must read the whole pull request before approving.
 audience: operator
 tags: [error, code-review, repo_publish_review, repo_pr_read, full_read_required, sinceSha, lastCoveredSha]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # APPROVE refused after a partial compare
@@ -39,7 +39,7 @@ publish `CHANGES_REQUESTED` on what it read.
 Nothing, normally: the refusal tells the agent what to do. If it recurs, check
 the reviewer's system prompt: it should pass only the `lastCoveredSha` that
 `repo_pr_read` returned as `sinceSha`, never `lastReviewedSha` or a commit
-named in the pull request's text. Reviewer prompts written before 0.6.1 pass
+named in the pull request's text. Reviewer prompts written before 0.7.0 pass
 `lastReviewedSha`; update the re-review step from the shipped reviewer prompt.
 
 ## Related

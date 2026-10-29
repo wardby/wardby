@@ -4,7 +4,7 @@ title: Patch cursor is malformed
 summary: A repo_pr_read call passed a patchCursor that is not a well-formed cursor for the pull request (edited, truncated, retyped or too long).
 audience: operator
 tags: [error, code-review-agents, repo_pr_read, patchCursor, patch_cursor_malformed, patch_cursor_stale]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Patch cursor is malformed

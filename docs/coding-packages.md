@@ -625,7 +625,7 @@ refused for a reason about the version itself (too new, an advisory, ...).
 
 ## Package audit mode
 
-From Wardby 0.6.1, an agent's owner can switch its coding runs' registry into
+From Wardby 0.7.0, an agent's owner can switch its coding runs' registry into
 package audit mode for a limited time. A package outside the allowlist is then
 installed instead of refused, and recorded so it can be approved afterwards.
 Use it to find out which packages a task actually needs (a new framework, a
@@ -959,7 +959,7 @@ the cache doesn't fail the run: its projects report `tool_unavailable`. See
      the proxy pod's `emptyDir`, so snapshots are lost when the pod restarts.
    - **Docker quickstart**: add `WARDBY_DEPENDENCY_CACHE=true` to
      `.wardby/.env` and restart the stack. Snapshots live on a named volume
-     that `docker compose down -v` removes. This requires wardby 0.6.1 or
+     that `docker compose down -v` removes. This requires wardby 0.7.0 or
      later (earlier runtime images can't write to the volume).
 2. **Database grants.** Where the coding proxy has its own restricted database
    role (GKE), it needs access to `DependencySnapshot` and a few `CodingRun`

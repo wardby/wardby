@@ -4,7 +4,7 @@ title: Fix merge conflicts on a wardby pull request
 summary: Follow-up runs merge the PR's current target branch first and resolve its conflicts; ask to update a PR that fell behind.
 audience: operator
 tags: [github, pull-requests, merge-conflict, update-pr, target-branch, continuation, review_fix]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Fix merge conflicts on a wardby pull request

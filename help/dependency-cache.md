@@ -4,7 +4,7 @@ title: Dependency cache for coding runs
 summary: Restore npm node_modules from a verified snapshot before a coding agent starts, so runs skip the install.
 audience: operator
 tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, timeout, CODING_CPUS, CODING_MEMORY_MB, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
-appliesTo: >=0.6.1
+appliesTo: >=0.7.0
 ---
 
 # Dependency cache for coding runs
@@ -80,7 +80,7 @@ for folders restored from a snapshot.
    variables, plus the `BLOB_STORE_S3_*` proxy variables. kind:
    `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh` (not durable).
    Docker quickstart: add `WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`
-   (requires wardby 0.6.1 or later).
+   (requires wardby 0.7.0 or later).
 2. GKE: nothing extra. `up.sh` grants the proxy the `DependencySnapshot`
    table before the rollout.
 3. Per agent, once the worker images are current: `update_agent` with

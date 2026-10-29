@@ -35,7 +35,7 @@ run finishes.
 To stop a run that is pending, queued, or running (for example one a schedule
 started that you did not want), call `stop_run` with its id. It ends as
 `cancelled`, along with the sub-agent runs it still has in flight. Search help
-for "stop run" (article `stop-run`, Wardby 0.6.1 and later).
+for "stop run" (article `stop-run`, Wardby 0.7.0 and later).
 
 For the full lifecycle and the controls applied to every managed run, read
 [`README.md`](../README.md).

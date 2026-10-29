@@ -4,7 +4,7 @@ title: APPROVE refused on a cut file list (file_list_truncated)
 summary: The pull request has more changed files than repo_pr_read lists, so repo_publish_review refuses the agent's APPROVE; it can still request changes or comment.
 audience: operator
 tags: [error, code-review, repo_publish_review, repo_pr_read, file_list_truncated, fileListComplete, large-pull-request]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # APPROVE refused on a cut file list

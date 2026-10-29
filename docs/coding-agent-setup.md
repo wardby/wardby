@@ -691,7 +691,7 @@ default. Turn it on per agent:
 
 `sessionResume` applies to Claude Code agents only; `create_agent` and
 `update_agent` refuse it on a Codex agent. Wardby keeps each run's session,
-and `get_run_transcript` plus `npx wardby resume` continue it on a
+and `get_run_transcript` plus `npx @wardby/cli@latest resume` continue it on a
 developer's machine (see [Continue a run on your machine](#continue-a-run-on-your-machine)).
 This section covers what is stored, how to set it up, and how to resume.
 
@@ -811,12 +811,12 @@ returns:
   deleted).
 - `download.url` and `download.expiresAt`: a signed download link that works
   for 10 minutes.
-- `command`: `npx wardby resume -`. It asks for the link; paste
+- `command`: `npx @wardby/cli@latest resume -`. It asks for the link; paste
   `download.url`.
 
 The transcript itself never enters your MCP client's conversation, only the
 link. Run the command in a terminal. You can also pass the link as an
-argument (`npx wardby resume '<link>'`) or pipe it in, but an argument stays
+argument (`npx @wardby/cli@latest resume '<link>'`) or pipe it in, but an argument stays
 in your shell history and in the process list while Claude Code runs, so
 pasting it at the prompt is the safer default.
 
@@ -837,7 +837,7 @@ pasting it at the prompt is the safer default.
   warning that the run's changes are not in it.
 
 ```text
-npx wardby resume - [--dir <path> | --here] [--force] [--print]
+npx @wardby/cli@latest resume - [--dir <path> | --here] [--force] [--print]
 ```
 
 | Option         | Effect                                                                             |

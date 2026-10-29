@@ -306,9 +306,9 @@ Existing agents are allowed no services until their owners add
 `codingProfile.services`, and every existing agent gets the `.wardby/`
 protected-path baseline without any change to its settings.
 
-### From 0.6.1: `YARN_*`, `PNPM_*` and `COREPACK_*` are reserved
+### From 0.7.0: `YARN_*`, `PNPM_*` and `COREPACK_*` are reserved
 
-From Wardby 0.6.1 a service's `testEnv` can't set a variable starting
+From Wardby 0.7.0 a service's `testEnv` can't set a variable starting
 `YARN_`, `PNPM_` or `COREPACK_`: the worker uses them to point yarn, pnpm and
 corepack at the package registry (see
 [pnpm and yarn](coding-packages.md#pnpm-and-yarn)). A custom catalog entry

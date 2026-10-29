@@ -4,7 +4,7 @@ title: Native worker launch abandoned
 summary: A sandbox run ended while its worker was launching (usually stopped during a low-power gateway wake), so no worker pod was created.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, low-power, native_sandbox_launch_abandoned]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Native worker launch abandoned

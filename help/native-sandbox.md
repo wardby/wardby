@@ -116,7 +116,7 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
 - `stop_run` stops a sandbox run: its gateway session ends so the worker exits
   at its next call, and a worker still running after 5 seconds is killed and
   removed (a warm pool worker is discarded, never reused). Search help for
-  "stop run" (article `stop-run`, Wardby 0.6.1 and later).
+  "stop run" (article `stop-run`, Wardby 0.7.0 and later).
 
 ## Roll back
 

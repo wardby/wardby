@@ -4,7 +4,7 @@ title: Coding provider out of credit or over its spend limit
 summary: A coding run's model provider refused it because the account is out of credit or over its spend limit; retrying does not help until the limit is raised.
 audience: operator
 tags: [error, coding-agents, billing, quota, spend-limit, coding_stream_quota_exceeded]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Coding provider out of credit or over its spend limit

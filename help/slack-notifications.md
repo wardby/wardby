@@ -31,7 +31,7 @@ per card. This is outbound only: nothing in Slack starts or affects a run.
 `issue_picked_up`, `run_failed` and `run_blocked` (top-level runs only),
 `pr_opened`, `review_posted` (approve / changes requested / comment),
 `review_fix` (round started, or stopped at the cap), `pr_closed` (merged or
-closed, with any Jira status move), and `packages_audited` (from Wardby 0.6.1,
+closed, with any Jira status move), and `packages_audited` (from Wardby 0.7.0,
 top-level runs only: what its coding runs installed under package audit mode,
 described in the `package-audit-mode` help article; it doesn't change the
 thread's status). `events` on a link narrows which of these post; omitted

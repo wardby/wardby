@@ -4,7 +4,7 @@ title: Delegation conflict
 summary: A delegate_to_* call returned delegation_conflict because its call id is already used by a run of another sub-agent.
 audience: operator
 tags: [error, delegation, sub-agents, runs, delegation_conflict]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Delegation conflict

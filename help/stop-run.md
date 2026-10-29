@@ -4,7 +4,7 @@ title: Stop or cancel a run
 summary: Use stop_run to stop a pending, queued, or running run and its in-flight sub-agent runs; it ends as cancelled.
 audience: operator
 tags: [runs, stop run, cancel run, stop_run, cancelled, schedules, coding-agents, native-agents, sandbox]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Stop or cancel a run

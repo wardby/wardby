@@ -4,7 +4,7 @@ title: Package not allowed (wardby_package_not_allowed)
 summary: The coding package registry refused a package because it is not on the agent's allowlist, or is only reachable through a refused package.
 audience: operator
 tags: [error, coding-agents, packages, allowlist, wardby_package_not_allowed]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Package not allowed
