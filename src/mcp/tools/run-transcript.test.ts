@@ -107,7 +107,7 @@ describe("get_run_transcript", () => {
     expect(tokens).toHaveLength(1);
     expect(body.download.url).toContain(encodeURIComponent(tokens[0]));
     // The command reads the link from stdin, so it stays out of shell history and the process list.
-    expect(body.command).toBe("npx wardby resume -");
+    expect(body.command).toBe("npx @wardby/cli@latest resume -");
     expect(body.command).not.toContain(tokens[0]);
     expect(result.text).not.toContain("hello");
   });

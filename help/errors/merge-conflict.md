@@ -4,7 +4,7 @@ title: Conflict markers remain
 summary: A follow-up run left conflict markers in a file the target-branch merge conflicted, so nothing was pushed.
 audience: operator
 tags: [error, coding-agents, vcs, merge-conflict, pull-requests]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Conflict markers remain

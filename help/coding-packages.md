@@ -49,7 +49,7 @@ that installs it.
 Four codes say a package could not be reached through the allowlist. The agent
 should stop on all of them except `wardby_graph_incomplete`; the owner fixes
 them by allowlisting the package directly (`update_agent`,
-`codingProfile.packageAllowlist`). Each code has an article under `errors/` (for example `errors/package-not-allowed-pending`), available from release 0.6.1.
+`codingProfile.packageAllowlist`). Each code has an article under `errors/` (for example `errors/package-not-allowed-pending`), available from release 0.7.0.
 
 - `wardby_package_not_allowed`: not on the allowlist and not declared by a package already resolved in the run, or only reachable through a refused package.
 - `wardby_package_not_allowed_pending`: the dependency walk stopped before reaching it; retrying rarely helps.
@@ -64,13 +64,13 @@ lockfileVersion 1 lockfile can't be planned, so regenerate it with a current
 npm to avoid the slower walk.
 
 To find out which packages a task needs without a round of refusals for each
-one, turn on package audit mode for a limited time (from Wardby 0.6.1): the
+one, turn on package audit mode for a limited time (from Wardby 0.7.0): the
 registry installs packages outside the allowlist and records them for you to
 approve. Read the `package-audit-mode` help article, "Package audit mode".
 
 ## pnpm and yarn
 
-From Wardby 0.6.1, pnpm, yarn classic (1.x) and yarn 2 or later (Berry, with
+From Wardby 0.7.0, pnpm, yarn classic (1.x) and yarn 2 or later (Berry, with
 node-modules or Plug'n'Play) install from the same npm allowlist as npm, and
 their lockfiles are verified the same way: before `pnpm install`/`add` or
 `yarn`/`yarn install`/`yarn add`, the worker's shim sends `pnpm-lock.yaml`
@@ -163,7 +163,7 @@ told to trust CI over the sandbox's **Tests**.
 
 ## Accepting advisories
 
-From Wardby 0.6.1, a version withheld only by a high or critical advisory
+From Wardby 0.7.0, a version withheld only by a high or critical advisory
 (refused with `wardby_version_filtered`) can be served for one agent once an
 approver accepts the advisory. Set `codingProfile.packagePolicy.acceptedAdvisories`
 with `create_agent` or `update_agent` (needs `packages:approve` or
@@ -199,7 +199,7 @@ syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), packag
 
 ## Dependency cache
 
-From Wardby 0.6.1, a coding agent can start with `node_modules` already
+From Wardby 0.7.0, a coding agent can start with `node_modules` already
 restored from a verified snapshot instead of running `npm ci`. Read the
 `dependency-cache` help article, "Dependency cache for coding runs".
 

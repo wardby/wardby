@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: wardby admin viewer API
-  version: 0.6.0
+  version: 0.7.0
   description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
 servers:
   - url: https://{host}

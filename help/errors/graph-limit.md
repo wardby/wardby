@@ -4,7 +4,7 @@ title: Dependency graph over the limit (wardby_graph_limit)
 summary: The run's dependency graph walk hit REGISTRY_MAX_GRAPH_PACKAGES before reaching the package; the owner can allowlist it directly, or the operator can raise the limit.
 audience: operator
 tags: [error, coding-agents, packages, allowlist, wardby_graph_limit, REGISTRY_MAX_GRAPH_PACKAGES]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Dependency graph over the limit

@@ -4,12 +4,12 @@ title: Package audit mode
 summary: Let a coding agent install packages outside its allowlist for a limited time, recorded for approval afterwards; full mode also installs versions with high-severity advisories. Malware and the release-age limit are always enforced.
 audience: operator
 tags: [coding-agents, packages, allowlist, package audit, package audit mode, audit mode, packageAuditMode, packageAuditMinutes, approve_audited_packages, packages_audited, npm, pypi, supply-chain]
-appliesTo: >=0.6.1
+appliesTo: >=0.7.0
 ---
 
 # Package audit mode
 
-From Wardby 0.6.1, a coding agent's registry can run in package audit mode for
+From Wardby 0.7.0, a coding agent's registry can run in package audit mode for
 a limited time. Instead of refusing a package that is not on the agent's
 allowlist, the registry installs it and records it. Use it to find out which
 packages a task needs, then approve them and turn the mode off.

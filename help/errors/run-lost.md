@@ -4,7 +4,7 @@ title: Run lost
 summary: A run ended as lost, usually because a deploy replaced the version that was executing it.
 audience: operator
 tags: [error, runs, deploy, lost]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Run lost

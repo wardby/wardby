@@ -4,7 +4,7 @@ title: A value was not stored because it contains a secret (secret_in_value)
 summary: A datastore or agent memory write was refused because the value contains the value of a secret attached to the agent; store the secret's name and read it when needed.
 audience: operator
 tags: [error, secrets, datastore, memory, secret_in_value, secret_check_unavailable, datastore set, memory set]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # A value was not stored because it contains a secret (secret_in_value)

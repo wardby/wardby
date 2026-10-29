@@ -428,7 +428,7 @@ For an npm repository, the coding proxy can keep `node_modules` snapshots so a
 run starts with its dependencies already installed. Add
 `WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`, restart the stack, then set
 `codingProfile.dependencyCache` to `true` on the agent with `update_agent`. This
-needs wardby 0.6.1 or later; snapshots live on a Docker volume that
+needs wardby 0.7.0 or later; snapshots live on a Docker volume that
 `down -v` removes. See [Dependency cache](coding-packages.md#dependency-cache).
 
 ## Your first agents

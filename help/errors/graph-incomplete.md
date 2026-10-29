@@ -4,7 +4,7 @@ title: Package still being checked (wardby_graph_incomplete)
 summary: The registry's walk reached the package but timed out before checking its versions, usually a slow upstream; retry shortly.
 audience: operator
 tags: [error, coding-agents, packages, allowlist, wardby_graph_incomplete]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Package still being checked

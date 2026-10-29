@@ -1,7 +1,7 @@
 ---
 id: resume-runs-locally
 title: Resume Claude Code runs locally (sessionResume, get_run_transcript, wardby resume)
-summary: Keep each Claude Code run's redacted conversation with sessionResume, then continue it on your machine with get_run_transcript and npx wardby resume.
+summary: Keep each Claude Code run's redacted conversation with sessionResume, then continue it on your machine with get_run_transcript and npx @wardby/cli@latest resume.
 audience: operator
 tags: [sessionResume, wardby resume, get_run_transcript, transcript, blob-store, WARDBY_SESSION_TRANSCRIPTS]
 appliesTo: ">=0.7.0"
@@ -11,7 +11,7 @@ appliesTo: ">=0.7.0"
 
 `sessionResume` makes a Claude Code agent keep a redacted copy of each run's
 conversation, so the session can be continued locally in Claude Code with
-`get_run_transcript` and `npx wardby resume`. It is off by default and is not
+`get_run_transcript` and `npx @wardby/cli@latest resume`. It is off by default and is not
 available for Codex agents. It needs Claude Code worker images from Wardby
 0.7.0 or later.
 
@@ -65,7 +65,7 @@ are comfortable sharing with everyone who can read them.
    that works for 10 minutes and the command to run; otherwise the status
    (`none`, `too_large`, `not_captured`, `failed`, `expired`, `unavailable`,
    `unsupported`) and what it means.
-2. Run the command in a terminal, `npx wardby resume -`, and paste the link
+2. Run the command in a terminal, `npx @wardby/cli@latest resume -`, and paste the link
    when it asks. (A link given as an argument stays in shell history and the
    process list.) For a GitHub repository, run it inside a clone of that
    repository. A `local:` repository is used only when the link comes from

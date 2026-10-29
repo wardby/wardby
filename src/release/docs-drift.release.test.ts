@@ -137,10 +137,10 @@ function mcpTools(): string[] {
 /** MCP tools named nowhere in docs/ or help/ when this suite was written: finding D2. */
 const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["update_budget_group", "list_budget_groups", "delete_budget_group", "detach_tool"],
-  ...["create_datastore", "list_datastores", "delete_datastore", "attach_datastore"],
+  ...["create_datastore", "list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
   ...["list_subagents", "unlink_repository", "get_agent_memory", "list_agent_memory", "delete_agent_memory"],
-  ...["detach_secret", "delete_secret", "create_webhook", "list_webhooks", "delete_webhook"],
+  ...["detach_secret", "delete_secret", "create_webhook"],
 ]);
 
 /** Every environment variable the code reads, with the first file that reads it. */

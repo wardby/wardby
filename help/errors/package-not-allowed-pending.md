@@ -4,7 +4,7 @@ title: Package not reached (wardby_package_not_allowed_pending)
 summary: The dependency-graph walk stopped before reaching the requested package; the owner should allowlist it directly because retrying rarely helps.
 audience: operator
 tags: [error, coding-agents, packages, allowlist, wardby_package_not_allowed_pending]
-appliesTo: ">=0.6.1"
+appliesTo: ">=0.7.0"
 ---
 
 # Package not reached

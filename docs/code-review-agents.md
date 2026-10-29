@@ -930,7 +930,7 @@ yet.
   again: the request that opened it has already finished. A push that
   continues the pull request inside the same, still-running request is held
   like the first one.
-- From Wardby 0.6.1, a push to a pull request that is still a **draft** is
+- From Wardby 0.7.0, a push to a pull request that is still a **draft** is
   held while the coding run that pushed it may still be pushing (its result
   is not recorded yet), so a run that stopped at its budget is never
   reviewed mid-way. When that coding run was delegated by a lead that is
@@ -1025,7 +1025,7 @@ drops a review already being held.
 
 ### Large pull requests
 
-From Wardby 0.6.1, `repo_pr_read` returns a large pull request's diff in pages.
+From Wardby 0.7.0, `repo_pr_read` returns a large pull request's diff in pages.
 All changed files share one character budget per call (`maxPatchChars`,
 default 60,000, at most 200,000). Source, test and configuration files get it
 first. Everything else follows: the repository root's `docs/`, `doc/` and
@@ -1078,7 +1078,7 @@ The `unread_files` refusal applies in both execution modes. In `sandbox` mode
 (see [Native agent sandbox](native-sandbox.md)) the gateway saves what the run
 has read on its session after each `repo_pr_read` and `repo_read_file` call, so
 `repo_publish_review` checks the same reads as in `control-plane` mode.
-Reviewer prompts written before 0.6.1 still work, because the refusal tells
+Reviewer prompts written before 0.7.0 still work, because the refusal tells
 the agent what to do; update them with the paging step from the shipped
 reviewer prompt.
 
@@ -1108,7 +1108,7 @@ and config file it listed was read, and the run either read the whole pull
 request (no `sinceSha`) or compared only from the `lastCoveredSha` its reads
 returned. A review that does not cover its head keeps the earlier covered head.
 On GitHub the covered head is kept in the agent's summary comment marker (a
-summary comment written by a version before 0.6.1 has none, so the next review
+summary comment written by a version before 0.7.0 has none, so the next review
 reads the whole pull request); on a local repository it is kept with each
 review. Only a marker at the very start of the App's own summary comment
 counts. In text an agent or a run supplies and the App posts (`repo_comment`,
@@ -1130,7 +1130,7 @@ pull request (no `sinceSha`) or passes `lastCoveredSha`; the shipped reviewer
 prompt does this. See
 [`full_read_required`](../help/errors/full-read-required.md).
 
-Reviewer prompts written before 0.6.1 pass `lastReviewedSha` as `sinceSha`.
+Reviewer prompts written before 0.7.0 pass `lastReviewedSha` as `sinceSha`.
 They still work, because the refusal tells the agent to read the whole pull
 request, but update their re-review step from the shipped reviewer prompt to
 avoid the extra read. Owners of agents whose prompt is stored with the agent
@@ -1352,7 +1352,7 @@ as for every `repo_*` result.
 
 ### Reviewer step: package audit mode
 
-From Wardby 0.6.1, a pull request whose coding run had
+From Wardby 0.7.0, a pull request whose coding run had
 [package audit mode](coding-packages.md#package-audit-mode) on opens with a
 `[!CAUTION]` banner. **Packages outside the allowlist** names what the
 registry installed that the agent's allowlist doesn't cover, and in `full`
