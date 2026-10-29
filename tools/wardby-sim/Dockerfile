@@ -4,14 +4,14 @@
 #
 # Build from the repo root:
 #   docker build -f tools/wardby-sim/Dockerfile -t localhost:5001/wardby-sim:dev .
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
 WORKDIR /build
 # The simulator uses only Node built-ins; esbuild (the repo's pinned version) bundles it.
 RUN npm install --no-save esbuild@0.28.2
 COPY tools/wardby-sim/src ./src
 RUN npx esbuild src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/main.mjs
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4
 # git http-backend serves the simulated repositories; wardby's merge-tree needs git >= 2.38,
 # so the build fails on anything older.
 RUN apt-get update \
