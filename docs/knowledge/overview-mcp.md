@@ -7,7 +7,7 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:21:57.208Z }
 sources:
   - id: composition
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/mcp/index.ts#L109-L167
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/mcp/index.ts#L111-L169
   - id: dispatch
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/mcp/server.ts#L256-L276
   - id: access
@@ -20,9 +20,9 @@ wardby:
     - id: composition
       repo: github:wardby/wardby
       path: src/mcp/index.ts
-      lines: [109, 167]
+      lines: [111, 169]
       symbol: localOperatorContext / registerAllTools
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:6aa95fcc8cdc1954cd86a19e435870c3b23f5c4f0ec6d003839181c5e67c50cf
     - id: dispatch
       repo: github:wardby/wardby
@@ -52,9 +52,9 @@ A management call proceeds through these steps:
 
 The area owns request context, tool registration and task presentation; durable principals, grants and task rows live in [Prisma](overview-prisma.md). Authentication adapters come from [provider seams](overview-providers.md), and transport settings come from [configuration](overview-config.md).
 
-**What to do:** preserve independent scope and resource checks. Read the area's contracts on [transactional authorization](transactional-agent-authorization.md), [schema conversion](mcp-schema-module-boundary.md), [HTTP prompt discovery](mcp-http-prompt-discovery.md), [task cancellation](mcp-cancelled-task-precedence.md) and [secret-entry replicas](secret-entry-replica-contract.md). Operator setup belongs in [identity provider guidance](../getting-started-identity-provider.md).
+**What to do:** preserve independent scope and resource checks. Read the area's contracts on [transactional authorization](transactional-agent-authorization.md), [schema conversion](mcp-schema-module-boundary.md), [HTTP prompt discovery](mcp-http-prompt-discovery.md), [task cancellation](mcp-cancelled-task-precedence.md) [secret-entry replicas](secret-entry-replica-contract.md), [attached tool names](agent-tool-name-uniqueness.md) and [tool mutation isolation](tool-mutation-attachment-isolation.md). Operator setup belongs in [identity provider guidance](../getting-started-identity-provider.md).
 
-[^composition]: src/mcp/index.ts, lines 109-167.
+[^composition]: src/mcp/index.ts, lines 111-169.
 
 [^dispatch]: src/mcp/server.ts, lines 256-276.
 

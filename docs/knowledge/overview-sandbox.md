@@ -11,11 +11,11 @@ sources:
   - id: composition
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/composition.ts#L30-L92
   - id: worker
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/worker.ts#L37-L100
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/native-worker/worker.ts#L36-L109
   - id: gateway
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/gateway-server.ts#L101-L139
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/native-worker/gateway-server.ts#L147-L186
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/gateway-server.ts#L215-L241
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/native-worker/gateway-server.ts#L282-L305
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -38,24 +38,24 @@ wardby:
     - id: worker
       repo: github:wardby/wardby
       path: src/native-worker/worker.ts
-      lines: [37, 100]
+      lines: [36, 109]
       symbol: runNativeWorker
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:a5ecda1addcbf4acd895a94c3a1670e865342601d5d4028b9bd208119a51ad62
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
+      spanHash: sha256:1e7c3f52bdfad23cbee8f99ba1332b228132757aab6be39532abfe59f7ab1f41
     - id: gateway
       repo: github:wardby/wardby
       path: src/native-worker/gateway-server.ts
-      lines: [101, 139]
+      lines: [147, 186]
       symbol: handle
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:75818d5d25ee6ecf6c77c802fc123a7f5f396589d4c99325bb37a9b2ec6fb43a
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
+      spanHash: sha256:c41c053bce9f3d41356cbd4268bc9a13ab1712010b6a8cdc07ca3273854585ca
     - id: model
       repo: github:wardby/wardby
       path: src/native-worker/gateway-server.ts
-      lines: [215, 241]
+      lines: [282, 305]
       symbol: streamModel
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:d3122b8a90bb9b4345ed411b8ddc73fedb0ea9e979f069d1a2f1615ca3eb97dd
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
+      spanHash: sha256:10c692cf8548b3793227c43bc93c6bf73b16a5c72e3dcbc4ccc1250c4c51945f
   confidence: high
 ---
 
@@ -76,8 +76,8 @@ The area owns worker protocol, sandbox bridges and launch lifecycle. Session, ca
 
 [^composition]: src/native-worker/composition.ts, lines 30-92.
 
-[^worker]: src/native-worker/worker.ts, lines 37-100.
+[^worker]: src/native-worker/worker.ts, lines 36-109.
 
-[^gateway]: src/native-worker/gateway-server.ts, lines 101-139.
+[^gateway]: src/native-worker/gateway-server.ts, lines 147-186.
 
-[^model]: src/native-worker/gateway-server.ts, lines 215-241.
+[^model]: src/native-worker/gateway-server.ts, lines 282-305.

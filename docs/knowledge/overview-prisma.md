@@ -7,9 +7,9 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:57.805Z }
 sources:
   - id: run
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L327-L379
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/prisma/schema.prisma#L329-L381
   - id: proxy
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L807-L845
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/prisma/schema.prisma#L832-L870
   - id: notify
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql#L1-L47
   - id: package
@@ -22,16 +22,16 @@ wardby:
     - id: run
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [327, 379]
+      lines: [329, 381]
       symbol: Run
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:52761459ccb0f62de1ca181d8c506ad51ebfc470b56440eabd80e23c01d0699a
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
+      spanHash: sha256:2a0f126a2562191be8c7280801d0ad67b379d3b6b36541f3bdfd212e38b9a619
     - id: proxy
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [807, 845]
+      lines: [832, 870]
       symbol: CodingProxySession
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:992812db47e0a461bab6f9527a8e0d8bb9708b0452bbeba1d23169293532d338
     - id: notify
       repo: github:wardby/wardby
@@ -63,9 +63,9 @@ The database owns durable identity, accounting and recovery state; blob contents
 
 **What to do:** follow [CLAUDE.md, Database / Prisma](../../CLAUDE.md#database--prisma--strict) for schema work. Review [nullable tool uniqueness](nullable-tool-uniqueness.md) and [viewer notification isolation](viewer-notify-write-isolation.md) for database behavior that the declarative schema alone does not convey.
 
-[^run]: prisma/schema.prisma, lines 327-379.
+[^run]: prisma/schema.prisma, lines 329-381.
 
-[^proxy]: prisma/schema.prisma, lines 807-845.
+[^proxy]: prisma/schema.prisma, lines 832-870.
 
 [^notify]: prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql, lines 1-47.
 

@@ -9,11 +9,11 @@ sources:
   - id: registry
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/index.ts#L33-L47
   - id: execution
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/executor/composition.ts#L87-L126
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/providers/executor/composition.ts#L100-L139
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/llm/routing.ts#L67-L79
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/providers/llm/routing.ts#L75-L87
   - id: vcs
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/vcs/routing.ts#L26-L53
+    url: https://github.com/wardby/wardby/blob/dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c/src/providers/vcs/routing.ts#L27-L54
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -46,23 +46,23 @@ wardby:
     - id: execution
       repo: github:wardby/wardby
       path: src/providers/executor/composition.ts
-      lines: [87, 126]
+      lines: [100, 139]
       symbol: buildConfiguredExecutor
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:68bdd107cd1d591a2ac700c253fa8449e7316347e48e23055fca286612685275
     - id: model
       repo: github:wardby/wardby
       path: src/providers/llm/routing.ts
-      lines: [67, 79]
+      lines: [75, 87]
       symbol: RoutingLlmProvider.entryFor / forRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:4b757bc28723803469e6625fb8ba7f9ca6d48cb496b669193d3fa4fb3023d475
     - id: vcs
       repo: github:wardby/wardby
       path: src/providers/vcs/routing.ts
-      lines: [26, 53]
+      lines: [27, 54]
       symbol: RoutingVcsProvider.target
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: dbcd5fd693b7b5891ed6c8897b30a5bc1ce6404c
       spanHash: sha256:338d5bc2f7ab53f490045d41a6db1639351fc50d958887c77afee4855d46cc6e
   confidence: high
 ---
@@ -82,8 +82,8 @@ Adapters own external API translation, lifecycle handles and error semantics. [P
 
 [^registry]: src/providers/index.ts, lines 33-47.
 
-[^execution]: src/providers/executor/composition.ts, lines 87-126.
+[^execution]: src/providers/executor/composition.ts, lines 100-139.
 
-[^model]: src/providers/llm/routing.ts, lines 67-79.
+[^model]: src/providers/llm/routing.ts, lines 75-87.
 
-[^vcs]: src/providers/vcs/routing.ts, lines 26-53.
+[^vcs]: src/providers/vcs/routing.ts, lines 27-54.
