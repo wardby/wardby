@@ -155,6 +155,19 @@ describe("invokeHostTool", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("reports no credential when the broker no longer allows an API host", async () => {
+    const fetchImpl = vi.fn(async () => response({}));
+    // The tool catches the failure, which must not turn it into a success.
+    const code = `try { await fetch("${API}/x", { secrets: ["host"] }); } catch {} return { diff: "x" };`;
+    const credential = async () => ({
+      value: TOKEN,
+      broker: { hosts: ["git.example.com"], placement: { kind: "header", name: "Authorization", format: "{value}" } },
+    });
+    const result = await invokeHostTool(input(code, { credential: credential as never, fetchImpl: fetchImpl }));
+    expect(result).toEqual({ ok: false, code: "host_tool_no_credential" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("reports a timeout", async () => {
     const result = await invokeHostTool(
       input(`while (true) {}`, { limits: { maxInterruptChecks: 2_000, wallTimeLimitMs: 500 } }),

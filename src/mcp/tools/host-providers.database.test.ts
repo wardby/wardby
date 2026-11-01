@@ -9,7 +9,27 @@ import type { SecretCipher } from "../../providers/secrets/types.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
 import { registerHostProviderTools } from "./host-providers.js";
+import { fulfillSecretElicitation, fulfillUnbrokerElicitation } from "./secret-elicitation.js";
 import { registerSecretsTools } from "./secrets.js";
+
+const logged = vi.hoisted(() => [] as unknown[]);
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const at = (...line: unknown[]): void => {
+      logged.push(line);
+    };
+    return {
+      child: () => make(),
+      trace: at,
+      debug: at,
+      info: at,
+      warn: at,
+      error: at,
+      fatal: at,
+    };
+  };
+  return { logger: make() };
+});
 
 const db = createPrismaClient();
 const principalIds: string[] = [];
@@ -179,12 +199,12 @@ describe("host provider tools", () => {
     expect(view).toMatchObject({
       provider: name,
       mode: "allowlist",
-      restartRequired: true,
       webhookSecret: "webhook",
       permissionSecret: null,
       credentials: [{ repositories: "acme/*", secret: "repo-token", kind: "static" }],
       trustedAccounts: ["acct-1"],
     });
+    expect(view).not.toHaveProperty("restartRequired");
     expect(view.operations).toHaveLength(REQUIRED_OPERATIONS.length);
     for (const op of view.operations) expect(op.status).toBe("approved");
 
@@ -232,6 +252,32 @@ describe("host provider tools", () => {
       where: { provider_operation: { provider: name, operation } },
     });
     expect(updated.code).toBe("return { changed: true };");
+  });
+
+  it("shows the approved and current schema, so a schema-only change can be read", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    const name = newName();
+    const { call } = await connect(p);
+    await call("register_host_provider", args(name, tools));
+    const [changedOp, sameOp] = REQUIRED_OPERATIONS;
+    await db.tool.update({
+      where: { ownerId_name: { ownerId: p.id, name: tools[changedOp] } },
+      data: { paramsZod: "z.object({ extra: z.string() })" },
+    });
+
+    const got = JSON.parse((await call("get_host_provider", { provider: name, includeCode: true })).text);
+    const changed = got.operations.find((o: { operation: string }) => o.operation === changedOp);
+    expect(changed.status).toBe("changed");
+    expect(changed.approvedParamsZod).toBe("z.object({}).passthrough()");
+    expect(changed.currentParamsZod).toBe("z.object({ extra: z.string() })");
+    expect(changed.approvedCode).toBe(changed.currentCode);
+    const same = got.operations.find((o: { operation: string }) => o.operation === sameOp);
+    expect(same.approvedParamsZod).toBe("z.object({}).passthrough()");
+    expect(same.currentParamsZod).toBeUndefined();
+
+    const plain = JSON.parse((await call("get_host_provider", { provider: name })).text);
+    expect(plain.operations[0].approvedParamsZod).toBeUndefined();
   });
 
   it("keeps the snapshot when its tool is deleted, and won't approve it", async () => {
@@ -464,6 +510,79 @@ describe("host provider tools", () => {
       );
     });
 
+    describe("a permission secret across providers", () => {
+      const PERMISSION = {
+        permissionApiPath: "/2.0/workspaces/{workspace}/permissions/repositories/{repo}",
+      };
+
+      it("another provider's credential as this one's permission secret", async () => {
+        const p = await principal();
+        const { tools } = await seed(p);
+        const first = newName();
+        expect((await (await connect(p)).call("register_host_provider", args(first, tools))).isError).toBe(false);
+        await secret(p, "second-token", "fake-second-token-0123456789", BROKER);
+        const name = newName();
+        await refused(
+          p,
+          name,
+          {
+            ...args(name, { ...tools, getRepositoryPermission: tools[REQUIRED_OPERATIONS[0]] }),
+            credentials: [{ repositories: "acme/*", secret: "second-token" }],
+            permissionCredential: "repo-token",
+            ...PERMISSION,
+          },
+          "host_provider_permission_secret_shared",
+        );
+      });
+
+      async function withPermission(p: Principal, tools: Record<string, string>) {
+        await secret(p, "perm-token", "fake-perm-token-0123456789", BROKER);
+        const first = newName();
+        const input = {
+          ...args(first, { ...tools, getRepositoryPermission: tools[REQUIRED_OPERATIONS[0]] }),
+          permissionCredential: "perm-token",
+          ...PERMISSION,
+        };
+        expect((await (await connect(p)).call("register_host_provider", input)).isError).toBe(false);
+        return input;
+      }
+
+      it("another provider's permission secret as this one's permission secret", async () => {
+        const p = await principal();
+        const { tools } = await seed(p);
+        const input = await withPermission(p, tools);
+        await secret(p, "second-token", "fake-second-token-0123456789", BROKER);
+        const name = newName();
+        await refused(
+          p,
+          name,
+          { ...input, provider: name, credentials: [{ repositories: "acme/*", secret: "second-token" }] },
+          "host_provider_permission_secret_shared",
+        );
+      });
+
+      it("another provider's permission secret as this one's credential", async () => {
+        const p = await principal();
+        const { tools } = await seed(p);
+        await withPermission(p, tools);
+        const name = newName();
+        await refused(
+          p,
+          name,
+          { ...args(name, tools), credentials: [{ repositories: "acme/*", secret: "perm-token" }] },
+          "host_provider_permission_secret_shared",
+        );
+      });
+
+      it("re-registering the same provider still works", async () => {
+        const p = await principal();
+        const { tools } = await seed(p);
+        const input = await withPermission(p, tools);
+        const again = await (await connect(p)).call("register_host_provider", input);
+        expect(again.isError).toBe(false);
+      });
+    });
+
     it("a webhook secret of 15 characters", async () => {
       const p = await principal();
       const { tools } = await seed(p);
@@ -566,7 +685,8 @@ describe("host provider tools", () => {
     for (const used of [credential, webhook]) {
       const result = await call("delete_secret", { id: used.id });
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("host provider");
+      expect(result.text).toContain(name);
+      expect(result.text).not.toContain(TOKEN);
       expect(await db.secret.findUnique({ where: { id: used.id } })).not.toBeNull();
     }
   });
@@ -584,6 +704,151 @@ describe("host provider tools", () => {
     expect(result.text).toContain("webhook secret");
     expect(result.text).not.toContain(WEBHOOK);
     expect(await db.agentSecret.count({ where: { agentId: a.id } })).toBe(0);
+  });
+
+  describe("rotating a provider's secret", () => {
+    const WRITER = { scopes: ["secrets:write"], roles: [] as string[] };
+    const UNROLED = { scopes: ["secrets:write", "hosts:admin"], roles: [] as string[] };
+    const NEW_VALUE = "fake-rotated-value-0123456789";
+    const LINK = "https://wardby.example/secret";
+
+    async function registered() {
+      const p = await principal();
+      const { tools, credential, webhook } = await seed(p);
+      const permission = await secret(p, "perm-token", "fake-perm-token-0123456789", BROKER);
+      const name = newName();
+      const result = await (
+        await connect(p)
+      ).call("register_host_provider", {
+        ...args(name, { ...tools, getRepositoryPermission: tools[REQUIRED_OPERATIONS[0]] }),
+        permissionCredential: "perm-token",
+        permissionApiPath: "/2.0/workspaces/{workspace}/permissions/repositories/{repo}",
+      });
+      expect(result.isError).toBe(false);
+      return { p, credential, webhook, permission };
+    }
+    const stored = async (id: string) => (await db.secret.findUniqueOrThrow({ where: { id } })).ciphertext;
+
+    it.each([
+      ["only secrets:write", WRITER],
+      ["the scope but no role", UNROLED],
+    ])("refuses a caller with %s, for each kind of provider secret, and mints no link", async (_label, caller) => {
+      const { p, credential, webhook, permission } = await registered();
+      const { call } = await connect(p, caller);
+      for (const used of [credential, webhook, permission]) {
+        const before = await stored(used.id);
+        const direct = await call("create_secret", { name: used.name, value: NEW_VALUE });
+        expect(direct.isError, used.name).toBe(true);
+        expect(direct.text).not.toContain(NEW_VALUE);
+        expect(await stored(used.id)).toBe(before);
+
+        const browser = await call("create_secret", { name: used.name });
+        expect(browser.isError, used.name).toBe(true);
+        expect(browser.text).not.toContain(LINK);
+
+        const broker = await call("set_secret_broker", { name: used.name, broker: BROKER });
+        expect(broker.isError, used.name).toBe(true);
+        const unbroker = await call("set_secret_broker", { name: used.name, broker: null });
+        expect(unbroker.isError, used.name).toBe(true);
+        expect(unbroker.text).not.toContain(LINK);
+      }
+      expect((await db.secret.findUniqueOrThrow({ where: { id: credential.id } })).broker).toEqual(BROKER);
+    });
+
+    it("still lets a secrets:write caller rotate a secret no provider uses", async () => {
+      const p = await principal();
+      const free = await secret(p, "free-secret", "fake-free-value-0123456789");
+      const { call } = await connect(p, WRITER);
+      expect((await call("create_secret", { name: "free-secret", value: NEW_VALUE })).isError).toBe(false);
+      expect(await stored(free.id)).toBe(`enc:${NEW_VALUE}`);
+    });
+
+    it("lets a host manager rotate one", async () => {
+      const { p, webhook, credential } = await registered();
+      const { call } = await connect(p);
+      expect((await call("create_secret", { name: "webhook", value: NEW_VALUE })).isError).toBe(false);
+      expect(await stored(webhook.id)).toBe(`enc:${NEW_VALUE}`);
+      expect((await call("create_secret", { name: "repo-token", value: NEW_VALUE })).isError).toBe(false);
+      expect(await stored(credential.id)).toBe(`enc:${NEW_VALUE}`);
+    });
+
+    it("refuses a 15-character webhook value given directly", async () => {
+      const { p, webhook } = await registered();
+      const before = await stored(webhook.id);
+      const result = await (await connect(p)).call("create_secret", { name: "webhook", value: "fake-15-chars-0" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("host_provider_webhook_secret_short");
+      expect(result.text).not.toContain("fake-15-chars-0");
+      expect(await stored(webhook.id)).toBe(before);
+    });
+
+    it("refuses a 15-character webhook value from the browser, and the same link takes a corrected one", async () => {
+      const { p, webhook } = await registered();
+      const payload = { ownerId: p.id, secretName: "webhook", kind: "create" as const, hostManager: true };
+      try {
+        const short = await fulfillSecretElicitation(payload, "fake-15-chars-0", cipher, db);
+        expect(short).toMatchObject({ ok: false });
+        expect(JSON.stringify(short)).toContain("host_provider_webhook_secret_short");
+        expect(JSON.stringify(short)).not.toContain("fake-15-chars-0");
+        expect(await stored(webhook.id)).toBe(`enc:${WEBHOOK}`);
+
+        expect(await fulfillSecretElicitation(payload, NEW_VALUE, cipher, db)).toMatchObject({ ok: true });
+        expect(await stored(webhook.id)).toBe(`enc:${NEW_VALUE}`);
+      } finally {
+        await db.secretElicitationOutcome.deleteMany({ where: { ownerId: p.id } });
+      }
+    });
+
+    it("hands a host manager a browser link", async () => {
+      const { p } = await registered();
+      const result = await (await connect(p)).call("create_secret", { name: "webhook" });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(LINK);
+    });
+
+    it("won't honour a link minted before the secret joined a provider", async () => {
+      const { p, webhook, credential } = await registered();
+      const stale = await fulfillSecretElicitation(
+        { ownerId: p.id, secretName: "webhook", kind: "create" },
+        NEW_VALUE,
+        cipher,
+        db,
+      );
+      expect(stale).toMatchObject({ ok: false });
+      expect(await stored(webhook.id)).toBe(`enc:${WEBHOOK}`);
+
+      const unbroker = await fulfillUnbrokerElicitation(
+        { ownerId: p.id, secretName: "repo-token", kind: "unbroker", brokerHash: "any" },
+        cipher,
+        db,
+      );
+      expect(unbroker).toMatchObject({ ok: false });
+      expect((await db.secret.findUniqueOrThrow({ where: { id: credential.id } })).broker).toEqual(BROKER);
+      expect(await db.secretElicitationOutcome.count({ where: { ownerId: p.id } })).toBe(0);
+    });
+  });
+
+  it("logs no token or webhook secret through register, approve, test and delete", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    await db.tool.update({
+      where: { ownerId_name: { ownerId: p.id, name: tools.getPullRequest } },
+      data: { code: `throw new Error("boom");` },
+    });
+    const name = newName();
+    const { call } = await connect(p);
+    logged.length = 0;
+
+    expect((await call("register_host_provider", args(name, tools))).isError).toBe(false);
+    expect((await call("approve_host_provider_tools", { provider: name, tools: ["getDiff"] })).isError).toBe(false);
+    const test = await call("test_host_provider", { provider: name, repository: `${name}:acme/web`, pullRequest: 4 });
+    expect(test.isError).toBe(false);
+    expect((await call("delete_host_provider", { provider: name })).isError).toBe(false);
+
+    const text = JSON.stringify(logged);
+    for (const action of ["register", "approve", "test", "delete"]) expect(text).toContain(`hosts.provider.${action}`);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain(WEBHOOK);
   });
 
   it("test_host_provider needs hosts:admin, and a role that grants it", async () => {

@@ -30,6 +30,11 @@ export function assertHostToolRequest(url: string, method: string, scope: HostTo
   }
   if (!scope.apiHosts.includes(parsed.hostname.toLowerCase())) throw new HostToolRequestDenied();
   if (!scope.methods.includes(method.toUpperCase())) throw new HostToolRequestDenied();
+  // Some frameworks read the method from these, which would turn a checked GET into a write.
+  for (const key of parsed.searchParams.keys()) {
+    const name = key.toLowerCase();
+    if (name === "_method" || name.startsWith("x-http-method")) throw new HostToolRequestDenied();
+  }
   const prefix = scope.pathPrefix.toLowerCase();
   if (!prefix.startsWith("/")) throw new HostToolRequestDenied();
   // The repository is matched literally on the raw path; decoding is only for the segment rules.

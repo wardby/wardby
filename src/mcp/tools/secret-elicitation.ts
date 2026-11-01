@@ -22,7 +22,13 @@
  * "create".
  */
 import type { PrismaClient } from "#prisma";
-import { createSecret, listSecrets, setSecretBroker, type SecretMetadata } from "../../core/secrets.js";
+import {
+  createSecret,
+  hostProvidersUsingSecret,
+  listSecrets,
+  setSecretBroker,
+  type SecretMetadata,
+} from "../../core/secrets.js";
 import {
   parseSecretBrokerConfig,
   SECRET_BROKER_CHANGED,
@@ -44,6 +50,8 @@ export interface SecretElicitationPayload {
    * removal is refused if the secret's config has changed since (or the link has none).
    */
   brokerHash?: string;
+  /** The caller passed the hosts:admin check when the link was minted. */
+  hostManager?: boolean;
 }
 
 export type SecretElicitationOutcome =
@@ -70,6 +78,19 @@ function kindOf(outcome: unknown): SecretElicitationKind {
 }
 
 const ELICITATION_TTL_MS = 600_000;
+const HOST_PROVIDER_LINK_STALE =
+  "host_provider_secret_link_stale: a host provider now uses this secret; request a new link with hosts:admin";
+
+/**
+ * A link minted before the secret joined a host provider carries no hosts:admin check.
+ * Refused without recording an outcome, so a fresh link from a host manager still works.
+ */
+async function isStaleForHostProvider(db: PrismaClient, payload: SecretElicitationPayload): Promise<boolean> {
+  if (payload.hostManager) return false;
+  const { ownerId, secretName: name } = payload;
+  const secret = await db.secret.findUnique({ where: { ownerId_name: { ownerId, name } }, select: { id: true } });
+  return secret !== null && (await hostProvidersUsingSecret(db, secret.id)).providers.length > 0;
+}
 
 /** Sweeps every expired entry, not just the one being looked up, so a set-and-never-polled-again entry doesn't linger forever. */
 async function pruneExpired(db: PrismaClient, now: Date): Promise<void> {
@@ -127,6 +148,9 @@ export async function fulfillSecretElicitation(
     where: { ownerId_secretName: { ownerId, secretName } },
   });
   if (existing && kindOf(existing.outcome) === "create") return existing.outcome as SecretElicitationOutcome;
+  if (await isStaleForHostProvider(db, payload)) {
+    return { ok: false, kind: "create", error: HOST_PROVIDER_LINK_STALE };
+  }
 
   let outcome: SecretElicitationOutcome;
   try {
@@ -159,7 +183,12 @@ export async function fulfillSecretElicitation(
   return outcome;
 }
 
-const CORRECTABLE_ERRORS = ["secret_broker_value_invalid", "secret_broker_config_invalid", "bridge_input_limit"];
+const CORRECTABLE_ERRORS = [
+  "secret_broker_value_invalid",
+  "secret_broker_config_invalid",
+  "bridge_input_limit",
+  "host_provider_webhook_secret_short",
+];
 
 function isCorrectableInput(message: string): boolean {
   return CORRECTABLE_ERRORS.some((code) => message.startsWith(code));
@@ -188,6 +217,9 @@ export async function fulfillUnbrokerElicitation(
     where: { ownerId_secretName: { ownerId, secretName } },
   });
   if (existing && kindOf(existing.outcome) === "unbroker") return existing.outcome as SecretElicitationOutcome;
+  if (await isStaleForHostProvider(db, payload)) {
+    return { ok: false, kind: "unbroker", error: HOST_PROVIDER_LINK_STALE };
+  }
 
   let outcome: SecretElicitationOutcome;
   try {

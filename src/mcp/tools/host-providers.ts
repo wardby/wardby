@@ -72,7 +72,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
     name: "register_host_provider",
     scope: "hosts:admin",
     description:
-      "Host managers (hosts:admin): register a code host implemented by your custom tools, or replace one. Each tool's code and schema are copied, and only that copy ever runs: update_tool changes nothing until approve_host_provider_tools. Credentials must be your brokered secrets, allowed on every API host and gitHost. Without permissionCredential, trustedAccounts decides who may start runs. A new provider takes effect after a server restart.",
+      "Host managers (hosts:admin): register a code host implemented by your custom tools, or replace one. Each tool's code and schema are copied, and only that copy ever runs: update_tool changes nothing until approve_host_provider_tools. Credentials must be your brokered secrets, allowed on every API host and gitHost. Without permissionCredential, trustedAccounts decides who may start runs. No restart is needed today, because agents can't use a provider yet; a new provider will need one once they can.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -134,7 +134,6 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
       audit(ctx, "register", view.provider, { mode: view.mode, operations: view.operations.length });
       return textResult({
         ...view,
-        restartRequired: true,
         note:
           view.mode === "permission"
             ? "Permission mode: once agents can use this provider, the host will decide who has access, and a failed lookup will refuse."
@@ -169,7 +168,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
     name: "get_host_provider",
     scope: "hosts:admin",
     description:
-      "Host managers (hosts:admin): a provider's config, active permission mode, secret names (never values), and which tools have unapproved changes. includeCode adds each approved snapshot and any newer tool code, to review before approving.",
+      "Host managers (hosts:admin): a provider's config, active permission mode, secret names (never values), and which tools have unapproved changes. includeCode adds each approved snapshot's code and schema, and any newer code and schema, to review before approving.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

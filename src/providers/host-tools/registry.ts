@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { Prisma, PrismaClient } from "#prisma";
 import { isValidHostProviderName } from "../../coding/code-host.js";
 import { isExactHostname, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
+import { MIN_WEBHOOK_SECRET_LENGTH } from "../../core/secrets.js";
 import type { SecretCipher } from "../secrets/types.js";
 import { HOST_TOOL_CONTRACT_VERSION, isHostOperation, REQUIRED_OPERATIONS, type HostOperation } from "./operations.js";
 
@@ -39,7 +40,6 @@ export class HostProviderError extends Error {
 }
 
 const HTTP_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
-const MIN_WEBHOOK_SECRET_LENGTH = 16;
 const REPOSITORY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}\/(?:\*|[a-z0-9][a-z0-9._-]{0,99})$/;
 const SECRET_NAME = z.string().min(1).max(1024);
 
@@ -118,12 +118,16 @@ export const RegisterHostProviderSchema = z
       !template ||
       template.protocol !== "https:" ||
       template.hostname !== input.gitHost ||
+      template.username ||
+      template.password ||
+      template.port ||
       !hasExactlyFields(input.pullRequestUrlTemplate, ["repository", "number"])
     ) {
       ctx.addIssue({
         code: "custom",
         path: ["pullRequestUrlTemplate"],
-        message: "must be an https URL on gitHost with {repository} and {number} once each",
+        message:
+          "must be an https URL on gitHost, with no credentials or port, and with {repository} and {number} once each",
       });
     }
     if ((input.permissionCredential === undefined) !== (input.permissionApiPath === undefined)) {
@@ -166,7 +170,9 @@ export interface OperationView {
   approvedSha256: string;
   currentSha256: string | null;
   approvedCode?: string;
+  approvedParamsZod?: string;
   currentCode?: string;
+  currentParamsZod?: string;
 }
 
 export interface HostProviderView {
@@ -251,12 +257,32 @@ export async function registerHostProvider(
         const secret = await requireSecret(tx, principalId, input.permissionCredential);
         requireBroker(input.permissionCredential, secret.broker, input.apiHosts);
         permissionSecretId = secret.id;
-        if (credentials.some((c) => c.secretId === secret.id)) {
+        if (
+          credentials.some((c) => c.secretId === secret.id) ||
+          (await tx.hostProviderCredential.count({
+            where: { secretId: secret.id, provider: { not: input.provider } },
+          })) > 0
+        ) {
           throw new HostProviderError(
             "host_provider_permission_secret_shared",
-            "the permission secret must not also be a credential, so no other operation can reach it",
+            "the permission secret must not also be a credential of any provider, so no other operation can reach it",
           );
         }
+      }
+      if (
+        (await tx.hostProvider.count({
+          where: {
+            permissionSecretId: {
+              in: [...credentials.map((c) => c.secretId), ...(permissionSecretId ? [permissionSecretId] : [])],
+            },
+            name: { not: input.provider },
+          },
+        })) > 0
+      ) {
+        throw new HostProviderError(
+          "host_provider_permission_secret_shared",
+          "another provider's permission secret must not be a credential or permission secret here",
+        );
       }
       const webhookSecret = await requireSecret(tx, principalId, input.webhook.secret);
       if (
@@ -423,7 +449,10 @@ export async function getHostProviderView(
         ...(options.includeCode
           ? {
               approvedCode: o.code,
-              ...(o.tool && currentSha256 !== approvedSha256 ? { currentCode: o.tool.code } : {}),
+              approvedParamsZod: o.paramsZod,
+              ...(o.tool && currentSha256 !== approvedSha256
+                ? { currentCode: o.tool.code, currentParamsZod: o.tool.paramsZod }
+                : {}),
             }
           : {}),
       };

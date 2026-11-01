@@ -83,8 +83,9 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
           } catch {
             entry = undefined;
           }
-          // A thrown or partial credential must not carry its text into tool code.
-          if (!entry || !entry.broker) {
+          // A thrown or partial credential must not carry its text into tool code. Registering
+          // checks the hosts, but a broker config can be narrowed afterwards.
+          if (!entry || !entry.broker || input.apiHosts.some((h) => !entry.broker!.hosts.includes(h))) {
             failures.noCredential = true;
             throw new Error("host_tool_no_credential");
           }

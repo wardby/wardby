@@ -20,10 +20,11 @@ private. So `test_host_provider` gives a fixed code for each operation.
   its scopes. On the permission lookup, a repository token is often not enough.
 - `host_not_found`, `host_conflict`, `host_rate_limited` or `host_unavailable`: the host answered
   with that state. Check the repository, pull request or ref you named, or try again later.
-- `host_tool_no_credential`: no `credentials` entry covers this repository.
+- `host_tool_no_credential`: no `credentials` entry covers this repository, the secret can't be
+  decrypted, or the secret is no longer brokered or no longer allows every API host.
 - `host_tool_request_denied`: the tool left its API hosts or repository path, used the wrong
   method, set a header other than `accept`, `content-type`, `if-match` or `if-none-match`, sent a
-  path a server could read as something else (dot-only segments, encoded separators), or made
+  `_method` or `x-http-method*` query key, sent a path a server could read as something else (dot-only segments, encoded separators), or made
   more than three requests. No request follows a redirect: fetch the `Location` yourself.
 - `host_tool_invalid_result` or `host_tool_invalid_params`: the tool doesn't match its
   operation's shape.

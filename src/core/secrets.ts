@@ -38,6 +38,28 @@ function brokerOf(secret: Pick<Secret, "broker">): SecretBrokerConfig | null {
 const BROKERED_GET_MESSAGE =
   'secret_brokered: this secret is brokered; send it with fetch(url, { secrets: ["NAME"] }) instead of reading it';
 
+/** A webhook secret signs what a host sends us, so a short one is refused at registration and at rotation. */
+export const MIN_WEBHOOK_SECRET_LENGTH = 16;
+export const WEBHOOK_SECRET_SHORT = `host_provider_webhook_secret_short: a host provider's webhook secret needs at least ${MIN_WEBHOOK_SECRET_LENGTH} characters`;
+export const WEBHOOK_SECRET_ATTACHED =
+  "host_provider_webhook_secret_attached: this secret is a host provider's webhook secret and can't be attached to an agent";
+
+/** The host providers using a secret, by name, and whether it's the webhook secret of any. */
+export async function hostProvidersUsingSecret(
+  db: Pick<PrismaClient, "hostProvider" | "hostProviderCredential">,
+  secretId: string,
+): Promise<{ providers: string[]; webhook: boolean }> {
+  const credentials = await db.hostProviderCredential.findMany({ where: { secretId }, select: { provider: true } });
+  const rows = await db.hostProvider.findMany({
+    where: { OR: [{ webhookSecretId: secretId }, { permissionSecretId: secretId }] },
+    select: { name: true, webhookSecretId: true },
+  });
+  return {
+    providers: [...new Set([...credentials.map((c) => c.provider), ...rows.map((r) => r.name)])].sort(),
+    webhook: rows.some((r) => r.webhookSecretId === secretId),
+  };
+}
+
 /**
  * Encrypts and stores a secret value. Upserts on (ownerId, name) — calling
  * this again for a name the owner already has rotates its value in place
@@ -55,6 +77,12 @@ export async function createSecret(
 ): Promise<Secret> {
   boundedString(name, 1024);
   boundedString(value, 65_536);
+  if (value.length < MIN_WEBHOOK_SECRET_LENGTH) {
+    const current = await db.secret.findUnique({ where: { ownerId_name: { ownerId, name } }, select: { id: true } });
+    if (current && (await db.hostProvider.count({ where: { webhookSecretId: current.id } })) > 0) {
+      throw new Error(WEBHOOK_SECRET_SHORT);
+    }
+  }
   const broker = options.broker ? parseSecretBrokerConfig(options.broker) : undefined;
   if (broker) assertBrokerableValue(broker, value);
   const ciphertext = await cipher.encrypt(value);
@@ -164,7 +192,8 @@ async function findOwnedSecretByName(db: PrismaClient, ownerId: string, name: st
 
 /** Attaches one of the owner's own secrets (by canonical name) to an agent,
  *  under `boundName` — the point-of-use name the agent's tools resolve
- *  (`secrets.get(boundName)`). Defaults to the secret's own name. */
+ *  (`secrets.get(boundName)`). Defaults to the secret's own name. A host
+ *  provider's webhook secret is kept off every agent, so no tool can read it. */
 export async function attachSecret(
   agentId: string,
   name: string,
@@ -174,6 +203,9 @@ export async function attachSecret(
 ): Promise<void> {
   const secret = await findOwnedSecretByName(db, ownerId, name);
   if (!secret) throw new Error(`No secret named "${name}" owned by this caller.`);
+  if ((await db.hostProvider.count({ where: { webhookSecretId: secret.id } })) > 0) {
+    throw new Error(WEBHOOK_SECRET_ATTACHED);
+  }
   await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName } });
 }
 

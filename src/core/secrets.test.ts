@@ -105,6 +105,7 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
         return row;
       },
     },
+    hostProvider: { count: async () => 0 },
     agentSecret: {
       create: async ({ data }: { data: FakeAgentSecretRow }) => {
         agentSecrets.push(data);

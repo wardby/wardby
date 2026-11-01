@@ -18,7 +18,7 @@ const ZOD = "z.object({}).passthrough()";
 const API = "const base = `https://api.bitbucket.org/2.0/repositories/${params.workspace}/${params.repo}`;";
 const OK =
   'if (r.status === 404) return { error: "not_found" }; if (r.status === 403) return { error: "forbidden" }; if (r.status === 401) return { error: "unauthorized" }; if (!r.ok) return { error: "unavailable" };';
-const PR = `{ number: j.id, title: j.title, body: j.description, author: j.author.account_id, state: j.state.toLowerCase(), merged: j.state === "MERGED", draft: j.draft, baseRef: j.destination.branch.name, headRef: j.source.branch.name, headSha: j.source.commit.hash, isFork: false, htmlUrl: j.links.html.href }`;
+const PR = `{ number: j.id, title: j.title, body: j.description, author: j.author.account_id, state: j.state === "OPEN" ? "open" : "closed", merged: j.state === "MERGED", draft: j.draft, baseRef: j.destination.branch.name, headRef: j.source.branch.name, headSha: j.source.commit.hash, isFork: false, htmlUrl: j.links.html.href }`;
 
 /** Enough tools to drive the checks; PR 3 ships the real reference tools. */
 const TOOLS: Record<string, string> = {
@@ -101,6 +101,30 @@ describe("selfTestHostProvider", () => {
     ]) {
       expect(byOperation(report)[name], name).toEqual({ operation: name, outcome: "pass" });
     }
+  });
+
+  it("carries no token in a passing report, even when the host echoes it", async () => {
+    const { provider, bitbucket, options } = setup();
+    bitbucket.state.addPullRequest("acme/web", {
+      id: 5,
+      title: SIM_BITBUCKET_REPO_TOKEN,
+      headRef: "echo",
+      headSha: "def456",
+    });
+    bitbucket.state.setPermission("acme/web", "acct-1", "write");
+    const echoed = await callHostOperation(provider, cipher, REPOSITORY, "getPullRequest", { number: 5 }, options);
+    expect(echoed.ok).toBe(true);
+
+    const report = await selfTestHostProvider(
+      provider,
+      cipher,
+      { repository: REPOSITORY, pullRequest: 5, headRef: "echo", accountId: "acct-1" },
+      options,
+    );
+    expect(byOperation(report).getPullRequest).toEqual({ operation: "getPullRequest", outcome: "pass" });
+    expect(report.results.filter((r) => r.outcome === "fail")).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain(SIM_BITBUCKET_REPO_TOKEN);
+    expect(JSON.stringify(report)).not.toContain(SIM_BITBUCKET_WORKSPACE_TOKEN);
   });
 
   it("calls no write", async () => {
@@ -186,10 +210,9 @@ describe("selfTestHostProvider", () => {
 
 describe("callHostOperation", () => {
   it("won't send the permission credential to a repository operation", async () => {
-    const { provider, bitbucket, options } = setup({
+    const { provider, options } = setup({
       credentials: [],
     });
-    void bitbucket;
     const result = await callHostOperation(provider, cipher, REPOSITORY, "getPullRequest", { number: 4 }, options);
     expect(result).toEqual({ ok: false, code: "host_tool_no_credential" });
   });
@@ -246,6 +269,37 @@ describe("callHostOperation", () => {
     );
     expect(result.ok).toBe(true);
     expect(seen).toEqual(["GET /2.0/repositories/acme/web/pullrequests/4"]);
+  });
+
+  it("maps a merged pull request to closed, with merged set", async () => {
+    const { provider, bitbucket, options } = setup();
+    bitbucket.state.addPullRequest("acme/web", { id: 6, state: "MERGED", headRef: "done", headSha: "fed321" });
+    const result = await callHostOperation(provider, cipher, REPOSITORY, "getPullRequest", { number: 6 }, options);
+    expect(result).toMatchObject({ ok: true, value: { number: 6, state: "closed", merged: true } });
+  });
+
+  it.each([
+    ["declaring", "z.object({ number: z.number(), page: z.string().optional() })", "after-2"],
+    ["not declaring", "z.object({ number: z.number() })", null],
+  ])("passes page to a tool %s it", async (_label, paramsZod, expected) => {
+    const { provider, options } = setup({
+      operations: [
+        {
+          operation: "listPullRequestFiles",
+          code: `return { files: [], nextPage: params.page ? "after-" + params.page : null };`,
+          paramsZod,
+        },
+      ],
+    });
+    const result = await callHostOperation(
+      provider,
+      cipher,
+      REPOSITORY,
+      "listPullRequestFiles",
+      { number: 4, page: "2" },
+      options,
+    );
+    expect(result).toEqual({ ok: true, value: { files: [], nextPage: expected } });
   });
 
   it("reports an operation with no snapshot", async () => {

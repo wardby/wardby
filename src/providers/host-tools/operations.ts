@@ -22,6 +22,7 @@ export const HOST_TOOL_DECLINE_CODES = [
 ] as const;
 export type HostToolDeclineCode = (typeof HOST_TOOL_DECLINE_CODES)[number];
 
+// What a paged operation returns; its tool takes the last one back as the optional `page` input.
 const page = z.string().nullable();
 const pullRequest = z
   .object({
@@ -29,7 +30,8 @@ const pullRequest = z
     title: z.string(),
     body: z.string(),
     author: z.string().nullable(),
-    state: z.string(),
+    // A merged pull request is "closed" with `merged` set: consumers compare state to "open".
+    state: z.enum(["open", "closed"]),
     merged: z.boolean(),
     draft: z.boolean(),
     baseRef: z.string(),

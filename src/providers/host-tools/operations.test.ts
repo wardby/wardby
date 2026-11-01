@@ -53,6 +53,15 @@ describe("host operations", () => {
     expect(permission.map(([name]) => name)).toEqual(["getRepositoryPermission"]);
   });
 
+  it("takes only open or closed as a pull request's state", () => {
+    expect(HOST_OPERATIONS.getPullRequest.result.safeParse({ ...PR, state: "closed", merged: true }).success).toBe(
+      true,
+    );
+    for (const state of ["merged", "OPEN", "declined", ""]) {
+      expect(HOST_OPERATIONS.getPullRequest.result.safeParse({ ...PR, state }).success, state).toBe(false);
+    }
+  });
+
   it("validates a result, and refuses a wrong one", () => {
     expect(HOST_OPERATIONS.getPullRequest.result.safeParse(PR).success).toBe(true);
     expect(HOST_OPERATIONS.getPullRequest.result.safeParse({ ...PR, number: "4" }).success).toBe(false);

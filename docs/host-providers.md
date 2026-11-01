@@ -65,7 +65,8 @@ provider, including its tool code, whoever owns the tools it names.
    }
    ```
 
-5. Restart the server. Approvals don't need a restart, but a new provider does.
+5. No restart is needed in this release, because agents can't use a provider yet. Once they
+   can, a new provider will need a server restart; approvals won't.
 
 The tools and secrets you name must be yours. Secret rules, each refused with a named code:
 
@@ -77,7 +78,17 @@ The tools and secrets you name must be yours. Secret rules, each refused with a 
   be attached to an agent (`host_provider_webhook_secret_shared`). `attach_secret` refuses
   it too.
 - The webhook secret needs at least 16 characters (`host_provider_webhook_secret_short`).
+- A permission secret can't be a credential or permission secret of any other provider, and a
+  credential can't be another provider's permission secret
+  (`host_provider_permission_secret_shared`).
 - `gitUsername` can't be a credential's value and can't contain "username".
+- `pullRequestUrlTemplate` is an https URL on `gitHost`, with no username, password or port.
+
+Keep provider credentials unattached. A brokered credential attached to one of its owner's agents
+can be used by that agent's tools without the host provider path guard, which only applies to a
+provider's bound tools.
+
+See [the refusal codes](../help/errors/host-provider-error.md) for what each one means.
 
 These provider names can't be used: `github`, `local`, `http`, `https`, `ssh`, `git`,
 `file` and `constructor`. Names match `^[a-z][a-z0-9-]{1,30}$`.
@@ -113,12 +124,29 @@ working in the meantime.
 
 1. Call `update_tool`.
 2. Call `get_host_provider` with `includeCode: true`. Changed tools show `status: "changed"`.
+   Each operation has `approvedCode` and `approvedParamsZod`, and a changed one also has
+   `currentCode` and `currentParamsZod`, because a change can be to the schema alone.
 3. Read the change, then call `approve_host_provider_tools` with the operation names. It
    applies from the next call.
 
 Deleting a tool keeps its snapshot running, with `status: "tool_deleted"`. To change that
 operation, bind a new tool by registering again. Registering again also approves every tool
 at its current code.
+
+## Rotate a secret
+
+A secret a provider uses is replaced with `create_secret` under the same name, whether it's a
+credential, the permission credential or the webhook secret. Change its broker config with
+`set_secret_broker`. Both need `hosts:admin` with a role that grants it, as well as
+`secrets:write`, and refuse before handing out a browser link. Without brokering a credential
+stops working, so `set_secret_broker` with `broker: null` also breaks the provider.
+
+The new webhook value needs at least 16 characters, whether you pass it directly or enter it
+in the browser (`host_provider_webhook_secret_short`). A browser link requested before the secret
+joined a provider is refused (`host_provider_secret_link_stale`); request a new one.
+
+Rotating needs no re-registration: the next call uses the new value. Update the webhook secret on
+the host at the same time.
 
 ## Test a provider
 
@@ -162,9 +190,13 @@ an operation, an outcome and a fixed code for each, and no response data, so you
 | `host_tool_invalid_result`              | The tool's answer doesn't match its operation's shape.           |
 | `host_tool_invalid_params`              | The tool's schema refused what Wardby sends it.                  |
 | `host_tool_request_denied`              | The tool went outside what a bound tool may request (see below). |
-| `host_tool_no_credential`               | No credential's `repositories` covers this repository.           |
+| `host_tool_no_credential`               | See below.                                                       |
 | `host_tool_failed`                      | The tool threw an error. Its message is dropped on purpose.      |
 | `host_tool_timeout`                     | The tool ran out of time or instructions.                        |
+
+`host_tool_no_credential` has these causes: no credential's `repositories` covers this repository,
+the secret can't be decrypted, or the secret is no longer brokered or no longer allows every API
+host.
 
 ## Tool contract
 
@@ -177,26 +209,37 @@ where the code is `unauthorized`, `forbidden`, `not_found`, `conflict`, `rate_li
 call with `host_tool_invalid_result`.
 
 A pull request object, as returned by `getPullRequest` and `findPullRequest`, has exactly:
-`number` (positive integer), `title`, `body`, `author` (string or null), `state`, `merged`
-(boolean), `draft` (boolean), `baseRef`, `headRef`, `headSha` (non-empty), `isFork` (boolean) and
+`number` (positive integer), `title`, `body`, `author` (string or null), `state` (`open` or
+`closed`; a merged pull request is `closed` with `merged` true, so map your host's own states),
+`merged` (boolean), `draft` (boolean), `baseRef`, `headRef`, `headSha` (non-empty), `isFork` (boolean) and
 `htmlUrl` (a URL).
 
 Read operations (method GET):
 
-| Operation                 | Input fields  | Result                                                                                                                                                                                                                                  |
-| ------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getPullRequest`          | `number`      | A pull request object.                                                                                                                                                                                                                  |
-| `findPullRequest`         | `headRef`     | `{ pullRequest }`: a pull request object, or null if none.                                                                                                                                                                              |
-| `listPullRequestFiles`    | `number`      | `{ files, nextPage }`. Each file: `filename`, `status`, `additions`, `deletions` (non-negative integers) and optionally `previousFilename`.                                                                                             |
-| `getDiff`                 | `number`      | `{ diff }`: the unified diff text.                                                                                                                                                                                                      |
-| `readFile`                | `ref`, `path` | `{ kind: "file", content }`, `{ kind: "directory" }` or `{ kind: "not_found" }`. No other keys.                                                                                                                                         |
-| `listFiles`               | `ref`, `path` | `{ entries, nextPage }`. Each entry: `path`, `type` (`file` or `directory`) and optionally `size` (non-negative integer).                                                                                                               |
-| `listComments`            | `number`      | `{ comments, nextPage }`. Each comment: `id` (non-empty), `author` and `authorId` (string or null), `body`, `createdAt`, `path` (string or null), `line` (positive integer or null), `parentId` (string or null), `resolved` (boolean). |
-| `listCommitStatuses`      | `ref`         | `{ statuses, nextPage }`. Each status: `key`, `state` (`pending`, `success`, `failure` or `stopped`) and `url` (string or null).                                                                                                        |
-| `getRepositoryPermission` | `accountId`   | `{ permission }`: `none`, `read`, `triage`, `write`, `maintain` or `admin`. Uses the permission credential and `permissionApiPath`.                                                                                                     |
+| Operation                 | Input fields          | Result                                                                                                                                                                                                                                  |
+| ------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getPullRequest`          | `number`              | A pull request object.                                                                                                                                                                                                                  |
+| `findPullRequest`         | `headRef`             | `{ pullRequest }`: a pull request object, or null if none.                                                                                                                                                                              |
+| `listPullRequestFiles`    | `number`, `page`      | `{ files, nextPage }`. Each file: `filename`, `status` (`added`, `modified`, `removed` or `renamed`), `additions`, `deletions` (non-negative integers) and optionally `previousFilename`.                                               |
+| `getDiff`                 | `number`              | `{ diff }`: the unified diff text.                                                                                                                                                                                                      |
+| `readFile`                | `ref`, `path`         | `{ kind: "file", content }`, `{ kind: "directory" }` or `{ kind: "not_found" }`. No other keys.                                                                                                                                         |
+| `listFiles`               | `ref`, `path`, `page` | `{ entries, nextPage }`. Each entry: `path`, `type` (`file` or `directory`) and optionally `size` (non-negative integer).                                                                                                               |
+| `listComments`            | `number`, `page`      | `{ comments, nextPage }`. Each comment: `id` (non-empty), `author` and `authorId` (string or null), `body`, `createdAt`, `path` (string or null), `line` (positive integer or null), `parentId` (string or null), `resolved` (boolean). |
+| `listCommitStatuses`      | `ref`, `page`         | `{ statuses, nextPage }`. Each status: `key`, `state` (`pending`, `success`, `failure` or `stopped`) and `url` (string or null).                                                                                                        |
+| `getRepositoryPermission` | `accountId`           | `{ permission }`: `none`, `read`, `triage`, `write`, `maintain` or `admin`. Uses the permission credential and `permissionApiPath`.                                                                                                     |
 
-Operations that page return `nextPage`: a string to continue from, or null at the end. Wardby
-handles the paging, so the tool returns one page per call.
+`listPullRequestFiles`, `listFiles`, `listComments` and `listCommitStatuses` page. Each returns
+one page per call, with `nextPage`: a string to continue from, or null at the end. To get the next
+page, Wardby passes that string back as the optional `page` input, and it leaves `page` out for the
+first page. Declare `page` in `paramsZod`, because `z.object` drops keys it doesn't name, and a tool
+without it would return the first page every time. `test_host_provider` reads the first page only.
+
+`ref` is optional on `readFile` and `listFiles`, where leaving it out means the default branch, so
+declare it as optional there. `listCommitStatuses` always needs one, because statuses belong to a
+commit.
+
+Keep a file's `status` to those four words: Wardby treats a `removed` file as having nothing to read
+at the head.
 
 Write operations:
 
@@ -226,6 +269,8 @@ call's repository. A bound tool:
 - makes at most three requests per call. No request follows a redirect, whether or not it
   carries a secret: follow a `Location` yourself, which counts as a request and goes through
   the same limits;
+- can't send the query keys `_method` or any starting `x-http-method`, in any case, which some
+  frameworks read as the request's method;
 - has its path judged by what a server could turn it into: dot-only segments after decoding
   and encoded separators are refused. A few unusual file names can therefore be refused, and a
   repository path must be sent literally, not percent-encoded;
@@ -238,4 +283,5 @@ tool catches the error.
 ## Remove a provider
 
 `delete_host_provider` removes a provider and its snapshots. It's refused while an agent links
-to one of its repositories. `delete_secret` is refused while a provider uses that secret.
+to one of its repositories. `delete_secret` is refused while a provider uses that secret, and
+names the provider.
