@@ -13,6 +13,15 @@ describe("assertHostToolRequest", () => {
     "/2.0/repositories/acme/web",
     "/2.0/repositories/acme/web/pullrequests/4",
     "/2.0/repositories/ACME/Web/src/abc/a.txt?x=1",
+    ...[
+      "src/abc/a%20b.txt",
+      "src/abc/100%25.txt",
+      "src/abc/100%.txt",
+      "src/abc/50%25off.txt",
+      "src/abc/.hidden",
+      "src/abc/a..b",
+      "diff/acme/web:abc%0Ddef",
+    ].map((rest) => `/2.0/repositories/acme/web/${rest}`),
   ])("allows %s", (path) => {
     expect(() => assertHostToolRequest(url(path), "GET", scope)).not.toThrow();
   });
@@ -36,6 +45,36 @@ describe("assertHostToolRequest", () => {
     ["a double-encoded dot-segment", url("/2.0/repositories/acme/web/%252e%252e/other")],
     ["a double-encoded slash", url("/2.0/repositories/acme/web/..%252fother")],
     ["an encoded NUL", url("/2.0/repositories/acme/web/..%00/other")],
+    ["encoded form ..%20/other", url("/2.0/repositories/acme/web/..%20/other")],
+    ["encoded form .%20./other", url("/2.0/repositories/acme/web/.%20./other")],
+    ["encoded form %20../other", url("/2.0/repositories/acme/web/%20../other")],
+    ["encoded form ..%2520/other", url("/2.0/repositories/acme/web/..%2520/other")],
+    ["encoded form ..%c2%a0/other", url("/2.0/repositories/acme/web/..%c2%a0/other")],
+    ["encoded form ..%e3%80%80/other", url("/2.0/repositories/acme/web/..%e3%80%80/other")],
+    ["encoded form ..%c2%85/other", url("/2.0/repositories/acme/web/..%c2%85/other")],
+    ["encoded form .%c2%ad./other", url("/2.0/repositories/acme/web/.%c2%ad./other")],
+    ["encoded form ..%e2%80%8b/other", url("/2.0/repositories/acme/web/..%e2%80%8b/other")],
+    ["encoded form .%e2%80%8b./other", url("/2.0/repositories/acme/web/.%e2%80%8b./other")],
+    ["encoded form ..%ef%bb%bf/other", url("/2.0/repositories/acme/web/..%ef%bb%bf/other")],
+    ["encoded form %EF%BC%8E%EF%BC%8E/other", url("/2.0/repositories/acme/web/%EF%BC%8E%EF%BC%8E/other")],
+    ["encoded form ．．/other", url("/2.0/repositories/acme/web/．．/other")],
+    ["encoded form ..%EF%BC%8Fother", url("/2.0/repositories/acme/web/..%EF%BC%8Fother")],
+    [
+      "encoded form %EF%BC%8E%EF%BC%8E%EF%BC%8Fother",
+      url("/2.0/repositories/acme/web/%EF%BC%8E%EF%BC%8E%EF%BC%8Fother"),
+    ],
+    ["encoded form ..%EF%BC%BCother", url("/2.0/repositories/acme/web/..%EF%BC%BCother")],
+    ["encoded form ..%E2%88%95other", url("/2.0/repositories/acme/web/..%E2%88%95other")],
+    ["encoded form ..%E2%81%84other", url("/2.0/repositories/acme/web/..%E2%81%84other")],
+    ["encoded form ..%3f/other", url("/2.0/repositories/acme/web/..%3f/other")],
+    ["encoded form ..%23/other", url("/2.0/repositories/acme/web/..%23/other")],
+    ["encoded form ..%253f/other", url("/2.0/repositories/acme/web/..%253f/other")],
+    ["encoded form ..%2523/other", url("/2.0/repositories/acme/web/..%2523/other")],
+    ["encoded form ...", url("/2.0/repositories/acme/web/...")],
+    ["encoded form ..%2e/other", url("/2.0/repositories/acme/web/..%2e/other")],
+    ["encoded form ..,x/other", url("/2.0/repositories/acme/web/..,x/other")],
+    ["encoded form ..:x/other", url("/2.0/repositories/acme/web/..:x/other")],
+    ["encoded form %252e%252e%25/other", url("/2.0/repositories/acme/web/%252e%252e%25/other")],
   ])("refuses %s", (_label, target) => {
     expect(() => assertHostToolRequest(target, "GET", scope)).toThrow(HostToolRequestDenied);
   });

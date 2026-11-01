@@ -36,12 +36,24 @@ export function assertHostToolRequest(url: string, method: string, scope: HostTo
   if (path !== prefix && !path.startsWith(`${prefix}/`)) throw new HostToolRequestDenied();
 }
 
-const MAX_DECODE_ROUNDS = 5;
+const MAX_DECODE_ROUNDS = 8;
 const ALLOWED_HEADERS = ["accept", "content-type", "if-match", "if-none-match"];
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** Decodes every run of valid %XX escapes as UTF-8 bytes; a stray % stays literal. */
+function decodeOnce(text: string): string {
+  return text.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+    const bytes = Uint8Array.from(run.match(/%([0-9a-f]{2})/gi) ?? [], (hex) => parseInt(hex.slice(1), 16));
+    return utf8.decode(bytes);
+  });
+}
 
 /**
- * The path as a server may finally read it: decoded until stable, `;params` dropped from
- * each segment. Anything that could move it outside a prefix is a denial.
+ * The path as a server may finally read it: decoded to stable, NFKC-normalized, then
+ * judged per segment. Servers and proxies disagree on what a segment "is" (encoded or
+ * Unicode lookalike separators, stripped whitespace or format characters, trailing
+ * delimiters), so a segment that is only dots once those are removed is refused, and so
+ * is anything that changes the segment count. Ordinary names with odd characters pass.
  */
 function normalizedPath(pathname: string): string {
   let current = pathname;
@@ -49,21 +61,23 @@ function normalizedPath(pathname: string): string {
     if (round > MAX_DECODE_ROUNDS) throw new HostToolRequestDenied();
     let next: string;
     try {
-      next = decodeURIComponent(current);
+      next = decodeOnce(current);
     } catch {
       throw new HostToolRequestDenied();
     }
     if (next === current) break;
-    // Decoding must not create a separator that wasn't there.
-    if (next.split("/").length !== current.split("/").length) throw new HostToolRequestDenied();
     current = next;
   }
+  current = current.normalize("NFKC");
   // eslint-disable-next-line no-control-regex
-  if (/[\\\u0000-\u001f\u007f]/.test(current)) throw new HostToolRequestDenied();
-  const segments = current.split("/").map((segment) => segment.split(";")[0] ?? "");
-  if (segments.some((segment) => segment === "." || segment === "..")) throw new HostToolRequestDenied();
-  return current
-    .split("/")
+  if (/[\\\u0000\u2215\u2044]/.test(current)) throw new HostToolRequestDenied();
+  const segments = current.split("/");
+  if (segments.length !== pathname.split("/").length) throw new HostToolRequestDenied();
+  for (const segment of segments) {
+    const bare = segment.replace(/[\p{Z}\p{C}%]/gu, "");
+    if (/^\.+(?:[;?#,:].*)?$/.test(bare)) throw new HostToolRequestDenied();
+  }
+  return segments
     .map((segment) => segment.split(";")[0])
     .join("/")
     .toLowerCase();

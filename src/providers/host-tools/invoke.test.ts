@@ -146,6 +146,15 @@ describe("invokeHostTool", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("reports no credential when the entry has no broker", async () => {
+    const fetchImpl = vi.fn(async () => response({}));
+    const code = `await fetch("${API}/x", { secrets: ["host"] }); return { diff: "x" };`;
+    const credential = async () => ({ value: TOKEN, broker: null });
+    const result = await invokeHostTool(input(code, { credential, fetchImpl: fetchImpl }));
+    expect(result).toEqual({ ok: false, code: "host_tool_no_credential" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("reports a timeout", async () => {
     const result = await invokeHostTool(
       input(`while (true) {}`, { limits: { maxInterruptChecks: 2_000, wallTimeLimitMs: 500 } }),
