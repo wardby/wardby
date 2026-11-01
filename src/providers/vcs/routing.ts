@@ -1,6 +1,6 @@
 import { codeProviderOf } from "../../coding/code-host.js";
 import { LocalRepoError, isLocalRepository } from "../../coding/local-repo.js";
-import type { RepositoryFileInput } from "./github.js";
+import type { RepositoryFileInput } from "./types.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,

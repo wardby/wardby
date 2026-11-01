@@ -33,6 +33,23 @@ import {
   supersededDescriptionComment,
   type DescriptionCommentRecord,
 } from "./pr-description.js";
+import type {
+  DescriptionBaseline,
+  DescriptionUpdateResult,
+  RelatedPullRequestEntry,
+  RelatedPullRequestState,
+  RelatedPullRequestsInput,
+  RepositoryFileInput,
+} from "./types.js";
+
+export type {
+  DescriptionBaseline,
+  DescriptionUpdateResult,
+  RelatedPullRequestEntry,
+  RelatedPullRequestState,
+  RelatedPullRequestsInput,
+  RepositoryFileInput,
+};
 
 export { RELATED_SECTION_END, RELATED_SECTION_START };
 
@@ -154,23 +171,6 @@ export interface PullRequestResult {
   descriptionSha256?: string;
 }
 
-/** What wardby last wrote into a pull request description (control-plane records). */
-export interface DescriptionBaseline {
-  /** Null = legacy pull request (no recorded write). */
-  recordedSha256: string | null;
-  /**
-   * Legacy pull requests only: the hash of the body wardby would have written
-   * for the root run, rebuilt from stored records. A current body with this
-   * hash is unedited. Absent when the records can't rebuild it (then the
-   * description counts as edited).
-   */
-  legacySha256?: string;
-  /** Stored summary of the run whose text the description carries (root run for legacy). */
-  previousAgentText?: string;
-  /** That run's id. */
-  agentTextRunId: string;
-}
-
 /**
  * A fix round's description update. `runId` is this (latest) run; the pull
  * request is re-found by `rootRunId`'s marker. `related` is ignored: the
@@ -187,18 +187,6 @@ export interface UpdateDescriptionInput extends Omit<PullRequestInput, "runId" |
    */
   headSha?: string;
 }
-
-/** `agentTextRunId` is the run whose summary the description now carries. */
-export type DescriptionUpdateResult =
-  | { kind: "replaced" | "unchanged"; sha256: string; agentTextRunId: string }
-  | {
-      kind: "refreshed";
-      reason: "empty" | "too_short" | "missing_closing_keyword";
-      sha256: string;
-      agentTextRunId: string;
-    }
-  | { kind: "edited_by_hand"; commentPosted: boolean }
-  | { kind: "skipped"; reason: "not_open" | "too_long" | "error" };
 
 /** See VcsProvider.notifyContinuationStarted/Finished (types.ts) — these back that GitHub-specific mechanism. */
 export interface ContinuationStatusCommentInput {
@@ -231,16 +219,6 @@ export interface ContinuationCheckRunCompleteInput {
    * left at that commit.
    */
   headRef?: string;
-}
-
-/** One file at one ref, read through the API without a clone. */
-export interface RepositoryFileInput {
-  repository: string;
-  ref: string;
-  /** Repository-relative POSIX path. */
-  path: string;
-  /** Refused above this many bytes. */
-  maxBytes: number;
 }
 
 const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
@@ -408,32 +386,6 @@ function isThisAppsComment(comment: Record<string, unknown>, appId: number): boo
 export const MAX_RELATED_PULL_REQUESTS = 20;
 /** GitHub rejects a pull request body longer than this. */
 export const MAX_PULL_REQUEST_BODY_CHARS = 65_536;
-
-export type RelatedPullRequestState = "open" | "draft" | "merged" | "closed";
-
-/** One pull request of the request's set, from stored control-plane rows only. */
-export interface RelatedPullRequestEntry {
-  repository: string;
-  /** Absent only for `self` while the pull request is being created. */
-  number?: number;
-  /** Live state; absent when unknown (at creation). */
-  state?: RelatedPullRequestState;
-  /** The pull request whose description this section is in. */
-  self?: boolean;
-  /**
-   * Step in the delegating agent's declared merge order (1-99), from
-   * CodingRun.mergeOrder; absent = the delegating agent set no order
-   * (an open entry is listed under "Not ordered:" when any other entry,
-   * open or done, has one).
-   */
-  mergeOrder?: number;
-}
-
-export interface RelatedPullRequestsInput {
-  /** In merge order: by mergeOrder when set, else the order the request's coding runs were dispatched. */
-  entries: readonly RelatedPullRequestEntry[];
-  issue?: { key: string; url?: string; trackerName?: string };
-}
 
 const RELATED_STATES = new Set<string>(["open", "draft", "merged", "closed"]);
 

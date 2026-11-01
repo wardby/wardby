@@ -1,10 +1,4 @@
 import type { PackageAuditReport } from "../../coding/registry/audit-mode.js";
-import type {
-  DescriptionBaseline,
-  DescriptionUpdateResult,
-  RelatedPullRequestsInput,
-  RepositoryFileInput,
-} from "./github.js";
 
 /** What happened to a pull request description: wardby just wrote it (a new PR) or updated a fix round's. */
 export type DescriptionWriteOutcome = { kind: "written"; sha256: string } | DescriptionUpdateResult;
@@ -164,8 +158,8 @@ export interface VcsProvider {
    * Best-effort "wardby is working on this" signal for a continuation
    * a no-op when `workspace.continuation` is unset, since a fresh run has
    * no PR to attach anything to until its one commit lands. Optional
-   * because this is a GitHub-specific concept, not a universal VCS one --
-   * a future non-GitHub provider (or a test double) can simply omit it,
+   * because not every host has this signal (GitHub does; others may too) --
+   * a provider (or a test double) can simply omit it,
    * mirroring `Executor.resolveCodingWorkerImage?` (dispatch.ts calls it
    * with `?.()`). Implementations MUST NOT throw: this is strictly
    * observability, never allowed to affect the real coding run.
@@ -248,4 +242,69 @@ export interface ContinuationFinishedDetails {
    * (the pull request it opened or continued, or a branch with no number).
    */
   changesPushed?: { pullRequestNumber?: number };
+}
+
+/** What wardby last wrote into a pull request description (control-plane records). */
+export interface DescriptionBaseline {
+  /** Null = legacy pull request (no recorded write). */
+  recordedSha256: string | null;
+  /**
+   * Legacy pull requests only: the hash of the body wardby would have written
+   * for the root run, rebuilt from stored records. A current body with this
+   * hash is unedited. Absent when the records can't rebuild it (then the
+   * description counts as edited).
+   */
+  legacySha256?: string;
+  /** Stored summary of the run whose text the description carries (root run for legacy). */
+  previousAgentText?: string;
+  /** That run's id. */
+  agentTextRunId: string;
+}
+
+/** `agentTextRunId` is the run whose summary the description now carries. */
+export type DescriptionUpdateResult =
+  | { kind: "replaced" | "unchanged"; sha256: string; agentTextRunId: string }
+  | {
+      kind: "refreshed";
+      reason: "empty" | "too_short" | "missing_closing_keyword";
+      sha256: string;
+      agentTextRunId: string;
+    }
+  | { kind: "edited_by_hand"; commentPosted: boolean }
+  | { kind: "skipped"; reason: "not_open" | "too_long" | "error" };
+
+/** One file at one ref, read through the API without a clone. */
+export interface RepositoryFileInput {
+  repository: string;
+  ref: string;
+  /** Repository-relative POSIX path. */
+  path: string;
+  /** Refused above this many bytes. */
+  maxBytes: number;
+}
+
+export type RelatedPullRequestState = "open" | "draft" | "merged" | "closed";
+
+/** One pull request of the request's set, from stored control-plane rows only. */
+export interface RelatedPullRequestEntry {
+  repository: string;
+  /** Absent only for `self` while the pull request is being created. */
+  number?: number;
+  /** Live state; absent when unknown (at creation). */
+  state?: RelatedPullRequestState;
+  /** The pull request whose description this section is in. */
+  self?: boolean;
+  /**
+   * Step in the delegating agent's declared merge order (1-99), from
+   * CodingRun.mergeOrder; absent = the delegating agent set no order
+   * (an open entry is listed under "Not ordered:" when any other entry,
+   * open or done, has one).
+   */
+  mergeOrder?: number;
+}
+
+export interface RelatedPullRequestsInput {
+  /** In merge order: by mergeOrder when set, else the order the request's coding runs were dispatched. */
+  entries: readonly RelatedPullRequestEntry[];
+  issue?: { key: string; url?: string; trackerName?: string };
 }

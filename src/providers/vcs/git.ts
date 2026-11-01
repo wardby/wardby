@@ -28,7 +28,7 @@ import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
 import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
-import type { RepositoryFileInput } from "./github.js";
+import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
