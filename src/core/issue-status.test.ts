@@ -86,6 +86,10 @@ function db(
 }
 
 describe("toJiraMarkdown", () => {
+  it("does not make a GitHub link out of a hosted repository", () => {
+    expect(toJiraMarkdown("Opened bitbucket:acme/api#4.")).toBe("Opened bitbucket:acme/api#4.");
+  });
+
   it("turns the run footer into italics and PR refs into links", () => {
     expect(toJiraMarkdown("✅ Opened o/r#4.\n\n<sub>wardby run `r1`</sub>")).toBe(
       "✅ Opened [o/r#4](https://github.com/o/r/pull/4).\n\n_wardby run `r1`_",

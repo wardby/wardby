@@ -595,3 +595,11 @@ describe("openPullRequestHints", () => {
     expect(many.split("Never open a new pull request").length).toBe(2);
   });
 });
+
+describe("openPullRequestHints on a hosted repository", () => {
+  it("names the pull request without a GitHub link", () => {
+    const text = openPullRequestHints([{ repository: "bitbucket:acme/api", number: 4, openedByRunId: "run1" }]);
+    expect(text).toContain("bitbucket:acme/api#4");
+    expect(text).not.toContain("github.com");
+  });
+});

@@ -6,6 +6,7 @@
  * docs/private/2026-09-25-code-review-host-design.md §6.3.
  */
 import { Prisma, type PrismaClient } from "#prisma";
+import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type {
@@ -416,7 +417,7 @@ export function continuationHint(prNumber: number, runId: string): string {
 }
 
 const HINT_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const HINT_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const HINT_REPOSITORY = /^(?:[a-z][a-z0-9-]{1,30}:)?[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 /** One hint per open sibling (stored rows only; links built, ids re-validated), then the shared guidance. */
 export function siblingContinuationHints(siblings: readonly OpenSibling[]): string | undefined {
@@ -429,11 +430,13 @@ export function siblingContinuationHints(siblings: readonly OpenSibling[]): stri
         s.number > 0,
     )
     .slice(0, MAX_SIBLING_HINTS)
-    .map(
-      (s) =>
-        `- ${s.repository}#${s.number} (https://github.com/${s.repository}/pull/${s.number}): to change it, ` +
-        `delegate to that repository's coding agent and ${continuePriorRunPhrase(s.openedByRunId)}.`,
-    );
+    .map((s) => {
+      const url = pullRequestWebUrl(codeProviderOf(s.repository), s.repository, s.number);
+      return (
+        `- ${s.repository}#${s.number}${url ? ` (${url})` : ""}: to change it, ` +
+        `delegate to that repository's coding agent and ${continuePriorRunPhrase(s.openedByRunId)}.`
+      );
+    });
   if (lines.length === 0) return undefined;
   return [
     "[This pull request is one of a set wardby opened for the same request. The set's other open pull requests:",

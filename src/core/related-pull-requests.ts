@@ -23,6 +23,7 @@
  * brings every later follow-up tree that continued one of its pull requests.
  */
 import { Prisma, type PrismaClient, type Run, type RunStatus } from "#prisma";
+import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import {
   issueReference,
@@ -472,7 +473,7 @@ export interface OpenSibling {
   openedByRunId: string;
 }
 
-const HINT_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const HINT_REPOSITORY = /^(?:[a-z][a-z0-9-]{1,30}:)?[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 /**
  * The continuation hint for a ticket (a GitHub or Jira issue) that already has
@@ -491,12 +492,14 @@ export function openPullRequestHints(prs: readonly OpenSibling[]): string {
         p.number > 0,
     )
     .slice(0, MAX_SIBLING_HINTS)
-    .map(
-      (p) =>
-        `This issue already has an open pull request wardby opened: ${p.repository}#${p.number} ` +
-        `(https://github.com/${p.repository}/pull/${p.number}). ` +
-        `To revise it, delegate with continuePriorRun set to exactly "${p.openedByRunId}".`,
-    );
+    .map((p) => {
+      const url = pullRequestWebUrl(codeProviderOf(p.repository), p.repository, p.number);
+      return (
+        `This issue already has an open pull request wardby opened: ${p.repository}#${p.number}` +
+        `${url ? ` (${url})` : ""}. ` +
+        `To revise it, delegate with continuePriorRun set to exactly "${p.openedByRunId}".`
+      );
+    });
   return lines.length > 0 ? [...lines, SIBLING_GUIDANCE].join("\n\n") : "";
 }
 

@@ -19,6 +19,7 @@
  * stored. Best effort: none of these ever throws.
  */
 import type { Run } from "#prisma";
+import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import type { PullRequestOrigin, ReviewHostRegistry, UpsertNamedCheckInput } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
@@ -97,9 +98,12 @@ interface LiveMember {
   headSha?: string;
 }
 
-const prUrl = (repository: string, number: number) => `https://github.com/${repository}/pull/${number}`;
-/** `repository#number` as a link: never a title or any other free text from the host. */
-const prLink = (m: MergeOrderMember) => `[${m.repository}#${m.number}](${prUrl(m.repository, m.number)})`;
+/** `repository#number`, as a link when the host has one: never a title or any other free text from the host. */
+const prLink = (m: MergeOrderMember) => {
+  const label = `${m.repository}#${m.number}`;
+  const url = pullRequestWebUrl(codeProviderOf(m.repository), m.repository, m.number);
+  return url ? `[${label}](${url})` : label;
+};
 const keyOf = (repository: string, number: number) => `${repository}#${number}`;
 
 function safeRepository(value: string): string | undefined {

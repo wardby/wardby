@@ -5,6 +5,7 @@
  * text. Best effort throughout: nothing here throws.
  */
 import { Prisma, type PrismaClient } from "#prisma";
+import { pullRequestWebUrl } from "../coding/code-host.js";
 import {
   projectOf,
   type IssueTracker,
@@ -46,12 +47,11 @@ export type IssueStatusDb = Pick<
 >;
 
 export function toJiraMarkdown(text: string): string {
-  return text
-    .replace(/<sub>(.*?)<\/sub>/g, "_$1_")
-    .replace(
-      /\b([\w.-]+\/[\w.-]+)#(\d+)\b/g,
-      (_m, repo: string, n: string) => `[${repo}#${n}](https://github.com/${repo}/pull/${n})`,
-    );
+  return text.replace(/<sub>(.*?)<\/sub>/g, "_$1_").replace(
+    // Not after ":": `<provider>:<workspace>/<repo>#n` is not a GitHub repository.
+    /(?<!:)\b([\w.-]+\/[\w.-]+)#(\d+)\b/g,
+    (_m, repo: string, n: string) => `[${repo}#${n}](${pullRequestWebUrl("github", repo, Number(n))})`,
+  );
 }
 
 export function issueStatusRow(

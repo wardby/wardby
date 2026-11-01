@@ -39,6 +39,7 @@ import {
   type ChatProviderName,
   type ChatProviderRegistry,
 } from "../providers/chat/types.js";
+import { pullRequestWebUrl } from "../coding/code-host.js";
 import { tryAcquireLease } from "./lease.js";
 import { logger } from "./logger.js";
 import {
@@ -135,7 +136,7 @@ async function subjectOf(db: PrismaClient, d: Delivery): Promise<ThreadSubject> 
     return { label: ev.workItemKey, title: item?.title ?? null, url: item?.url ?? null };
   }
   if (ev.repository && ev.prNumber != null) {
-    const url = ev.codeProvider === "github" ? `https://github.com/${ev.repository}/pull/${ev.prNumber}` : null;
+    const url = pullRequestWebUrl(ev.codeProvider ?? "", ev.repository, ev.prNumber);
     return { label: `${ev.repository}#${ev.prNumber}`, title: null, url };
   }
   if (ev.runId) return { label: `run ${ev.runId.slice(0, 8)}`, title: null, url: null };
