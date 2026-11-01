@@ -1,6 +1,7 @@
 /** The graph snapshot read model behind GET /admin/api/graph (docs/viewer-api.md). */
 import type { Prisma, PrismaClient } from "#prisma";
 import { periodStart } from "../core/budget-groups.js";
+import { codeProviderOf } from "../coding/code-host.js";
 import { publicCodingRunResult } from "../coding/protocol.js";
 import type { GraphRun, GraphSnapshot, Outcome, RunTriggerInfo } from "./api-schema.js";
 
@@ -123,7 +124,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[], sites
   ) {
     outcomes.push({
       kind: "pull_request",
-      provider: "github",
+      provider: codeProviderOf(result.repository),
       repository: result.repository,
       number: result.pullRequestNumber,
       url: result.pullRequestUrl,

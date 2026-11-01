@@ -18,7 +18,11 @@ export { GitHubAppClient } from "./github.js";
 export { GitVcsProvider, NodeGitCommandRunner } from "./git.js";
 export { GitHubRemote } from "./github-remote.js";
 export { LocalRemote } from "./local-remote.js";
-export { RoutingVcsProvider, VCS_GITHUB_NOT_CONFIGURED_ERROR } from "./routing.js";
+export {
+  RoutingVcsProvider,
+  VCS_GITHUB_NOT_CONFIGURED_ERROR,
+  VCS_HOST_PROVIDER_NOT_CONFIGURED_ERROR,
+} from "./routing.js";
 export type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 
 export interface BuildVcsProviderOptions {

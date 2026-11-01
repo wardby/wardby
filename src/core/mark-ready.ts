@@ -54,10 +54,10 @@ export async function maybeMarkReady(
   deps: MarkReadyDeps,
   repository: string,
   prNumber: number,
-  provider = "github",
+  provider: string,
 ): Promise<MarkReadyOutcome> {
   try {
-    const host = deps.hosts?.[provider as keyof ReviewHostRegistry];
+    const host = deps.hosts?.[provider];
     if (!host?.pullRequestOrigin || !host.readOwnChecks || !host.readCi || !host.markReadyForReview) return "off";
     const links = await deps.db.agentRepository.findMany({
       where: { provider, repository },

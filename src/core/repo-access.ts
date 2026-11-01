@@ -20,7 +20,6 @@ import {
   ReviewHostError,
   type HostPermission,
   type HostUser,
-  type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { LocalRepoError, isLocalRepository, loadLocalRepoRoots, resolveLocalRepository } from "../coding/local-repo.js";
@@ -216,7 +215,7 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     const key = `${provider}\u0000${repository}\u0000${user.id}`;
     const hit = cache.get(key);
     if (!fresh && hit && hit.expiresAt > now()) return { ok: true, level: hit.level, login: user.login };
-    const host = options.hosts[provider as ReviewHostProvider];
+    const host = options.hosts[provider];
     if (!host) {
       log.warn({ provider, repository }, "no review host configured for a repository access check");
       return { ok: false, transient: false };

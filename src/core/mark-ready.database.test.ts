@@ -155,31 +155,34 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   });
 
   it("two concurrent evaluations of one pull request mark it exactly once", async () => {
-    const outcomes = await Promise.all([maybeMarkReady(deps, repository, 7), maybeMarkReady(deps, repository, 7)]);
+    const outcomes = await Promise.all([
+      maybeMarkReady(deps, repository, 7, "github"),
+      maybeMarkReady(deps, repository, 7, "github"),
+    ]);
     expect(outcomes.sort()).toEqual(["marked", "skipped"]);
     expect(host.markReadyForReview).toHaveBeenCalledTimes(1);
     expect(await markedReadyAt()).toBeInstanceOf(Date);
   });
 
   it("after marking, a later evaluation of the same draft is skipped without touching the host", async () => {
-    expect(await maybeMarkReady(deps, repository, 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, repository, 7, "github")).toBe("marked");
     vi.mocked(host.markReadyForReview!).mockClear();
     // A person moved it back to draft: the host still reports a draft, but marking is final.
-    expect(await maybeMarkReady(deps, repository, 7)).toBe("skipped");
+    expect(await maybeMarkReady(deps, repository, 7, "github")).toBe("skipped");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
   it("a host failure releases the claim, so the next evaluation marks", async () => {
     failMark = true;
-    expect(await maybeMarkReady(deps, repository, 7)).toBe("failed");
+    expect(await maybeMarkReady(deps, repository, 7, "github")).toBe("failed");
     expect(await markedReadyAt()).toBeNull();
     failMark = false;
-    expect(await maybeMarkReady(deps, repository, 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, repository, 7, "github")).toBe("marked");
     expect(await markedReadyAt()).toBeInstanceOf(Date);
   });
 
   it("marks a pull request a coding builder opened for an opted-in lead that delegated to it", async () => {
-    expect(await maybeMarkReady(deps, repository, 8)).toBe("marked");
+    expect(await maybeMarkReady(deps, repository, 8, "github")).toBe("marked");
     const row = await db.codingRun.findUniqueOrThrow({
       where: { runId: id("sub-8") },
       select: { markedReadyAt: true },
@@ -188,7 +191,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   });
 
   it("does not mark for an opted-in agent outside the builder's run tree", async () => {
-    expect(await maybeMarkReady(deps, repository, 9)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, repository, 9, "github")).toBe("not_ready");
     const row = await db.codingRun.findUniqueOrThrow({
       where: { runId: id("sub-9") },
       select: { markedReadyAt: true },

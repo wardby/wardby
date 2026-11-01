@@ -2599,3 +2599,11 @@ describe("a draft whose last push stopped at its budget", () => {
     expect(h.completeCheck).not.toHaveBeenCalled();
   });
 });
+
+describe("siblingContinuationHints on a hosted repository", () => {
+  it("names the pull request without a GitHub link", () => {
+    const text = siblingContinuationHints([{ repository: "bitbucket:acme/api", number: 4, openedByRunId: "run1" }]);
+    expect(text).toContain("bitbucket:acme/api#4");
+    expect(text).not.toContain("github.com");
+  });
+});

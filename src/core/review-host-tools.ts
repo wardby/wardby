@@ -20,11 +20,13 @@ import {
   type CiView,
   type CodeReviewHost,
   type PullRequestView,
+  type BuiltInHostProvider,
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import type { RelatedPullRequestState } from "../providers/vcs/github.js";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
+import { codeProviderOf, normalizeHostedRepository } from "../coding/code-host.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
 import type { ReviewReadLedger } from "./review-reads.js";
@@ -310,16 +312,17 @@ export const REVIEW_HOST_TOOL_NAMES: ReadonlySet<string> = new Set(REVIEW_HOST_T
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["repo_publish_review", "repo_comment"]);
 
 /** The "local:" prefix is part of a local repository's id, so resolveLink matches it before stripping host prefixes. */
-const HOST_PREFIXES: Record<ReviewHostProvider, string> = { github: "github.com/", local: "local:" };
+const HOST_PREFIXES: Record<BuiltInHostProvider, string> = { github: "github.com/", local: "local:" };
 
 function normalizeFor(provider: ReviewHostProvider, value: string): string | null {
   try {
     if (provider === "github") return normalizeGitHubRepository(value);
     if (provider === "local") return normalizeLocalRepository(value);
+    const repository = normalizeHostedRepository(value);
+    return codeProviderOf(repository) === provider ? repository : null;
   } catch {
     return null;
   }
-  return null;
 }
 
 export function resolveLink(

@@ -99,6 +99,18 @@ describe("resolveLink", () => {
   });
 });
 
+describe("resolveLink with a hosted repository", () => {
+  const link = { provider: "bitbucket", repository: "bitbucket:acme/api" } as RepositoryLink;
+
+  it("matches the link by its full id", () => {
+    expect(resolveLink([link], "bitbucket:Acme/API")).toBe(link);
+  });
+
+  it("does not match a bare owner/name to a hosted link", () => {
+    expect(resolveLink([link], "acme/api")).toBeNull();
+  });
+});
+
 describe("handleReviewHostTool", () => {
   it("rejects an unlinked repository and a write tool on a read link", async () => {
     const c = ctx();

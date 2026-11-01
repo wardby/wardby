@@ -7,6 +7,7 @@
  * only by the finalizer that made the run terminal. Never throws.
  */
 import type { PrismaClient } from "#prisma";
+import { pullRequestWebUrl } from "../coding/code-host.js";
 import { packageAuditDigest } from "../coding/registry/audit-mode.js";
 import { blockingRefusals, collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
@@ -82,7 +83,7 @@ export async function emitRunFinishedEvents(
           agentName,
           verdict: check.verdict as "APPROVE",
           prLabel,
-          prUrl: check.provider === "github" ? `https://github.com/${check.repository}/pull/${check.prNumber}` : null,
+          prUrl: pullRequestWebUrl(check.provider, check.repository, check.prNumber),
           ciPending: check.ciPendingAtReview === true,
         },
       });

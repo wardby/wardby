@@ -150,6 +150,37 @@ describe("RoutingVcsProvider pull request descriptions", () => {
   });
 });
 
+describe("hosted repositories", () => {
+  const input = (repository: string) =>
+    ({ runId: "r", repository, baseRef: "main", headRef: "wardby/run-r", protectedPaths: [] }) as VcsPrepareInput;
+
+  it("sends a hosted repository to its own provider", async () => {
+    const github = fake("github");
+    const bitbucket = fake("bitbucket");
+    const routing = new RoutingVcsProvider({ github, local: null, hosted: new Map([["bitbucket", bitbucket]]) });
+    await routing.prepareWorkspace(input("bitbucket:acme/api"));
+    expect(bitbucket.calls).toEqual(["prepare:bitbucket:acme/api"]);
+    expect(github.calls).toEqual([]);
+  });
+
+  it("refuses a hosted repository whose provider isn't configured, and never falls back to GitHub", async () => {
+    const github = fake("github");
+    const routing = new RoutingVcsProvider({ github, local: null });
+    await expect(routing.prepareWorkspace(input("bitbucket:acme/api"))).rejects.toThrow(
+      "vcs_host_provider_not_configured",
+    );
+    expect(github.calls).toEqual([]);
+  });
+
+  it("does nothing for best-effort calls on an unconfigured hosted provider", async () => {
+    const github = fake("github");
+    const routing = new RoutingVcsProvider({ github, local: null });
+    const workspace = { repository: "bitbucket:acme/api" } as PreparedWorkspace;
+    await expect(routing.notifyContinuationStarted(workspace)).resolves.toBeUndefined();
+    expect(github.calls).toEqual([]);
+  });
+});
+
 describe("buildVcsProvider", () => {
   it("does not throw when only LOCAL_REPO_ROOTS is set, and fails GitHub repositories lazily", async () => {
     const provider = buildVcsProvider({ vcs: "github" }, {}, { LOCAL_REPO_ROOTS: "/tmp" });

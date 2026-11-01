@@ -13,6 +13,7 @@
  */
 import { Prisma, type PrismaClient } from "#prisma";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../../coding/protocol.js";
+import { codeProviderOf, normalizeHostedRepository } from "../../coding/code-host.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner, requireNotPublicWritable } from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -41,6 +42,8 @@ function normalizeRepository(provider: string, repository: string): string {
   try {
     if (provider === "local") return normalizeLocalRepository(repository);
     if (provider === "github") return normalizeGitHubRepository(repository);
+    const normalized = normalizeHostedRepository(repository);
+    if (codeProviderOf(normalized) === provider) return normalized;
   } catch {
     // fall through
   }

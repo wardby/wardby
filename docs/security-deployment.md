@@ -779,6 +779,12 @@ packages, both forced to patched versions by `overrides` in `package.json`:
   re-run `prisma generate`, `prisma validate`, the `migrate diff` drift check,
   and the migration image's `migrate deploy`.
 
+ESLint and `typescript-eslint` still ask for `minimatch` 10, which is flagged
+(GHSA-g3hv-75wg-m249, moderate, fixed in 11.0.1), so `overrides` also forces
+`minimatch` to 11.0.3. It is development-only and never reaches a production
+image. After changing it, confirm `npm run lint` checks the same files and
+still reports problems.
+
 `scripts/security-audit.mjs` carries no exceptions: with the overrides the full
 and production audits are clean, and if a lockfile change ever dropped one, the
 advisory would reappear and the security job would fail.

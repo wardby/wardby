@@ -1,5 +1,5 @@
 import type { PrismaClient, Run } from "#prisma";
-import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
 
@@ -22,7 +22,7 @@ export async function closeOpenHostCheck(
   try {
     const check = await db.runHostCheck.findUnique({ where: { runId: run.id } });
     if (!check || check.completedAt) return;
-    const host = hosts[check.provider as ReviewHostProvider];
+    const host = hosts[check.provider];
     if (!host) return;
     const outOfBudget = run.status === "refused" || run.status === "budget_exhausted";
     await host.completeCheck(check.repository, {

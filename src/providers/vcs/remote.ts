@@ -1,5 +1,15 @@
 import type { DescriptionWriteOutcome, FinalizeChangesDetails, PreparedWorkspace, VcsProvider } from "./types.js";
 
+/** Accepts bounded opaque git auth tokens without allowing control characters. */
+export function isSafeGitAuthToken(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 20 &&
+    Buffer.byteLength(value, "utf8") <= 512 &&
+    /^[A-Za-z0-9._-]+$/.test(value)
+  );
+}
+
 /** What a remote needs to publish a pushed commit (GitHub: open or find the draft PR). */
 export interface PublishInput {
   /** The validated workspace whose headRef was just pushed. */
@@ -22,6 +32,8 @@ export type PublishResult =
  * fetch-compare-push) stays in GitVcsProvider and applies to every remote.
  */
 export interface GitRemote {
+  /** The username git sends with the token (GitHub: unset, git-askpass.sh's default). */
+  readonly gitUsername?: string;
   /** Extra `-c` pairs appended after HARDENED_GIT_CONFIG for clone/push/ls-remote (GitHub: none). */
   readonly gitConfig: readonly string[];
   /** Syntactic normalization of a repository id for this remote (GitHub: owner/name; local: local:/abs/path). */

@@ -18,7 +18,7 @@ import {
   type PackageAuditMode,
   type PackageAuditSummary,
 } from "../coding/registry/audit-mode.js";
-import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
+import { codeProviderOf } from "../coding/code-host.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
   SERVICE_UNREADY_CATEGORY,
@@ -144,7 +144,7 @@ export function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
     outcome: r.outcome,
     repository: r.repository,
     pullRequestNumber: r.pullRequestNumber,
-    codeProvider: CODING_CODE_PROVIDER,
+    codeProvider: codeProviderOf(r.repository),
     ...(typeof r.pullRequestUrl === "string" ? { pullRequestUrl: r.pullRequestUrl } : {}),
     ...failedCheckCount(r.tests),
   };
@@ -608,7 +608,7 @@ export async function completeHostStatus(
     const status = await db.runHostStatus.findUnique({ where: { runId: run.id } });
     if (!status || status.completedAt) return;
     if (!status.commentId && !opts.postIfMissing) return;
-    const host = hosts[status.provider as ReviewHostProvider];
+    const host = hosts[status.provider];
     if (!host) return;
     const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit } =
       await collectRunOutcome(db, run);

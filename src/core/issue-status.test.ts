@@ -86,6 +86,25 @@ function db(
 }
 
 describe("toJiraMarkdown", () => {
+  it("does not make a GitHub link out of a hosted repository", () => {
+    expect(toJiraMarkdown("Opened bitbucket:acme/api#4.")).toBe("Opened bitbucket:acme/api#4.");
+  });
+
+  it.each(["bitbucket:my-team/api#4", "bitbucket:acme.co/api#4", "my-host:acme/api#4"])(
+    "leaves all of the hosted repository %s as written",
+    (reference) => {
+      expect(toJiraMarkdown(`Opened ${reference}.`)).toBe(`Opened ${reference}.`);
+    },
+  );
+
+  it.each([
+    ["Opened o/r#4.", "Opened [o/r#4](https://github.com/o/r/pull/4)."],
+    ["PR:o/r#4", "PR:[o/r#4](https://github.com/o/r/pull/4)"],
+    ["Opened my-team/api#4.", "Opened [my-team/api#4](https://github.com/my-team/api/pull/4)."],
+  ])("links the GitHub reference in %j", (text, linked) => {
+    expect(toJiraMarkdown(text)).toBe(linked);
+  });
+
   it("turns the run footer into italics and PR refs into links", () => {
     expect(toJiraMarkdown("✅ Opened o/r#4.\n\n<sub>wardby run `r1`</sub>")).toBe(
       "✅ Opened [o/r#4](https://github.com/o/r/pull/4).\n\n_wardby run `r1`_",

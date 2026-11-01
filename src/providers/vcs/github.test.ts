@@ -1464,6 +1464,17 @@ describe("related pull requests section", () => {
     expect(block).toContain("- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged");
   });
 
+  it("lists a pull request on another host, without a link it has no way to build", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/app", number: 4, self: true },
+        { repository: "bitbucket:acme/web", number: 2, state: "open" },
+      ],
+    });
+    expect(block).toContain("bitbucket:acme/web#2 — open");
+    expect(block).not.toContain("https://github.com/bitbucket");
+  });
+
   it("renders nothing without another valid pull request", () => {
     expect(renderRelatedSection({ entries: [{ repository: "acme/app", number: 4, self: true }] })).toBeUndefined();
     expect(

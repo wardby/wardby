@@ -23,13 +23,13 @@
  * brings every later follow-up tree that continued one of its pull requests.
  */
 import { Prisma, type PrismaClient, type Run, type RunStatus } from "#prisma";
-import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
+import { codeProviderOf, normalizeHostedRepository, pullRequestWebUrl } from "../coding/code-host.js";
 import {
   issueReference,
   type IssueTrackerProvider,
   type IssueTrackerRegistry,
 } from "../providers/issue-tracker/types.js";
-import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { CodeReviewHost, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { renderRelatedSection, type RelatedPullRequestState } from "../providers/vcs/github.js";
 import { pullRequestOutcome } from "./host-status.js";
 import { logger } from "./logger.js";
@@ -156,7 +156,7 @@ export async function runTreeRoot(
 
 function safeRepository(value: string): string | undefined {
   try {
-    return normalizeGitHubRepository(value);
+    return normalizeHostedRepository(value);
   } catch {
     return undefined;
   }
@@ -281,7 +281,8 @@ export async function collectRelatedPullRequests(
   if (issueFilter.size > 0) {
     const recorded = await db.issuePullRequest.findMany({
       where: {
-        codeProvider: CODING_CODE_PROVIDER,
+        // A local repository has no pull requests to record: everything here is on a code host.
+        codeProvider: { not: "local" },
         OR: [...issueFilter.values()].map((i) => ({ issueProvider: i.provider, issueKey: i.key })),
       },
       select: { repository: true, number: true, createdAt: true, openedByRunId: true, state: true },
@@ -340,6 +341,12 @@ interface LivePullRequest {
   mergeOrder?: number;
 }
 
+type RelatedSectionHost = CodeReviewHost &
+  Required<Pick<CodeReviewHost, "replaceRelatedSection" | "pullRequestOrigin">>;
+
+const canEditRelatedSection = (host: CodeReviewHost | undefined): host is RelatedSectionHost =>
+  host?.replaceRelatedSection !== undefined && host.pullRequestOrigin !== undefined;
+
 function issueFor(
   group: RelatedPullRequestGroup,
   trackers: IssueTrackerRegistry | undefined,
@@ -362,8 +369,12 @@ export async function updateRelatedPullRequests(
   hosts: ReviewHostRegistry | undefined,
   trackers: IssueTrackerRegistry | undefined,
 ): Promise<void> {
-  const host = hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
-  if (!host?.replaceRelatedSection || !host.pullRequestOrigin) return;
+  // A request's pull requests may span hosts: each is read and written through its own.
+  const editorFor = (repository: string): RelatedSectionHost | undefined => {
+    const host = hosts?.[codeProviderOf(repository)];
+    return canEditRelatedSection(host) ? host : undefined;
+  };
+  if (!Object.values(hosts ?? {}).some(canEditRelatedSection)) return;
   try {
     // A run that delegated nothing has no request set of its own.
     if (!(await db.run.findFirst({ where: { parentRunId: run.id }, select: { id: true } }))) return;
@@ -383,6 +394,9 @@ export async function updateRelatedPullRequests(
         continue;
       }
       try {
+        // Reading only needs the read: a host that can't edit the section still reports its pull requests.
+        const host = hosts?.[codeProviderOf(pr.repository)];
+        if (!host?.pullRequestOrigin) throw new Error("no_host_for_repository");
         const origin = await host.pullRequestOrigin(pr.repository, pr.number);
         const state: RelatedPullRequestState = origin.merged
           ? "merged"
@@ -435,6 +449,8 @@ export async function updateRelatedPullRequests(
         ...(issue ? { issue } : {}),
       });
       if (!block) continue;
+      const host = editorFor(target.repository);
+      if (!host) continue;
       try {
         const outcome = await host.replaceRelatedSection(target.repository, target.number, {
           expectedMarkerRunId: target.markerRunId,
@@ -472,7 +488,7 @@ export interface OpenSibling {
   openedByRunId: string;
 }
 
-const HINT_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const HINT_REPOSITORY = /^(?:[a-z][a-z0-9-]{1,30}:)?[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 /**
  * The continuation hint for a ticket (a GitHub or Jira issue) that already has
@@ -491,12 +507,14 @@ export function openPullRequestHints(prs: readonly OpenSibling[]): string {
         p.number > 0,
     )
     .slice(0, MAX_SIBLING_HINTS)
-    .map(
-      (p) =>
-        `This issue already has an open pull request wardby opened: ${p.repository}#${p.number} ` +
-        `(https://github.com/${p.repository}/pull/${p.number}). ` +
-        `To revise it, delegate with continuePriorRun set to exactly "${p.openedByRunId}".`,
-    );
+    .map((p) => {
+      const url = pullRequestWebUrl(codeProviderOf(p.repository), p.repository, p.number);
+      return (
+        `This issue already has an open pull request wardby opened: ${p.repository}#${p.number}` +
+        `${url ? ` (${url})` : ""}. ` +
+        `To revise it, delegate with continuePriorRun set to exactly "${p.openedByRunId}".`
+      );
+    });
   return lines.length > 0 ? [...lines, SIBLING_GUIDANCE].join("\n\n") : "";
 }
 
@@ -549,7 +567,7 @@ export async function openSiblingsForIssue(
 ): Promise<OpenSibling[]> {
   try {
     const newest = await db.issuePullRequest.findMany({
-      where: { issueProvider: issue.provider, issueKey: issue.key, codeProvider: CODING_CODE_PROVIDER },
+      where: { issueProvider: issue.provider, issueKey: issue.key, codeProvider: { not: "local" } },
       orderBy: { createdAt: "desc" },
       take: 1,
       select: { openedByRunId: true },

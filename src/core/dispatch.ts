@@ -1,9 +1,9 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
+import { normalizeHostedRepository } from "../coding/code-host.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingTaskInputSchema,
-  normalizeGitHubRepository,
   normalizeGitRef,
   publicCodingRunResult,
   composeCodingTask,
@@ -420,7 +420,7 @@ export async function checkContinuation(
       })
     : candidate;
   if (!root) return { ok: false, reason: "unknown_run" };
-  if (normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(repository)) {
+  if (normalizeHostedRepository(root.repository) !== normalizeHostedRepository(repository)) {
     return { ok: false, reason: "other_repository" };
   }
   const rootResult = publicCodingRunResult(root.result);

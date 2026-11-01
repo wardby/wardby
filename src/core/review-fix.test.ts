@@ -267,8 +267,22 @@ describe("startReviewFixAfterReview", () => {
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 
-  it("does not start a round for a non-github provider", async () => {
+  it("does not start a round with no host for the provider", async () => {
     const { deps } = setup({ check: { ...CHECK, provider: "bitbucket" } });
+    await startReviewFixAfterReview("run-1", deps);
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("starts a round for a registered host provider", async () => {
+    const { deps, host } = setup({ check: { ...CHECK, provider: "bitbucket", repository: "bitbucket:o/r" } });
+    deps.hosts = { bitbucket: host };
+    await startReviewFixAfterReview("run-1", deps);
+    expect(dispatchRun).toHaveBeenCalled();
+  });
+
+  it("does not start a round on a local repository", async () => {
+    const { deps, host } = setup({ check: { ...CHECK, provider: "local", repository: "local:/srv/o" } });
+    deps.hosts = { local: host };
     await startReviewFixAfterReview("run-1", deps);
     expect(dispatchRun).not.toHaveBeenCalled();
   });

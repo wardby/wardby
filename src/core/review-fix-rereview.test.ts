@@ -144,7 +144,8 @@ function setup(opts: Opts = {}) {
       runHostCheck: { findFirst: findCheck, updateMany: claim },
     } as never,
     executor: {} as never,
-    hosts: { github: host },
+    // A local host too: the "a local repository" row must stop at its guard, not for want of a host.
+    hosts: { github: host, local: host },
     repoAccess,
   } as ReReviewDeps;
   return { deps, host, addLabel, claim, findCheck };
@@ -296,6 +297,7 @@ describe("reReviewAfterNoChangeFix", () => {
     ["a root run that is not the review_fix agent's", { rootAgentId: "someone-else" }],
     ["no review_fix link any more", { fixLink: null }],
     ["no status row on the root", { hostStatus: null }],
+    ["a local repository", { hostStatus: { provider: "local" } }],
     ["a closed PR", { origin: { state: "closed" } }],
     ["a moved head", { origin: { headSha: "f".repeat(40) } }],
     ["a fork", { origin: { isFork: true } }],
@@ -310,6 +312,13 @@ describe("reReviewAfterNoChangeFix", () => {
     expect(startReviews).not.toHaveBeenCalled();
     expect(addLabel).not.toHaveBeenCalled();
     expect(host.comment).not.toHaveBeenCalled();
+  });
+
+  it("re-reviews on a registered host provider", async () => {
+    const { deps, host } = setup({ hostStatus: { provider: "bitbucket" } });
+    deps.hosts = { bitbucket: host };
+    await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).toHaveBeenCalled();
   });
 
   it("never throws", async () => {

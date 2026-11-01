@@ -66,6 +66,14 @@ const result = {
   usage: { tokensIn: 100, tokensOut: 20, costUsd: 0.01 },
 };
 
+describe("hosted repositories", () => {
+  it("still refuses a hosted repository in a coding result (opens in the coding-run PR)", () => {
+    // Starts from a result that parses, so the repository is the only reason for the refusal.
+    expect(CodingRunResultSchema.safeParse(result).success).toBe(true);
+    expect(CodingRunResultSchema.safeParse({ ...result, repository: "bitbucket:acme/api" }).success).toBe(false);
+  });
+});
+
 describe("GitHub repository normalization", () => {
   it("normalizes canonical names and uncredentialed HTTPS URLs", () => {
     expect(normalizeGitHubRepository("OpenAI/Example.git")).toBe("openai/example");

@@ -120,7 +120,7 @@ describe("collectRelatedPullRequests", () => {
     expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual(["acme/app#2", "acme/app#4"]);
     expect(fake.issuePullRequest.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { codeProvider: "github", OR: [{ issueProvider: "github", issueKey: "acme/app#7" }] },
+        where: { codeProvider: { not: "local" }, OR: [{ issueProvider: "github", issueKey: "acme/app#7" }] },
       }),
     );
   });
@@ -397,6 +397,48 @@ describe("updateRelatedPullRequests", () => {
   });
 });
 
+describe("updateRelatedPullRequests across hosts", () => {
+  const rows = [row("c1", opened("acme/api", 1), 1), row("c2", opened("bitbucket:acme/web", 2), 2)];
+  const recorded = { c1: "acme/api", c2: "bitbucket:acme/web" };
+  const origins = {
+    "acme/api#1": { state: "open", markerRunId: "c1" },
+    "bitbucket:acme/web#2": { state: "open", markerRunId: "c2" },
+  };
+
+  it("reads and writes each pull request through its own host", async () => {
+    const github = host(origins);
+    const bitbucket = host(origins);
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, { github, bitbucket }, undefined);
+    expect(github.pullRequestOrigin.mock.calls).toEqual([["acme/api", 1]]);
+    expect(bitbucket.pullRequestOrigin.mock.calls).toEqual([["bitbucket:acme/web", 2]]);
+    expect(github.replaceRelatedSection.mock.calls.map((c) => [c[0], c[1]])).toEqual([["acme/api", 1]]);
+    expect(bitbucket.replaceRelatedSection.mock.calls.map((c) => [c[0], c[1]])).toEqual([["bitbucket:acme/web", 2]]);
+  });
+
+  it("keeps a pull request whose host is missing in the section, unknown and never edited", async () => {
+    const github = host(origins);
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, { github }, undefined);
+    expect(github.pullRequestOrigin.mock.calls).toEqual([["acme/api", 1]]);
+    expect(github.replaceRelatedSection).toHaveBeenCalledTimes(1);
+    const [repository, number, input] = github.replaceRelatedSection.mock.calls[0];
+    expect([repository, number]).toEqual(["acme/api", 1]);
+    expect(input.block).toContain("bitbucket:acme/web#2");
+  });
+
+  it("reads a host that can't edit the section, and edits only the pull request whose host can", async () => {
+    const github = host(origins);
+    const merged = { "bitbucket:acme/web#2": { state: "closed", merged: true, markerRunId: "c2" } };
+    const { replaceRelatedSection: _none, ...bitbucket } = host(merged);
+    const hosts = { github, bitbucket: bitbucket as CodeReviewHost };
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, hosts, undefined);
+    expect(bitbucket.pullRequestOrigin.mock.calls).toEqual([["bitbucket:acme/web", 2]]);
+    expect(github.replaceRelatedSection).toHaveBeenCalledTimes(1);
+    const [repository, number, input] = github.replaceRelatedSection.mock.calls[0];
+    expect([repository, number]).toEqual(["acme/api", 1]);
+    expect(input.block).toMatch(/bitbucket:acme\/web#2.*merged/);
+  });
+});
+
 // A request without a tracked issue: lead opens A#1 and B#2; a mention on A#1 starts follow-up F,
 // which continues A#1 and opens C#3; later a mention on B#2 starts G, which continues B#2 only.
 // The set reached from B (or G) must still include C#3: the collector walks forward to the lead's
@@ -593,5 +635,13 @@ describe("openPullRequestHints", () => {
     const many = openPullRequestHints(Array.from({ length: 12 }, (_, i) => pr(i)));
     expect(many.split("This issue already has").length - 1).toBe(10);
     expect(many.split("Never open a new pull request").length).toBe(2);
+  });
+});
+
+describe("openPullRequestHints on a hosted repository", () => {
+  it("names the pull request without a GitHub link", () => {
+    const text = openPullRequestHints([{ repository: "bitbucket:acme/api", number: 4, openedByRunId: "run1" }]);
+    expect(text).toContain("bitbucket:acme/api#4");
+    expect(text).not.toContain("github.com");
   });
 });

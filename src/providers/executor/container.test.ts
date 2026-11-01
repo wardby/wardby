@@ -4351,6 +4351,7 @@ describe("failure diagnostics", () => {
       "vcs_github_not_configured: set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to run coding agents on GitHub repositories",
       "preflight",
     ],
+    ["vcs_host_provider_not_configured", "preflight"],
   ])("categorizes a post-push %s failure by its prefix, as %s", async (message, category) => {
     // A GitHub API failure after the push used to be reported as
     // "workspace": the category substring-matched "git" in "github_".

@@ -245,3 +245,11 @@ describe("protectedPaths exceptions", () => {
     ).toEqual(["docs/**", "!docs/CODEOWNERS"]);
   });
 });
+
+describe("hosted repositories", () => {
+  it("still refuses a hosted repository", () => {
+    const validProfile = { repository: "OpenAI/Example.git" };
+    expect(CodingProfileSchema.safeParse(validProfile).success).toBe(true);
+    expect(CodingProfileSchema.safeParse({ ...validProfile, repository: "bitbucket:acme/api" }).success).toBe(false);
+  });
+});

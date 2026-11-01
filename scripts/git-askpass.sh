@@ -2,7 +2,7 @@
 
 case "$1" in
   *Username*)
-    printf '%s\n' 'x-access-token'
+    printf '%s\n' "${WARDBY_GIT_USERNAME:-x-access-token}"
     ;;
   *)
     IFS= read -r token <&3

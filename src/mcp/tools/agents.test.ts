@@ -3430,6 +3430,52 @@ describe("coding repository authorization (H5-1/C3-2)", () => {
     await client.close();
   });
 
+  it("update_agent checks a hosted repository against its own provider, never GitHub", async () => {
+    const db = fakeDb([
+      {
+        ...(await seeded().agent.findUnique({ where: { id: "a1" } }))!,
+        kind: "native",
+        codingProfile: {
+          provider: "codex",
+          repository: "bitbucket:acme/api",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: [".github/workflows/**"],
+        },
+      } as never,
+    ]);
+    const { gate, authorizePrincipal } = gateAt("unlinked");
+    const client = await connect(db, gate);
+    const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", kind: "coding" } });
+    expect(result.isError).toBe(true);
+    expect(authorizePrincipal).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "bitbucket", repository: "bitbucket:acme/api" }),
+    );
+    await client.close();
+  });
+
+  it("create_agent refuses a hosted repository before any access check", async () => {
+    const { gate, authorizePrincipal } = gateAt("write");
+    const db = fakeDb();
+    const client = await connect(db, gate);
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "hosted-coder",
+        systemPrompt: "Make the change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { repository: "bitbucket:acme/api" },
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    expect((await db.agent.findMany({})).length).toBe(0);
+    await client.close();
+  });
+
   it("create_agent refuses a caller without a linked account or with only read or triage", async () => {
     for (const level of ["unlinked", "read", "triage"] as const) {
       const db = fakeDb();

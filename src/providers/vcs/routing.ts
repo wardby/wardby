@@ -1,5 +1,6 @@
+import { codeProviderOf } from "../../coding/code-host.js";
 import { LocalRepoError, isLocalRepository } from "../../coding/local-repo.js";
-import type { RepositoryFileInput } from "./github.js";
+import type { RepositoryFileInput } from "./types.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -16,19 +17,26 @@ import type {
 export const VCS_GITHUB_NOT_CONFIGURED_ERROR =
   "vcs_github_not_configured: set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to run coding agents on GitHub repositories";
 
+/** Keeps a stable code prefix for error matching. The provider name comes from a validated repository id. */
+export const VCS_HOST_PROVIDER_NOT_CONFIGURED_ERROR = "vcs_host_provider_not_configured";
+
 export interface RoutingVcsOptions {
   /** Null when no GitHub App is configured. */
   github: VcsProvider | null;
   /** Null when no local repository roots are configured. */
   local: VcsProvider | null;
+  /** Registered host providers, by name. */
+  hosted?: ReadonlyMap<string, VcsProvider>;
 }
 
 /**
- * One VcsProvider over both repository kinds: `local:/abs/path` goes to the
- * local provider, everything else to GitHub. A kind that is not configured
- * fails only when a repository of that kind is actually used, so a server with
- * only one of the two still starts. The repository name is not re-resolved
- * here: the local provider verifies it against the trusted roots.
+ * One VcsProvider over every repository kind: `local:/abs/path` goes to the
+ * local provider, `<provider>:<workspace>/<repo>` to the registered host
+ * provider of that name, and everything else to GitHub. A kind that is not
+ * configured fails only when a repository of that kind is actually used, so a
+ * server with only some of them still starts. A hosted repository never falls
+ * back to GitHub. The repository name is not re-resolved here: the local
+ * provider verifies it against the trusted roots.
  */
 export class RoutingVcsProvider implements VcsProvider {
   constructor(private readonly options: RoutingVcsOptions) {}
@@ -43,13 +51,21 @@ export class RoutingVcsProvider implements VcsProvider {
       }
       return this.options.local;
     }
+    const provider = codeProviderOf(repository);
+    if (provider !== "github") {
+      const hosted = this.options.hosted?.get(provider);
+      if (!hosted) throw new Error(`${VCS_HOST_PROVIDER_NOT_CONFIGURED_ERROR}: no host provider named ${provider}`);
+      return hosted;
+    }
     if (!this.options.github) throw new Error(VCS_GITHUB_NOT_CONFIGURED_ERROR);
     return this.options.github;
   }
 
   /** The target when configured, else null (best-effort calls that must never throw). */
   private optionalTarget(repository: string): VcsProvider | null {
-    return (isLocalRepository(repository) ? this.options.local : this.options.github) ?? null;
+    if (isLocalRepository(repository)) return this.options.local ?? null;
+    const provider = codeProviderOf(repository);
+    return (provider === "github" ? this.options.github : this.options.hosted?.get(provider)) ?? null;
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
