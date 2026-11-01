@@ -28,8 +28,8 @@ import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
 import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
-import { isSafeGitHubInstallationToken, type RepositoryFileInput } from "./github.js";
-import type { GitRemote } from "./remote.js";
+import type { RepositoryFileInput } from "./github.js";
+import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -48,6 +48,7 @@ export const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
+const SAFE_GIT_USERNAME = /^[A-Za-z0-9._-]{1,64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
 const MERGE_TARGET_REF = "refs/wardby/merge-target";
@@ -85,6 +86,8 @@ const HARDENED_GIT_CONFIG = [
 export interface GitCommandOptions {
   cwd?: string;
   authToken?: string;
+  /** The username git sends with the token (default: git-askpass.sh's GitHub default). Not secret. */
+  authUsername?: string;
   maxOutputBytes?: number;
   /** Non-zero exit codes that still resolve with the output (`merge-tree` exits 1 on conflicts). */
   acceptExitCodes?: readonly number[];
@@ -143,8 +146,11 @@ export class NodeGitCommandRunner implements GitCommandRunner {
   }
 
   async run(args: readonly string[], options: GitCommandOptions = {}): Promise<GitCommandResult> {
-    if (options.authToken !== undefined && !isSafeGitHubInstallationToken(options.authToken)) {
+    if (options.authToken !== undefined && !isSafeGitAuthToken(options.authToken)) {
       throw new Error("git_auth_token_invalid");
+    }
+    if (options.authUsername !== undefined && !SAFE_GIT_USERNAME.test(options.authUsername)) {
+      throw new Error("git_auth_username_invalid");
     }
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
@@ -158,6 +164,7 @@ export class NodeGitCommandRunner implements GitCommandRunner {
       GIT_TERMINAL_PROMPT: "0",
       GCM_INTERACTIVE: "never",
       GIT_ASKPASS: options.authToken ? this.askPassPath : "/bin/false",
+      ...(options.authToken && options.authUsername ? { WARDBY_GIT_USERNAME: options.authUsername } : {}),
       SSH_ASKPASS: "/bin/false",
       GIT_LFS_SKIP_SMUDGE: "1",
       // WARDBY_TEST_SIMULATORS (test only): the simulator's throwaway CA; empty otherwise.
@@ -377,7 +384,10 @@ export class GitVcsProvider implements VcsProvider {
 
     try {
       await this.remote.withAccess(normalized.repository, async (token) => {
-        const auth = token !== undefined ? { authToken: token } : {};
+        const auth =
+          token !== undefined
+            ? { authToken: token, ...(this.remote.gitUsername ? { authUsername: this.remote.gitUsername } : {}) }
+            : {};
         if (this.remote.refNotFoundError) {
           const listed = await this.git.run(
             [
@@ -814,7 +824,7 @@ export class GitVcsProvider implements VcsProvider {
     workspacePath: string,
     cloneBranch: string,
     ref: string,
-    auth: { authToken?: string },
+    auth: { authToken?: string; authUsername?: string },
   ): Promise<boolean> {
     const fetch = (depth: readonly string[], refspec: string) =>
       this.gitForPaths(
@@ -1083,7 +1093,10 @@ export class GitVcsProvider implements VcsProvider {
   private async pushOnce(workspace: PreparedWorkspace, commitSha: string): Promise<void> {
     this.remote.assertPushRef?.(workspace.headRef);
     await this.remote.withAccess(workspace.repository, async (token) => {
-      const auth = token !== undefined ? { authToken: token } : {};
+      const auth =
+        token !== undefined
+          ? { authToken: token, ...(this.remote.gitUsername ? { authUsername: this.remote.gitUsername } : {}) }
+          : {};
       const remote = await this.remoteHead(workspace, auth);
       if (remote === commitSha) return;
       await this.remote.beforePush?.(workspace.repository, workspace.headRef);
@@ -1116,7 +1129,10 @@ export class GitVcsProvider implements VcsProvider {
     });
   }
 
-  private async remoteHead(workspace: PreparedWorkspace, auth: { authToken?: string }): Promise<string | null> {
+  private async remoteHead(
+    workspace: PreparedWorkspace,
+    auth: { authToken?: string; authUsername?: string },
+  ): Promise<string | null> {
     const result = await this.gitFor(
       workspace,
       [...this.remote.gitConfig, "ls-remote", "--heads", "origin", `refs/heads/${workspace.headRef}`],

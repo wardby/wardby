@@ -10,6 +10,7 @@ import {
   summarizePackageAudit,
   type PackageAuditReport,
 } from "../../coding/registry/audit-mode.js";
+import { isSafeGitAuthToken } from "./remote.js";
 import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import {
   DEPENDENCY_CACHE_PATH,
@@ -326,16 +327,6 @@ function positiveInteger(value: unknown): number {
 function safeApiError(response: Response): Error {
   const requestId = response.headers.get("x-github-request-id");
   return new Error(`github_api_error:${response.status}${requestId ? `:${requestId}` : ""}`);
-}
-
-/** Accepts bounded opaque installation tokens without allowing control characters. */
-export function isSafeGitHubInstallationToken(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length >= 20 &&
-    Buffer.byteLength(value, "utf8") <= 512 &&
-    /^[A-Za-z0-9._-]+$/.test(value)
-  );
 }
 
 /**
@@ -1619,7 +1610,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       ([permissionName, level]) => grantedPermissions[permissionName] === level,
     );
     if (
-      !isSafeGitHubInstallationToken(payload.token) ||
+      !isSafeGitAuthToken(payload.token) ||
       !Number.isFinite(expiresAt) ||
       expiresAt <= this.now().getTime() + 60_000 ||
       !requestedGranted ||

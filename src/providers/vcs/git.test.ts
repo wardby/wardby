@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { logger } from "../../core/logger.js";
@@ -1307,5 +1309,87 @@ describe("redactGitOutput with a self-overlapping value", () => {
 
   it("still redacts a value shorter than the sandbox redactor's minimum", () => {
     expect(redactGitOutput("x abcd y", ["abcd"]) === "x [REDACTED] y").toBe(true);
+  });
+});
+
+describe("git-askpass.sh", () => {
+  const askpass = fileURLToPath(new URL("../../../scripts/git-askpass.sh", import.meta.url));
+  const username = (env: NodeJS.ProcessEnv) =>
+    execFileSync("/bin/sh", [askpass, "Username for 'https://example.test': "], { env, encoding: "utf8" });
+
+  it("defaults to GitHub's username", () => {
+    expect(username({ PATH: "/usr/bin:/bin" })).toBe("x-access-token\n");
+  });
+
+  it("uses the remote's username when set", () => {
+    expect(username({ PATH: "/usr/bin:/bin", WARDBY_GIT_USERNAME: "x-token-auth" })).toBe("x-token-auth\n");
+  });
+});
+
+describe("NodeGitCommandRunner authUsername", () => {
+  const fakeToken = "fake_token_value_0123456789";
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  async function fakeGit(body: string[]): Promise<{ root: string; executable: string }> {
+    const root = await mkdtemp(join(tmpdir(), "wardby-git-username-"));
+    roots.push(root);
+    const executable = resolve(root, "fake-git.mjs");
+    await writeFile(
+      executable,
+      [`#!${process.execPath}`, "import { readFileSync } from 'node:fs';", ...body].join("\n"),
+    );
+    await chmod(executable, 0o700);
+    return { root, executable };
+  }
+
+  it("refuses an unsafe username before running git", async () => {
+    const runner = new NodeGitCommandRunner({ homeDir: tmpdir() });
+    await expect(runner.run(["version"], { authToken: "a".repeat(20), authUsername: "bad name\n" })).rejects.toThrow(
+      "git_auth_username_invalid",
+    );
+  });
+
+  it("puts only the username in the environment, never the token", async () => {
+    const { root, executable } = await fakeGit([
+      "console.log(JSON.stringify({ username: process.env.WARDBY_GIT_USERNAME ?? null, env: JSON.stringify(process.env), fd3: readFileSync(3, 'utf8').trim() }));",
+    ]);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root });
+    const withName = JSON.parse(
+      (await runner.run(["status"], { authToken: fakeToken, authUsername: "x-token-auth" })).stdout,
+    ) as { username: string | null; env: string; fd3: string };
+    expect(withName.username).toBe("x-token-auth");
+    expect(withName.env).not.toContain(fakeToken);
+    expect(withName.fd3).toBe(fakeToken);
+    const without = JSON.parse((await runner.run(["status"], { authToken: fakeToken })).stdout) as {
+      username: string | null;
+    };
+    expect(without.username).toBeNull();
+    // A username without a token is ignored: no credential flow, no variable.
+    const noToken = await fakeGit(["console.log(String(process.env.WARDBY_GIT_USERNAME ?? null));"]);
+    const bare = new NodeGitCommandRunner({ gitBinary: noToken.executable, homeDir: noToken.root });
+    expect((await bare.run(["status"], { authUsername: "x-token-auth" })).stdout.trim()).toBe("null");
+  });
+
+  it("keeps a fake token out of git's output when the command fails", async () => {
+    // The fake git prints the token it reads from fd 3 and the whole environment,
+    // so the failure path really carries the token and only redaction hides it.
+    const { root, executable } = await fakeGit([
+      "console.error('token=' + readFileSync(3, 'utf8').trim() + ' env=' + JSON.stringify(process.env));",
+      "process.exit(2);",
+    ]);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root });
+    const error = await runner
+      .run(["ls-remote", "origin", fakeToken], { authToken: fakeToken, authUsername: "x-token-auth" })
+      .then(
+        () => null,
+        (err: unknown) => err,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("token=[REDACTED]");
+    expect(String(error)).toContain("x-token-auth");
+    expect(String(error)).not.toContain(fakeToken);
   });
 });
