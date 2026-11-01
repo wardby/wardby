@@ -2,6 +2,8 @@ import { z } from "zod";
 import { isAbsolute, resolve } from "node:path";
 
 export const CODING_PROTOCOL_VERSION = 1 as const;
+/** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
+export const CODING_CODE_PROVIDER = "github";
 /** result.json and the agent output file: room for a full summary and test list, JSON-escaped. */
 export const MAX_CODING_ARTIFACT_BYTES = 256 * 1024;
 /** The worker input artifact (input.json): larger than results because it can carry Claude Code repo context. */
