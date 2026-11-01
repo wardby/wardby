@@ -195,6 +195,8 @@ model Tool {
   ownerId String?
   owner   Principal? @relation(fields: [ownerId], references: [id])
 
+  hostProviderOperations HostProviderOperation[]
+
   @@unique([ownerId, name])
 }
 
@@ -1211,6 +1213,10 @@ model Secret {
   updatedAt  DateTime      @updatedAt
   agents     AgentSecret[]
 
+  hostProviderWebhooks    HostProvider[]           @relation("HostProviderWebhookSecret")
+  hostProviderPermissions HostProvider[]           @relation("HostProviderPermissionSecret")
+  hostProviderCredentials HostProviderCredential[] @relation("HostProviderCredentialSecret")
+
   @@unique([ownerId, name])
 }
 
@@ -1952,4 +1958,76 @@ model NotificationThread {
   updatedAt DateTime @updatedAt
 
   @@unique([provider, channelId, threadKey])
+}
+
+/// A code host implemented by operator-approved custom tools (docs/host-providers.md).
+/// `name` is the prefix of its repository ids: `<name>:<workspace>/<repo>`. Holds no secret values.
+model HostProvider {
+  name                   String   @id
+  contractVersion        Int
+  gitHost                String
+  apiHosts               String[]
+  gitUsername            String
+  pullRequestUrlTemplate String
+  /// Where one repository lives on the API, with `{repository}`: a repository-scoped tool's requests stay under it.
+  repositoryApiPath      String
+  /// The effective-permission endpoint, with `{workspace}` and `{repo}`. Set with a permission secret.
+  permissionApiPath      String?
+  /// How to verify and read a webhook: header names and algorithm, never the secret.
+  webhook                Json
+  webhookSecretId        String
+  webhookSecret          Secret   @relation("HostProviderWebhookSecret", fields: [webhookSecretId], references: [id], onDelete: Restrict)
+  /// Set: ask the host who has access. Unset: trustedAccounts decides.
+  permissionSecretId     String?
+  permissionSecret       Secret?  @relation("HostProviderPermissionSecret", fields: [permissionSecretId], references: [id], onDelete: Restrict)
+  createdById            String
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  operations      HostProviderOperation[]
+  credentials     HostProviderCredential[]
+  trustedAccounts HostProviderTrustedAccount[]
+}
+
+/// One approved snapshot: the code Wardby runs. `update_tool` changes nothing here until approved again.
+model HostProviderOperation {
+  provider     String
+  operation    String
+  /// The tool it was copied from. Null once that tool is deleted; the snapshot keeps working.
+  toolId       String?
+  code         String
+  paramsZod    String
+  approvedById String
+  approvedAt   DateTime @default(now())
+
+  hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
+  tool         Tool?        @relation(fields: [toolId], references: [id], onDelete: SetNull)
+
+  @@id([provider, operation])
+}
+
+/// Which brokered secret serves which repositories. `credentialKind` is `static` only in v1.
+model HostProviderCredential {
+  id                String @id @default(cuid())
+  provider          String
+  repositoryPattern String
+  secretId          String
+  credentialKind    String @default("static")
+
+  hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
+  secret       Secret       @relation("HostProviderCredentialSecret", fields: [secretId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, repositoryPattern])
+}
+
+/// Host accounts allowed to start runs when the provider has no permission secret.
+model HostProviderTrustedAccount {
+  provider  String
+  accountId String
+  addedById String
+  addedAt   DateTime @default(now())
+
+  hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
+
+  @@id([provider, accountId])
 }
