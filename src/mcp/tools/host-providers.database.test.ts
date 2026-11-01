@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import type { Principal } from "#prisma";
@@ -584,5 +584,63 @@ describe("host provider tools", () => {
     expect(result.text).toContain("webhook secret");
     expect(result.text).not.toContain(WEBHOOK);
     expect(await db.agentSecret.count({ where: { agentId: a.id } })).toBe(0);
+  });
+
+  it("test_host_provider needs hosts:admin, and a role that grants it", async () => {
+    const p = await principal();
+    const input = { provider: "nope", repository: "nope:acme/web" };
+    const noRole = await (await connect(p, { roles: [] })).call("test_host_provider", input);
+    expect(noRole.isError).toBe(true);
+    expect(noRole.text).toContain("host-manager");
+    const noScope = await (await connect(p, { scopes: ["tools:write"] })).call("test_host_provider", input);
+    expect(noScope.isError).toBe(true);
+  });
+
+  it("test_host_provider returns 404 for an unknown provider", async () => {
+    const p = await principal();
+    const result = await (
+      await connect(p)
+    ).call("test_host_provider", {
+      provider: "nope",
+      repository: "nope:acme/web",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("not found");
+  });
+
+  it("test_host_provider refuses another provider's repository, and sends nothing", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    const name = newName();
+    const { call } = await connect(p);
+    await call("register_host_provider", args(name, tools));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      for (const repository of ["other:acme/web", "acme/web", "not a repository"]) {
+        const result = await call("test_host_provider", { provider: name, repository });
+        expect(result.isError, repository).toBe(true);
+        expect(result.text).toContain(`repository must be ${name}:<workspace>/<repo>`);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("test_host_provider reports fixed codes, with no token or webhook secret", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    await db.tool.updateMany({ where: { ownerId: p.id }, data: { code: 'return { error: "not_found" };' } });
+    const name = newName();
+    const { call } = await connect(p);
+    await call("register_host_provider", args(name, tools));
+
+    const result = await call("test_host_provider", { provider: name, repository: `${name}:acme/web`, pullRequest: 4 });
+    expect(result.isError).toBe(false);
+    expect(result.text).not.toContain(TOKEN);
+    expect(result.text).not.toContain(WEBHOOK);
+    const report = JSON.parse(result.text);
+    expect(report).toMatchObject({ provider: name, repository: `${name}:acme/web`, mode: "allowlist" });
+    expect(report.results).toContainEqual({ operation: "getPullRequest", outcome: "fail", code: "host_not_found" });
   });
 });

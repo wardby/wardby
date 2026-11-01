@@ -5,6 +5,7 @@
  * they run in the push and pull request flow. Results carry secret names, never values.
  */
 import { z } from "zod";
+import { codeProviderOf, normalizeHostedRepository } from "../../coding/code-host.js";
 import { logger } from "../../core/logger.js";
 import {
   approveHostProviderTools,
@@ -14,6 +15,7 @@ import {
   registerHostProvider,
   RegisterHostProviderSchema,
 } from "../../providers/host-tools/registry.js";
+import { hostToolFetch, loadProviderForCalls, selfTestHostProvider } from "../../providers/host-tools/self-test.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -50,6 +52,19 @@ const ApproveSchema = z
   .object({ provider: z.string().min(1).max(40), tools: z.array(z.string().min(1).max(100)).min(1) })
   .strict();
 const GetSchema = z.object({ provider: z.string().min(1).max(40), includeCode: z.boolean().optional() }).strict();
+const TestSchema = z
+  .object({
+    provider: z.string().min(1).max(40),
+    repository: z.string().min(1).max(300),
+    pullRequest: z.number().int().positive().optional(),
+    headRef: z.string().min(1).max(255).optional(),
+    ref: z.string().min(1).max(255).optional(),
+    accountId: z
+      .string()
+      .regex(/^[A-Za-z0-9:{}_-]{1,128}$/)
+      .optional(),
+  })
+  .strict();
 const DeleteSchema = z.object({ provider: z.string().min(1).max(40) }).strict();
 
 export function registerHostProviderTools(mcp: WardbyMcpServer): void {
@@ -185,6 +200,39 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
       await mapped(() => deleteHostProvider(ctx.db, provider));
       audit(ctx, "delete", provider);
       return textResult({ deleted: provider });
+    },
+  });
+
+  mcp.registerTool({
+    name: "test_host_provider",
+    scope: "hosts:admin",
+    description:
+      "Host managers (hosts:admin): run each approved read-only tool against one repository, with its real credential, and report pass, fail or skipped with a fixed code per operation. Changes nothing on the host: write operations are skipped, and a read-only tool can only send GET. Name a pullRequest, headRef and accountId to reach the checks that need them. The report holds no response data, so it can be shared.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["provider", "repository"],
+      properties: {
+        provider: { type: "string" },
+        repository: { type: "string", description: "<provider>:<workspace>/<repo>" },
+        pullRequest: { type: "integer", minimum: 1 },
+        headRef: { type: "string", description: "A branch with an open pull request." },
+        ref: { type: "string", description: "A commit or branch. Defaults to the pull request's head." },
+        accountId: { type: "string", description: "A host account to look up, in permission mode." },
+      },
+    },
+    handler: async (rawArgs: unknown, ctx) => {
+      const { provider, ...input } = parse(TestSchema, "test_host_provider arguments", rawArgs);
+      const loaded = await loadProviderForCalls(ctx.db, provider);
+      if (!loaded) throw new McpError(404, `Host provider "${provider}" not found.`);
+      try {
+        if (codeProviderOf(normalizeHostedRepository(input.repository)) !== provider) throw new Error("mismatch");
+      } catch {
+        throw new McpError(400, `repository must be ${provider}:<workspace>/<repo>`);
+      }
+      const report = await selfTestHostProvider(loaded, ctx.providers.secrets, input, hostToolFetch());
+      audit(ctx, "test", provider, { repository: report.repository });
+      return textResult(report);
     },
   });
 }
