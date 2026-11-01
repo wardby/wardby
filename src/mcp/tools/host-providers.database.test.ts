@@ -406,6 +406,64 @@ describe("host provider tools", () => {
       );
     });
 
+    it("a webhook secret that is another provider's credential", async () => {
+      const p = await principal();
+      const { tools } = await seed(p);
+      const first = newName();
+      expect((await (await connect(p)).call("register_host_provider", args(first, tools))).isError).toBe(false);
+      await secret(p, "other-token", "fake-other-token-0123456789", BROKER);
+      await secret(p, "other-hook", "fake-other-hook-0123456789");
+      const name = newName();
+      // "repo-token" is the first provider's credential; the second tries it as its webhook secret.
+      await refused(
+        p,
+        name,
+        {
+          ...args(name, tools),
+          webhook: { ...args(name, tools).webhook, secret: "repo-token" },
+          credentials: [{ repositories: "acme/*", secret: "other-token" }],
+        },
+        "host_provider_webhook_secret_shared",
+      );
+    });
+
+    it("a credential that is another provider's webhook secret", async () => {
+      const p = await principal();
+      const { tools } = await seed(p);
+      await secret(p, "brokered-hook", "fake-brokered-hook-0123456789", BROKER);
+      const first = newName();
+      const ok = await (
+        await connect(p)
+      ).call("register_host_provider", {
+        ...args(first, tools),
+        webhook: { ...args(first, tools).webhook, secret: "brokered-hook" },
+      });
+      expect(ok.isError).toBe(false);
+      const name = newName();
+      await refused(
+        p,
+        name,
+        { ...args(name, tools), credentials: [{ repositories: "acme/*", secret: "brokered-hook" }] },
+        "host_provider_webhook_secret_shared",
+      );
+    });
+
+    it("a permission secret that is also a credential", async () => {
+      const p = await principal();
+      const { tools } = await seed(p);
+      const name = newName();
+      await refused(
+        p,
+        name,
+        {
+          ...args(name, { ...tools, getRepositoryPermission: tools[REQUIRED_OPERATIONS[0]] }),
+          permissionCredential: "repo-token",
+          permissionApiPath: "/2.0/workspaces/{workspace}/permissions/repositories/{repo}",
+        },
+        "host_provider_permission_secret_shared",
+      );
+    });
+
     it("a webhook secret of 15 characters", async () => {
       const p = await principal();
       const { tools } = await seed(p);

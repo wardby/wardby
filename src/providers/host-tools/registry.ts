@@ -22,6 +22,7 @@ export type HostProviderErrorCode =
   | "host_provider_secret_placement"
   | "host_provider_webhook_secret_shared"
   | "host_provider_webhook_secret_short"
+  | "host_provider_permission_secret_shared"
   | "host_provider_username_is_secret"
   | "host_provider_in_use"
   | "host_provider_operation_not_bound"
@@ -250,16 +251,36 @@ export async function registerHostProvider(
         const secret = await requireSecret(tx, principalId, input.permissionCredential);
         requireBroker(input.permissionCredential, secret.broker, input.apiHosts);
         permissionSecretId = secret.id;
+        if (credentials.some((c) => c.secretId === secret.id)) {
+          throw new HostProviderError(
+            "host_provider_permission_secret_shared",
+            "the permission secret must not also be a credential, so no other operation can reach it",
+          );
+        }
       }
       const webhookSecret = await requireSecret(tx, principalId, input.webhook.secret);
       if (
         credentials.some((c) => c.secretId === webhookSecret.id) ||
         permissionSecretId === webhookSecret.id ||
-        (await tx.agentSecret.count({ where: { secretId: webhookSecret.id } })) > 0
+        (await tx.agentSecret.count({ where: { secretId: webhookSecret.id } })) > 0 ||
+        (await tx.hostProviderCredential.count({
+          where: { secretId: webhookSecret.id, provider: { not: input.provider } },
+        })) > 0 ||
+        (await tx.hostProvider.count({
+          where: { permissionSecretId: webhookSecret.id, name: { not: input.provider } },
+        })) > 0 ||
+        (await tx.hostProvider.count({
+          where: {
+            webhookSecretId: {
+              in: [...credentials.map((c) => c.secretId), ...(permissionSecretId ? [permissionSecretId] : [])],
+            },
+            name: { not: input.provider },
+          },
+        })) > 0
       ) {
         throw new HostProviderError(
           "host_provider_webhook_secret_shared",
-          "the webhook secret must not be a credential or attached to an agent, so no tool can read it",
+          "the webhook secret must not be shared with any other provider's credentials or attached to an agent, so no tool can read it",
         );
       }
       if ((await cipher.decrypt(webhookSecret.ciphertext)).length < MIN_WEBHOOK_SECRET_LENGTH) {
