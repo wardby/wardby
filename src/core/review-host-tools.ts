@@ -26,6 +26,7 @@ import {
 } from "../providers/review-host/types.js";
 import type { RelatedPullRequestState } from "../providers/vcs/github.js";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
+import { codeProviderOf, normalizeHostedRepository } from "../coding/code-host.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
 import type { ReviewReadLedger } from "./review-reads.js";
@@ -317,10 +318,11 @@ function normalizeFor(provider: ReviewHostProvider, value: string): string | nul
   try {
     if (provider === "github") return normalizeGitHubRepository(value);
     if (provider === "local") return normalizeLocalRepository(value);
+    const repository = normalizeHostedRepository(value);
+    return codeProviderOf(repository) === provider ? repository : null;
   } catch {
     return null;
   }
-  return null;
 }
 
 export function resolveLink(
