@@ -54,26 +54,27 @@ access tokens for that audience.
 
 Create these scopes in the provider:
 
-| Scope                 | Capability                                                         |
-| --------------------- | ------------------------------------------------------------------ |
-| `agents:read`         | Inspect agents, models, runs, memory, and attached resources.      |
-| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships.  |
-| `runs:trigger`        | Start agent runs.                                                  |
-| `tools:write`         | Create, attach, and manage tools.                                  |
-| `datastore:write`     | Create, attach, query, and modify datastores.                      |
-| `secrets:write`       | Create, attach, rotate, and remove secret bindings.                |
-| `webhooks:write`      | Create and manage webhook triggers.                                |
-| `budget_groups:write` | Create and manage shared budget groups.                            |
-| `packages:approve`    | Approve coding agents' package allowlists.                         |
-| `services:manage`     | Create, update and delete coding-run service catalog entries.      |
-| `agents:admin`        | Reassign agent ownership, BYO worker images; admins only.          |
-| `memory:write`        | Set and delete agent memory entries.                               |
-| `admin:view`          | Read every owner's runs through the admin viewer API; admins only. |
-| `models:admin`        | Add, override, disable and reset model catalog entries.            |
-| `power:manage`        | Read low-power state and sleep the proxy/gateway now; admins only. |
+| Scope                 | Capability                                                                      |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `agents:read`         | Inspect agents, models, runs, memory, and attached resources.                   |
+| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships.               |
+| `runs:trigger`        | Start agent runs.                                                               |
+| `tools:write`         | Create, attach, and manage tools.                                               |
+| `datastore:write`     | Create, attach, query, and modify datastores.                                   |
+| `secrets:write`       | Create, attach, rotate, and remove secret bindings.                             |
+| `webhooks:write`      | Create and manage webhook triggers.                                             |
+| `budget_groups:write` | Create and manage shared budget groups.                                         |
+| `packages:approve`    | Approve coding agents' package allowlists.                                      |
+| `services:manage`     | Create, update and delete coding-run service catalog entries.                   |
+| `agents:admin`        | Reassign agent ownership, BYO worker images; admins only.                       |
+| `memory:write`        | Set and delete agent memory entries.                                            |
+| `admin:view`          | Read every owner's runs through the admin viewer API; admins only.              |
+| `models:admin`        | Add, override, disable and reset model catalog entries.                         |
+| `power:manage`        | Read low-power state and sleep the proxy/gateway now; admins only.              |
+| `hosts:admin`         | Register host providers and approve their tools; admins and host managers only. |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
-may request every advertised scope. Define all fifteen in the provider even when
+may request every advertised scope. Define all sixteen in the provider even when
 policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
@@ -97,17 +98,22 @@ every advertised scope fail with `invalid_scope`.
 deployment, define it in the provider too and map it like `agents:admin`;
 otherwise clients that request every advertised scope fail with `invalid_scope`.
 
+`hosts:admin` was added after `power:manage`. When you upgrade an existing
+deployment, define it in the provider too and map it like `agents:admin`;
+otherwise clients that request every advertised scope fail with `invalid_scope`.
+
 ### Wardby roles
 
 A scope only delegates. `agents:admin`, `packages:approve`, `services:manage`,
-`admin:view`, `models:admin` and `power:manage` take effect only for a caller who also holds a Wardby role that grants them:
+`admin:view`, `models:admin`, `power:manage` and `hosts:admin` take effect only for a caller who also holds a Wardby role that grants them:
 
-| Wardby role        | Grants                                                                                                                                                                                                                                                                                                                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`), `packages:approve`, `services:manage`, `admin:view` (read every owner's runs, see [viewer-api.md](viewer-api.md)), `models:admin` (model catalog) and `power:manage` (`power_status`, `power_sleep`; see [getting-started-gke.md](getting-started-gke.md#low-power-mode)) |
-| `package-approver` | `packages:approve` (package allowlist and policy approval)                                                                                                                                                                                                                                                                     |
-| `service-manager`  | `services:manage` (coding-run service catalog changes)                                                                                                                                                                                                                                                                         |
-| `model-manager`    | `models:admin` (model catalog changes: `set_model`, `disable_model`, `reset_model`; see [models.md](models.md))                                                                                                                                                                                                                |
+| Wardby role        | Grants                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`), `packages:approve`, `services:manage`, `admin:view` (read every owner's runs, see [viewer-api.md](viewer-api.md)), `models:admin` (model catalog), `hosts:admin` (host providers) and `power:manage` (`power_status`, `power_sleep`; see [getting-started-gke.md](getting-started-gke.md#low-power-mode)) |
+| `package-approver` | `packages:approve` (package allowlist and policy approval)                                                                                                                                                                                                                                                                                                     |
+| `service-manager`  | `services:manage` (coding-run service catalog changes)                                                                                                                                                                                                                                                                                                         |
+| `model-manager`    | `models:admin` (model catalog changes: `set_model`, `disable_model`, `reset_model`; see [models.md](models.md))                                                                                                                                                                                                                                                |
+| `host-manager`     | `hosts:admin` (`register_host_provider`, `approve_host_provider_tools`, `test_host_provider`; see [host-providers.md](host-providers.md))                                                                                                                                                                                                                      |
 
 The roles come from a claim in the caller's **access token**, which you map to
 Wardby roles:
@@ -162,16 +168,16 @@ their next token.
 
 Provider examples:
 
-- **Okta** (custom authorization server): create four groups, `wardby-admin`,
-  `wardby-packages`, `wardby-services` and `wardby-models`. Add a `groups` claim
+- **Okta** (custom authorization server): create five groups, `wardby-admin`,
+  `wardby-packages`, `wardby-services`, `wardby-models` and `wardby-hosts`. Add a `groups` claim
   to the access token, filtered to those groups. Set `AUTH_ROLE_CLAIM=groups` and
-  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager`.
+  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager`.
   Optionally, add access policy rules so only those groups can obtain
-  `agents:admin`, `packages:approve`, `services:manage`, `admin:view`, `models:admin` and `power:manage`.
-- **FusionAuth:** create four application roles, `admin`,
-  `package-approver`, `service-manager` and `model-manager`. They appear in the
+  `agents:admin`, `packages:approve`, `services:manage`, `admin:view`, `models:admin`, `power:manage` and `hosts:admin`.
+- **FusionAuth:** create five application roles, `admin`,
+  `package-approver`, `service-manager`, `model-manager` and `host-manager`. They appear in the
   access token's top-level `roles` claim. Set `AUTH_ROLE_CLAIM=roles` and
-  `AUTH_ROLE_MAP=admin=admin,package-approver=package-approver,service-manager=service-manager,model-manager=model-manager`.
+  `AUTH_ROLE_MAP=admin=admin,package-approver=package-approver,service-manager=service-manager,model-manager=model-manager,host-manager=host-manager`.
 - **Keycloak:** create realm roles such as `wardby-admin`, `wardby-packages`,
   `wardby-services` and `wardby-models`. Realm roles appear under
   `realm_access.roles`. Set `AUTH_ROLE_CLAIM=realm_access.roles` and
@@ -272,7 +278,7 @@ Confirm that:
 
 - `resource` is the canonical MCP URI;
 - `authorization_servers` contains the external issuer; and
-- `scopes_supported` contains all fifteen Wardby scopes.
+- `scopes_supported` contains all sixteen Wardby scopes.
 
 An unauthenticated MCP request must return `401` with a `WWW-Authenticate`
 challenge pointing back to that metadata document.

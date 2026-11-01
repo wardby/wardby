@@ -67,10 +67,11 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly admin:view, agents:admin, packages:approve, services:manage, models:admin and power:manage as privileged", () => {
+  it("treats exactly admin:view, agents:admin, packages:approve, services:manage, models:admin, power:manage and hosts:admin as privileged", () => {
     expect([...PRIVILEGED_SCOPES].sort()).toEqual([
       "admin:view",
       "agents:admin",
+      "hosts:admin",
       "models:admin",
       "packages:approve",
       "power:manage",
@@ -80,10 +81,17 @@ describe("supported scopes", () => {
   });
 
   it("built-in roles: admin grants every permission, package-approver, service-manager and model-manager one each", () => {
-    expect([...ROLE_NAMES].sort()).toEqual(["admin", "model-manager", "package-approver", "service-manager"]);
+    expect([...ROLE_NAMES].sort()).toEqual([
+      "admin",
+      "host-manager",
+      "model-manager",
+      "package-approver",
+      "service-manager",
+    ]);
     expect([...ROLE_PERMISSIONS.admin].sort()).toEqual([
       "admin:view",
       "agents:admin",
+      "hosts:admin",
       "models:admin",
       "packages:approve",
       "power:manage",
@@ -195,6 +203,14 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(permissionsOf(["admin"]).has("models:admin")).toBe(true);
     expect(permissionsOf(["model-manager"])).toEqual(new Set(["models:admin"]));
     expect(permissionsOf(["service-manager"]).has("models:admin")).toBe(false);
+  });
+
+  it("grants hosts:admin to admin and host-manager only, and treats it as privileged", () => {
+    expect(PRIVILEGED_SCOPES).toContain("hosts:admin");
+    expect(SCOPES_SUPPORTED).toContain("hosts:admin");
+    expect(permissionsOf(["admin"]).has("hosts:admin")).toBe(true);
+    expect(permissionsOf(["host-manager"])).toEqual(new Set(["hosts:admin"]));
+    expect(permissionsOf(["model-manager"]).has("hosts:admin")).toBe(false);
   });
 });
 

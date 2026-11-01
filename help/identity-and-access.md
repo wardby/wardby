@@ -31,6 +31,8 @@ models. Six sensitive permissions have an additional role requirement:
 - `models:admin` requires the `admin` or `model-manager` role. It adds,
   overrides, disables, and resets model catalog entries; see
   [Models and pricing](models.md).
+- `hosts:admin` requires the `admin` or `host-manager` role. It registers host
+  providers and approves their tools.
 - `power:manage` requires the `admin` role. It reads low-power state and
   sleeps the coding proxy and native gateway now (`power_status`,
   `power_sleep`); see

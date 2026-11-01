@@ -79,13 +79,14 @@ Scopes and roles do different jobs:
 - **Roles authorize.** A user has a set of roles. With no roles, the user is a
   member:
 
-| Role               | Grants                                                                                                 |
-| ------------------ | ------------------------------------------------------------------------------------------------------ |
-| `admin`            | `agents:admin`, `packages:approve`, `services:manage`, `admin:view`, `models:admin` and `power:manage` |
-| `package-approver` | `packages:approve`                                                                                     |
-| `service-manager`  | `services:manage`                                                                                      |
-| `model-manager`    | `models:admin`                                                                                         |
-| (none)             | nothing privileged; every other scope works as the token allows                                        |
+| Role               | Grants                                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `admin`            | `agents:admin`, `packages:approve`, `services:manage`, `admin:view`, `models:admin`, `power:manage` and `hosts:admin` |
+| `package-approver` | `packages:approve`                                                                                                    |
+| `service-manager`  | `services:manage`                                                                                                     |
+| `model-manager`    | `models:admin`                                                                                                        |
+| `host-manager`     | `hosts:admin`                                                                                                         |
+| (none)             | nothing privileged; every other scope works as the token allows                                                       |
 
 Eight operations are privileged:
 

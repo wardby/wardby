@@ -34,7 +34,7 @@ AUDIENCE=${AUDIENCE:-http://127.0.0.1:8099/}
 # scopes_supported from the protected-resource metadata and asks for the lot,
 # and Keycloak rejects the whole authorization request with invalid_scope if
 # even one is unknown.
-ALL_SCOPES=${ALL_SCOPES:-"agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin packages:approve memory:write services:manage admin:view models:admin power:manage"}
+ALL_SCOPES=${ALL_SCOPES:-"agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin packages:approve memory:write services:manage admin:view models:admin power:manage hosts:admin"}
 # wardby roles come from a signed access-token claim, never from a scope:
 # realm roles, which Keycloak emits under realm_access.roles, mapped through
 # AUTH_ROLE_MAP (wardby-admin=admin, wardby-packages=package-approver).

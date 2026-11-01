@@ -72,7 +72,7 @@ scopes so they are always present; a real deployment may prefer optional
 scopes and explicit requests.
 
 **A privileged scope isn't enough on its own.** Wardby honours `agents:admin`,
-`packages:approve`, `services:manage`, `admin:view`, `models:admin` and `power:manage` only
+`packages:approve`, `services:manage`, `admin:view`, `models:admin`, `power:manage` and `hosts:admin` only
 when the access token's role claim, mapped through `AUTH_ROLE_MAP`, gives the
 caller a Wardby role that grants them:
 
