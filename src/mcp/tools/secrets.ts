@@ -11,13 +11,16 @@ import {
   attachSecret,
   detachSecret,
   deleteSecret,
+  hostProvidersUsingSecret,
   setSecretBroker,
+  WEBHOOK_SECRET_ATTACHED,
 } from "../../core/secrets.js";
 import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
 import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import { requireOwnedSecret } from "../auth/ownership.js";
+import { requireScope } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   clearUnbrokerOutcome,
@@ -43,7 +46,11 @@ function parseBrokerArg(input: unknown): SecretBrokerConfig {
 function mapSecretError(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);
   if (message.startsWith("secret_not_found")) throw new McpError(404, message);
-  if (message.startsWith("secret_broker_config_invalid") || message.startsWith("secret_broker_value_invalid")) {
+  if (
+    message.startsWith("secret_broker_config_invalid") ||
+    message.startsWith("secret_broker_value_invalid") ||
+    message.startsWith("host_provider_webhook_secret_short")
+  ) {
     throw new McpError(400, message);
   }
   throw err;
@@ -87,6 +94,21 @@ async function findOwnSecret(ctx: McpRequestContext, name: string) {
   return secret;
 }
 
+/**
+ * A host provider's secret needs hosts:admin as well as secrets:write: replacing a credential
+ * or its broker config changes what the provider does. True when the caller passed that check,
+ * and its links say so; checked before any link is minted, and again when one is submitted.
+ */
+async function requireHostsAdminIfProviderSecret(ctx: McpRequestContext, name: string): Promise<boolean> {
+  const secret = await ctx.db.secret.findUnique({
+    where: { ownerId_name: { ownerId: ctx.principal.id, name } },
+    select: { id: true },
+  });
+  if (!secret || (await hostProvidersUsingSecret(ctx.db, secret.id)).providers.length === 0) return false;
+  requireScope(ctx, ctx.canonicalUri, "hosts:admin");
+  return true;
+}
+
 /** Builds the browser-form URL for a minted token — stdio's ephemeral loopback server or the HTTP transport's mounted route (see mcp/index.ts and streamable-http.ts). */
 export type SecretElicitationUrlBuilder = (token: string) => Promise<string>;
 
@@ -105,7 +127,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "create_secret",
     scope: "secrets:write",
     description:
-      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. See the help article "brokered-secrets".',
+      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {
@@ -116,6 +138,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       required: ["name"],
     },
     handler: async (args: { name: string; value?: string; broker?: unknown }, ctx) => {
+      const hostManager = await requireHostsAdminIfProviderSecret(ctx, args.name);
       const broker = args.broker === undefined ? undefined : parseBrokerArg(args.broker);
       if (args.value !== undefined) {
         let secret;
@@ -162,6 +185,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         secretName: args.name,
         kind: "create",
         ...(broker ? { broker } : {}),
+        ...(hostManager ? { hostManager } : {}),
       };
       const token = await mcp.mintRequestState(payload);
       const url = await opts.buildElicitationUrl(token);
@@ -192,7 +216,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "set_secret_broker",
     scope: "secrets:write",
     description:
-      'Sets or changes a secret\'s broker config ({ hosts, pathPrefixes?, placement }), so tools can only send it to those hosts with fetch(url, { secrets: [name] }) and never read it. broker: null removes brokering, which must be confirmed by a person in the browser link this returns. Every change is audited. See the help article "brokered-secrets".',
+      'Sets or changes a secret\'s broker config ({ hosts, pathPrefixes?, placement }), so tools can only send it to those hosts with fetch(url, { secrets: [name] }) and never read it. broker: null removes brokering, which must be confirmed by a person in the browser link this returns. Every change is audited. A secret a host provider uses also needs hosts:admin. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {
@@ -206,6 +230,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     },
     handler: async (args: { name: string; broker: unknown }, ctx) => {
       const ownerId = ctx.principal.id;
+      const hostManager = await requireHostsAdminIfProviderSecret(ctx, args.name);
       if (args.broker !== null) {
         const broker = parseBrokerArg(args.broker);
         await findOwnSecret(ctx, args.name);
@@ -259,6 +284,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         secretName: args.name,
         kind: "unbroker",
         brokerHash: brokerConfigHash(parseSecretBrokerConfig(secret.broker)),
+        ...(hostManager ? { hostManager } : {}),
       };
       const token = await mcp.mintRequestState(payload);
       const url = await opts.buildElicitationUrl(token);
@@ -316,6 +342,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         // Resolved among the agent owner's secrets (== the caller here).
         await attachSecret(args.agentId, args.name, ownerId, ctx.db, args.alias ?? args.name);
       } catch (err) {
+        if (err instanceof Error && err.message === WEBHOOK_SECRET_ATTACHED) throw new McpError(409, err.message);
         throw new McpError(404, err instanceof Error ? err.message : String(err));
       }
       return textResult({ attached: true });
@@ -349,6 +376,13 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
       await requireOwnedSecret(ctx.db, args.id, ctx.principal.id);
+      const { providers } = await hostProvidersUsingSecret(ctx.db, args.id);
+      if (providers.length > 0) {
+        throw new McpError(
+          409,
+          `This secret is used by host provider ${providers.map((p) => `"${p}"`).join(", ")}; re-register it or delete_host_provider first.`,
+        );
+      }
       await deleteSecret(args.id, ctx.db);
       return textResult({ deleted: args.id });
     },

@@ -77,6 +77,7 @@ function fakeDb() {
       }),
       findUnique: vi.fn(async () => ({ id: "s", name: "n" })),
     },
+    hostProvider: { count: vi.fn(async () => 0) },
     agentSecret: {
       create: vi.fn(async (a: unknown) => {
         calls.agentSecret.push(a);

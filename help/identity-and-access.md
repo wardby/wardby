@@ -21,7 +21,7 @@ audience, and the granted Wardby scopes in `scope` or `scp`.
 
 Scopes authorize normal operations such as managing agents, runs, tools,
 datastores, secrets, webhooks, budgets, packages, services, memory, and
-models. Six sensitive permissions have an additional role requirement:
+models. Seven sensitive permissions have an additional role requirement:
 
 - `agents:admin` requires the Wardby `admin` role.
 - `packages:approve` requires the `admin` or `package-approver` role.
@@ -31,6 +31,9 @@ models. Six sensitive permissions have an additional role requirement:
 - `models:admin` requires the `admin` or `model-manager` role. It adds,
   overrides, disables, and resets model catalog entries; see
   [Models and pricing](models.md).
+- `hosts:admin` requires the `admin` or `host-manager` role. It registers host
+  providers, approves their tools and, with `secrets:write`, replaces their secrets; see
+  [Host providers](../docs/host-providers.md).
 - `power:manage` requires the `admin` role. It reads low-power state and
   sleeps the coding proxy and native gateway now (`power_status`,
   `power_sleep`); see

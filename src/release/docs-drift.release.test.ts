@@ -140,7 +140,7 @@ const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["create_datastore", "list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
   ...["list_subagents", "unlink_repository", "get_agent_memory", "list_agent_memory", "delete_agent_memory"],
-  ...["detach_secret", "delete_secret", "create_webhook"],
+  ...["detach_secret", "create_webhook"],
 ]);
 
 /** Every environment variable the code reads, with the first file that reads it. */

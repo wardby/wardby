@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codeProviderOf, normalizeHostedRepository, pullRequestWebUrl } from "./code-host.js";
+import { codeProviderOf, isValidHostProviderName, normalizeHostedRepository, pullRequestWebUrl } from "./code-host.js";
 
 describe("codeProviderOf", () => {
   it("reads the provider from the repository's form", () => {
@@ -57,5 +57,38 @@ describe("pullRequestWebUrl", () => {
 
   it("has no GitHub link for an id that is not a GitHub name", () => {
     expect(pullRequestWebUrl("github", "bitbucket:acme/api.", 12)).toBeNull();
+  });
+});
+
+describe("isValidHostProviderName", () => {
+  it.each(["bitbucket", "my-host", "ab"])("accepts %s", (name) => {
+    expect(isValidHostProviderName(name)).toBe(true);
+  });
+  it.each([
+    "github",
+    "local",
+    "http",
+    "https",
+    "ssh",
+    "git",
+    "file",
+    "constructor",
+    "a",
+    "Bitbucket",
+    "-x",
+    "x_y",
+    "a".repeat(32),
+  ])("refuses %s", (name) => {
+    expect(isValidHostProviderName(name)).toBe(false);
+  });
+});
+
+describe("hosted names that could become a second identity", () => {
+  it.each(["bitbucket:acme/web.git", "bitbucket:acme/a..b", "bitbucket:a..b/web"])("%s has no hosted form", (id) => {
+    expect(() => normalizeHostedRepository(id)).toThrow();
+    expect(codeProviderOf(id)).toBe("github");
+  });
+  it("a name with a single dot stays hosted", () => {
+    expect(normalizeHostedRepository("bitbucket:acme/web.app")).toBe("bitbucket:acme/web.app");
   });
 });

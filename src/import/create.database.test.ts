@@ -696,6 +696,124 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     }
   });
 
+  it("won't attach a host provider's webhook secret to an imported agent", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("x25519");
+    const id = randomUUID().slice(0, 8);
+    const agentName = `test-webhook-guard-${id}`;
+    const secretName = `WEBHOOK_${id}`;
+    const providerName = `wh${id}`;
+    const ownerSubject = `test-owner-webhook-guard-${id}`;
+    const plaintext = `fake-webhook-value-${id}-0123456789`;
+
+    const bundle: Bundle = {
+      manifest: {
+        bundleVersion: 1,
+        source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+        secretMode: "envelope",
+        transferKeyId: "test-key",
+        contentWindowDays: null,
+        contentSince: null,
+        toolCallDetail: "metadata",
+        runAuditWindowDays: null,
+        runAuditSince: null,
+        capabilities: [],
+        counts: { agents: 1 },
+      },
+      readAgents: () => [
+        {
+          name: agentName,
+          systemPrompt: "Test agent",
+          provider: "bedrock",
+          model: "claude-opus-4",
+          region: null,
+          schedule: null,
+          timezone: "UTC",
+          scheduleEnabled: false,
+          maxTurns: 10,
+          budgetUsd: "5.00",
+          ownerEmail: null,
+          kind: "native",
+          memoryEnabled: false,
+          unmodeled: {},
+        },
+      ],
+      readTools: () => [],
+      readAgentTools: () => [],
+      readSecrets: () => [
+        { name: secretName, description: null, ownerEmail: null, ciphertext: seal(plaintext, secretName, publicKey) },
+      ],
+      readAgentSecrets: () => [{ agentName, secretName, alias: null }],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+
+    let owner: { id: string } | undefined;
+    try {
+      owner = await resolvePrincipal(ownerSubject, db);
+      const cipher = buildSecretCipher(loadProviderConfig());
+      const webhookSecret = await db.secret.create({
+        data: {
+          name: secretName,
+          ciphertext: await cipher.encrypt(plaintext),
+          keyId: cipher.keyId(),
+          ownerId: owner.id,
+        },
+      });
+      await db.hostProvider.create({
+        data: {
+          name: providerName,
+          contractVersion: 1,
+          gitHost: "git.example.test",
+          apiHosts: ["api.example.test"],
+          gitUsername: "x-token-auth",
+          pullRequestUrlTemplate: "https://git.example.test/{repository}/pull/{number}",
+          repositoryApiPath: "/2.0/repositories/{repository}",
+          webhook: {},
+          webhookSecretId: webhookSecret.id,
+          createdById: owner.id,
+        },
+      });
+      const recon = preflight({
+        bundle,
+        routableModels: new Set(["claude-opus-4"]),
+        supportedGlobals: new Set(),
+        existingAgentNames: new Set(),
+        existingToolNames: new Set(),
+        capabilitiesSupported: new Set(),
+        onConflict: "fail",
+        prefix: "",
+        allowOpenFetch: false,
+      });
+      const result = await createFromBundle(bundle, recon, {
+        db,
+        cipher,
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "envelope",
+        transferPrivateKey: privateKey,
+        allowOpenFetch: false,
+      });
+
+      expect(result.warnings.some((w) => w.includes("host_provider_webhook_secret_attached"))).toBe(true);
+      expect(JSON.stringify(result.warnings)).not.toContain(plaintext);
+      const agent = await db.agent.findUniqueOrThrow({ where: { name: agentName } });
+      expect(await db.agentSecret.count({ where: { agentId: agent.id } })).toBe(0);
+    } finally {
+      await db.hostProvider.deleteMany({ where: { name: providerName } });
+      const a = await db.agent.findUnique({ where: { name: agentName } });
+      if (a) {
+        await db.agentSecret.deleteMany({ where: { agentId: a.id } });
+        await db.agent.deleteMany({ where: { id: a.id } });
+      }
+      if (owner) {
+        await db.secret.deleteMany({ where: { ownerId: owner.id, name: secretName } });
+        await db.principal.deleteMany({ where: { subject: ownerSubject } });
+      }
+    }
+  });
+
   it("a boundName collision across two same-named shared stores on one agent warns instead of throwing", async () => {
     // createDatastore (Task 3) is a plain create, not an upsert (deliberate,
     // per progress.md's Task 3 note) — two shared-datastore definitions with

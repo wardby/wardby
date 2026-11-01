@@ -23,6 +23,9 @@
 - [Secrets and tools](tool-secrets.md) covers readable and brokered secrets
   (brokered secrets require 0.6.0+):
   attaching secrets to tools, `set_secret_broker`, placements, and errors.
+- [Host providers](host-providers.md) (0.8.0+) covers adding a code host with
+  your own custom tools: registering, approving, testing and removing a
+  provider.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to

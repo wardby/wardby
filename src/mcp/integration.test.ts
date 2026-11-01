@@ -307,6 +307,9 @@ function buildFakeDb() {
       // same-named tools to one agent.
       findFirst: async () => null,
     },
+    // attach_secret / delete_secret ask whether a host provider uses the secret.
+    hostProvider: { count: async () => 0 },
+    hostProviderCredential: { count: async () => 0 },
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();

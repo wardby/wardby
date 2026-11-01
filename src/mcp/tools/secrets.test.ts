@@ -49,6 +49,8 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
 
   return {
     resourceGrant: fakeResourceGrants(grants),
+    hostProvider: { count: async () => 0, findMany: async () => [] },
+    hostProviderCredential: { findMany: async () => [] },
     agentSecretRows: agentSecrets,
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {

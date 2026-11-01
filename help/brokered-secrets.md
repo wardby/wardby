@@ -67,6 +67,8 @@ alone never removes it. Every change is audited.
 
 ## Related
 
+- [Host providers](../docs/host-providers.md): a provider's credentials must be brokered
+  secrets
 - Full guide: [`docs/tool-secrets.md`](../docs/tool-secrets.md)
 - [Use native agents, tools, and data](native-capabilities.md)
 - Errors: [`secret_brokered`](errors/secret-brokered.md),

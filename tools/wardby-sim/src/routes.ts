@@ -33,6 +33,9 @@ const github = (method: string, pattern: string, note: string): RouteEntry =>
 
 const jira = (method: string, pattern: string, note: string): RouteEntry => unverified("jira", method, pattern, note);
 
+const bitbucket = (method: string, pattern: string, note: string): RouteEntry =>
+  unverified("bitbucket", method, pattern, note);
+
 export const ROUTES: readonly RouteEntry[] = [
   // --- GitHub REST (github/rest.ts, github/graphql.ts) ---
   github("GET", "/app", "App JWT checked (RS256, iss, exp/iat); id, slug, owner. Docs only."),
@@ -327,6 +330,33 @@ export const ROUTES: readonly RouteEntry[] = [
     "/anthropic/v1/messages",
     "Streams scripted content blocks (text, tool_use). Replayed by Claude Code through the proxy and by wardby's " +
       "native Anthropic client in Flow G; the real API's full event set is not modelled.",
+  ),
+
+  // --- Bitbucket Cloud REST 2.0 (bitbucket/service.ts): Bearer repository or workspace token ---
+  bitbucket(
+    "GET",
+    "/2.0/repositories/{workspace}/{slug}/pullrequests",
+    "Filtered by a q of source.branch.name only. Docs only.",
+  ),
+  bitbucket("GET", "/2.0/repositories/{workspace}/{slug}/pullrequests/{id}", "Docs only."),
+  bitbucket(
+    "GET",
+    "/2.0/repositories/{workspace}/{slug}/pullrequests/{id}/diffstat",
+    "One page, from the seeded files. Docs only.",
+  ),
+  bitbucket("GET", "/2.0/repositories/{workspace}/{slug}/pullrequests/{id}/diff", "302 to /diff/{spec}. Docs only."),
+  bitbucket(
+    "GET",
+    "/2.0/repositories/{workspace}/{slug}/diff/{spec}",
+    "The seeded diff, whatever the spec. Docs only.",
+  ),
+  bitbucket("GET", "/2.0/repositories/{workspace}/{slug}/pullrequests/{id}/comments", "One page. Docs only."),
+  bitbucket("GET", "/2.0/repositories/{workspace}/{slug}/commit/{commit}/statuses", "One page. Docs only."),
+  bitbucket("GET", "/2.0/repositories/{workspace}/{slug}/src/{commit}/*", "The seeded files at any commit. Docs only."),
+  bitbucket(
+    "GET",
+    "/2.0/workspaces/{workspace}/permissions/repositories/{slug}",
+    "A q of user.account_id only (spec O5 is whether the real one takes it). Workspace token; a repository token gets 403. Docs only.",
   ),
 ];
 

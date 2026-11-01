@@ -402,3 +402,34 @@ describe("secret in value help", () => {
     expect(catalog.pages.find((entry) => entry.id === id)?.markdown).toContain("`secret_in_value`");
   });
 });
+
+describe("host provider errors help", () => {
+  it("is the first result for every registration code", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "errors/host-provider-error";
+    const markdown = catalog.pages.find((entry) => entry.id === id)?.markdown;
+    for (const code of [
+      "host_provider_not_found",
+      "host_provider_missing_operation",
+      "host_provider_tool_not_found",
+      "host_provider_secret_not_found",
+      "host_provider_secret_not_brokered",
+      "host_provider_secret_hosts",
+      "host_provider_secret_placement",
+      "host_provider_webhook_secret_shared",
+      "host_provider_webhook_secret_short",
+      "host_provider_webhook_secret_attached",
+      "host_provider_permission_secret_shared",
+      "host_provider_secret_link_stale",
+      "host_provider_username_is_secret",
+      "host_provider_in_use",
+      "host_provider_operation_not_bound",
+      "host_provider_tool_deleted",
+    ]) {
+      expect(searchHelp(catalog, code)[0]?.page.id, code).toBe(id);
+      expect(markdown, code).toContain(`\`${code}\``);
+    }
+  });
+});
