@@ -8,14 +8,34 @@ import { LOCAL_REPO_PREFIX, normalizeGitHubRepository } from "./protocol.js";
 
 const HOSTED_REPOSITORY =
   /^([a-z][a-z0-9-]{1,30}):([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
-/** Never a registered provider: built-ins, and URL schemes a repository string could start with. */
-const RESERVED_PREFIXES: ReadonlySet<string> = new Set(["github", "local", "http", "https", "ssh", "git", "file"]);
+const HOST_PROVIDER_NAME = /^[a-z][a-z0-9-]{1,30}$/;
+/** Never a registered provider: built-ins, URL schemes a repository string could start with, and an Object.prototype key. */
+const RESERVED_PREFIXES: ReadonlySet<string> = new Set([
+  "github",
+  "local",
+  "http",
+  "https",
+  "ssh",
+  "git",
+  "file",
+  "constructor",
+]);
+
+/** Whether `name` may be registered: it must also be what a `<name>:<workspace>/<repo>` id resolves to. */
+export function isValidHostProviderName(name: string): boolean {
+  return HOST_PROVIDER_NAME.test(name) && !RESERVED_PREFIXES.has(name);
+}
+
+/** `a..b` could walk a path and `web.git` is a second name for `web`, so neither is a repository id. */
+function isCanonicalPart(part: string): boolean {
+  return !part.endsWith(".") && !part.includes("..") && !part.toLowerCase().endsWith(".git");
+}
 
 function hostedParts(value: string): { provider: string; workspace: string; repository: string } | null {
   const match = HOSTED_REPOSITORY.exec(value);
   if (!match || RESERVED_PREFIXES.has(match[1])) return null;
   const [, provider, workspace, repository] = match;
-  return repository.endsWith(".") || workspace.endsWith(".") ? null : { provider, workspace, repository };
+  return isCanonicalPart(workspace) && isCanonicalPart(repository) ? { provider, workspace, repository } : null;
 }
 
 /** The provider that owns an already-normalized repository id. */
