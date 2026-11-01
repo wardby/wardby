@@ -12,6 +12,7 @@ import {
   mentionStatusRow,
   outcomeBody,
   postMentionStatus,
+  pullRequestOutcome,
   REPLY_MAX_PARTS,
   workingBody,
 } from "./host-status.js";
@@ -1098,5 +1099,17 @@ describe("full replies", () => {
         body: expect.stringMatching(/^\*\*Reply, part 1 of 1/),
       });
     });
+  });
+});
+
+describe("pullRequestOutcome's provider", () => {
+  const result = { outcome: "pull_request_opened", pullRequestNumber: 4 };
+
+  it("is GitHub for an owner/name repository", () => {
+    expect(pullRequestOutcome({ ...result, repository: "acme/api" })?.codeProvider).toBe("github");
+  });
+
+  it("comes from a hosted repository's prefix", () => {
+    expect(pullRequestOutcome({ ...result, repository: "bitbucket:acme/api" })?.codeProvider).toBe("bitbucket");
   });
 });

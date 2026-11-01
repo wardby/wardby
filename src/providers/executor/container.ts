@@ -11,6 +11,7 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
 import { withBaseCommit } from "../../coding/base-commit.js";
+import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
@@ -1454,7 +1455,7 @@ export class ContainerExecutor implements Executor {
     const sameRepository = run.profileRepository !== null && run.profileRepository === run.repository;
     const decision = await this.options.repoAccess.authorizeUse({
       ownerId: run.ownerId,
-      provider: "github",
+      provider: codeProviderOf(run.repository),
       repository: run.repository,
       required: requiredLevel("coding"),
       authorizedVia: sameRepository ? run.repositoryAuthorizedVia : "host_permission",
@@ -2014,7 +2015,9 @@ export class ContainerExecutor implements Executor {
     ) {
       candidates.push({ provider: "github", repository: run.repository, number: status.number });
     }
-    const closed = closingIssueNumber(description, run.repository);
+    // The closing keyword names a GitHub issue: no other host's repository has one to read.
+    const closed =
+      codeProviderOf(run.repository) === "github" ? closingIssueNumber(description, run.repository) : undefined;
     if (closed !== undefined && !candidates.some((ref) => ref.provider === "github" && ref.number === closed)) {
       candidates.push({ provider: "github", repository: run.repository, number: closed });
     }

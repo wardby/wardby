@@ -1188,7 +1188,7 @@ async function sweepCiRows(deps: ReviewStartDeps, providers: HostEvent["provider
     }
     for (const rows of groups.values()) {
       const first = rows[0];
-      const provider = first.provider as HostEvent["provider"];
+      const provider = first.provider;
       const key = { provider, repository: first.repository, prNumber: first.prNumber, headSha: first.headSha };
       const host = deps.hosts[provider];
       if (!host) continue;
@@ -1404,7 +1404,7 @@ async function releaseRequestRows(
   const runIds: string[] = [];
   for (const group of groups.values()) {
     const first = group[0];
-    const provider = first.provider as HostEvent["provider"];
+    const provider = first.provider;
     const key = { provider, repository: first.repository, prNumber: first.prNumber, headSha: first.headSha };
     const host = deps.hosts[provider];
     if (!host) continue;

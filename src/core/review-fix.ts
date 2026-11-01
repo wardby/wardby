@@ -307,7 +307,7 @@ export async function startReviewFixAfterReview(runId: string, deps: ReviewFixDe
   try {
     const check = await deps.db.runHostCheck.findUnique({ where: { runId } });
     if (!check || check.verdict !== "CHANGES_REQUESTED" || check.prNumber === null || !check.reviewBody) return;
-    if (check.provider !== "github") return;
+    if (check.provider === "local") return;
     const result = await startReviewFixRound(
       {
         provider: check.provider,
@@ -411,7 +411,7 @@ async function reReview(runId: string, deps: ReReviewDeps): Promise<ReReviewResu
   }
   if (root.parentRunId) return skip("not_fix_round");
   const status = root.hostStatus;
-  if (!status || status.provider !== "github") return skip("not_fix_round");
+  if (!status || status.provider === "local") return skip("not_fix_round");
   const provider = status.provider;
   const { repository, number: prNumber } = status;
   if (run.codingRun.repository.toLowerCase() !== repository.toLowerCase()) return skip("not_fix_round");

@@ -20,6 +20,7 @@ import {
   type CiView,
   type CodeReviewHost,
   type PullRequestView,
+  type BuiltInHostProvider,
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
@@ -310,7 +311,7 @@ export const REVIEW_HOST_TOOL_NAMES: ReadonlySet<string> = new Set(REVIEW_HOST_T
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["repo_publish_review", "repo_comment"]);
 
 /** The "local:" prefix is part of a local repository's id, so resolveLink matches it before stripping host prefixes. */
-const HOST_PREFIXES: Record<ReviewHostProvider, string> = { github: "github.com/", local: "local:" };
+const HOST_PREFIXES: Record<BuiltInHostProvider, string> = { github: "github.com/", local: "local:" };
 
 function normalizeFor(provider: ReviewHostProvider, value: string): string | null {
   try {

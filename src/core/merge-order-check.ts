@@ -19,9 +19,13 @@
  * stored. Best effort: none of these ever throws.
  */
 import type { Run } from "#prisma";
-import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
-import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
-import type { PullRequestOrigin, ReviewHostRegistry, UpsertNamedCheckInput } from "../providers/review-host/types.js";
+import { codeProviderOf, normalizeHostedRepository, pullRequestWebUrl } from "../coding/code-host.js";
+import type {
+  CodeReviewHost,
+  PullRequestOrigin,
+  ReviewHostRegistry,
+  UpsertNamedCheckInput,
+} from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
 import { maybeMarkReady, type MarkReadyDb } from "./mark-ready.js";
 import { collectRelatedPullRequests, runTreeRoot, type RelatedPullRequestsDb } from "./related-pull-requests.js";
@@ -108,10 +112,26 @@ const keyOf = (repository: string, number: number) => `${repository}#${number}`;
 
 function safeRepository(value: string): string | undefined {
   try {
-    return normalizeGitHubRepository(value);
+    return normalizeHostedRepository(value);
   } catch {
     return undefined;
   }
+}
+
+type CheckHost = CodeReviewHost & Required<Pick<CodeReviewHost, "upsertNamedCheck" | "pullRequestOrigin">>;
+
+const canPostCheck = (host: CodeReviewHost | undefined): host is CheckHost =>
+  host?.upsertNamedCheck !== undefined && host.pullRequestOrigin !== undefined;
+
+/** The host that can post this repository's merge order check, if any. */
+function checkHost(hosts: ReviewHostRegistry | undefined, repository: string): CheckHost | undefined {
+  const host = hosts?.[codeProviderOf(repository)];
+  return canPostCheck(host) ? host : undefined;
+}
+
+/** Whether any configured host can post the check; none means nothing to read or sync. */
+function anyCheckHost(hosts: ReviewHostRegistry | undefined): boolean {
+  return Object.values(hosts ?? {}).some(canPostCheck);
 }
 
 function originState(origin: PullRequestOrigin): MergeOrderMember["state"] {
@@ -191,8 +211,7 @@ export async function syncMergeOrderChecks(
   opts: MergeOrderSyncOptions = {},
 ): Promise<void> {
   const log = deps.log ?? moduleLog;
-  const host = deps.hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
-  if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
+  if (!anyCheckHost(deps.hosts)) return;
   try {
     const group = await collectRelatedPullRequests(deps.db, seedRunId);
     if (opts.synced) {
@@ -236,10 +255,11 @@ export async function syncMergeOrderChecks(
         continue;
       }
       try {
-        const origin =
-          reused && key === keyOf(reused, opts.origin!.number)
-            ? await opts.origin!.read()
-            : await host.pullRequestOrigin(pr.repository, pr.number);
+        let origin: PullRequestOrigin;
+        const memberHost = checkHost(deps.hosts, pr.repository);
+        if (reused && key === keyOf(reused, opts.origin!.number)) origin = await opts.origin!.read();
+        else if (memberHost) origin = await memberHost.pullRequestOrigin(pr.repository, pr.number);
+        else throw new Error("no_host_for_repository");
         let headSha: string | undefined;
         if (origin.markerRunId) {
           const opener = await deps.db.codingRun.findUnique({
@@ -272,9 +292,11 @@ export async function syncMergeOrderChecks(
       }
       const verdict = mergeOrderVerdict(self, set);
       if (verdict.status === "skip") continue;
+      const selfHost = checkHost(deps.hosts, self.repository);
+      if (!selfHost) continue;
       const input = mergeOrderCheckInput(self, verdict, steps, target.headSha, leadRunning);
       try {
-        await host.upsertNamedCheck(self.repository, input);
+        await selfHost.upsertNamedCheck(self.repository, input);
         log.info(
           { seedRunId, repository: self.repository, number: self.number, status: verdict.status },
           "merge order check posted",
@@ -288,7 +310,12 @@ export async function syncMergeOrderChecks(
       }
       if (input.status === "completed" && input.conclusion === "success") {
         // The last earlier step merged: the pull request may now be ready for review (#287).
-        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log: deps.log }, self.repository, self.number);
+        await maybeMarkReady(
+          { db: deps.db, hosts: deps.hosts, log: deps.log },
+          self.repository,
+          self.number,
+          codeProviderOf(self.repository),
+        );
       }
     }
   } catch (err) {
@@ -305,8 +332,7 @@ export async function syncMergeOrderChecksAfterRun(
   run: Pick<Run, "id" | "parentRunId">,
 ): Promise<void> {
   if (run.parentRunId !== null) return;
-  const host = deps.hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
-  if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
+  if (!anyCheckHost(deps.hosts)) return;
   try {
     if (!(await deps.db.run.findFirst({ where: { parentRunId: run.id }, select: { id: true } }))) return;
   } catch (err) {
@@ -347,10 +373,9 @@ export async function syncMergeOrderChecksForPullRequest(
   opts: MergeOrderSyncOptions = {},
 ): Promise<void> {
   const log = deps.log ?? moduleLog;
-  const host = deps.hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
-  if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
   const repository = safeRepository(pr.repository);
   if (!repository || !Number.isSafeInteger(pr.number) || pr.number <= 0) return;
+  if (!checkHost(deps.hosts, repository)) return;
   let roots: Array<{ id: string }>;
   try {
     roots = [];
@@ -393,8 +418,7 @@ export function resetMergeOrderSweepForTests(): void {
  */
 export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date = new Date()): Promise<number> {
   const log = deps.log ?? moduleLog;
-  const host = deps.hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
-  if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return 0;
+  if (!anyCheckHost(deps.hosts)) return 0;
   if (now.getTime() - lastSweepAt < MERGE_ORDER_SWEEP_INTERVAL_MS) return 0;
   lastSweepAt = now.getTime();
   const since = new Date(now.getTime() - MERGE_ORDER_SWEEP_MAX_AGE_MS);

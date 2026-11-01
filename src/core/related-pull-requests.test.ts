@@ -120,7 +120,7 @@ describe("collectRelatedPullRequests", () => {
     expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual(["acme/app#2", "acme/app#4"]);
     expect(fake.issuePullRequest.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { codeProvider: "github", OR: [{ issueProvider: "github", issueKey: "acme/app#7" }] },
+        where: { codeProvider: { not: "local" }, OR: [{ issueProvider: "github", issueKey: "acme/app#7" }] },
       }),
     );
   });
@@ -401,6 +401,35 @@ describe("updateRelatedPullRequests", () => {
 // which continues A#1 and opens C#3; later a mention on B#2 starts G, which continues B#2 only.
 // The set reached from B (or G) must still include C#3: the collector walks forward to the lead's
 // tree, then reverse from the lead's openers to F's tree.
+describe("updateRelatedPullRequests across hosts", () => {
+  const rows = [row("c1", opened("acme/api", 1), 1), row("c2", opened("bitbucket:acme/web", 2), 2)];
+  const recorded = { c1: "acme/api", c2: "bitbucket:acme/web" };
+  const origins = {
+    "acme/api#1": { state: "open", markerRunId: "c1" },
+    "bitbucket:acme/web#2": { state: "open", markerRunId: "c2" },
+  };
+
+  it("reads and writes each pull request through its own host", async () => {
+    const github = host(origins);
+    const bitbucket = host(origins);
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, { github, bitbucket }, undefined);
+    expect(github.pullRequestOrigin.mock.calls).toEqual([["acme/api", 1]]);
+    expect(bitbucket.pullRequestOrigin.mock.calls).toEqual([["bitbucket:acme/web", 2]]);
+    expect(github.replaceRelatedSection.mock.calls.map((c) => [c[0], c[1]])).toEqual([["acme/api", 1]]);
+    expect(bitbucket.replaceRelatedSection.mock.calls.map((c) => [c[0], c[1]])).toEqual([["bitbucket:acme/web", 2]]);
+  });
+
+  it("keeps a pull request whose host is missing in the section, unknown and never edited", async () => {
+    const github = host(origins);
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, { github }, undefined);
+    expect(github.pullRequestOrigin.mock.calls).toEqual([["acme/api", 1]]);
+    expect(github.replaceRelatedSection).toHaveBeenCalledTimes(1);
+    const [repository, number, input] = github.replaceRelatedSection.mock.calls[0];
+    expect([repository, number]).toEqual(["acme/api", 1]);
+    expect(input.block).toContain("bitbucket:acme/web#2");
+  });
+});
+
 describe("continuations in both directions (no tracked issue)", () => {
   const none = { issueProvider: null, issueKey: null };
   const a = row("a", opened("acme/a", 1), 1, none);

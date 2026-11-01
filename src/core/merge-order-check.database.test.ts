@@ -225,7 +225,12 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(reads).not.toContain(`${repoD}#30`);
     // Only the member whose posted check is completed/success (#287); not the in_progress ones.
     expect(maybeMarkReady).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(maybeMarkReady).mock.calls[0]).toEqual([{ db, hosts: deps.hosts, log: undefined }, repoA, 1]);
+    expect(vi.mocked(maybeMarkReady).mock.calls[0]).toEqual([
+      { db, hosts: deps.hosts, log: undefined },
+      repoA,
+      1,
+      "github",
+    ]);
   });
 
   it("a delegated (non-root) run's end posts nothing", async () => {

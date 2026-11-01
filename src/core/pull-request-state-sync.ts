@@ -8,7 +8,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 
@@ -42,7 +42,7 @@ export async function syncOpenPullRequestStates(
         .updateMany({ where: { id, state: "open" }, data: { updatedAt: now } })
         .catch((err: unknown) => log.warn({ err, id }, "could not mark a pull request as checked"));
     for (const row of rows) {
-      const host = hosts[row.codeProvider as ReviewHostProvider];
+      const host = hosts[row.codeProvider];
       if (!host?.pullRequestOrigin) continue;
       try {
         const origin = await host.pullRequestOrigin(row.repository, row.number);

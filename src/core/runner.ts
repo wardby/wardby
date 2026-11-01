@@ -840,7 +840,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
     // only a runner built without hosts (as in many tests) skips the table.
     const repositoryLinks: RepositoryLink[] = reviewHosts
       ? (await db.agentRepository.findMany({ where: { agentId: agent.id } })).map((l) => ({
-          provider: l.provider as RepositoryLink["provider"],
+          provider: l.provider,
           repository: l.repository,
           access: l.access === "write" ? "write" : "read",
           checkName: l.checkName,

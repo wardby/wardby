@@ -110,7 +110,7 @@ function setup(
 describe("maybeMarkReady", () => {
   it("marks when every condition holds", async () => {
     const { deps, host, db, log } = setup();
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA, "root");
     expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", "wardby review"]);
     expect(db.codingRun.updateMany).toHaveBeenCalledTimes(1);
@@ -128,7 +128,7 @@ describe("maybeMarkReady", () => {
 
     it("never marks a pull request whose opening run stopped at its budget", async () => {
       const { deps, host, db } = setup({ root: rootRow({ run: { agentId: "builder", status: "budget_exhausted" } }) });
-      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+      expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
       expect(host.markReadyForReview).not.toHaveBeenCalled();
       expect(db.codingRun.updateMany).not.toHaveBeenCalled();
     });
@@ -142,7 +142,7 @@ describe("maybeMarkReady", () => {
           { result: UPDATED, run: { status: "succeeded" } },
         ],
       });
-      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+      expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
       expect(host.markReadyForReview).not.toHaveBeenCalled();
     });
 
@@ -151,7 +151,7 @@ describe("maybeMarkReady", () => {
         root: rootRow({ run: { agentId: "builder", status: "budget_exhausted" } }),
         continuations: [{ result: UPDATED, run: { status: "succeeded" } }],
       });
-      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+      expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
       expect(db.codingRun.findMany).toHaveBeenCalledWith({
         where: { rootCodingRunId: "root" },
         select: { result: true, run: { select: { status: true } } },
@@ -164,7 +164,7 @@ describe("maybeMarkReady", () => {
     const { deps, host } = setup({
       links: [{ ...BUILDER, markReadyWhenPassing: false }],
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
   });
 
@@ -172,13 +172,13 @@ describe("maybeMarkReady", () => {
     const { deps, host } = setup({
       links: [{ ...BUILDER, access: "read" }],
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
   });
 
   it("is off with no host reads when the opted-in builder link is unauthorized", async () => {
     const { deps, host } = setup({ links: [{ ...BUILDER, authorizedVia: null }, REVIEWER] });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
   });
 
@@ -186,7 +186,7 @@ describe("maybeMarkReady", () => {
     const { deps, host } = setup({
       links: [BUILDER, REVIEWER, { ...REVIEWER, agentId: "rogue", checkName: "rogue review", authorizedVia: null }],
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", "wardby review"]);
   });
 
@@ -202,7 +202,7 @@ describe("maybeMarkReady", () => {
       ["wardby merge order", { status: "completed", conclusion: "success" }],
     ]);
     const { deps, host } = setup({ links: [BUILDER, ...reviewers], checks });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", ...names]);
   });
 
@@ -213,7 +213,7 @@ describe("maybeMarkReady", () => {
       checkName: `review-${i}`,
     }));
     const { deps, host } = setup({ links: [BUILDER, ...reviewers] });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
     expect(host.readOwnChecks).not.toHaveBeenCalled();
   });
@@ -256,13 +256,13 @@ describe("maybeMarkReady", () => {
     ["the opener recorded no pull request", { root: rootRow({ result: null }) }],
   ])("is not ready when %s", async (_why, over) => {
     const { deps, host } = setup(over);
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
   it("accepts a repository with no CI", async () => {
     const { deps } = setup({ ci: { state: "none" } });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
   });
 
   it("accepts a successful merge order check", async () => {
@@ -272,30 +272,30 @@ describe("maybeMarkReady", () => {
         ["wardby merge order", { status: "completed", conclusion: "success" }],
       ]),
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
   });
 
   it("matches the opener's repository case-insensitively", async () => {
     const { deps } = setup({ root: rootRow({ repository: "Acme/Web" }) });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
   });
 
   it("skips when already marked once", async () => {
     const { deps, host } = setup({ root: rootRow({ markedReadyAt: new Date() }) });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("skipped");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("skipped");
     expect(host.readOwnChecks).not.toHaveBeenCalled();
   });
 
   it("skips when another evaluation won the claim", async () => {
     const { deps, host } = setup({ claimCount: 0 });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("skipped");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("skipped");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
   it("releases its claim when the host skips or fails", async () => {
     for (const mark of ["skipped", new Error("boom")] as const) {
       const { deps, db } = setup({ mark });
-      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe(mark === "skipped" ? "skipped" : "failed");
+      expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe(mark === "skipped" ? "skipped" : "failed");
       expect(db.codingRun.updateMany).toHaveBeenCalledTimes(2);
       const claim = (db.codingRun.updateMany.mock.calls[0] as unknown[])[0] as { data: { markedReadyAt: Date } };
       const release = (db.codingRun.updateMany.mock.calls[1] as unknown[])[0] as {
@@ -319,7 +319,7 @@ describe("maybeMarkReady", () => {
         run: { agentId: "fixer" },
       })
       .mockResolvedValueOnce(rootRow({}));
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(db.codingRun.findUnique).toHaveBeenCalledTimes(2);
     expect((db.codingRun.findUnique.mock.calls[1] as unknown[])[0]).toMatchObject({ where: { runId: "root" } });
     const claim = (db.codingRun.updateMany.mock.calls[0] as unknown[])[0] as { where: { runId: string } };
@@ -337,7 +337,7 @@ describe("maybeMarkReady", () => {
         run: { agentId: "builder" },
       })
       .mockResolvedValueOnce(null);
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
@@ -353,7 +353,7 @@ describe("maybeMarkReady", () => {
         run: { agentId: "builder" },
       })
       .mockResolvedValueOnce(rootRow({ repository: "acme/other", result: { ...OPENED, repository: "acme/other" } }));
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.readOwnChecks).not.toHaveBeenCalled();
     expect(db.codingRun.updateMany).not.toHaveBeenCalled();
   });
@@ -361,7 +361,7 @@ describe("maybeMarkReady", () => {
   it("never throws", async () => {
     const { deps, host, log } = setup();
     host.pullRequestOrigin.mockRejectedValueOnce(new Error("down"));
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("failed");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("failed");
     expect(log.warn).toHaveBeenCalled();
   });
 });
@@ -383,7 +383,7 @@ describe("maybeMarkReady with a delegating lead", () => {
 
   it("marks when the builder's ancestor lead has an opted-in write link", async () => {
     const { deps, host, db } = setup({ links: [LEAD, REVIEWER], root: delegated, runs: leadRuns });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA, "root");
     expect((db.run.findUnique.mock.calls[0] as unknown[])[0]).toMatchObject({ where: { id: "lead-run" } });
   });
@@ -394,7 +394,7 @@ describe("maybeMarkReady with a delegating lead", () => {
       root: rootRow({ run: { agentId: "builder", parentRunId: "mid-run" } }),
       runs: { "mid-run": { agentId: "planner", parentRunId: "lead-run" }, ...leadRuns },
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
   });
 
   it("is off with no host reads when the lead's link is not opted in", async () => {
@@ -403,7 +403,7 @@ describe("maybeMarkReady with a delegating lead", () => {
       root: delegated,
       runs: leadRuns,
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
   });
 
@@ -413,7 +413,7 @@ describe("maybeMarkReady with a delegating lead", () => {
       root: delegated,
       runs: leadRuns,
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
@@ -423,13 +423,13 @@ describe("maybeMarkReady with a delegating lead", () => {
       root: delegated,
       runs: leadRuns,
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 
   it("does not walk the run tree when the opener itself is opted in", async () => {
     const { deps, db } = setup({ root: rootRow({ run: { agentId: "builder", parentRunId: "lead-run" } }) });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(db.run.findUnique).not.toHaveBeenCalled();
   });
 
@@ -447,13 +447,13 @@ describe("maybeMarkReady with a delegating lead", () => {
 
   it("finds an opted-in lead exactly 10 hops up the run tree", async () => {
     const { deps, db } = chainTo(10);
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
     expect(db.run.findUnique).toHaveBeenCalledTimes(10);
   });
 
   it("bounds the walk: an opted-in lead 11 hops up does not count", async () => {
     const { deps, db, host } = chainTo(11);
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(db.run.findUnique).toHaveBeenCalledTimes(10);
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
@@ -464,7 +464,7 @@ describe("maybeMarkReady with a delegating lead", () => {
       root: rootRow({ run: { agentId: "builder", parentRunId: "a" } }),
       runs: { a: { agentId: "x", parentRunId: "b" }, b: { agentId: "y", parentRunId: "a" } },
     });
-    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("not_ready");
     expect(db.run.findUnique.mock.calls.length).toBeLessThanOrEqual(10);
   });
 });

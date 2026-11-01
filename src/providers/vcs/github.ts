@@ -2,6 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { testSimulatorBase } from "../../config/test-simulators.js";
+import { codeProviderOf, normalizeHostedRepository, pullRequestWebUrl } from "../../coding/code-host.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
 import {
   packageAuditRows,
@@ -445,10 +446,10 @@ export interface RelatedPullRequestsInput {
 
 const RELATED_STATES = new Set<string>(["open", "draft", "merged", "closed"]);
 
-/** The repository normalized, or undefined when it isn't a plain owner/name safe inside a link. */
+/** The repository normalized, or undefined when it isn't a hosted repository id safe inside a link. */
 function safeRepository(value: string): string | undefined {
   try {
-    const repository = normalizeGitHubRepository(value);
+    const repository = normalizeHostedRepository(value);
     return isSafeMarkdownFragment(repository) && !/[[\]()<>\s]/.test(repository) ? repository : undefined;
   } catch {
     return undefined;
@@ -462,7 +463,9 @@ function relatedLine(entry: RelatedPullRequestEntry, prefix: string): string | u
   const state = entry.state && RELATED_STATES.has(entry.state) ? ` — ${entry.state}` : "";
   if (entry.self) return `${prefix} **This pull request**${state}`;
   if (!Number.isSafeInteger(entry.number) || (entry.number ?? 0) <= 0) return undefined;
-  return `${prefix} [${repository}#${entry.number}](https://github.com/${repository}/pull/${entry.number})${state}`;
+  const label = `${repository}#${entry.number}`;
+  const url = pullRequestWebUrl(codeProviderOf(repository), repository, entry.number!);
+  return `${prefix} ${url ? `[${label}](${url})` : label}${state}`;
 }
 
 const isDone = (entry: RelatedPullRequestEntry) => entry.state === "merged" || entry.state === "closed";
