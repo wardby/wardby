@@ -141,6 +141,10 @@ credential, the permission credential or the webhook secret. Change its broker c
 `secrets:write`, and refuse before handing out a browser link. Without brokering a credential
 stops working, so `set_secret_broker` with `broker: null` also breaks the provider.
 
+Only the secret's owner can rotate it this way, because secret names belong to their owner. If
+another host manager calls `create_secret` with the same name, they get a separate secret and the
+provider keeps the old value. They must register the provider again with their own secret instead.
+
 The new webhook value needs at least 16 characters, whether you pass it directly or enter it
 in the browser (`host_provider_webhook_secret_short`). A browser link requested before the secret
 joined a provider is refused (`host_provider_secret_link_stale`); request a new one.
