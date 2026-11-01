@@ -25,8 +25,9 @@ provider, including its tool code, whoever owns the tools it names.
 1. Create a tool for each operation with `create_tool`. Each does one host call. See
    [Tool contract](#tool-contract).
 2. Store each credential with `create_secret`, and broker it with `set_secret_broker`
-   ([tool-secrets.md](tool-secrets.md)). Allow every API host and the git host, and place it
-   in a header or query parameter.
+   ([tool-secrets.md](tool-secrets.md)). Allow every API host and place it in a header or
+   query parameter. Repository credentials also allow the git host; the permission
+   credential needs only the API hosts.
 3. Store a webhook secret of at least 16 characters. Don't attach it to any agent.
 4. Call `register_host_provider`:
 
@@ -51,14 +52,25 @@ provider, including its tool code, whoever owns the tools it names.
    }
    ```
 
-   The `tools` map above is shortened: bind every required operation.
+   Bind every required operation in `tools` (names here are placeholders), and any optional
+   ones you want. For example:
+
+   ```json
+   "tools": {
+     "getPullRequest": "your_get_pr", "listPullRequestFiles": "your_list_files",
+     "getDiff": "your_get_diff", "readFile": "your_read_file", "listFiles": "your_list_dir",
+     "listComments": "your_list_comments", "createComment": "your_create_comment",
+     "submitVerdict": "your_submit_verdict", "findPullRequest": "your_find_pr",
+     "openPullRequest": "your_open_pr", "updatePullRequest": "your_update_pr"
+   }
+   ```
 
 5. Restart the server. Approvals don't need a restart, but a new provider does.
 
 The tools and secrets you name must be yours. Secret rules, each refused with a named code:
 
 - Credentials and `permissionCredential` must be brokered, placed in a header or query
-  parameter, and allowed on the API hosts (credentials also on the git host).
+  parameter, and allowed on the API hosts (credentials also on the git host; the permission credential needs only the API hosts).
 - `permissionCredential` can't also be listed in `credentials`
   (`host_provider_permission_secret_shared`), so no other operation can reach it.
 - The webhook secret can't be a credential or permission secret of any provider, and can't
@@ -78,6 +90,9 @@ These operations are required: `getPullRequest`, `listPullRequestFiles`, `getDif
 when you set `permissionCredential`.
 
 ## Who may start a run
+
+This is how it will work once agents can use a provider. Registering records your choice
+now; nothing enforces it in this release.
 
 | Setup                     | Situation                                | Result                            |
 | ------------------------- | ---------------------------------------- | --------------------------------- |
@@ -116,9 +131,24 @@ real credential:
   "repository": "your-host:your-workspace/your-repo",
   "pullRequest": 4,
   "headRef": "a-branch-with-a-pull-request",
+  "ref": "a-commit-or-branch",
   "accountId": "<account id>"
 }
 ```
+
+Only `provider` and `repository` are required. Each other field enables the checks that need it:
+
+| Field         | Checks it enables                                                                   |
+| ------------- | ----------------------------------------------------------------------------------- |
+| `pullRequest` | `getPullRequest`, `listPullRequestFiles`, `getDiff`, `listComments`                 |
+| `headRef`     | `findPullRequest`                                                                   |
+| `ref`         | `readFile`, `listFiles`, `listCommitStatuses` (defaults to the pull request's head) |
+| `accountId`   | `getRepositoryPermission`                                                           |
+
+Each result is an `outcome` of `pass`, `fail` (with a fixed code, below) or `skipped`. A skip has
+one of these codes: `not_bound` (no tool bound), `needs_pull_request`, `needs_head_ref`,
+`needs_ref`, `needs_account` (the field above is missing), `allowlist_mode` (no
+`permissionCredential`, so no permission lookup) and `not_read_only` (a write operation, never run).
 
 Write operations are skipped. A read-only tool can only send GET requests. The report holds
 an operation, an outcome and a fixed code for each, and no response data, so you can share it.
@@ -139,11 +169,51 @@ an operation, an outcome and a fixed code for each, and no response data, so you
 ## Tool contract
 
 Each tool receives `workspace`, `repo` and `repository` (`workspace/repo`), plus its
-operation's fields. Declare them in `paramsZod`.
+operation's input fields (below). Declare them in `paramsZod`.
 
 A tool answers with its operation's result, or `{ "error": "<code>" }` when the host refused,
 where the code is `unauthorized`, `forbidden`, `not_found`, `conflict`, `rate_limited` or
-`unavailable`.
+`unavailable`. Results are checked strictly: an extra key, a missing key or a wrong type fails the
+call with `host_tool_invalid_result`.
+
+A pull request object, as returned by `getPullRequest` and `findPullRequest`, has exactly:
+`number` (positive integer), `title`, `body`, `author` (string or null), `state`, `merged`
+(boolean), `draft` (boolean), `baseRef`, `headRef`, `headSha` (non-empty), `isFork` (boolean) and
+`htmlUrl` (a URL).
+
+Read operations (method GET):
+
+| Operation                 | Input fields  | Result                                                                                                                                                                                                                                  |
+| ------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getPullRequest`          | `number`      | A pull request object.                                                                                                                                                                                                                  |
+| `findPullRequest`         | `headRef`     | `{ pullRequest }`: a pull request object, or null if none.                                                                                                                                                                              |
+| `listPullRequestFiles`    | `number`      | `{ files, nextPage }`. Each file: `filename`, `status`, `additions`, `deletions` (non-negative integers) and optionally `previousFilename`.                                                                                             |
+| `getDiff`                 | `number`      | `{ diff }`: the unified diff text.                                                                                                                                                                                                      |
+| `readFile`                | `ref`, `path` | `{ kind: "file", content }`, `{ kind: "directory" }` or `{ kind: "not_found" }`. No other keys.                                                                                                                                         |
+| `listFiles`               | `ref`, `path` | `{ entries, nextPage }`. Each entry: `path`, `type` (`file` or `directory`) and optionally `size` (non-negative integer).                                                                                                               |
+| `listComments`            | `number`      | `{ comments, nextPage }`. Each comment: `id` (non-empty), `author` and `authorId` (string or null), `body`, `createdAt`, `path` (string or null), `line` (positive integer or null), `parentId` (string or null), `resolved` (boolean). |
+| `listCommitStatuses`      | `ref`         | `{ statuses, nextPage }`. Each status: `key`, `state` (`pending`, `success`, `failure` or `stopped`) and `url` (string or null).                                                                                                        |
+| `getRepositoryPermission` | `accountId`   | `{ permission }`: `none`, `read`, `triage`, `write`, `maintain` or `admin`. Uses the permission credential and `permissionApiPath`.                                                                                                     |
+
+Operations that page return `nextPage`: a string to continue from, or null at the end. Wardby
+handles the paging, so the tool returns one page per call.
+
+Write operations:
+
+| Operation           | Method | Result                       |
+| ------------------- | ------ | ---------------------------- |
+| `openPullRequest`   | POST   | A pull request object.       |
+| `updatePullRequest` | PUT    | A pull request object.       |
+| `createComment`     | POST   | `{ id }` (non-empty string). |
+| `editComment`       | PUT    | `{ id }` (non-empty string). |
+| `resolveThread`     | POST   | `{}`                         |
+| `submitVerdict`     | POST   | `{}`                         |
+| `setCommitStatus`   | POST   | `{}`                         |
+
+The input fields of the write operations are defined when agents can use a provider, in a later
+release, so tools for them may need changing then. `test_host_provider` never runs them.
+
+`normalizeEvent` makes no requests and isn't called yet.
 
 Use `fetch(url, { secrets: ["host"] })`. Wardby resolves `host` to the credential for this
 call's repository. A bound tool:

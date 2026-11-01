@@ -25,8 +25,8 @@ You need the `hosts:admin` scope and a role that grants it (`admin` or `host-man
 `update_tool` changes nothing until you call `approve_host_provider_tools`. See which tools have
 changes with `get_host_provider`.
 
-A bound tool reaches only the provider's API hosts, inside one repository's path, and follows no
-redirects itself: it re-fetches the `Location`. Any host manager can read and re-register any
+A bound tool reaches only the provider's API hosts, inside one repository's path, and Wardby
+follows no redirects; the tool must fetch the `Location` itself. Any host manager can read and re-register any
 provider.
 
 See [docs/host-providers.md](../docs/host-providers.md) for the full guide.

@@ -27,7 +27,7 @@ private. So `test_host_provider` gives a fixed code for each operation.
   more than three requests. No request follows a redirect: fetch the `Location` yourself.
 - `host_tool_invalid_result` or `host_tool_invalid_params`: the tool doesn't match its
   operation's shape.
-- `host_tool_failed`: the tool threw an error. Run its code with `dry_run_tool` to see why.
+- `host_tool_failed`: the tool threw an error. `dry_run_tool` shows errors that don't involve the request, for example with a stubbed response. It has no `host` credential, so a tool using `secrets: ["host"]` fails there for another reason.
 - `host_tool_timeout`: it ran out of time or instructions.
 
 To fix a tool, call `update_tool`, then `approve_host_provider_tools`.

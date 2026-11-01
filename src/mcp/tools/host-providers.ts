@@ -137,8 +137,8 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
         restartRequired: true,
         note:
           view.mode === "permission"
-            ? "Permission mode: the host decides who has access, and a failed lookup refuses."
-            : "Allowlist mode: only trustedAccounts may start runs, at write level.",
+            ? "Permission mode: once agents can use this provider, the host will decide who has access, and a failed lookup will refuse."
+            : "Allowlist mode: once agents can use this provider, only trustedAccounts will be able to start runs, at write level.",
       });
     },
   });
@@ -207,7 +207,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
     name: "test_host_provider",
     scope: "hosts:admin",
     description:
-      "Host managers (hosts:admin): run each approved read-only tool against one repository, with its real credential, and report pass, fail or skipped with a fixed code per operation. Changes nothing on the host: write operations are skipped, and a read-only tool can only send GET. Name a pullRequest, headRef and accountId to reach the checks that need them. The report holds no response data, so it can be shared.",
+      "Host managers (hosts:admin): run each approved read-only tool against one repository, with its real credential, and report pass, fail or skipped with a fixed code per operation. Changes nothing on the host: write operations are skipped, and a read-only tool can only send GET. Name a pullRequest, headRef, ref and accountId to reach the checks that need them. The report holds no response data, so it can be shared.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
