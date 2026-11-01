@@ -55,11 +55,12 @@ export async function loadProviderForCalls(db: PrismaClient, name: string): Prom
   };
 }
 
-// No URL-encoding: normalizeHostedRepository admits only [A-Za-z0-9._-], and the request guard compares a raw prefix.
+// No URL-encoding: callHostOperation only takes a repository in its normalized form, which admits only [A-Za-z0-9._-], and the request guard compares a raw prefix.
 function encodePath(template: string, fields: Record<string, string>): string {
   return template.replace(/\{([a-z]+)\}/g, (_m, field: string) => fields[field]);
 }
 
+/** The repository is compared in its normalized form, so callers must pass one. */
 export async function callHostOperation(
   provider: LoadedProvider,
   cipher: SecretCipher,
@@ -68,6 +69,13 @@ export async function callHostOperation(
   fields: Record<string, unknown>,
   options: { fetchImpl?: typeof safeFetch; simulated?: boolean } = {},
 ): Promise<HostToolResult> {
+  let ours = false;
+  try {
+    ours = normalizeHostedRepository(repository) === repository && codeProviderOf(repository) === provider.name;
+  } catch {
+    // Not a repository we can name: denied below.
+  }
+  if (!ours) return { ok: false, code: "host_tool_request_denied" };
   const snapshot = provider.operations.find((o) => o.operation === operation);
   if (!snapshot) return { ok: false, code: "host_tool_failed" };
   const path = repository.slice(`${provider.name}:`.length);
@@ -86,7 +94,7 @@ export async function callHostOperation(
     provider: provider.name,
     operation,
     snapshot,
-    params: { workspace, repo, repository: path, ...fields },
+    params: { ...fields, workspace, repo, repository: path },
     apiHosts: provider.apiHosts,
     pathPrefix: encodePath(template, { repository: path, workspace, repo }),
     credential,

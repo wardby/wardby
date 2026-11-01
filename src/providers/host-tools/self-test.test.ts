@@ -215,6 +215,39 @@ describe("callHostOperation", () => {
     expect(result).toEqual({ ok: false, code: "host_tool_request_denied" });
   });
 
+  it.each([
+    ["a mismatched prefix", "zzzzzzzzz:acme/web", "getPullRequest"],
+    ["a permission lookup with no repository name", "bitbucket:foo", "getRepositoryPermission"],
+    ["a permission lookup with extra segments", "bitbucket:acme/web/extra", "getRepositoryPermission"],
+    ["a repository that isn't normalized", "bitbucket:ACME/web", "getPullRequest"],
+  ] as const)("denies %s, and sends nothing", async (_name, repository, operation) => {
+    const { provider, seen, options } = setup();
+    const result = await callHostOperation(
+      provider,
+      cipher,
+      repository,
+      operation,
+      { number: 4, accountId: "a" },
+      options,
+    );
+    expect(result).toEqual({ ok: false, code: "host_tool_request_denied" });
+    expect(seen).toEqual([]);
+  });
+
+  it("keeps caller fields from overwriting the repository identity", async () => {
+    const { provider, seen, options } = setup();
+    const result = await callHostOperation(
+      provider,
+      cipher,
+      REPOSITORY,
+      "getPullRequest",
+      { number: 4, repository: "acme/other", workspace: "other", repo: "other" },
+      options,
+    );
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual(["GET /2.0/repositories/acme/web/pullrequests/4"]);
+  });
+
   it("reports an operation with no snapshot", async () => {
     const { provider, options } = setup({ operations: [] });
     expect(await callHostOperation(provider, cipher, REPOSITORY, "getDiff", { number: 4 }, options)).toEqual({
