@@ -88,7 +88,7 @@ Scopes and roles do different jobs:
 | `host-manager`     | `hosts:admin`                                                                                                         |
 | (none)             | nothing privileged; every other scope works as the token allows                                                       |
 
-Eight operations are privileged:
+Nine kinds of operation are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent (see [Sharing agents](#sharing-agents) for what
@@ -108,7 +108,15 @@ Eight operations are privileged:
   [viewer-api.md](viewer-api.md));
 - reading low-power state and scaling the coding proxy and native gateway to
   zero now (`power_status`, `power_sleep`; see
-  [Low-power mode](getting-started-gke.md#low-power-mode)).
+  [Low-power mode](getting-started-gke.md#low-power-mode));
+- registering, approving, testing and deleting host providers
+  (`register_host_provider`, `approve_host_provider_tools`,
+  `test_host_provider`, `delete_host_provider`; reading one with
+  `get_host_provider` needs the same permission). Approved tools run on the
+  control plane with the provider's credentials, so grant `hosts:admin` like
+  `agents:admin`. Any host manager can read and re-register any provider,
+  including its tool code, whoever owns the tools; see
+  [host-providers.md](host-providers.md).
 
 Each needs **both** its scope on the token **and** a role that grants that
 permission:
@@ -120,13 +128,16 @@ permission:
 - The admin viewer API needs `admin:view`, which only the `admin` role grants.
 - `power_status` and `power_sleep` need `power:manage`, which only the `admin`
   role grants.
+- Host provider tools need `hosts:admin`, which the `admin` and `host-manager`
+  roles grant.
 
 In practice:
 
-- an `admin` can do all eight;
+- an `admin` can do all of them;
 - a `package-approver` can approve packages only;
 - a `service-manager` can change the service catalog only;
 - a `model-manager` can change the model catalog only;
+- a `host-manager` can manage host providers only;
 - a member can do none of them.
 
 Callers who fail the check get `403`:

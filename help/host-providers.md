@@ -1,0 +1,32 @@
+---
+id: host-providers
+title: Add a code host with your own tools (host providers)
+summary: Register a code host implemented by custom tools, approve changes to them, and test them with read-only calls. Agents can't use a provider yet.
+audience: operator
+tags: [host provider, register_host_provider, approve_host_provider_tools, hosts:admin, host-manager]
+appliesTo: >=0.8.0
+---
+
+# Host providers
+
+A host provider adds a code host using your own custom tools. This release lets you register
+a provider, approve its tools and test them. Agents can't use a registered provider yet.
+
+You need the `hosts:admin` scope and a role that grants it (`admin` or `host-manager`). See
+[Identity and access](identity-and-access.md).
+
+1. Write one tool per operation with `create_tool`.
+2. Broker each credential with `set_secret_broker`, allowing the API hosts and the git host
+   ([Brokered secrets](brokered-secrets.md)).
+3. Call `register_host_provider`, then restart the server.
+4. Call `test_host_provider` to check each read-only tool. Failures have
+   [fixed codes](errors/host-tool-failed.md).
+
+`update_tool` changes nothing until you call `approve_host_provider_tools`. See which tools have
+changes with `get_host_provider`.
+
+A bound tool reaches only the provider's API hosts, inside one repository's path, and follows no
+redirects itself: it re-fetches the `Location`. Any host manager can read and re-register any
+provider.
+
+See [docs/host-providers.md](../docs/host-providers.md) for the full guide.

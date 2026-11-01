@@ -120,7 +120,7 @@ Wardby roles:
 
 ```dotenv
 AUTH_ROLE_CLAIM=groups   # claim name or dotted path
-AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager
+AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
 ```
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
@@ -179,9 +179,9 @@ Provider examples:
   access token's top-level `roles` claim. Set `AUTH_ROLE_CLAIM=roles` and
   `AUTH_ROLE_MAP=admin=admin,package-approver=package-approver,service-manager=service-manager,model-manager=model-manager,host-manager=host-manager`.
 - **Keycloak:** create realm roles such as `wardby-admin`, `wardby-packages`,
-  `wardby-services` and `wardby-models`. Realm roles appear under
+  `wardby-services`, `wardby-models` and `wardby-hosts`. Realm roles appear under
   `realm_access.roles`. Set `AUTH_ROLE_CLAIM=realm_access.roles` and
-  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager`.
+  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager`.
   For client roles, use `resource_access.<client-id>.roles`. The
   [local Keycloak harness](../deploy/keycloak-test/README.md) sets this up.
 - **Auth0:** add the user's roles to the access token as a namespaced custom
@@ -242,7 +242,7 @@ AUTH_JWKS_URI=https://identity.example.com/your-tenant/.well-known/jwks.json
 AUTH_AUDIENCE=https://wardby.example.com/mcp
 # Optional: Wardby roles (see "Wardby roles" above).
 AUTH_ROLE_CLAIM=groups
-AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager
+AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
 ```
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's

@@ -157,6 +157,9 @@ or that the tool is not granted, fails with
 [`secret_brokered`](../help/errors/secret-brokered.md), so update tools that read
 the value to use `fetch` instead.
 
+A host provider's credentials must be brokered secrets, placed in a header or
+query parameter. See [host-providers.md](host-providers.md).
+
 ## What the host enforces
 
 - **https only**, to the default port. Any other scheme or port is refused with
