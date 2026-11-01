@@ -144,7 +144,8 @@ function setup(opts: Opts = {}) {
       runHostCheck: { findFirst: findCheck, updateMany: claim },
     } as never,
     executor: {} as never,
-    hosts: { github: host },
+    // A local host too: the "a local repository" row must stop at its guard, not for want of a host.
+    hosts: { github: host, local: host },
     repoAccess,
   } as ReReviewDeps;
   return { deps, host, addLabel, claim, findCheck };

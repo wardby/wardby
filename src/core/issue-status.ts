@@ -48,9 +48,10 @@ export type IssueStatusDb = Pick<
 
 export function toJiraMarkdown(text: string): string {
   return text.replace(/<sub>(.*?)<\/sub>/g, "_$1_").replace(
-    // Not after ":": `<provider>:<workspace>/<repo>#n` is not a GitHub repository.
-    /(?<!:)\b([\w.-]+\/[\w.-]+)#(\d+)\b/g,
-    (_m, repo: string, n: string) => `[${repo}#${n}](${pullRequestWebUrl("github", repo, Number(n))})`,
+    // With a `<provider>:` prefix it is a hosted repository, not a GitHub one: left as written.
+    /(\b[a-z][a-z0-9-]{1,30}:)?\b([\w.-]+\/[\w.-]+)#(\d+)\b/g,
+    (match, prefix: string | undefined, repo: string, n: string) =>
+      prefix ? match : `[${repo}#${n}](${pullRequestWebUrl("github", repo, Number(n))})`,
   );
 }
 

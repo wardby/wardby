@@ -447,6 +447,25 @@ describe("repository tools", () => {
     await client.close();
   });
 
+  it("refuses a hosted provider at the tool's schema", async () => {
+    const { db, mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", provider: "bitbucket", repository: "bitbucket:acme/api", access: "write" },
+    });
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toContain("data/provider must be equal to one of the allowed values");
+    expect(await db.agentRepository.findMany({})).toEqual([]);
+    const { tools } = await client.listTools();
+    const link = tools.find((t) => t.name === "link_repository")!;
+    expect((link.inputSchema.properties as Record<string, { enum?: string[] }>).provider.enum).toEqual([
+      "github",
+      "local",
+    ]);
+    await client.close();
+  });
+
   it("requires write access for the review_fix trigger", async () => {
     const { mcp } = setup([{ id: "a1", name: "delivery", ownerId: "p1", kind: "native" }], "p1");
     const client = await connectClient(mcp);

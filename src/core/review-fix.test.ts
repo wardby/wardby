@@ -267,7 +267,7 @@ describe("startReviewFixAfterReview", () => {
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 
-  it("does not start a round for a non-github provider", async () => {
+  it("does not start a round with no host for the provider", async () => {
     const { deps } = setup({ check: { ...CHECK, provider: "bitbucket" } });
     await startReviewFixAfterReview("run-1", deps);
     expect(dispatchRun).not.toHaveBeenCalled();

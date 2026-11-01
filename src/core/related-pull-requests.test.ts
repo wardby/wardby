@@ -397,10 +397,6 @@ describe("updateRelatedPullRequests", () => {
   });
 });
 
-// A request without a tracked issue: lead opens A#1 and B#2; a mention on A#1 starts follow-up F,
-// which continues A#1 and opens C#3; later a mention on B#2 starts G, which continues B#2 only.
-// The set reached from B (or G) must still include C#3: the collector walks forward to the lead's
-// tree, then reverse from the lead's openers to F's tree.
 describe("updateRelatedPullRequests across hosts", () => {
   const rows = [row("c1", opened("acme/api", 1), 1), row("c2", opened("bitbucket:acme/web", 2), 2)];
   const recorded = { c1: "acme/api", c2: "bitbucket:acme/web" };
@@ -428,8 +424,25 @@ describe("updateRelatedPullRequests across hosts", () => {
     expect([repository, number]).toEqual(["acme/api", 1]);
     expect(input.block).toContain("bitbucket:acme/web#2");
   });
+
+  it("reads a host that can't edit the section, and edits only the pull request whose host can", async () => {
+    const github = host(origins);
+    const merged = { "bitbucket:acme/web#2": { state: "closed", merged: true, markerRunId: "c2" } };
+    const { replaceRelatedSection: _none, ...bitbucket } = host(merged);
+    const hosts = { github, bitbucket: bitbucket as CodeReviewHost };
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, hosts, undefined);
+    expect(bitbucket.pullRequestOrigin.mock.calls).toEqual([["bitbucket:acme/web", 2]]);
+    expect(github.replaceRelatedSection).toHaveBeenCalledTimes(1);
+    const [repository, number, input] = github.replaceRelatedSection.mock.calls[0];
+    expect([repository, number]).toEqual(["acme/api", 1]);
+    expect(input.block).toMatch(/bitbucket:acme\/web#2.*merged/);
+  });
 });
 
+// A request without a tracked issue: lead opens A#1 and B#2; a mention on A#1 starts follow-up F,
+// which continues A#1 and opens C#3; later a mention on B#2 starts G, which continues B#2 only.
+// The set reached from B (or G) must still include C#3: the collector walks forward to the lead's
+// tree, then reverse from the lead's openers to F's tree.
 describe("continuations in both directions (no tracked issue)", () => {
   const none = { issueProvider: null, issueKey: null };
   const a = row("a", opened("acme/a", 1), 1, none);

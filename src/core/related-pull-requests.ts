@@ -370,7 +370,7 @@ export async function updateRelatedPullRequests(
   trackers: IssueTrackerRegistry | undefined,
 ): Promise<void> {
   // A request's pull requests may span hosts: each is read and written through its own.
-  const hostFor = (repository: string): RelatedSectionHost | undefined => {
+  const editorFor = (repository: string): RelatedSectionHost | undefined => {
     const host = hosts?.[codeProviderOf(repository)];
     return canEditRelatedSection(host) ? host : undefined;
   };
@@ -394,8 +394,9 @@ export async function updateRelatedPullRequests(
         continue;
       }
       try {
-        const host = hostFor(pr.repository);
-        if (!host) throw new Error("no_host_for_repository");
+        // Reading only needs the read: a host that can't edit the section still reports its pull requests.
+        const host = hosts?.[codeProviderOf(pr.repository)];
+        if (!host?.pullRequestOrigin) throw new Error("no_host_for_repository");
         const origin = await host.pullRequestOrigin(pr.repository, pr.number);
         const state: RelatedPullRequestState = origin.merged
           ? "merged"
@@ -448,7 +449,7 @@ export async function updateRelatedPullRequests(
         ...(issue ? { issue } : {}),
       });
       if (!block) continue;
-      const host = hostFor(target.repository);
+      const host = editorFor(target.repository);
       if (!host) continue;
       try {
         const outcome = await host.replaceRelatedSection(target.repository, target.number, {

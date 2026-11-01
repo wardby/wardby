@@ -4,6 +4,7 @@ import type { CodeReviewHost } from "../providers/review-host/types.js";
 import {
   mergeOrderVerdict,
   syncMergeOrderChecks,
+  syncMergeOrderChecksForPullRequest,
   type MergeOrderDb,
   type MergeOrderMember,
 } from "./merge-order-check.js";
@@ -174,8 +175,81 @@ describe("syncMergeOrderChecks across hosts", () => {
     ]);
     await syncMergeOrderChecks({ db, hosts: { github } }, "seed", {});
     // Its later steps depend on it, so their checks are held back; nothing is written to the wrong host.
+    expect(github.pullRequestOrigin).toHaveBeenCalledWith("acme/api", 2);
     expect(github.pullRequestOrigin).not.toHaveBeenCalledWith("bitbucket:acme/web", 1);
     expect(github.upsertNamedCheck).not.toHaveBeenCalled();
+  });
+
+  /** A host that reports its pull requests but can't post a check. */
+  function readOnlyHost(provider: string, origin: { state: string; merged?: boolean }) {
+    return {
+      provider,
+      pullRequestOrigin: vi.fn(async (_repository: string, number: number) => ({
+        headSha: SHA,
+        isFork: false,
+        labels: [],
+        markerRunId: `run-${number}`,
+        ...origin,
+      })),
+    } as unknown as CodeReviewHost & { pullRequestOrigin: ReturnType<typeof vi.fn> };
+  }
+
+  const crossHostSet = [
+    { repository: "bitbucket:acme/web", number: 1, mergeOrder: 1 },
+    { repository: "acme/api", number: 2, mergeOrder: 2 },
+  ];
+
+  it("reads a host that can't post checks, so its GitHub sibling's check completes", async () => {
+    const github = checkHost("github");
+    const bitbucket = readOnlyHost("bitbucket", { state: "closed", merged: true });
+    await syncMergeOrderChecks({ db: dbWithSet(crossHostSet), hosts: { github, bitbucket } }, "seed", {});
+    expect(bitbucket.pullRequestOrigin).toHaveBeenCalledWith("bitbucket:acme/web", 1);
+    expect(github.upsertNamedCheck).toHaveBeenCalledWith(
+      "acme/api",
+      expect.objectContaining({ status: "completed", conclusion: "success" }),
+    );
+  });
+
+  it("posts no check on a pull request whose host can't post one, and carries on with the rest", async () => {
+    const github = checkHost("github");
+    const bitbucket = readOnlyHost("bitbucket", { state: "open" });
+    vi.mocked(maybeMarkReady).mockClear();
+    await syncMergeOrderChecks({ db: dbWithSet(crossHostSet), hosts: { github, bitbucket } }, "seed", {});
+    expect(github.upsertNamedCheck.mock.calls).toEqual([
+      ["acme/api", expect.objectContaining({ status: "in_progress" })],
+    ]);
+    expect(maybeMarkReady).not.toHaveBeenCalled();
+  });
+
+  it("syncs the set when a pull request closes on a host that can't post checks", async () => {
+    const github = checkHost("github");
+    const bitbucket = readOnlyHost("bitbucket", { state: "closed", merged: true });
+    const db = dbWithSet(crossHostSet);
+    vi.mocked(db.$queryRaw)
+      .mockResolvedValueOnce([{ runId: "run-1" }]) // the pull request's coding runs with a merge order
+      .mockResolvedValueOnce([{ id: "seed", status: "succeeded", isOpener: false }]); // their tree's root
+    await syncMergeOrderChecksForPullRequest(
+      { db, hosts: { github, bitbucket } },
+      {
+        repository: "bitbucket:acme/web",
+        number: 1,
+      },
+    );
+    expect(github.upsertNamedCheck).toHaveBeenCalledWith("acme/api", expect.objectContaining({ status: "completed" }));
+  });
+
+  it("syncs nothing on a pull request event when no host can post a check", async () => {
+    const bitbucket = readOnlyHost("bitbucket", { state: "open" });
+    const db = dbWithSet(crossHostSet);
+    await syncMergeOrderChecksForPullRequest(
+      { db, hosts: { bitbucket } },
+      {
+        repository: "bitbucket:acme/web",
+        number: 1,
+      },
+    );
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(bitbucket.pullRequestOrigin).not.toHaveBeenCalled();
   });
 
   it("marks ready through the host that passed the check", async () => {

@@ -35,7 +35,11 @@ export function normalizeHostedRepository(value: string): string {
   return normalizeGitHubRepository(value);
 }
 
-/** A pull request's web link, built only from validated parts; null when this host has none known here. */
+/**
+ * A pull request's web link, known here only for GitHub. A GitHub name never
+ * has a ":": anything that does gets no link, so no other host's id, valid or
+ * not, reaches a github.com URL.
+ */
 export function pullRequestWebUrl(provider: string, repository: string, number: number): string | null {
-  return provider === "github" ? `https://github.com/${repository}/pull/${number}` : null;
+  return provider === "github" && !repository.includes(":") ? `https://github.com/${repository}/pull/${number}` : null;
 }

@@ -384,10 +384,7 @@ export class GitVcsProvider implements VcsProvider {
 
     try {
       await this.remote.withAccess(normalized.repository, async (token) => {
-        const auth =
-          token !== undefined
-            ? { authToken: token, ...(this.remote.gitUsername ? { authUsername: this.remote.gitUsername } : {}) }
-            : {};
+        const auth = this.gitAuth(token);
         if (this.remote.refNotFoundError) {
           const listed = await this.git.run(
             [
@@ -1090,13 +1087,16 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  /** The git credentials for a remote's access token; none when the remote needs no token. */
+  private gitAuth(token: string | undefined): { authToken?: string; authUsername?: string } {
+    if (token === undefined) return {};
+    return { authToken: token, ...(this.remote.gitUsername ? { authUsername: this.remote.gitUsername } : {}) };
+  }
+
   private async pushOnce(workspace: PreparedWorkspace, commitSha: string): Promise<void> {
     this.remote.assertPushRef?.(workspace.headRef);
     await this.remote.withAccess(workspace.repository, async (token) => {
-      const auth =
-        token !== undefined
-          ? { authToken: token, ...(this.remote.gitUsername ? { authUsername: this.remote.gitUsername } : {}) }
-          : {};
+      const auth = this.gitAuth(token);
       const remote = await this.remoteHead(workspace, auth);
       if (remote === commitSha) return;
       await this.remote.beforePush?.(workspace.repository, workspace.headRef);

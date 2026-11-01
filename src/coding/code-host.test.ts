@@ -28,6 +28,11 @@ describe("normalizeHostedRepository", () => {
     "github:acme/api",
     "local:acme/api",
     "https:acme/api",
+    "http:acme/api",
+    "ssh:acme/api",
+    "git:acme/api",
+    "file:acme/api",
+    "bitbucket:acme/api.",
     "Bitbucket:acme/api",
     "bitbucket:acme",
     "bitbucket:acme/api/extra",
@@ -48,5 +53,9 @@ describe("pullRequestWebUrl", () => {
   it("has no link for any other provider", () => {
     expect(pullRequestWebUrl("local", "local:/srv/repo", 12)).toBeNull();
     expect(pullRequestWebUrl("bitbucket", "bitbucket:acme/api", 12)).toBeNull();
+  });
+
+  it("has no GitHub link for an id that is not a GitHub name", () => {
+    expect(pullRequestWebUrl("github", "bitbucket:acme/api.", 12)).toBeNull();
   });
 });

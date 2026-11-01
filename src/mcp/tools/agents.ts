@@ -7,6 +7,7 @@
  */
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { z } from "zod";
+import { codeProviderOf } from "../../coding/code-host.js";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
@@ -676,7 +677,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const authorization = codingProfile
         ? await authorizeRepositoryForSet(ctx, {
             ownerId: ctx.principal.id,
-            provider: "github",
+            provider: codeProviderOf(codingProfile.repository),
             repository: codingProfile.repository,
             kind: "coding",
             adminOverride: repositoryAdminOverride === true,
@@ -880,7 +881,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         plannedRepository !== null && repositoryChanges(before)
           ? await authorizeRepositoryForSet(ctx, {
               ownerId: before.ownerId,
-              provider: "github",
+              provider: codeProviderOf(plannedRepository),
               repository: plannedRepository,
               kind: "coding",
               adminOverride: args.repositoryAdminOverride === true,

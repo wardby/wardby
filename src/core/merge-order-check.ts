@@ -256,9 +256,10 @@ export async function syncMergeOrderChecks(
       }
       try {
         let origin: PullRequestOrigin;
-        const memberHost = checkHost(deps.hosts, pr.repository);
+        // Reading only needs the read: a host that can't post checks still reports its pull requests.
+        const memberHost = deps.hosts?.[codeProviderOf(pr.repository)];
         if (reused && key === keyOf(reused, opts.origin!.number)) origin = await opts.origin!.read();
-        else if (memberHost) origin = await memberHost.pullRequestOrigin(pr.repository, pr.number);
+        else if (memberHost?.pullRequestOrigin) origin = await memberHost.pullRequestOrigin(pr.repository, pr.number);
         else throw new Error("no_host_for_repository");
         let headSha: string | undefined;
         if (origin.markerRunId) {
@@ -375,7 +376,8 @@ export async function syncMergeOrderChecksForPullRequest(
   const log = deps.log ?? moduleLog;
   const repository = safeRepository(pr.repository);
   if (!repository || !Number.isSafeInteger(pr.number) || pr.number <= 0) return;
-  if (!checkHost(deps.hosts, repository)) return;
+  // This pull request's own host need not post checks: its siblings' checks may depend on it.
+  if (!anyCheckHost(deps.hosts)) return;
   let roots: Array<{ id: string }>;
   try {
     roots = [];

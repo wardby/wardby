@@ -3013,6 +3013,8 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["coding_provider_not_configured", "preflight"],
   // A GitHub repository on a server with no GitHub App: configuration, like an unsupported service.
   ["vcs_github_not_configured", "preflight"],
+  // The same for any other host: a repository whose provider this server has not registered.
+  ["vcs_host_provider_not_configured", "preflight"],
   ["vcs_", "workspace"],
   // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
   ["local_", "workspace"],
