@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertHostToolRequest, HostToolRequestDenied } from "./request-guard.js";
+import { assertHostToolHeaders, assertHostToolRequest, HostToolRequestDenied } from "./request-guard.js";
 
 const scope = {
   apiHosts: ["api.example.com"],
@@ -30,6 +30,12 @@ describe("assertHostToolRequest", () => {
     ["another port", "https://api.example.com:8443/2.0/repositories/acme/web"],
     ["user info", "https://u:p@api.example.com/2.0/repositories/acme/web"],
     ["not a URL", "nope"],
+    ["a parameter dot-segment", url("/2.0/repositories/acme/web/..;/other")],
+    ["a parameter dot-segment with text", url("/2.0/repositories/acme/web/..;x/..;y/z")],
+    ["an encoded dot-segment with a parameter", url("/2.0/repositories/acme/web/%2e%2e;/other")],
+    ["a double-encoded dot-segment", url("/2.0/repositories/acme/web/%252e%252e/other")],
+    ["a double-encoded slash", url("/2.0/repositories/acme/web/..%252fother")],
+    ["an encoded NUL", url("/2.0/repositories/acme/web/..%00/other")],
   ])("refuses %s", (_label, target) => {
     expect(() => assertHostToolRequest(target, "GET", scope)).toThrow(HostToolRequestDenied);
   });
@@ -39,5 +45,28 @@ describe("assertHostToolRequest", () => {
       HostToolRequestDenied,
     );
     expect(() => assertHostToolRequest(url("/2.0/repositories/acme/web"), "get", scope)).not.toThrow();
+  });
+
+  it("refuses a pathPrefix that would allow every path", () => {
+    for (const pathPrefix of ["", "x"]) {
+      expect(() => assertHostToolRequest(url("/a"), "GET", { ...scope, pathPrefix })).toThrow(HostToolRequestDenied);
+    }
+  });
+
+  it("allows only plain content headers", () => {
+    expect(() => assertHostToolHeaders(undefined)).not.toThrow();
+    expect(() =>
+      assertHostToolHeaders({ Accept: "a", "If-None-Match": "x", "content-type": "t", "if-match": "y" }),
+    ).not.toThrow();
+    for (const bad of [
+      { "X-HTTP-Method-Override": "DELETE" },
+      { "X-Original-URL": "/x" },
+      { Authorization: "x" },
+      ["accept"],
+      "accept",
+      null,
+    ]) {
+      expect(() => assertHostToolHeaders(bad)).toThrow(HostToolRequestDenied);
+    }
   });
 });

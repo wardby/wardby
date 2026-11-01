@@ -157,4 +157,36 @@ describe("invokeHostTool", () => {
     const result = await invokeHostTool(input(`return { diff: "x" };`, { params: { nope: true } }));
     expect(result).toEqual({ ok: false, code: "host_tool_invalid_params" });
   });
+
+  it("never follows a redirect, and the tool sees the 302", async () => {
+    const fetchImpl = vi.fn(async () => response("", 302));
+    const code = `const r = await fetch("${API}/x"); return { diff: String(r.status) };`;
+    const result = await invokeHostTool(input(code, { fetchImpl: fetchImpl }));
+    expect(result).toEqual({ ok: true, value: { diff: "302" } });
+    const [, , options] = fetchImpl.mock.calls[0] as unknown as [string, unknown, { followRedirects: boolean }];
+    expect(options.followRedirects).toBe(false);
+  });
+
+  it("sends nothing for a request with a header outside the allow-list", async () => {
+    const fetchImpl = vi.fn(async () => response({}));
+    const code = `await fetch("${API}/x", { headers: { "X-HTTP-Method-Override": "DELETE" } }); return { diff: "x" };`;
+    expect(await invokeHostTool(input(code, { fetchImpl: fetchImpl }))).toEqual({
+      ok: false,
+      code: "host_tool_request_denied",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failing credential's text out of the result, even when the tool catches it", async () => {
+    const fetchImpl = vi.fn(async () => response({}));
+    const code = `let m = ""; try { await fetch("${API}/x", { secrets: ["host"] }); } catch (e) { m = String(e && e.message); }
+      return { diff: m };`;
+    const credential = async () => {
+      throw new Error("fake-vault-detail-9876");
+    };
+    const result = await invokeHostTool(input(code, { credential, fetchImpl: fetchImpl }));
+    expect(result).toEqual({ ok: false, code: "host_tool_no_credential" });
+    expect(JSON.stringify(result)).not.toContain("fake-vault-detail");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });

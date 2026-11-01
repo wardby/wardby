@@ -1,14 +1,14 @@
 /**
  * Runs one approved snapshot of a bound tool with a restricted privileged host: fetch
  * reaches the provider's API hosts inside this call's repository, using the operation's
- * methods, and the only secret alias is `host`. Datastores and readable secrets are
+ * methods, with no redirects followed and only plain content headers, and the only secret alias is `host`. Datastores and readable secrets are
  * absent, and console output is dropped. Never throws: every failure is a fixed code,
  * so no tool text reaches a model, a run record or a published comment.
  */
 import type { SandboxLimits } from "../../sandbox/eval-core.js";
 import { createPrivilegedHost, type HostBridge, type PrivilegedHost } from "../../sandbox/host-functions.js";
 import { runToolCode } from "../../sandbox/run-in-sandbox.js";
-import type { safeFetch } from "../../sandbox/safe-fetch.js";
+import { safeFetch } from "../../sandbox/safe-fetch.js";
 import { validateParams } from "../../sandbox/zod-params.js";
 import type { Datastore } from "../datastore/types.js";
 import type { SharedDatastoreAccessor } from "../../core/datastores.js";
@@ -19,7 +19,12 @@ import {
   type HostOperation,
   type HostToolDeclineCode,
 } from "./operations.js";
-import { assertHostToolRequest, HostToolRequestDenied, MAX_HOST_TOOL_FETCHES } from "./request-guard.js";
+import {
+  assertHostToolHeaders,
+  assertHostToolRequest,
+  HostToolRequestDenied,
+  MAX_HOST_TOOL_FETCHES,
+} from "./request-guard.js";
 
 export const HOST_SECRET_ALIAS = "host";
 
@@ -65,14 +70,24 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
       sharedDatastore: {} as SharedDatastoreAccessor,
       logTag: `host-tool:${input.operation}`,
       allowedFetchHosts: [...input.apiHosts],
-      fetchImpl: input.fetchImpl,
+      // Redirects are never followed here: a later hop would skip the guard, so the tool re-fetches through it.
+      fetchImpl: (u, i, o) => (input.fetchImpl ?? safeFetch)(u, i, { ...o, followRedirects: false }),
       signal,
       secrets: {
         get: async () => undefined,
         resolve: async (name) => {
           if (name !== HOST_SECRET_ALIAS) return undefined;
-          const entry = await input.credential();
-          if (!entry) failures.noCredential = true;
+          let entry: SecretEntry | undefined;
+          try {
+            entry = await input.credential();
+          } catch {
+            entry = undefined;
+          }
+          // A thrown or partial credential must not carry its text into tool code.
+          if (!entry || !entry.broker) {
+            failures.noCredential = true;
+            throw new Error("host_tool_no_credential");
+          }
           return entry;
         },
       },
@@ -82,7 +97,11 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
       __bridge_console: async () => null,
       __bridge_fetch: async (argsJson) => {
         try {
-          const [url, init, secretNames] = JSON.parse(argsJson) as [string, { method?: string }?, unknown?];
+          const [url, init, secretNames] = JSON.parse(argsJson) as [
+            string,
+            { method?: string; headers?: unknown }?,
+            unknown?,
+          ];
           if (++fetches > MAX_HOST_TOOL_FETCHES) throw new HostToolRequestDenied();
           if (
             secretNames !== undefined &&
@@ -90,6 +109,7 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
           ) {
             throw new HostToolRequestDenied();
           }
+          assertHostToolHeaders(init?.headers);
           assertHostToolRequest(url, init?.method ?? "GET", {
             apiHosts: input.apiHosts,
             pathPrefix: input.pathPrefix,
