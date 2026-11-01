@@ -32,13 +32,15 @@ export function assertHostToolRequest(url: string, method: string, scope: HostTo
   if (!scope.methods.includes(method.toUpperCase())) throw new HostToolRequestDenied();
   const prefix = scope.pathPrefix.toLowerCase();
   if (!prefix.startsWith("/")) throw new HostToolRequestDenied();
-  const path = normalizedPath(parsed.pathname);
-  if (path !== prefix && !path.startsWith(`${prefix}/`)) throw new HostToolRequestDenied();
+  // The repository is matched literally on the raw path; decoding is only for the segment rules.
+  const raw = parsed.pathname.toLowerCase();
+  if (raw !== prefix && !raw.startsWith(`${prefix}/`)) throw new HostToolRequestDenied();
+  assertSafeSegments(parsed.pathname);
 }
 
 const MAX_DECODE_ROUNDS = 8;
 const ALLOWED_HEADERS = ["accept", "content-type", "if-match", "if-none-match"];
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Decodes every run of valid %XX escapes as UTF-8 bytes; a stray % stays literal. */
 function decodeOnce(text: string): string {
@@ -49,38 +51,34 @@ function decodeOnce(text: string): string {
 }
 
 /**
- * The path as a server may finally read it: decoded to stable, NFKC-normalized, then
- * judged per segment. Servers and proxies disagree on what a segment "is" (encoded or
+ * The path as a server may finally read it: decoded and NFKC-normalized together to
+ * stable (a fullwidth percent sign becomes a real one), then judged per segment. Servers and proxies disagree on what a segment "is" (encoded or
  * Unicode lookalike separators, stripped whitespace or format characters, trailing
  * delimiters), so a segment that is only dots once those are removed is refused, and so
  * is anything that changes the segment count. Ordinary names with odd characters pass.
  */
-function normalizedPath(pathname: string): string {
+function assertSafeSegments(pathname: string): void {
   let current = pathname;
   for (let round = 0; ; round++) {
     if (round > MAX_DECODE_ROUNDS) throw new HostToolRequestDenied();
     let next: string;
     try {
-      next = decodeOnce(current);
+      next = decodeOnce(current).normalize("NFKC");
     } catch {
       throw new HostToolRequestDenied();
     }
     if (next === current) break;
     current = next;
   }
-  current = current.normalize("NFKC");
   // eslint-disable-next-line no-control-regex
   if (/[\\\u0000\u2215\u2044]/.test(current)) throw new HostToolRequestDenied();
   const segments = current.split("/");
   if (segments.length !== pathname.split("/").length) throw new HostToolRequestDenied();
   for (const segment of segments) {
+    // % is stripped too: a stray % must not turn "..%" into a passing name.
     const bare = segment.replace(/[\p{Z}\p{C}%]/gu, "");
     if (/^\.+(?:[;?#,:].*)?$/.test(bare)) throw new HostToolRequestDenied();
   }
-  return segments
-    .map((segment) => segment.split(";")[0])
-    .join("/")
-    .toLowerCase();
 }
 
 /** Request headers a bound tool may set: no override, routing or credential headers. */

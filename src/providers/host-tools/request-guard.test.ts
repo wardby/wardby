@@ -75,8 +75,24 @@ describe("assertHostToolRequest", () => {
     ["encoded form ..,x/other", url("/2.0/repositories/acme/web/..,x/other")],
     ["encoded form ..:x/other", url("/2.0/repositories/acme/web/..:x/other")],
     ["encoded form %252e%252e%25/other", url("/2.0/repositories/acme/web/%252e%252e%25/other")],
+    ["a repository name with a parameter", url("/2.0/repositories/acme/web;x/y")],
+    ["a repository name with an encoded semicolon", url("/2.0/repositories/acme/web%3Bx/y")],
+    ["parameters on earlier segments", url("/2.0;x/repositories/acme;y/web/z")],
+    ["a fullwidth repository name", url("/2.0/repositories/acme/%EF%BD%97%EF%BD%85%EF%BD%82/x")],
+    ["a leading BOM in the repository name", url("/2.0/repositories/acme/%EF%BB%BFweb/x")],
+    ["a trailing BOM in the repository name", url("/2.0/repositories/acme/web%EF%BB%BF/x")],
+    ["a fullwidth percent dot-segment", url("/2.0/repositories/acme/web/％2e％2e/other")],
+    [
+      "an encoded fullwidth percent dot-segment",
+      url("/2.0/repositories/acme/web/%EF%BC%85%32%65%EF%BC%85%32%65/other"),
+    ],
   ])("refuses %s", (_label, target) => {
     expect(() => assertHostToolRequest(target, "GET", scope)).toThrow(HostToolRequestDenied);
+  });
+
+  it("allows a repository under an encoded prefix", () => {
+    const encoded = { ...scope, pathPrefix: "/2.0/repositories/acme/my%20repo" };
+    expect(() => assertHostToolRequest(url("/2.0/repositories/acme/my%20repo/src/a"), "GET", encoded)).not.toThrow();
   });
 
   it("refuses a method the operation doesn't use", () => {
