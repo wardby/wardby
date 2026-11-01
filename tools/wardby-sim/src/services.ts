@@ -7,6 +7,7 @@
 //   WARDBY_SIM_GITHUB_APP_OWNER     its owner account (default sim-owner)
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createBitbucketService } from "./bitbucket/service.js";
 import { createGitHubSim } from "./github/service.js";
 import { createJiraService } from "./jira/service.js";
 import { createModelService } from "./model/service.js";
@@ -35,6 +36,7 @@ export function buildServices(config: SimConfig): SimService[] {
     github.gitService,
     createSlackService(),
     createJiraService(),
+    createBitbucketService(),
     createNpmService(),
     ...createPypiServices(),
     createOsvService(),

@@ -10,6 +10,7 @@ import {
   createSimulatorRegistryFetch,
   refuseBedrockUnderTestSimulators,
   simulatorGitEnvironment,
+  simulatorHostFetch,
   SIMULATOR_PLACEHOLDER_API_KEY,
   simulatorModelClientOptions,
   isLocalSimulatorHost,
@@ -318,5 +319,39 @@ describe("the simulator's CA for git", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("simulatorHostFetch", () => {
+  const simulators = loadTestSimulators({
+    WARDBY_TEST_SIMULATORS: "1",
+    WARDBY_SIM_BASE_URL: "http://127.0.0.1:18090",
+  })!;
+
+  it("rewrites a simulated API host, allowing only the simulator's address", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true }));
+    const send = simulatorHostFetch(simulators, fetchImpl as never);
+    await send(
+      "https://api.bitbucket.org/2.0/repositories/acme/web?x=1",
+      { method: "GET" },
+      { followRedirects: false },
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:18090/bitbucket/api/2.0/repositories/acme/web?x=1",
+      { method: "GET" },
+      expect.objectContaining({
+        followRedirects: false,
+        allowedHosts: ["127.0.0.1"],
+        restrictToAllowedHosts: true,
+        privateHostAllowlist: ["127.0.0.1"],
+      }),
+    );
+  });
+
+  it("refuses every other host", async () => {
+    const fetchImpl = vi.fn();
+    const send = simulatorHostFetch(simulators, fetchImpl as never);
+    await expect(send("https://api.github.com/x")).rejects.toThrow("fetch_destination_blocked");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

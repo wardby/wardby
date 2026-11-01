@@ -25,12 +25,16 @@
  *   not a simulator token (xoxb-sim-…, sim-…, sim-…);
  * - Jira is configured but the simulator is plain http (Jira's https-only rule stays);
  * - the load-test mock upstream (WARDBY_LOAD_TEST / WARDBY_CODING_PROXY_MOCK_UPSTREAM) is also set.
+ *
+ * Under the switch, a host provider's tokens go to the simulator too, and only `sim-` tokens are sent
+ * (providers/host-tools).
  */
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { logger } from "../core/logger.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 
 /** SHA-256 (hex) of the SPKI DER of the simulator's test GitHub App key (tools/wardby-sim/fixtures). */
 export const SIMULATOR_GITHUB_APP_KEY_FINGERPRINT = "dac6c80f55da011bbd2ed5868c61972f778853069f125946964e093e51a7d141";
@@ -41,6 +45,7 @@ export const SIMULATOR_PREFIXES = {
   "github-git": "/github/git",
   slack: "/slack/api",
   jira: "/jira",
+  "bitbucket-api": "/bitbucket/api",
   npm: "/npm",
   pypi: "/pypi",
   "pypi-files": "/pypi-files",
@@ -58,6 +63,31 @@ export const SIMULATED_REGISTRY_HOSTS: Readonly<Record<string, SimulatedService>
   "files.pythonhosted.org": "pypi-files",
   "api.osv.dev": "osv",
 };
+
+/** The real API host each host-provider simulator stands in for. */
+export const SIMULATED_HOST_PROVIDER_HOSTS: Readonly<Record<string, SimulatedService>> = {
+  "api.bitbucket.org": "bitbucket-api",
+};
+
+/**
+ * A bound tool's fetch under the switch: its API host is rewritten to the simulator, whose local
+ * address the policy opens for this call alone. The request has already passed the host-tool guard
+ * and broker checks against the real host. Every other host is refused.
+ */
+export function simulatorHostFetch(simulators: TestSimulators, fetchImpl: typeof safeFetch): typeof safeFetch {
+  return async (input, init, options) => {
+    const parsed = new URL(input);
+    const service = SIMULATED_HOST_PROVIDER_HOSTS[parsed.hostname.toLowerCase()];
+    if (!service) throw new Error("fetch_destination_blocked");
+    const host = new URL(simulators.origin).hostname.replace(/^\[|\]$/g, "");
+    return fetchImpl(`${simulators.base(service)}${parsed.pathname}${parsed.search}`, init, {
+      ...options,
+      allowedHosts: [host],
+      restrictToAllowedHosts: true,
+      privateHostAllowlist: [host],
+    });
+  };
+}
 
 export type TestSimulatorsRefusal =
   | "partial"
