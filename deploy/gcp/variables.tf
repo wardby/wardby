@@ -151,7 +151,7 @@ variable "auth_role_claim" {
 }
 
 variable "auth_role_map" {
-  description = "Delegating mode only: comma-separated idpValue=wardbyRole pairs (AUTH_ROLE_MAP), e.g. \"wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager\". wardby roles: admin (make_owner, BYO workerImageRef, package approval, service catalog changes, model catalog changes), package-approver (package approval), service-manager (service catalog changes) and model-manager (model catalog changes: set_model, disable_model, reset_model). Matching is exact and case-sensitive; map only IdP values users cannot assign themselves. An unknown wardby role fails the app's startup."
+  description = "Delegating mode only: comma-separated idpValue=wardbyRole pairs (AUTH_ROLE_MAP), e.g. \"wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager\". wardby roles: admin (make_owner, BYO workerImageRef, package approval, service catalog changes, model catalog changes, host providers), package-approver (package approval), service-manager (service catalog changes), model-manager (model catalog changes: set_model, disable_model, reset_model) and host-manager (host providers: hosts:admin). Matching is exact and case-sensitive; map only IdP values users cannot assign themselves. An unknown wardby role fails the app's startup."
   type        = string
   default     = ""
 }
