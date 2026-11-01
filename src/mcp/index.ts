@@ -75,6 +75,7 @@ import { registerCostReportTools } from "./tools/cost-report.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerGrantTools } from "./tools/grants.js";
+import { registerHostProviderTools } from "./tools/host-providers.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerIssueProjectTools } from "./tools/issue-projects.js";
 import { registerNotificationChannelTools } from "./tools/notification-channels.js";
@@ -175,6 +176,7 @@ export function registerAllTools(
   registerSubAgentTools(mcp);
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
+  registerHostProviderTools(mcp);
   registerIssueProjectTools(mcp);
   registerNotificationChannelTools(mcp);
   registerHostAccountTools(mcp);

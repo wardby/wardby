@@ -14,7 +14,7 @@ const HOSTNAME = /^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})+$
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
 /** False for a name a resolver could read as an IPv4 address ("127.1", "0x7f.0.0.1") or with a label ending in "-". */
-function isExactHostname(h: string): boolean {
+export function isExactHostname(h: string): boolean {
   if (!HOSTNAME.test(h) || IPV4.test(h)) return false;
   const labels = h.split(".");
   const last = labels[labels.length - 1];

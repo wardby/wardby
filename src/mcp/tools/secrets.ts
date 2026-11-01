@@ -312,6 +312,11 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
       await requireBindable(ctx, agent);
       const ownerId = agent.ownerId!;
+      // A host provider's webhook secret is kept off every agent, so no tool can read it.
+      const named = await ctx.db.secret.findUnique({ where: { ownerId_name: { ownerId, name: args.name } } });
+      if (named && (await ctx.db.hostProvider.count({ where: { webhookSecretId: named.id } })) > 0) {
+        throw new McpError(409, "This secret is a host provider's webhook secret and can't be attached to an agent.");
+      }
       try {
         // Resolved among the agent owner's secrets (== the caller here).
         await attachSecret(args.agentId, args.name, ownerId, ctx.db, args.alias ?? args.name);
@@ -349,6 +354,17 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
       await requireOwnedSecret(ctx.db, args.id, ctx.principal.id);
+      const hostProviderUses =
+        (await ctx.db.hostProviderCredential.count({ where: { secretId: args.id } })) +
+        (await ctx.db.hostProvider.count({
+          where: { OR: [{ webhookSecretId: args.id }, { permissionSecretId: args.id }] },
+        }));
+      if (hostProviderUses > 0) {
+        throw new McpError(
+          409,
+          "This secret is used by a host provider; re-register it or delete_host_provider first.",
+        );
+      }
       await deleteSecret(args.id, ctx.db);
       return textResult({ deleted: args.id });
     },
