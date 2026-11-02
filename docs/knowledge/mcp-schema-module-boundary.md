@@ -7,9 +7,9 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-15T11:18:44.473Z }
 sources:
   - id: schema
-    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/mcp/server.ts#L55-L65
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/mcp/server.ts#L64-L74
   - id: registration
-    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/mcp/server.ts#L256-L263
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/mcp/server.ts#L282-L289
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -18,16 +18,16 @@ wardby:
     - id: schema
       repo: github:wardby/wardby
       path: src/mcp/server.ts
-      lines: [55, 65]
+      lines: [64, 74]
       symbol: ToolSpec
-      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
       spanHash: sha256:bac668c827f34c5a3c952226092c734f54e2c50d0f66ac55a3c15a369b4cfb1b
     - id: registration
       repo: github:wardby/wardby
       path: src/mcp/server.ts
-      lines: [256, 263]
+      lines: [282, 289]
       symbol: factory
-      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
       spanHash: sha256:6d9cdfe4089e7c9f1be23fb35e8a348407bfc70a2dd611d04875f32ef287f0d3
   confidence: high
 ---
@@ -36,6 +36,6 @@ The SDK bundles its own Zod module instance, so matching the package version doe
 
 **What to do:** keep schemas crossing this seam as plain JSON; replacing the converter with an application Zod shape can break registration even without a version mismatch.
 
-[^schema]: src/mcp/server.ts, lines 55-65.
+[^schema]: src/mcp/server.ts, lines 64-74.
 
-[^registration]: src/mcp/server.ts, lines 256-263.
+[^registration]: src/mcp/server.ts, lines 282-289.
