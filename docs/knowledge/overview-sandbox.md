@@ -4,18 +4,18 @@ title: Native tool and worker isolation
 description: QuickJS evaluates user tools while a run-bound gateway retains privileged effects and native worker authority.
 tags: [sandbox, native, isolation]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:57.805Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-02T06:04:39.135Z }
 sources:
   - id: tool
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/sandbox/user-tool.ts#L20-L46
   - id: composition
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/composition.ts#L30-L92
   - id: worker
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/worker.ts#L37-L100
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/native-worker/worker.ts#L36-L117
   - id: gateway
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/gateway-server.ts#L101-L139
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/native-worker/gateway-server.ts#L147-L185
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/native-worker/gateway-server.ts#L215-L241
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/native-worker/gateway-server.ts#L282-L306
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -38,24 +38,24 @@ wardby:
     - id: worker
       repo: github:wardby/wardby
       path: src/native-worker/worker.ts
-      lines: [37, 100]
+      lines: [36, 117]
       symbol: runNativeWorker
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:a5ecda1addcbf4acd895a94c3a1670e865342601d5d4028b9bd208119a51ad62
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
+      spanHash: sha256:43b0cb7ed92c170937b63bdf258ad7a5c1adceeb14c305a9ce4cda1c4f8d78f1
     - id: gateway
       repo: github:wardby/wardby
       path: src/native-worker/gateway-server.ts
-      lines: [101, 139]
+      lines: [147, 185]
       symbol: handle
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:75818d5d25ee6ecf6c77c802fc123a7f5f396589d4c99325bb37a9b2ec6fb43a
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
+      spanHash: sha256:c5067a06bf3ba16e1e8285b0afc47087de5f32dd8ec84bd22f1e6d4d1f3b278d
     - id: model
       repo: github:wardby/wardby
       path: src/native-worker/gateway-server.ts
-      lines: [215, 241]
+      lines: [282, 306]
       symbol: streamModel
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:d3122b8a90bb9b4345ed411b8ddc73fedb0ea9e979f069d1a2f1615ca3eb97dd
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
+      spanHash: sha256:e1bc656613f650211d293c3ac47ec948221284b24f335a04fd1adf68dce037dd
   confidence: high
 ---
 
@@ -65,8 +65,8 @@ An isolated native run proceeds through these steps:
 
 1. Composition selects the Docker or Kubernetes launcher and optionally wraps it with a single-use warm-worker pool.
 2. The executor establishes a run-bound gateway session and delivers worker input through the launcher's isolation and delivery gates.
-3. The worker drives NativeEngine with model calls and privileged tool effects represented as gateway requests. User tools stay in local QuickJS; built-ins are served remotely.
-4. The gateway validates request shape, run identity and current drivability before serving operations; model calls are restricted to the run's model. Results return to [core settlement](overview-core.md), whose authoritative accounting comes from the trusted side.[^composition][^worker][^gateway][^model]
+3. The worker drives NativeEngine with model calls and privileged tool effects represented as gateway requests. User tools stay in local QuickJS; long-running built-ins return pending and are polled with the same call ID so another gateway replica can resume them.
+4. The gateway validates request shape, run identity, proven network readiness and current drivability before serving operations; model calls are restricted to the run's model. Results return to [core settlement](overview-core.md), whose authoritative accounting comes from the trusted side.[^composition][^worker][^gateway][^model]
 
 The area owns worker protocol, sandbox bridges and launch lifecycle. Session, call and warm-worker ledgers live in [Prisma](overview-prisma.md). [Provider adapters](overview-providers.md) remain on the trusted side; [deployment](overview-deploy.md) supplies the network and container boundary. [Coding workers](overview-coding.md) use a separate execution protocol.
 
@@ -76,8 +76,8 @@ The area owns worker protocol, sandbox bridges and launch lifecycle. Session, ca
 
 [^composition]: src/native-worker/composition.ts, lines 30-92.
 
-[^worker]: src/native-worker/worker.ts, lines 37-100.
+[^worker]: src/native-worker/worker.ts, lines 36-117.
 
-[^gateway]: src/native-worker/gateway-server.ts, lines 101-139.
+[^gateway]: src/native-worker/gateway-server.ts, lines 147-185.
 
-[^model]: src/native-worker/gateway-server.ts, lines 215-241.
+[^model]: src/native-worker/gateway-server.ts, lines 282-306.

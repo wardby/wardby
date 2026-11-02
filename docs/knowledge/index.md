@@ -16,6 +16,8 @@
 
 ## Invariants
 
+- [Public write and capability binding must serialize](public-write-binding-transaction.md) — Opposing grant and attachment checks must commit atomically to prevent each from approving the other's absent state.
+
 - [HTTP compatibility depends on bootstrap order](http-dispatcher-bootstrap.md) — A Kubernetes client import can change built-in fetch behavior even when jobs use Docker.
 - [Pricing races must use the persisted winner](run-pricing-first-writer.md) — Concurrent native attempts must reuse the catalog terms that won the conditional pricing write.
 - [Private datastore wrappers must reject shared methods](private-datastore-shared-boundary.md) — Prefix restrictions on private keys cannot authorize the provider shared-store methods.
@@ -44,7 +46,7 @@
 
 ## Coverage
 
-1. src/mcp/ (tools, auth, access, grants): covered 2026-10-17 (6 concepts)
+1. src/mcp/ (tools, auth, access, grants): covered 2026-11-02 (7 concepts)
 2. src/config/ and env handling: covered 2026-10-17 (2 concepts)
 3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-17 (7 concepts)
 4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-17 (2 concepts)
