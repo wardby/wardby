@@ -921,6 +921,20 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           }
 
           const nextKind = args.kind ?? existing.kind;
+          if (nextKind !== existing.kind) {
+            // A write link without triggers is a coding agent's extra repository
+            // and a native agent's plain write access; changing kind would
+            // silently reinterpret it.
+            const reinterpreted = await tx.agentRepository.count({
+              where: { agentId: args.id, access: "write", triggers: { isEmpty: true } },
+            });
+            if (reinterpreted > 0) {
+              throw new McpError(
+                400,
+                `Agent "${args.id}" has write repository links without triggers, which mean different things on native and coding agents; unlink them before changing its kind.`,
+              );
+            }
+          }
           // A coding repository is an owner binding (agentOwnerBindings): an
           // agent everyone can write never gets one, as attach_* refuse theirs.
           if (
