@@ -14,7 +14,6 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import {
   CodingBaseRefSchema,
-  isCodingRepository,
   isLocalRepository,
   normalizeGitHubRepository,
   normalizeLocalRepository,
@@ -190,7 +189,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       if (agent.kind === "coding") {
         if (args.access !== "write") throw new McpError(400, "A coding agent's repository link needs write access.");
         // As codingProfile.repository: anything else would pass here and fail every run at dispatch.
-        if (!isCodingRepository(repository)) {
+        // What a coding run can work in, matching the coding profile.
+        if (provider !== "github" && provider !== "local") {
           throw new McpError(400, "A coding agent's repository link must be a GitHub repository or a local: path.");
         }
         if (
