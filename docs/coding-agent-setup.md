@@ -69,6 +69,50 @@ request currently targets, and the agent resolves any conflicts — see
 Over stdio, the local operator holds every role, so `repositoryAdminOverride`
 is the way to approve a repository there.
 
+## A coding agent's repositories
+
+A coding agent works in one repository per run, chosen from its list:
+
+- `codingProfile.repository` is the **default** repository.
+- `link_repository` adds more. A link on a coding agent takes
+  `access: "write"`, no triggers, no `checkName` and an optional `baseRef`
+  (the base branch for runs in that repository; default: the profile's
+  `baseRef`). Linking the default repository again is refused.
+- `unlink_repository` removes one.
+
+```json
+{ "agentId": "<agent id>", "repository": "your-org/other-repo", "access": "write", "baseRef": "main" }
+```
+
+Only the agent's owner (or an admin approving explicitly with `adminOverride`)
+can add a repository, and the same authorization applies as for the default;
+see [Repository authorization](#repository-authorization).
+
+The repository is chosen when the run starts and never changes during it:
+
+- `trigger_agent` takes an optional `repository`. Leave it out and the run uses
+  the default repository. Name one that is not on the list and the call is
+  refused with `repository_not_listed`.
+- A webhook body can carry `wardbyRepository` the same way (not `repository`,
+  which forwarded payloads already use). A refused value is a 400
+  `{ "error": "invalid_repository" }`. Like `task` and `baseRef`, a non-owner
+  can choose it only when `codingProfile.allowWebhookTaskOverride` is on;
+  otherwise the call is refused with 403.
+- A lead's `delegate_to_<name>` call takes `repository`. When the sub-agent has
+  more than its default repository the call must name one, unless
+  `continuePriorRun` is given: a follow-up works in the repository of the run
+  it continues. Without a choice the call is refused with
+  `repository_required`.
+
+Everything else about the agent is shared across its repositories: toolchain,
+worker image, services, system prompt, budget, protected paths and the package
+allowlist. If two repositories need different ones, use two agents.
+
+An agent with no repository links behaves as before. Changing an agent's
+`kind` is refused while it has write links without triggers; unlink them first.
+For the refusals, see [Repository required](../help/errors/repository-required.md)
+and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
+
 ## Local repositories
 
 A coding agent (or a review agent) can work on a git repository on the same

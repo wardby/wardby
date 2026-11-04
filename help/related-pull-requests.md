@@ -128,6 +128,10 @@ such hints: a fix round's task names only its own pull request. Merged and
 closed pull requests are never listed as continuable: a change there needs a
 new pull request, which joins the set once it is recorded.
 
+When the sub-agent is a coding agent with a list of repositories, a
+follow-up delegation passes `continuePriorRun` and takes its repository from
+that run, so it needs no `repository` of its own.
+
 Give your own delivery or router agent's system prompt a line such as:
 
     Continue the pull request you were asked about, and any listed open

@@ -208,6 +208,32 @@ pull request in it also gets a `wardby merge order` check run showing
 whether its earlier steps have merged yet; search help for "merge order
 check" for its states and for requiring it in branch protection.
 
+**One coding agent across several repositories.** Instead of one builder per
+repository, give one coding builder a list: its default in
+`codingProfile.repository`, and each other repository with `link_repository`
+(`access: "write"`, no triggers). The lead then names the repository on each
+call, and may delegate to the same builder once per repository:
+
+```json
+{ "task": "Add the /quotes endpoint the client will call.", "repository": "your-org/api", "mergeOrder": 1 }
+```
+
+```json
+{ "task": "Add the quotes page that calls /quotes.", "repository": "your-org/web", "mergeOrder": 2 }
+```
+
+Set `maxDelegationsPerRun` (up to 20) for the number of calls, and use
+`mergeOrder` where the pull requests must land in order. A call without
+`repository` is refused with `repository_required` (unless it continues a prior
+run with `continuePriorRun`), and a repository not on the list with
+`repository_not_listed`. A native sub-agent refuses `repository` with
+`repository_requires_coding_agent`. The lead sees the list in the tool
+definition only when it has the same owner as the builder, or another owner
+with execute access to a builder that sets `allowWebhookTaskOverride`. All
+repositories share the builder's toolchain, budget and prompt.
+
+Search help for `repository_required` or `repository_not_listed` for what to do about those refusals.
+
 ## Step 3: confirm
 
 Summarize what you created: each agent's name and id, the sub-agent bindings,
