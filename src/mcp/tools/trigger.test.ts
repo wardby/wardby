@@ -54,6 +54,7 @@ function fakeDb(
   grants: FakeGrantSeed[] = [],
   budget: { group?: Record<string, unknown>; groupRuns?: Record<string, unknown>[] } = {},
   localLinks: Map<string, string[]> = new Map(),
+  writeLinks: Map<string, string[]> = new Map(),
 ) {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, FakeRunRow>();
@@ -62,13 +63,16 @@ function fakeDb(
   let taskCounter = 0;
 
   const pullRequests: FakePullRequest[] = [];
+  const codingRuns: Record<string, unknown>[] = [];
   const db: any = {
     resourceGrant: fakeResourceGrants(grants),
     runs,
     pullRequests,
     agentRepository: {
-      findMany: async ({ where }: { where: { agentId: string; provider: string } }) =>
-        (localLinks.get(where.agentId) ?? []).map((repository) => ({ repository, provider: where.provider })),
+      findMany: async ({ where }: { where: { agentId: string; provider?: string; access?: string } }) =>
+        where.access === "write"
+          ? (writeLinks.get(where.agentId) ?? []).map((repository) => ({ repository, baseRef: null }))
+          : (localLinks.get(where.agentId) ?? []).map((repository) => ({ repository, provider: where.provider })),
     },
     localPullRequest: {
       create: async ({ data }: { data: { repository: string; branch: string; base: string } }) => {
@@ -168,7 +172,13 @@ function fakeDb(
       },
     },
     runBudgetEvent: { create: async ({ data }: { data: unknown }) => data },
-    codingRun: { create: async ({ data }: { data: unknown }) => data },
+    codingRuns,
+    codingRun: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        codingRuns.push(data);
+        return data;
+      },
+    },
     webhook: {},
     $queryRaw: async () => [],
   };
@@ -478,6 +488,87 @@ describe("trigger_agent", () => {
       await client.close();
     });
 
+    describe("repository choice", () => {
+      const links = new Map([["a1", ["acme/service-a", "acme/service-b"]]]);
+      async function withLinks(principalId: string, agent: FakeAgentRow, grants: FakeGrantSeed[]) {
+        const db = fakeDb([{ ...agent, model: "gpt-5.6-luna" } as FakeAgentRow], grants, {}, new Map(), links);
+        const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, principalId, ["runs:trigger"], false));
+        registerTriggerTool(mcp);
+        return { db: db as any, client: await connectClient(mcp) };
+      }
+      const call = (c: Client, args: Record<string, unknown>) =>
+        c.callTool({ name: "trigger_agent", arguments: { agentId: "a1", ...args } });
+
+      it("starts a coding run in a listed repository", async () => {
+        const { db, client } = await withLinks("owner", coding(false), []);
+        const result = await call(client, { repository: "acme/service-a" });
+        expect(result.isError).toBeFalsy();
+        expect(db.codingRuns.map((r: any) => r.repository)).toEqual(["acme/service-a"]);
+        await client.close();
+      });
+
+      it("still uses the profile's repository when none is passed and the agent has no links", async () => {
+        const plain = await as("owner", coding(false), []);
+        expect((await call(plain.client, {})).isError).toBeFalsy();
+        expect((plain.db as any).codingRuns.map((r: any) => r.repository)).toEqual(["o/r"]);
+        await plain.client.close();
+      });
+
+      it("refuses an unlisted repository without echoing it, and starts no run", async () => {
+        const { db, client } = await withLinks("owner", coding(false), []);
+        const secret = "acme/sk-fake-secret-0123456789";
+        const result = await call(client, { repository: secret });
+        expect(result.isError).toBe(true);
+        const text = JSON.stringify(result);
+        expect(text).toContain("repository_not_listed");
+        expect(text).toContain("acme/service-a");
+        expect(text).not.toContain("sk-fake-secret");
+        expect(db.runs.size).toBe(0);
+        await client.close();
+      });
+
+      it("defaults to the profile's repository when none is passed, even with listed links", async () => {
+        const { db, client } = await withLinks("owner", coding(false), []);
+        expect((await call(client, {})).isError).toBeFalsy();
+        expect(db.codingRuns.map((r: any) => r.repository)).toEqual(["o/r"]);
+        await client.close();
+      });
+
+      it("a non-owner may pass repository only when the owner opted in", async () => {
+        const closed = await withLinks("g", coding(false), [grant("execute")]);
+        const refused = await call(closed.client, { repository: "acme/service-a" });
+        expect(refused.isError).toBe(true);
+        expect(JSON.stringify(refused)).toMatch(/allowWebhookTaskOverride/);
+        await closed.client.close();
+        const open = await withLinks("g", coding(true), [grant("execute")]);
+        expect((await call(open.client, { repository: "acme/service-a" })).isError).toBeFalsy();
+        await open.client.close();
+      });
+
+      it("a caller without execute gets no repository list", async () => {
+        const noAccess = await withLinks("stranger", coding(true), []);
+        const readOnly = await withLinks("g", coding(true), [grant("read")]);
+        for (const { client } of [noAccess, readOnly]) {
+          const result = await call(client, { repository: "acme/nope" });
+          expect(result.isError).toBe(true);
+          const text = JSON.stringify(result);
+          expect(text).not.toContain("acme/service-a");
+          expect(text).not.toContain("acme/service-b");
+          expect(text).not.toContain("repository_not_listed");
+          await client.close();
+        }
+      });
+
+      it("refuses repository on a native agent", async () => {
+        const native = await as("owner", { id: "a1", name: "n", ownerId: "owner" }, []);
+        const result = await call(native.client, { repository: "acme/service-a" });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result)).toContain("only valid for coding agents");
+        await native.client.close();
+      });
+    });
+
     it("M8: the stdio operator is not the owner for task overrides either", async () => {
       const db = fakeDb([{ ...coding(false), model: "gpt-5.6-luna" } as FakeAgentRow]);
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -680,12 +771,12 @@ describe("trigger_agent on a local repository", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  async function trigger(db: ReturnType<typeof fakeDb>) {
+  async function trigger(db: ReturnType<typeof fakeDb>, args: Record<string, unknown> = {}) {
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
     registerTriggerTool(mcp);
     const client = await connectClient(mcp);
-    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", ...args } });
     await client.close();
     return result;
   }
@@ -711,6 +802,37 @@ describe("trigger_agent on a local repository", () => {
     const result = await trigger(fakeDb([codingAgent()]));
     expect(result.isError).toBeFalsy();
     expect(parseText(result as never)).toMatchObject({ warnings: ["1 uncommitted file is not included"] });
+  });
+
+  describe("a linked local repository chosen for the run", () => {
+    let linked: string;
+    beforeEach(() => {
+      linked = realpathSync(mkdtempSync(join(tmpdir(), "local-trigger-linked-")));
+      execFileSync("git", ["-C", linked, "init", "-q", "-b", "main"]);
+      vi.stubEnv("LOCAL_REPO_ROOTS", `${root}:${linked}`);
+    });
+    afterEach(() => rmSync(linked, { recursive: true, force: true }));
+    const agent = (): FakeAgentRow => ({
+      ...codingAgent(),
+      codingProfile: { provider: "codex", repository: "o/r", baseRef: "main", allowWebhookTaskOverride: false },
+    });
+    const dbFor = () => fakeDb([agent()], [], {}, new Map(), new Map([["a1", [`local:${linked}`]]]));
+
+    it("warns about the chosen repository's uncommitted files, not the default's", async () => {
+      writeFileSync(join(linked, "dirty.txt"), "x");
+      const result = await trigger(dbFor(), { repository: `local:${linked}` });
+      expect(result.isError).toBeFalsy();
+      expect(parseText(result as never)).toMatchObject({ warnings: ["1 uncommitted file is not included"] });
+    });
+
+    it("re-checks the chosen repository against the roots as they are now", async () => {
+      vi.stubEnv("LOCAL_REPO_ROOTS", root);
+      const db = dbFor();
+      const result = await trigger(db, { repository: `local:${linked}` });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain("local_repo_not_allowed");
+      expect((db as any).runs.size).toBe(0);
+    });
   });
 });
 

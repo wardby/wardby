@@ -29,6 +29,7 @@
  * gets 404, not another principal's final text/cost.
  */
 import { dispatchRun } from "../../core/dispatch.js";
+import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
 import {
   AttributionError,
   explicitAttribution,
@@ -56,6 +57,7 @@ const TriggerAgentSchema = z
     agentId: z.string().trim().min(1).max(128),
     task: CodingTaskOverrideSchema.optional(),
     baseRef: CodingBaseRefSchema.optional(),
+    repository: z.string().min(1).max(300).optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -139,16 +141,16 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 function assertOverrideAllowed(
   principalId: string,
   agent: { id: string; ownerId: string | null; codingProfile: { allowWebhookTaskOverride: boolean } | null },
-  args: { task?: string; baseRef?: string },
+  args: { task?: string; baseRef?: string; repository?: string },
 ): void {
   // Strictly the owner: the stdio operator's owner-level access doesn't make
   // it the owner whose repository authority the task steers (review M8).
   const isOwner = agent.ownerId !== null && agent.ownerId === principalId;
-  if (isOwner || (args.task === undefined && args.baseRef === undefined)) return;
+  if (isOwner || (args.task === undefined && args.baseRef === undefined && args.repository === undefined)) return;
   if (!agent.codingProfile?.allowWebhookTaskOverride) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task or baseRef, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef or repository, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
     );
   }
 }
@@ -164,7 +166,7 @@ async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
-  args: { task?: string; baseRef?: string },
+  args: { task?: string; baseRef?: string; repository?: string },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
   const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
@@ -183,6 +185,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         agentId: { type: "string" },
         task: { type: "string" },
         baseRef: { type: "string" },
+        repository: {
+          type: "string",
+          description:
+            "Coding agents only: a repository on the agent's list (see get_agent). Default: codingProfile.repository. " +
+            "Required when the agent has more than one repository and no default applies.",
+        },
         review: {
           type: "object",
           additionalProperties: false,
@@ -227,14 +235,33 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         }
         review = await resolveLocalReview(ctx, agent.id, args.review);
       }
-      if (agent.kind !== "coding" && (args.task !== undefined || args.baseRef !== undefined)) {
-        throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
+      if (
+        agent.kind !== "coding" &&
+        (args.task !== undefined || args.baseRef !== undefined || args.repository !== undefined)
+      ) {
+        throw new McpError(400, "Task, baseRef and repository overrides are only valid for coding agents.");
       }
 
       // A local repository is re-checked against the roots as they are now
       // (they can narrow after the agent was saved), before any run exists.
       let warnings: string[] = [];
-      const repository = agent.kind === "coding" ? agent.codingProfile?.repository : undefined;
+      // The resolver's refusal lists the agent's repositories, so it runs only
+      // after requireTriggerable (execute on the agent) and never echoes the
+      // requested value.
+      const refused = (err: unknown): never => {
+        if (err instanceof RepositoryChoiceRefusedError) throw new McpError(400, `${err.code}: ${err.message}`);
+        throw err;
+      };
+      const repository =
+        agent.kind === "coding" && agent.codingProfile
+          ? (
+              await resolveCodingRepository(ctx.db, {
+                agentId: agent.id,
+                profile: agent.codingProfile,
+                requested: args.repository,
+              }).catch(refused)
+            ).repository
+          : undefined;
       if (repository !== undefined && isLocalRepository(repository)) {
         try {
           const resolved = await resolveLocalRepository(repository, loadLocalRepoRoots(process.env).roots);
@@ -281,6 +308,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           trigger: "manual",
           codingTask: args.task,
           codingBaseRef: args.baseRef,
+          codingRepository: args.repository,
           attribution,
           task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
           triggeredById: ctx.principal.id,
@@ -302,7 +330,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         if (!dispatched) throw new Error("Run dispatch was not claimed.");
       } catch (err) {
         if (pullRequest) await ctx.db.localPullRequest.deleteMany({ where: { id: pullRequest.id } }).catch(() => {});
-        throw err;
+        return refused(err);
       }
 
       if (ctx.clientSupportsTasks) {
