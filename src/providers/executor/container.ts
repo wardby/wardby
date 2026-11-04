@@ -369,6 +369,12 @@ export interface ContainerRunSnapshot {
   profileRepository: string | null;
   /** How the profile's repository was authorized (CodingAgentProfile.repositoryAuthorizedVia). */
   repositoryAuthorizedVia: string | null;
+  /** The run's repository was chosen from the agent's list (CodingRun.viaRepositoryLink). */
+  viaRepositoryLink: boolean;
+  /** How the agent's current write link for the run's repository was authorized; null when there is none. */
+  repositoryLinkAuthorizedVia: string | null;
+  /** The agent's write link for the run's repository still exists (always false for a run not made via a link). */
+  repositoryLinkExists: boolean;
   /** The run's catalog entry recorded at dispatch (Run.pricingSnapshot); null on runs from before the catalog. */
   pricingVersion: string | null;
   pricingSnapshot: unknown;
@@ -513,6 +519,17 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       },
     });
     if (!row?.codingRun) return null;
+    const link = row.codingRun.viaRepositoryLink
+      ? await this.db.agentRepository.findFirst({
+          where: {
+            agentId: row.agentId,
+            repository: row.codingRun.repository,
+            access: "write",
+            triggers: { isEmpty: true },
+          },
+          select: { authorizedVia: true },
+        })
+      : null;
     return {
       runId: row.id,
       agentId: row.agentId,
@@ -564,6 +581,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
       repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
+      viaRepositoryLink: row.codingRun.viaRepositoryLink,
+      repositoryLinkExists: link !== null,
+      repositoryLinkAuthorizedVia: link?.authorizedVia ?? null,
       pricingVersion: row.pricingVersion,
       pricingSnapshot: row.pricingSnapshot,
     };
@@ -1452,13 +1472,20 @@ export class ContainerExecutor implements Executor {
    * access. Throws RepoAccessError (refused before anything is cloned).
    */
   private async authorizeRepository(run: ContainerRunSnapshot, opts: { inFlight: boolean }): Promise<void> {
+    // Checked first: a local repository is otherwise authorized by the trusted roots alone.
+    if (run.viaRepositoryLink && !run.repositoryLinkExists) throw new RepoAccessError("repo_access_not_authorized");
     const sameRepository = run.profileRepository !== null && run.profileRepository === run.repository;
+    const authorizedVia = run.viaRepositoryLink
+      ? run.repositoryLinkAuthorizedVia
+      : sameRepository
+        ? run.repositoryAuthorizedVia
+        : "host_permission";
     const decision = await this.options.repoAccess.authorizeUse({
       ownerId: run.ownerId,
       provider: codeProviderOf(run.repository),
       repository: run.repository,
       required: requiredLevel("coding"),
-      authorizedVia: sameRepository ? run.repositoryAuthorizedVia : "host_permission",
+      authorizedVia,
       retryTransient: opts.inFlight,
     });
     if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
@@ -2242,7 +2269,8 @@ export class ContainerExecutor implements Executor {
         this.continuationTargetOf(run);
       if (!workspace) throw new Error("coding_workspace_lost");
       // The same in-flight access check a push gets: a revoked owner's run edits nothing.
-      await this.authorizeRepository(run, { inFlight: true });
+      // Reloaded: the snapshot passed in predates the description reads above, and a link removed since then counts.
+      await this.authorizeRepository(await this.requireCurrent(run.runId), { inFlight: true });
       const details: FinalizeChangesDetails = {
         summary: output.summary,
         tests: output.tests,

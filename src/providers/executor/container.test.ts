@@ -142,6 +142,9 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     workspaceDiskMb: null,
     profileRepository: "openai/example",
     repositoryAuthorizedVia: "grandfathered",
+    viaRepositoryLink: false,
+    repositoryLinkAuthorizedVia: null,
+    repositoryLinkExists: false,
     pricingVersion: null,
     pricingSnapshot: null,
     ...overrides,
@@ -1652,6 +1655,28 @@ describe("ContainerExecutor", () => {
         ]);
         expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: label });
       }
+    });
+
+    it("a no_changes continuation refreshes nothing when its repository link vanishes after the result is read", async () => {
+      const created = await fixRound(
+        { viaRepositoryLink: true, repositoryLinkExists: true, repositoryLinkAuthorizedVia: "admin" },
+        { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+      );
+      noChanges(created);
+      let refreshed = 0;
+      created.vcs.refreshPullRequestDescription = async () => {
+        refreshed += 1;
+        return { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      // The description state is read after the run's snapshot was loaded for this branch.
+      const baselineRead = created.store.pullRequestDescriptionBaseline!.bind(created.store);
+      created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
+        if (created.jobs.launches === 1) created.store.run.repositoryLinkExists = false;
+        return baselineRead(rootRunId);
+      };
+      await created.executor.start("run-1");
+      expect(refreshed).toBe(0);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
     });
 
     it("no_changes continuation refreshes the description before store.complete (call order asserted)", async () => {
@@ -4525,6 +4550,92 @@ describe("ContainerExecutor repository authorization (H5-1/C3-2)", () => {
       expect(created.store.run.status).toBe("refused");
       expect(created.vcs.prepared).toBe(0);
     }
+  });
+});
+
+describe("ContainerExecutor repository link authorization at use", () => {
+  const allowAll = { authorizeUse: async () => ({ ok: true as const }) } as never;
+
+  async function expectRefusedBeforeClone(created: Awaited<ReturnType<typeof harness>>) {
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    const error = (created.store.terminations[0] as { error: string }).error;
+    expect(error).toMatch(/^coding_failure_repo_access:coding_diag_/);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.jobs.launches).toBe(0);
+    expect(created.sessions.creates).toBe(0);
+  }
+
+  it("refuses, before any clone, a run whose repository link was removed", async () => {
+    const created = await harness(
+      { viaRepositoryLink: true, repositoryLinkExists: false, repositoryLinkAuthorizedVia: null },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll },
+    );
+    await expectRefusedBeforeClone(created);
+  });
+
+  it("uses the link's approval, not the profile's, for a linked repository", async () => {
+    const gate = vi.fn(async (_input: unknown) => ({ ok: true as const }));
+    const created = await harness(
+      {
+        repositoryAuthorizedVia: "grandfathered",
+        viaRepositoryLink: true,
+        repositoryLinkExists: true,
+        repositoryLinkAuthorizedVia: "admin",
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: { authorizeUse: gate } as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(gate).toHaveBeenCalledWith(expect.objectContaining({ authorizedVia: "admin" }));
+  });
+
+  it("a local repository's link must still exist, even inside the trusted roots", async () => {
+    const created = await harness(
+      { repository: LOCAL_REPOSITORY, viaRepositoryLink: true, repositoryLinkExists: false },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll },
+    );
+    await expectRefusedBeforeClone(created);
+  });
+
+  it("does not put the repository in the refusal", async () => {
+    const created = await harness(
+      { repository: "acme/secret-name", viaRepositoryLink: true, repositoryLinkExists: false },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll },
+    );
+    await created.executor.start("run-1");
+    expect((created.store.terminations[0] as { error: string }).error).not.toContain("secret-name");
+    expect(JSON.stringify(logged)).not.toContain("secret-name");
+  });
+
+  it("blocks the final push when the link is removed mid-run", async () => {
+    const created = await harness(
+      { viaRepositoryLink: true, repositoryLinkExists: true, repositoryLinkAuthorizedVia: "admin" },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll },
+    );
+    created.jobs.onLaunch = () => {
+      created.store.run.repositoryLinkExists = false;
+    };
+    await created.executor.start("run-1");
+    expect(created.jobs.launches).toBe(1);
+    expect(created.vcs.finalized).toBe(0);
+    expect(created.store.run.status).toBe("failed");
+    expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_repo_access:/);
   });
 });
 
