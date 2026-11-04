@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -8,6 +8,12 @@ import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
+const { loadAgentSecretValues } = vi.hoisted(() => ({ loadAgentSecretValues: vi.fn() }));
+vi.mock("../../core/secret-guard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../core/secret-guard.js")>()),
+  loadAgentSecretValues,
+}));
+
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
 
 interface FakeAgentRow {
@@ -1070,5 +1076,73 @@ describe("run observability tools", () => {
     const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
     expect(without).not.toHaveProperty("services");
     await client.close();
+  });
+});
+
+describe("get_run: a coding run's request", () => {
+  const now = new Date("2026-11-04T12:00:00.000Z");
+  const row = (codingRun: Record<string, unknown>) => ({
+    id: "r1",
+    agentId: "a1",
+    status: "succeeded",
+    trigger: "subagent",
+    turns: 1,
+    tokensIn: 1,
+    tokensOut: 1,
+    costUsd: 0,
+    finalText: "done",
+    error: null,
+    startedAt: now,
+    finishedAt: now,
+    codingRun: { result: null, ...codingRun },
+  });
+  const getRun = async (run: ReturnType<typeof row>) => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }], [run]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    return parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never) as Record<
+      string,
+      unknown
+    >;
+  };
+
+  beforeEach(() => {
+    loadAgentSecretValues.mockReset();
+    loadAgentSecretValues.mockResolvedValue([]);
+  });
+
+  it("returns the task the run received", async () => {
+    const body = await getRun(row({ request: "Upgrade lodash in package.json" }));
+    expect(body.request).toBe("Upgrade lodash in package.json");
+    expect(body.requestUnavailable).toBeUndefined();
+    expect(loadAgentSecretValues).toHaveBeenCalledWith(expect.anything(), undefined, "a1");
+  });
+
+  it("masks the agent's secret values and token-shaped values", async () => {
+    loadAgentSecretValues.mockResolvedValue([{ name: "DB_PASSWORD", values: ["fake-attached-secret-value"] }]);
+    const token = `ghp_${"a".repeat(36)}`;
+    const body = await getRun(row({ request: `Use fake-attached-secret-value and ${token} to log in` }));
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("fake-attached-secret-value");
+    expect(text).not.toContain(token);
+    expect(body.request).toContain("to log in");
+  });
+
+  it("withholds the request when the agent's secrets can't be read", async () => {
+    loadAgentSecretValues.mockRejectedValue(new Error("fake-attached-secret-value unreadable"));
+    const body = await getRun(row({ request: "Use fake-attached-secret-value" }));
+    const text = JSON.stringify(body);
+    expect(body.request).toBeUndefined();
+    expect(body.requestUnavailable).toBe(true);
+    expect(text).not.toContain("fake-attached-secret-value");
+  });
+
+  it("omits the field on a run with no stored request, without reading secrets", async () => {
+    const body = await getRun(row({ request: null }));
+    expect(body.request).toBeUndefined();
+    expect(body.requestUnavailable).toBeUndefined();
+    expect(loadAgentSecretValues).not.toHaveBeenCalled();
   });
 });

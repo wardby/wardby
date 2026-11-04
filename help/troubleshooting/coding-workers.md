@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
+tags: [coding-agents, get_run, request, requestUnavailable, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
 appliesTo: >=0.2.1
 ---
 
@@ -94,6 +94,14 @@ commands run in a tool-runner container limited to at most 512 MiB and 0.25 CPU.
    guide). This applies to every coding run.
 3. For a Claude Code agent with heavy checks, run it on Codex instead, since raising
    the pod's memory doesn't raise the tool runner's limit.
+
+## See what a run was asked to do
+
+From Wardby 0.8.0, `get_run` returns a coding run's `request`: the task it
+received from `trigger_agent`, a webhook or a lead, without the agent's standing
+instructions. Use it to check what a lead told a coding agent. The agent's secret
+values and token-shaped values are masked. If the secrets can't be read, you get
+`requestUnavailable: true` instead of the text.
 
 ## Debug trace
 
