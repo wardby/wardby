@@ -198,7 +198,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
       childRunId: null,
       childAgentId: "agent-a",
     });
-    expect(await ledger.waitingChildAgentIds(created.id, "d-1")).toEqual(["agent-b"]);
+    expect(await ledger.waitingDelegations(created.id, "d-1")).toEqual([
+      { childAgentId: "agent-b", childRepository: null },
+    ]);
     await ledger.setDelegation(created.id, "d-1", {
       status: "pending",
       childAgentId: "agent-a",
@@ -206,5 +208,35 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     });
     expect(await ledger.delegation(created.id, "d-1")).toMatchObject({ status: "pending", childRunId: "child-run-1" });
     expect(await ledger.openDelegationChildren(created.id)).toEqual(["child-run-1"]);
+  });
+
+  it("round-trips a delegation's repository through waitingDelegations", async () => {
+    const { created } = await session();
+    for (const id of ["r-1", "r-2", "r-3"]) await ledger.claim(created.id, id, "builtin.call");
+    await ledger.setDelegation(created.id, "r-1", {
+      status: "waiting_budget",
+      childAgentId: "agent-a",
+      childRepository: "acme/service-a",
+    });
+    await ledger.setDelegation(created.id, "r-2", { status: "waiting_budget", childAgentId: "agent-b" });
+    const waiting = await ledger.waitingDelegations(created.id, "r-3");
+    expect(waiting).toHaveLength(2);
+    expect(waiting).toContainEqual({ childAgentId: "agent-a", childRepository: "acme/service-a" });
+    expect(waiting).toContainEqual({ childAgentId: "agent-b", childRepository: null });
+  });
+
+  it("keeps a delegation's repository through a later call that does not name it", async () => {
+    const { created } = await session();
+    await ledger.claim(created.id, "k-1", "builtin.call");
+    await ledger.setDelegation(created.id, "k-1", {
+      status: "waiting_budget",
+      childAgentId: "agent-a",
+      childRepository: "acme/service-a",
+    });
+    await ledger.setDelegation(created.id, "k-1", { status: "pending", childAgentId: "agent-a" });
+    const row = await db.nativeGatewayCall.findUniqueOrThrow({
+      where: { sessionId_callId: { sessionId: created.id, callId: "k-1" } },
+    });
+    expect(row).toMatchObject({ status: "pending", childRepository: "acme/service-a" });
   });
 });

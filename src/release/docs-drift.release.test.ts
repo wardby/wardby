@@ -59,8 +59,10 @@ function errorCodes(): Map<string, string> {
     }
   }
   // The delegate tools' errors (delegate_to_*), as the runner answers them.
-  for (const match of read(join(ROOT, "src/core/runner.ts")).matchAll(/\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g)) {
-    add(match[1], "src/core/runner.ts");
+  for (const file of ["src/core/runner.ts", "src/core/delegation-slots.ts"]) {
+    for (const match of read(join(ROOT, file)).matchAll(/\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g)) {
+      add(match[1], file);
+    }
   }
   // repo_pr_read's `patch_cursor_${reason}` (PatchCursorError's reasons).
   for (const reason of ["malformed", "stale"]) add(`patch_cursor_${reason}`, "src/core/review-host-tools.ts");
@@ -139,7 +141,7 @@ const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["update_budget_group", "list_budget_groups", "delete_budget_group", "detach_tool"],
   ...["create_datastore", "list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
-  ...["list_subagents", "unlink_repository", "get_agent_memory", "list_agent_memory", "delete_agent_memory"],
+  ...["list_subagents", "get_agent_memory", "list_agent_memory", "delete_agent_memory"],
   ...["detach_secret", "create_webhook"],
 ]);
 

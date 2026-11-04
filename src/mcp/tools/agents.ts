@@ -618,7 +618,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 1,
           maximum: MAX_DELEGATIONS_PER_RUN,
           description:
-            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent " +
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, to each sub-agent and repository at most once " +
             "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
         parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },
@@ -727,7 +727,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 1,
           maximum: MAX_DELEGATIONS_PER_RUN,
           description:
-            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent " +
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, to each sub-agent and repository at most once " +
             "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
         parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },

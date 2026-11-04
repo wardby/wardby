@@ -2343,6 +2343,85 @@ describe("coding-run services", () => {
       expect(state.codingRuns.map((row) => row.runId)).toEqual(["root_in_default"]);
     });
 
+    it("refuses a repository unlinked between the preview and the transaction", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      const findMany = vi.fn(async (): Promise<typeof listed> => []).mockResolvedValueOnce(listed);
+      state.db.agentRepository.findMany = findMany as never;
+      const attempt = dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingRepository: "acme/service-a" });
+      await expect(attempt).rejects.toBeInstanceOf(RepositoryChoiceRefusedError);
+      await expect(attempt).rejects.toMatchObject({ code: "repository_not_listed", allowed: ["acme/default"] });
+      // The first attempt read twice (preview, then in the transaction); the rejection is shared.
+      expect(findMany).toHaveBeenCalledTimes(2);
+      expect(state.runs).toEqual([]);
+      expect(state.codingRuns).toEqual([]);
+    });
+
+    const rootIn = (repository: string) => ({
+      runId: "root_run",
+      repository,
+      baseRef: "release",
+      headRef: "wardby/run-root_run",
+      rootCodingRunId: null,
+      run: { agent: { ownerId: "owner_1" } },
+      result: {
+        schemaVersion: 1,
+        outcome: "pull_request_opened",
+        repository,
+        baseRef: "release",
+        headRef: "wardby/run-root_run",
+        commitSha: "a".repeat(40),
+        pullRequestUrl: `https://github.com/${repository}/pull/22`,
+        pullRequestNumber: 22,
+        summary: "Opened the PR",
+        tests: [],
+        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      },
+    });
+
+    it("continues on a linked repository from the root, without naming it", async () => {
+      const a = agent();
+      const state = fakeDb(a, [rootIn("acme/service-a")], { links: listed });
+      const result = await dispatchRun({
+        db: state.db,
+        executor: idle,
+        agentId: a.id,
+        continuesCodingRunId: "root_run",
+      });
+      expect(state.codingRuns).toContainEqual(
+        expect.objectContaining({
+          runId: result?.run.id,
+          repository: "acme/service-a",
+          // The root's base branch, not the link's or the profile's.
+          baseRef: "release",
+          headRef: "wardby/run-root_run",
+          rootCodingRunId: "root_run",
+          viaRepositoryLink: true,
+        }),
+      );
+    });
+
+    it("continues on the default as not via a link, when a link has come to equal it", async () => {
+      const a = agent();
+      const state = fakeDb(a, [rootIn("acme/default")], {
+        links: [{ repository: "acme/default", baseRef: "develop" }, ...listed],
+      });
+      const result = await dispatchRun({
+        db: state.db,
+        executor: idle,
+        agentId: a.id,
+        continuesCodingRunId: "root_run",
+      });
+      expect(state.codingRuns).toContainEqual(
+        expect.objectContaining({
+          runId: result?.run.id,
+          repository: "acme/default",
+          baseRef: "release",
+          viaRepositoryLink: false,
+        }),
+      );
+    });
+
     it("refuses a repository for a native agent", async () => {
       const state = fakeDb(nativeAgent());
       await expect(

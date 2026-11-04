@@ -108,10 +108,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "pull_request trigger, and is unique per repository. waitForCi (only with the pull_request trigger) holds this agent's " +
       "review on a pushed head until that head's own CI finishes, instead of racing it; APPROVE is refused while CI on the " +
       "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
-      "reviewFixMaxRounds, waitForCi, and markReadyWhenPassing (an omitted field is cleared, not kept) and re-checks access " +
+      "reviewFixMaxRounds, waitForCi, markReadyWhenPassing, and baseRef (an omitted field is cleared, not kept) and re-checks access " +
       "— always send the full desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes " +
       "no triggers or checkName: it supports manual reviews only (trigger_agent with review). " +
-      "On a coding agent, adds a repository its runs may work in, with write access and no triggers.",
+      "On a coding agent, adds a repository its runs may work in, with write access and no triggers: a GitHub repository or a local one.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -188,6 +188,11 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       const triggers = [...new Set(args.triggers ?? [])];
       if (agent.kind === "coding") {
         if (args.access !== "write") throw new McpError(400, "A coding agent's repository link needs write access.");
+        // As codingProfile.repository: anything else would pass here and fail every run at dispatch.
+        // What a coding run can work in, matching the coding profile.
+        if (provider !== "github" && provider !== "local") {
+          throw new McpError(400, "A coding agent's repository link must be a GitHub repository or a local: path.");
+        }
         if (
           triggers.length > 0 ||
           args.checkName !== undefined ||

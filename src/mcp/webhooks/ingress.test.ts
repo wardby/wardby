@@ -19,6 +19,7 @@ interface FakeAgentRow {
   name: string;
   kind?: "native" | "coding";
   codingProfile?: Record<string, unknown> | null;
+  model?: string;
 }
 
 function fakeDb(agents: FakeAgentRow[]) {
@@ -216,6 +217,95 @@ describe("webhook ingress", () => {
     expect(result.status).toBe(202);
     expect(linkLookup).not.toHaveBeenCalled();
     expect(created).toEqual([]);
+  });
+
+  describe("wardbyRepository", () => {
+    const codingProfile = {
+      provider: "codex",
+      repository: "acme/service-a",
+      baseRef: "main",
+      defaultTask: "Default task",
+      allowWebhookTaskOverride: true,
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    async function setup(kind: "coding" | "native" = "coding", profile: Record<string, unknown> = codingProfile) {
+      const db = fakeDb([
+        // A model the catalog can run: with any other the run fails before its CodingRun is written.
+        { id: "a1", name: "coder", kind, model: "gpt-5.6-luna", codingProfile: kind === "coding" ? profile : null },
+      ]) as any;
+      db.agentRepository = {
+        findMany: async () => [{ repository: "acme/service-b", baseRef: null }],
+      };
+      const { id, secret } = await createWebhook("a1", "p1", db);
+      const handle = (body: Record<string, unknown>) =>
+        handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body }, db, executor);
+      return { db, secret, handle };
+    }
+
+    it("a coding webhook with the opt-in runs in a listed repository", async () => {
+      const { handle, db } = await setup();
+      const stored: { repository: string; viaRepositoryLink: boolean }[] = [];
+      db.codingRun.create = async ({ data }: any) => {
+        stored.push(data);
+        return data;
+      };
+      expect((await handle({ task: "fix", wardbyRepository: "ACME/Service-B" })).status).toBe(202);
+      expect((await handle({ task: "fix", wardbyRepository: "acme/service-a" })).status).toBe(202);
+      expect(stored).toEqual([
+        // The value from the list, not the caller's spelling.
+        expect.objectContaining({ repository: "acme/service-b", viaRepositoryLink: true }),
+        expect.objectContaining({ repository: "acme/service-a", viaRepositoryLink: false }),
+      ]);
+    });
+
+    it("an unlisted repository is a 400 with only an error code; neither the secret nor the list is echoed or logged", async () => {
+      const { handle, secret } = await setup();
+      const logs: string[] = [];
+      const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+        vi.spyOn(console, m).mockImplementation((...args: unknown[]) => void logs.push(args.map(String).join(" "))),
+      );
+      const out = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+        logs.push(String(chunk));
+        return true;
+      });
+      spies.push(out as never);
+      try {
+        const result = await handle({ wardbyRepository: "acme/sk-fake-secret" });
+        expect(result).toEqual({ status: 400, body: { error: "invalid_repository" } });
+        const seen = JSON.stringify(result) + logs.join("\n");
+        expect(seen).not.toContain(secret);
+        expect(seen).not.toContain("acme/service-a");
+        expect(seen).not.toContain("acme/service-b");
+        expect(seen).not.toContain("sk-fake-secret");
+      } finally {
+        spies.forEach((s) => s.mockRestore());
+      }
+    });
+
+    it("a non-string, empty or oversized wardbyRepository is a 400", async () => {
+      const { handle } = await setup();
+      for (const value of [42, "", "x".repeat(301), { a: 1 }]) {
+        expect((await handle({ wardbyRepository: value })).body).toEqual({ error: "invalid_repository" });
+      }
+    });
+
+    it("wardbyRepository without the opt-in is refused as disabled", async () => {
+      const { handle } = await setup("coding", { ...codingProfile, allowWebhookTaskOverride: false });
+      expect((await handle({ wardbyRepository: "acme/service-a" })).status).toBe(403);
+    });
+
+    it("wardbyRepository on a native agent is a 400", async () => {
+      const { handle } = await setup("native");
+      expect((await handle({ wardbyRepository: "acme/service-a" })).body).toEqual({ error: "invalid_repository" });
+    });
+
+    it("a forwarded payload's own repository object (e.g. GitHub) is ignored: it runs as today", async () => {
+      const { handle } = await setup();
+      const result = await handle({ action: "opened", repository: { full_name: "other/repo", id: 1 } });
+      expect(result.status).toBe(202);
+    });
   });
 
   it("rejects a malformed wardbyIssue with 400 invalid_issue", async () => {

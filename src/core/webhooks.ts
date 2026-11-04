@@ -18,6 +18,7 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
   type AttributionIntent,
 } from "./attribution.js";
+import { RepositoryChoiceRefusedError } from "./coding-repository.js";
 import { dispatchRun } from "./dispatch.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
@@ -88,6 +89,7 @@ export async function deleteWebhook(id: string, db: PrismaClient): Promise<void>
 export type ResolveWebhookRunResult =
   | { ok: true; runId: string }
   | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" }
+  | { ok: false; reason: "invalid_repository" }
   | { ok: false; reason: "invalid_issue"; message: string };
 
 /**
@@ -101,7 +103,7 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
-  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry } = {},
+  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry; repository?: string } = {},
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -112,6 +114,11 @@ export async function resolveWebhookRun(
   if (!agent) return { ok: false, reason: "not_found" };
   if (codingTask !== undefined && !taskAllowed(agent.kind, agent.codingProfile)) {
     return { ok: false, reason: "disabled" };
+  }
+  // Choosing a repository takes the same opt-in as a task, and only a coding agent has one.
+  if (opts.repository !== undefined) {
+    if (agent.kind !== "coding") return { ok: false, reason: "invalid_repository" };
+    if (!taskAllowed(agent.kind, agent.codingProfile)) return { ok: false, reason: "disabled" };
   }
 
   // An invalid or unlinked issue refuses the call before any run exists.
@@ -129,55 +136,66 @@ export async function resolveWebhookRun(
   }
 
   let rejected: "not_found" | "invalid_secret" | "disabled" = "disabled";
-  const dispatched = await dispatchRun({
-    db,
-    executor,
-    selfDefects: { db, issueTrackers: opts.issueTrackers },
-    agentId: agent.id,
-    trigger: "webhook",
-    attribution,
-    // Coding agents keep the existing per-agent opt-in (allowWebhookTaskOverride);
-    // a native agent's system prompt has no per-run input at all otherwise, so
-    // accepting task text over an authenticated webhook call needs no separate
-    // opt-in — it's a much lower-risk capability than a coding agent being told
-    // to modify a real repository.
-    codingTask: agent.kind === "coding" ? codingTask : undefined,
-    taskOverride: agent.kind === "native" ? codingTask : undefined,
-    // The webhook is its creator's standing trigger: its runs are visible to
-    // the creator (and the agent owner), like a trigger_agent call.
-    triggeredById: webhook.ownerId,
-    beforePersist: async (tx, currentAgent) => {
-      const current = await tx.webhook.findUnique({ where: { id } });
-      if (!current) {
-        rejected = "not_found";
-        return false;
-      }
-      if (!secretMatches(presentedSecret, current.secretHash)) {
-        rejected = "invalid_secret";
-        return false;
-      }
-      if (current.status !== "enabled") {
-        rejected = "disabled";
-        return false;
-      }
-      if (codingTask !== undefined && !taskAllowed(currentAgent.kind, currentAgent.codingProfile)) {
-        rejected = "disabled";
-        return false;
-      }
-      // The creator must still be allowed to trigger the agent (resource-
-      // sharing grants spec §3.10): its owner, or a holder of execute. Read
-      // through tx, so a revoke or make_owner takes effect on the next fire.
-      // A webhook on a formerly public agent keeps firing through the
-      // migration's everyone-execute grant.
-      const creatorAccess = await effectiveAccess(tx, "agent", currentAgent, current.ownerId);
-      if (!atLeast("agent", creatorAccess, "execute")) {
-        rejected = "disabled";
-        return false;
-      }
-      await tx.webhook.update({ where: { id }, data: { lastFiredAt: new Date() } });
-      return true;
-    },
-  });
+  let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+  try {
+    dispatched = await dispatchRun({
+      db,
+      executor,
+      selfDefects: { db, issueTrackers: opts.issueTrackers },
+      agentId: agent.id,
+      trigger: "webhook",
+      attribution,
+      // Coding agents keep the existing per-agent opt-in (allowWebhookTaskOverride);
+      // a native agent's system prompt has no per-run input at all otherwise, so
+      // accepting task text over an authenticated webhook call needs no separate
+      // opt-in — it's a much lower-risk capability than a coding agent being told
+      // to modify a real repository.
+      codingTask: agent.kind === "coding" ? codingTask : undefined,
+      taskOverride: agent.kind === "native" ? codingTask : undefined,
+      codingRepository: agent.kind === "coding" ? opts.repository : undefined,
+      // The webhook is its creator's standing trigger: its runs are visible to
+      // the creator (and the agent owner), like a trigger_agent call.
+      triggeredById: webhook.ownerId,
+      beforePersist: async (tx, currentAgent) => {
+        const current = await tx.webhook.findUnique({ where: { id } });
+        if (!current) {
+          rejected = "not_found";
+          return false;
+        }
+        if (!secretMatches(presentedSecret, current.secretHash)) {
+          rejected = "invalid_secret";
+          return false;
+        }
+        if (current.status !== "enabled") {
+          rejected = "disabled";
+          return false;
+        }
+        if (
+          (codingTask !== undefined || opts.repository !== undefined) &&
+          !taskAllowed(currentAgent.kind, currentAgent.codingProfile)
+        ) {
+          rejected = "disabled";
+          return false;
+        }
+        // The creator must still be allowed to trigger the agent (resource-
+        // sharing grants spec §3.10): its owner, or a holder of execute. Read
+        // through tx, so a revoke or make_owner takes effect on the next fire.
+        // A webhook on a formerly public agent keeps firing through the
+        // migration's everyone-execute grant.
+        const creatorAccess = await effectiveAccess(tx, "agent", currentAgent, current.ownerId);
+        if (!atLeast("agent", creatorAccess, "execute")) {
+          rejected = "disabled";
+          return false;
+        }
+        await tx.webhook.update({ where: { id }, data: { lastFiredAt: new Date() } });
+        return true;
+      },
+    });
+  } catch (err) {
+    // The refusal's message lists the agent's repositories; the caller gets only the code.
+    if (err instanceof RepositoryChoiceRefusedError) return { ok: false, reason: "invalid_repository" };
+    throw err;
+  }
   if (!dispatched) return { ok: false, reason: rejected };
   return { ok: true, runId: dispatched.run.id };
 }

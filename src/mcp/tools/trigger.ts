@@ -188,8 +188,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         repository: {
           type: "string",
           description:
-            "Coding agents only: a repository on the agent's list (see get_agent). Default: codingProfile.repository. " +
-            "Required when the agent has more than one repository and no default applies.",
+            "Coding agents only: a repository on the agent's list (see get_agent). Omit to use codingProfile.repository.",
         },
         review: {
           type: "object",

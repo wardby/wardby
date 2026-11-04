@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { RepositoryChoiceRefusedError, resolveCodingRepository } from "./coding-repository.js";
+import {
+  extraCodingRepositoryLinks,
+  RepositoryChoiceRefusedError,
+  resolveCodingRepository,
+} from "./coding-repository.js";
 
 const profile = { repository: "acme/default", baseRef: "main" };
 const links = [
@@ -15,6 +19,17 @@ function reader(rows = links, runs: Record<string, { repository: string; rootCod
 }
 const resolve = (db: ReturnType<typeof reader>, extra = {}) =>
   resolveCodingRepository(db as never, { agentId: "c1", profile, ...extra });
+
+describe("extraCodingRepositoryLinks", () => {
+  it("drops a link equal to the default, whatever its spelling", () => {
+    const rows = [{ repository: "ACME/Default" }, { repository: "acme/service-a" }];
+    expect(extraCodingRepositoryLinks(rows, "acme/default")).toEqual([{ repository: "acme/service-a" }]);
+  });
+  it("drops a local link equal to a local default", () => {
+    const rows = [{ repository: "local:/srv/a/" }, { repository: "local:/srv/b" }];
+    expect(extraCodingRepositoryLinks(rows, "local:/srv/a")).toEqual([{ repository: "local:/srv/b" }]);
+  });
+});
 
 describe("resolveCodingRepository", () => {
   it("uses the default without any query when nothing is asked for", async () => {
@@ -75,6 +90,85 @@ describe("resolveCodingRepository", () => {
     await expect(resolve(db, { continuesCodingRunId: "child", requireExplicit: true })).resolves.toMatchObject({
       repository: "acme/service-a",
       viaRepositoryLink: true,
+    });
+  });
+
+  describe("a local repository", () => {
+    const local = "local:/srv/repos/service";
+    const localLinks = [{ repository: local, baseRef: "develop" }];
+
+    it("uses a listed local repository, with its base branch and as a link", async () => {
+      await expect(resolve(reader(localLinks), { requested: local })).resolves.toEqual({
+        repository: local,
+        baseRef: "develop",
+        viaRepositoryLink: true,
+      });
+    });
+
+    it("matches a local path written with a trailing slash or dot segments", async () => {
+      await expect(resolve(reader(localLinks), { requested: "local:/srv/repos/./service/" })).resolves.toMatchObject({
+        repository: local,
+      });
+    });
+
+    it("refuses a local path that is not listed, without echoing it", async () => {
+      const error = await resolve(reader(localLinks), { requested: "local:/srv/sk-fake-secret" }).catch(
+        (e: unknown) => e,
+      );
+      expect(error).toMatchObject({ code: "repository_not_listed" });
+      expect((error as Error).message).not.toContain("sk-fake-secret");
+      expect((error as Error).message).toContain(local);
+    });
+
+    it("recognizes a local default without reading links", async () => {
+      const db = reader(localLinks);
+      const target = await resolveCodingRepository(db as never, {
+        agentId: "c1",
+        profile: { repository: "local:/srv/repos/main", baseRef: "main" },
+        requested: "local:/srv/repos/main/",
+      });
+      expect(target).toEqual({ repository: "local:/srv/repos/main", baseRef: "main", viaRepositoryLink: false });
+      expect(db.agentRepository.findMany).not.toHaveBeenCalled();
+    });
+
+    it("takes a continuation's local repository from its root", async () => {
+      const db = reader(localLinks, { root: { repository: local, rootCodingRunId: null } });
+      await expect(resolve(db, { continuesCodingRunId: "root" })).resolves.toMatchObject({
+        repository: local,
+        viaRepositoryLink: true,
+      });
+    });
+  });
+
+  describe("a link that equals the default, after update_agent moved the default onto it", () => {
+    const redundant = [{ repository: "ACME/Default", baseRef: "develop" }];
+
+    it("does not make a single-repository agent name its repository", async () => {
+      await expect(resolve(reader(redundant), { requireExplicit: true })).resolves.toEqual({
+        repository: "acme/default",
+        baseRef: "main",
+        viaRepositoryLink: false,
+      });
+    });
+
+    it("keeps a follow-up on the default from depending on the redundant link", async () => {
+      const db = reader([...redundant, ...links], { root: { repository: "acme/default", rootCodingRunId: null } });
+      await expect(resolve(db, { continuesCodingRunId: "root", requireExplicit: true })).resolves.toEqual({
+        repository: "acme/default",
+        baseRef: "main",
+        viaRepositoryLink: false,
+      });
+    });
+
+    it("lists the default once in a refusal", async () => {
+      const error = await resolve(reader([...redundant, ...links]), { requested: "acme/nope" }).catch(
+        (e: unknown) => e as RepositoryChoiceRefusedError,
+      );
+      expect((error as RepositoryChoiceRefusedError).allowed).toEqual([
+        "acme/default",
+        "acme/service-a",
+        "acme/service-b",
+      ]);
     });
   });
 

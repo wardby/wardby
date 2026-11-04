@@ -574,6 +574,12 @@ requires more than owning the agent:
 - **A repository is the owner's binding.** Principals the agent is shared
   with (`grant_access`) can't link, unlink or change its repository, even at
   `write`.
+- **A coding agent's extra repositories follow the same rules.** A
+  `link_repository` call with `access: "write"` and no triggers on a coding
+  agent adds a repository its runs may work in; it needs the same GitHub write
+  access or admin approval as the default repository. Unlinking it
+  refuses queued runs for that repository when they start, and a run already under way is refused at
+  its final push check (`repo_access`), so nothing is pushed.
 
 The authorization is stamped on the link (`authorizedVia`: `host_permission`,
 `admin`, or `grandfathered`) and **checked again every time it is used**: on

@@ -288,13 +288,19 @@ export class PrismaGatewayLedger {
   async setDelegation(
     sessionId: string,
     callId: string,
-    state: { status: "pending" | "waiting_budget"; childAgentId: string; childRunId?: string },
+    state: {
+      status: "pending" | "waiting_budget";
+      childAgentId: string;
+      childRepository?: string;
+      childRunId?: string;
+    },
   ): Promise<void> {
     await this.db.nativeGatewayCall.updateMany({
       where: { sessionId, callId, status: { in: ["pending", "waiting_budget"] } },
       data: {
         status: state.status,
         childAgentId: state.childAgentId,
+        ...(state.childRepository ? { childRepository: state.childRepository } : {}),
         ...(state.childRunId ? { childRunId: state.childRunId } : {}),
       },
     });
@@ -308,13 +314,16 @@ export class PrismaGatewayLedger {
     return { status, childRunId: row.childRunId, childAgentId: row.childAgentId, createdAt: row.createdAt };
   }
 
-  /** The sub-agents other delegations of this run are waiting for budget to start. */
-  async waitingChildAgentIds(sessionId: string, exceptCallId: string): Promise<string[]> {
+  /** The sub-agents (and repositories, null = the child's default) other delegations of this run wait on budget to start. */
+  async waitingDelegations(
+    sessionId: string,
+    exceptCallId: string,
+  ): Promise<{ childAgentId: string; childRepository: string | null }[]> {
     const rows = await this.db.nativeGatewayCall.findMany({
       where: { sessionId, status: "waiting_budget", callId: { not: exceptCallId }, childAgentId: { not: null } },
-      select: { childAgentId: true },
+      select: { childAgentId: true, childRepository: true },
     });
-    return rows.map((row) => row.childAgentId as string);
+    return rows.map((row) => ({ childAgentId: row.childAgentId as string, childRepository: row.childRepository }));
   }
 
   /** Delegations of this session whose child run is started and not yet reported. */

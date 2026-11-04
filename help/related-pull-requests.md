@@ -128,15 +128,19 @@ such hints: a fix round's task names only its own pull request. Merged and
 closed pull requests are never listed as continuable: a change there needs a
 new pull request, which joins the set once it is recorded.
 
+When the sub-agent is a coding agent with a list of repositories, a
+follow-up delegation passes `continuePriorRun` and takes its repository from
+that run, so it needs no `repository` of its own.
+
 Give your own delivery or router agent's system prompt a line such as:
 
     Continue the pull request you were asked about, and any listed open
     sibling the change requires; never open a new pull request in a
     repository that already has an open sibling for this request.
 
-The usual limits still apply: `maxDelegationsPerRun` and never delegating to
-the same sub-agent twice in one run; every push to a sibling pull request
-gets its own review; fix rounds are capped per pull request and only one
+The usual limits still apply: `maxDelegationsPerRun` and delegating to each
+sub-agent and repository at most once per run; every push to a sibling pull
+request gets its own review; fix rounds are capped per pull request and only one
 runs at a time on a pull request; and a continuation only ever reaches a
 sub-agent that shares the same owner as the one asked to continue it.
 
