@@ -112,12 +112,20 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
         repositoryLinkExists: true,
         repositoryLinkAuthorizedVia: "admin",
       });
+      const gone = { viaRepositoryLink: true, repositoryLinkExists: false, repositoryLinkAuthorizedVia: null };
+      const link = { agentId, provider: "github", repository: "openai/example" };
+      const updateLink = (data: { access?: string; triggers?: string[] }) =>
+        db.agentRepository.update({ where: { agentId_provider_repository: link }, data });
+      // Downgraded to read: no longer on the list.
+      await updateLink({ access: "read" });
+      await expect(store.load(runId)).resolves.toMatchObject(gone);
+      // Given a trigger: a review link now, not on the list either.
+      await updateLink({ access: "write", triggers: ["mention"] });
+      await expect(store.load(runId)).resolves.toMatchObject(gone);
+      await updateLink({ triggers: [] });
+      await expect(store.load(runId)).resolves.toMatchObject({ repositoryLinkExists: true });
       await db.agentRepository.deleteMany({ where: { agentId } });
-      await expect(store.load(runId)).resolves.toMatchObject({
-        viaRepositoryLink: true,
-        repositoryLinkExists: false,
-        repositoryLinkAuthorizedVia: null,
-      });
+      await expect(store.load(runId)).resolves.toMatchObject(gone);
     } finally {
       await db.codingRun.deleteMany({ where: { runId } });
       await db.run.deleteMany({ where: { id: runId } });

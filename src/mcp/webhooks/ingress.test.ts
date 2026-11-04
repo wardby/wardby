@@ -19,6 +19,7 @@ interface FakeAgentRow {
   name: string;
   kind?: "native" | "coding";
   codingProfile?: Record<string, unknown> | null;
+  model?: string;
 }
 
 function fakeDb(agents: FakeAgentRow[]) {
@@ -230,7 +231,10 @@ describe("webhook ingress", () => {
       protectedPaths: ["CODEOWNERS"],
     };
     async function setup(kind: "coding" | "native" = "coding", profile: Record<string, unknown> = codingProfile) {
-      const db = fakeDb([{ id: "a1", name: "coder", kind, codingProfile: kind === "coding" ? profile : null }]) as any;
+      const db = fakeDb([
+        // A model the catalog can run: with any other the run fails before its CodingRun is written.
+        { id: "a1", name: "coder", kind, model: "gpt-5.6-luna", codingProfile: kind === "coding" ? profile : null },
+      ]) as any;
       db.agentRepository = {
         findMany: async () => [{ repository: "acme/service-b", baseRef: null }],
       };
@@ -241,9 +245,19 @@ describe("webhook ingress", () => {
     }
 
     it("a coding webhook with the opt-in runs in a listed repository", async () => {
-      const { handle } = await setup();
-      expect((await handle({ task: "fix", wardbyRepository: "acme/service-b" })).status).toBe(202);
+      const { handle, db } = await setup();
+      const stored: { repository: string; viaRepositoryLink: boolean }[] = [];
+      db.codingRun.create = async ({ data }: any) => {
+        stored.push(data);
+        return data;
+      };
+      expect((await handle({ task: "fix", wardbyRepository: "ACME/Service-B" })).status).toBe(202);
       expect((await handle({ task: "fix", wardbyRepository: "acme/service-a" })).status).toBe(202);
+      expect(stored).toEqual([
+        // The value from the list, not the caller's spelling.
+        expect.objectContaining({ repository: "acme/service-b", viaRepositoryLink: true }),
+        expect.objectContaining({ repository: "acme/service-a", viaRepositoryLink: false }),
+      ]);
     });
 
     it("an unlisted repository is a 400 with only an error code; neither the secret nor the list is echoed or logged", async () => {

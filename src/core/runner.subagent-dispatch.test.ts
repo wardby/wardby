@@ -2811,10 +2811,70 @@ describe("delegating to a coding sub-agent with a repository list", () => {
   }
 
   describe("the tool definition", () => {
-    it("is byte-identical for a child with no links", () => {
-      expect(JSON.stringify(delegateToolDef("fixer", true, []))).toBe(JSON.stringify(delegateToolDef("fixer", true)));
-      expect(JSON.stringify(delegateToolDef("fixer", false, []))).toBe(JSON.stringify(delegateToolDef("fixer", false)));
-      expect(JSON.stringify(delegateToolDef("fixer", true))).not.toContain('"repository"');
+    // The definition as it was before repository lists, written out: a cached lead's prompt
+    // depends on these exact bytes. Do not regenerate this from delegateToolDef.
+    const goldenDelegateTool = (timing: string) => ({
+      name: "delegate_to_fixer",
+      description: `Delegates a task to your "fixer" sub-agent. ${timing} counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
+      jsonSchema: {
+        type: "object",
+        properties: {
+          task: { type: "string" },
+          datastoreRef: {
+            type: "object",
+            properties: { name: { type: "string" }, key: { type: "string" } },
+            required: ["name", "key"],
+            additionalProperties: false,
+          },
+          grantParentMemoryKeys: { type: "array", items: { type: "string" } },
+          continuePriorRun: {
+            type: "string",
+            description:
+              "Coding sub-agents only. The run id of a prior coding run whose branch/PR this dispatch should push a new commit onto, instead of opening a fresh one — use when the task is a revision to an existing PR (a plan/spec update, or a code-review follow-up), even across a different sub-agent than the one that opened it.",
+          },
+          mergeOrder: {
+            type: "integer",
+            minimum: 1,
+            maximum: 99,
+            description:
+              "Coding sub-agents only. This repository's step in the merge order of the whole request (1 = merge first). " +
+              "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
+              "equal numbers have no order between them. Set it whenever one change spans several repositories.",
+          },
+        },
+        required: ["task"],
+        additionalProperties: false,
+      },
+    });
+
+    it.each([
+      [
+        true,
+        "Blocks until it finishes. Several delegate_to_* calls made in the same turn run at the same time, so make them together when their tasks don't need each other's results. Its spend",
+      ],
+      [false, "Runs synchronously and blocks until it finishes; its spend"],
+    ])("is byte-identical for a child with no links, with parallel %s", (parallel, timing) => {
+      const golden = JSON.stringify(goldenDelegateTool(timing));
+      expect(JSON.stringify(delegateToolDef("fixer", parallel))).toBe(golden);
+      expect(JSON.stringify(delegateToolDef("fixer", parallel, []))).toBe(golden);
+    });
+
+    it("offers no repository when the child's only link equals its default", async () => {
+      const { llm } = await runLead({
+        calls: [],
+        links: [{ agentId: "fixer", repository: DEFAULT_REPOSITORY.toUpperCase() }],
+      });
+      const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      expect(JSON.stringify(tool.parameters)).toBe(JSON.stringify(delegateToolDef("fixer", false).jsonSchema));
+    });
+
+    it("lists the default once when a link equals it", async () => {
+      const { llm } = await runLead({
+        calls: [],
+        links: [...twoLinks(), { agentId: "fixer", repository: DEFAULT_REPOSITORY }],
+      });
+      const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      expect((tool.parameters.properties as any).repository.enum).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
     });
 
     it("offers a multi-repository child's list as an enum", () => {
@@ -3084,6 +3144,25 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     it("refuses a second delegation to a child's default, when it has no links, as before", async () => {
       const { results } = await runLead({ calls: [fix(), fix()], links: [] });
       expect(results[1]).toContain("already_dispatched");
+      expect(results[1]).toContain(
+        'This run already delegated to \\"fixer\\"; a run delegates to each sub-agent at most once.',
+      );
+    });
+
+    it("words the refusal by repository for a child with a list, even for its default", async () => {
+      const { results } = await runLead({ calls: [fix(DEFAULT_REPOSITORY), fix(DEFAULT_REPOSITORY)] });
+      expect(results[1]).toContain(
+        'This run already delegated to \\"fixer\\" for this repository; a run delegates to each sub-agent and repository at most once.',
+      );
+    });
+
+    it("words the refusal by sub-agent when the child's only link equals its default", async () => {
+      const { results } = await runLead({
+        calls: [fix(), fix()],
+        links: [{ agentId: "fixer", repository: DEFAULT_REPOSITORY }],
+      });
+      expect(results[0]).not.toContain("already_dispatched");
+      expect(results[1]).toContain("a run delegates to each sub-agent at most once.");
     });
   });
 

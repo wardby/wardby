@@ -47,12 +47,40 @@ function same(a: string, b: string): boolean {
   return left !== null && left === canonical(b);
 }
 
-export function listCodingRepositoryLinks(reader: Pick<CodingRepositoryReader, "agentRepository">, agentId: string) {
-  return reader.agentRepository.findMany({
-    where: { agentId, access: "write", triggers: { isEmpty: true } },
+/** Which of an agent's links are repositories on a coding agent's list. */
+export const CODING_REPOSITORY_LINK_FILTER = { access: "write", triggers: { isEmpty: true } } as const;
+
+/**
+ * The repositories a list adds to its default. A link can come to equal the default when
+ * update_agent moves the default onto it; that link adds nothing, and a run there is on the default.
+ */
+export function extraCodingRepositoryLinks<Link extends { repository: string }>(
+  links: readonly Link[],
+  defaultRepository: string,
+): Link[] {
+  return links.filter((link) => !same(link.repository, defaultRepository));
+}
+
+async function listExtraRepositoryLinks(
+  reader: Pick<CodingRepositoryReader, "agentRepository">,
+  agentId: string,
+  defaultRepository: string,
+) {
+  const links = await reader.agentRepository.findMany({
+    where: { agentId, ...CODING_REPOSITORY_LINK_FILTER },
     select: { repository: true, baseRef: true },
     orderBy: { repository: "asc" },
   });
+  return extraCodingRepositoryLinks(links, defaultRepository);
+}
+
+/** Whether the agent has more than its default, for wording only: authorization is resolveCodingRepository's. */
+export async function hasCodingRepositoryList(
+  reader: Pick<CodingRepositoryReader, "agentRepository">,
+  agentId: string,
+  defaultRepository: string,
+): Promise<boolean> {
+  return (await listExtraRepositoryLinks(reader, agentId, defaultRepository)).length > 0;
 }
 
 export async function resolveCodingRepository(
@@ -71,7 +99,7 @@ export async function resolveCodingRepository(
   if (requested !== undefined && same(requested, profile.repository)) return defaultTarget;
   if (requested === undefined && continuesCodingRunId === undefined && !input.requireExplicit) return defaultTarget;
 
-  const links = await listCodingRepositoryLinks(reader, input.agentId);
+  const links = await listExtraRepositoryLinks(reader, input.agentId, profile.repository);
   const onList = (name: string) => links.find((link) => same(link.repository, name));
   const target = (link: { repository: string; baseRef: string | null }) => ({
     repository: link.repository,

@@ -16,10 +16,11 @@ triggers). No run was started. The message lists the repositories that are
 allowed and never repeats the value that was sent.
 
 A webhook that sends `wardbyRepository` gets the same refusal as a 400
-`{ "error": "invalid_repository" }`, but only when
-`codingProfile.allowWebhookTaskOverride` is on. With the flag off, a webhook
-that carries `wardbyRepository` is refused with 403 `{ "error": "disabled" }`
-before the repository is checked, whoever created the webhook.
+`{ "error": "invalid_repository" }` when
+`codingProfile.allowWebhookTaskOverride` is on. A malformed value (not a string,
+empty, or over 300 characters) is that same 400 with the flag on or off. With
+the flag off, a well-formed value is refused with 403 `{ "error": "disabled" }`
+before it is compared with the list, whoever created the webhook.
 
 ## What to do
 

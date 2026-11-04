@@ -384,6 +384,19 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
     });
   });
 
+  it("words a repeat delegation to a child with no list by sub-agent", async () => {
+    const l = await lead({ maxDelegationsPerRun: 2 });
+    const ctx = ctxFor(l, controlledExecutor().executor);
+    await durableDelegate(ctx, "d-1", "delegate_to_a", JSON.stringify({ task: "x" }));
+    const second = await durableDelegate(ctx, "d-2", "delegate_to_a", JSON.stringify({ task: "y" }));
+    expect(second).toEqual({
+      result: JSON.stringify({
+        error: "already_dispatched",
+        message: 'This run already delegated to "a"; a run delegates to each sub-agent at most once.',
+      }),
+    });
+  });
+
   it("never admits more than the limit when parallel delegations race on different replicas", async () => {
     const l = await lead({ maxDelegationsPerRun: 1, parallelDelegations: true });
     const ex = controlledExecutor();

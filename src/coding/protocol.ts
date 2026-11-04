@@ -302,7 +302,8 @@ export function normalizeLocalRepository(value: string): string {
   return `${LOCAL_REPO_PREFIX}${resolve(path)}`;
 }
 
-function isCodingRepository(value: string): boolean {
+/** What a coding run can work in, on a profile or a link: a GitHub name or a local path. */
+export function isCodingRepository(value: string): boolean {
   if (!isLocalRepository(value)) return isGitHubRepository(value);
   try {
     normalizeLocalRepository(value);

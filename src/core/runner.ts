@@ -31,7 +31,10 @@ import {
 } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import {
+  CODING_REPOSITORY_LINK_FILTER,
   type CodingRepositoryReader,
+  extraCodingRepositoryLinks,
+  hasCodingRepositoryList,
   RepositoryChoiceRefusedError,
   resolveCodingRepository,
 } from "./coding-repository.js";
@@ -348,7 +351,10 @@ async function delegationTarget(
   childAgentId: string,
   childAgent: DelegationChildAgent,
   args: z.infer<typeof DelegateArgs>,
-): Promise<{ slot: string; defaultRepository: string | null; repository?: string } | { refusal: string }> {
+): Promise<
+  | { slot: string; defaultRepository: string | null; repository?: string; hasRepositoryList: boolean }
+  | { refusal: string }
+> {
   if (childAgent.kind !== "coding" || !childAgent.codingProfile) {
     if (args.repository !== undefined) {
       return {
@@ -358,7 +364,7 @@ async function delegationTarget(
         }),
       };
     }
-    return { slot: delegationSlot(childAgentId, null), defaultRepository: null };
+    return { slot: delegationSlot(childAgentId, null), defaultRepository: null, hasRepositoryList: false };
   }
   try {
     const target = await resolveCodingRepository(db, {
@@ -372,6 +378,7 @@ async function delegationTarget(
       slot: delegationSlot(childAgentId, target.repository),
       defaultRepository: childAgent.codingProfile.repository,
       repository: target.repository,
+      hasRepositoryList: await hasCodingRepositoryList(db, childAgentId, childAgent.codingProfile.repository),
     };
   } catch (err) {
     if (err instanceof RepositoryChoiceRefusedError) {
@@ -874,8 +881,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
         ? await db.agentRepository.findMany({
             where: {
               agentId: { in: subAgentEdges.map((edge) => edge.childAgentId) },
-              access: "write",
-              triggers: { isEmpty: true },
+              ...CODING_REPOSITORY_LINK_FILTER,
               agent: { kind: "coding" },
             },
             include: {
@@ -894,6 +900,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       const child = links[0]?.agent;
       const profile = child?.codingProfile;
       if (!profile) return [];
+      const extras = extraCodingRepositoryLinks(links, profile.repository);
+      if (extras.length === 0) return [];
       // Across owners, as authorizeDelegation compares them (owner-less on both sides is the same
       // owner): the list is the child's owner's to show, so only a lead that could choose sees it.
       // That takes the opt-in and the lead's owner's execute access; revoke_access leaves the edge.
@@ -908,7 +916,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       ) {
         return [];
       }
-      return [profile.repository, ...links.map((link) => link.repository)];
+      return [profile.repository, ...extras.map((link) => link.repository)];
     };
     const delegateTools = await Promise.all(
       subAgentEdges.map(async (edge): Promise<LoadedTool> =>
@@ -1421,6 +1429,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             waitingSlots: [...waitingDelegations],
             slot: delegation.slot,
             boundName,
+            childHasRepositoryList: delegation.hasRepositoryList,
             limit: loaded.maxDelegationsPerRun ?? 1,
           });
           if (limitRefusal) return limitRefusal;
@@ -2104,6 +2113,7 @@ export async function durableDelegate(
         ),
         slot: delegation.slot,
         boundName,
+        childHasRepositoryList: delegation.hasRepositoryList,
         limit,
       });
     };

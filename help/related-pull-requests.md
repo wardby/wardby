@@ -138,9 +138,9 @@ Give your own delivery or router agent's system prompt a line such as:
     sibling the change requires; never open a new pull request in a
     repository that already has an open sibling for this request.
 
-The usual limits still apply: `maxDelegationsPerRun` and never delegating to
-the same sub-agent twice in one run; every push to a sibling pull request
-gets its own review; fix rounds are capped per pull request and only one
+The usual limits still apply: `maxDelegationsPerRun` and delegating to each
+sub-agent and repository at most once per run; every push to a sibling pull
+request gets its own review; fix rounds are capped per pull request and only one
 runs at a time on a pull request; and a continuation only ever reaches a
 sub-agent that shares the same owner as the one asked to continue it.
 

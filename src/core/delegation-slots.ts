@@ -29,12 +29,16 @@ export function delegationLimitRefusal(input: {
   slot: string;
   boundName: string;
   limit: number;
+  /** Whether "the same slot" means the same repository; otherwise it means the same sub-agent. */
+  childHasRepositoryList: boolean;
 }): string | null {
-  const { priorSlots, waitingSlots, slot, boundName, limit } = input;
+  const { priorSlots, waitingSlots, slot, boundName, limit, childHasRepositoryList } = input;
   if (priorSlots.includes(slot) || waitingSlots.includes(slot)) {
     return JSON.stringify({
       error: "already_dispatched",
-      message: `This run already delegated to "${boundName}" for this repository; a run delegates to each sub-agent and repository at most once.`,
+      message: childHasRepositoryList
+        ? `This run already delegated to "${boundName}" for this repository; a run delegates to each sub-agent and repository at most once.`
+        : `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
     });
   }
   if (priorSlots.length < limit && priorSlots.length + waitingSlots.length >= limit) {

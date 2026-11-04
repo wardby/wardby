@@ -281,6 +281,57 @@ describe("repository tools", () => {
       await client.close();
     });
 
+    it("refuses a hosted repository, which a coding run cannot work in, without echoing it", async () => {
+      // Past the tool's schema, which offers no hosted provider today: this guard is what holds
+      // when it does, since normalizeRepository accepts any registered host.
+      const { db } = setup(agents(), "p1");
+      const tools = new Map<string, { handler: (args: unknown, ctx: unknown) => Promise<unknown> }>();
+      registerRepositoryTools({
+        registerTool: (tool: { name: string; handler: never }) => tools.set(tool.name, tool),
+      } as never);
+      const ctx = fakeCtx(db, "p1", ["agents:read", "agents:write"]);
+      const attempt = tools
+        .get("link_repository")!
+        .handler({ agentId: "c1", provider: "bitbucket", repository: "bitbucket:acme/repo", access: "write" }, ctx);
+      await expect(attempt).rejects.toMatchObject({ httpStatus: 400 });
+      await expect(attempt).rejects.toThrow(/GitHub repository or a local: path/);
+      await expect(attempt).rejects.not.toThrow(/acme\/repo/);
+      expect(await db.agentRepository.findMany({ where: { agentId: "c1" } })).toEqual([]);
+    });
+
+    it("refuses a hosted repository named without a provider", async () => {
+      const { db, mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "c1", repository: "bitbucket:acme/repo", access: "write" },
+      });
+      expect(result.isError).toBeTruthy();
+      expect(await db.agentRepository.findMany({ where: { agentId: "c1" } })).toEqual([]);
+      await client.close();
+    });
+
+    it("clears a link's baseRef when re-linking without it, and says so in the description", async () => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const link = (extra: Record<string, unknown> = {}) =>
+        client.callTool({
+          name: "link_repository",
+          arguments: { agentId: "c1", repository: "acme/service-a", access: "write", ...extra },
+        });
+      const first = await link({ baseRef: "develop" });
+      expect((parseText(first as never) as { link: Record<string, unknown> }).link).toMatchObject({
+        baseRef: "develop",
+      });
+      const relinked = await link();
+      expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({ baseRef: null });
+      const { tools } = await client.listTools();
+      expect(tools.find((tool) => tool.name === "link_repository")?.description).toMatch(
+        /markReadyWhenPassing,? and baseRef \(an omitted field is cleared/,
+      );
+      await client.close();
+    });
+
     it("refuses baseRef on a native agent's link", async () => {
       const { mcp } = setup(agents(), "p1");
       const client = await connectClient(mcp);

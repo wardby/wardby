@@ -32,6 +32,7 @@ describe("delegationLimitRefusal", () => {
     slot: "c\nacme/a",
     boundName: "fixer",
     limit: 5,
+    childHasRepositoryList: true,
   };
   const errorOf = (r: string | null) => (r ? (JSON.parse(r) as { error: string; message: string }) : null);
 
@@ -43,6 +44,18 @@ describe("delegationLimitRefusal", () => {
     const out = errorOf(delegationLimitRefusal({ ...base, priorSlots: ["c\nacme/a"] }));
     expect(out?.error).toBe("already_dispatched");
     expect(out?.message).toContain("at most once");
+  });
+  it("speaks of the repository only for a child with a list", () => {
+    const withList = errorOf(delegationLimitRefusal({ ...base, priorSlots: ["c\nacme/a"] }));
+    expect(withList?.message).toBe(
+      'This run already delegated to "fixer" for this repository; a run delegates to each sub-agent and repository at most once.',
+    );
+    const withoutList = errorOf(
+      delegationLimitRefusal({ ...base, childHasRepositoryList: false, priorSlots: ["c\nacme/a"] }),
+    );
+    expect(withoutList?.message).toBe(
+      'This run already delegated to "fixer"; a run delegates to each sub-agent at most once.',
+    );
   });
   it("refuses a slot that is waiting for budget, but not a different waiting slot", () => {
     expect(errorOf(delegationLimitRefusal({ ...base, waitingSlots: ["c\nacme/a"] }))?.error).toBe("already_dispatched");

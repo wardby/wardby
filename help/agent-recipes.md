@@ -162,8 +162,8 @@ yourself.`
 A router delegates once per run by default. For one native agent that splits a
 request across several repositories, attach one builder per repository and set
 the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
-`update_agent`. Each `delegate_to_<name>` call must go to a different
-sub-agent; the calls run one after another unless you also set
+`update_agent`. A run delegates to each sub-agent and repository at most
+once; the calls run one after another unless you also set
 `parallelDelegations: true`, which starts only the **consecutive**
 `delegate_to_*` calls of one turn together — a non-delegation call between
 two delegations splits them, nothing is reordered, and results return to the
@@ -231,6 +231,11 @@ run with `continuePriorRun`), and a repository not on the list with
 definition only when it has the same owner as the builder, or another owner
 with execute access to a builder that sets `allowWebhookTaskOverride`. All
 repositories share the builder's toolchain, budget and prompt.
+
+Being on the list lets a run work in a repository; it starts nothing there. Link
+the lead and the reviewer on each listed GitHub repository with the triggers
+they need, or a pull request opened there gets no review, mention follow-up, fix
+round or mark-ready.
 
 Search help for `repository_required` or `repository_not_listed` for what to do about those refusals.
 

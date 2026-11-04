@@ -77,7 +77,8 @@ A coding agent works in one repository per run, chosen from its list:
 - `link_repository` adds more. A link on a coding agent takes
   `access: "write"`, no triggers, no `checkName` and an optional `baseRef`
   (the base branch for runs in that repository; default: the profile's
-  `baseRef`). Linking the default repository again is refused.
+  `baseRef`). The repository must be on GitHub or a `local:` path. Linking the
+  default repository again is refused.
 - `unlink_repository` removes one.
 
 ```json
@@ -92,13 +93,16 @@ The repository is chosen when the run starts and never changes during it:
 
 - `trigger_agent` takes an optional `repository`. Leave it out and the run uses
   the default repository. Name one that is not on the list and the call is
-  refused with `repository_not_listed`.
+  refused with `repository_not_listed`. Only the agent's owner can pass
+  `repository`, unless `codingProfile.allowWebhookTaskOverride` is on; anyone
+  else is refused with a 403.
 - A webhook body can carry `wardbyRepository` the same way (not `repository`,
   which forwarded payloads already use). A refused value is a 400
   `{ "error": "invalid_repository" }`. A webhook can carry `wardbyRepository`
   only when `codingProfile.allowWebhookTaskOverride` is on, whoever created
-  the webhook. With the flag off the call is refused with 403
-  `{ "error": "disabled" }`, before the repository value is checked.
+  the webhook. With the flag off a well-formed value is refused with 403
+  `{ "error": "disabled" }`, before it is compared with the list; a malformed
+  one (not a string, empty, or over 300 characters) is a 400 either way.
 - A lead's `delegate_to_<name>` call takes `repository`. When the sub-agent has
   more than its default repository the call must name one, unless
   `continuePriorRun` is given: a follow-up works in the repository of the run
@@ -109,9 +113,21 @@ Everything else about the agent is shared across its repositories: toolchain,
 worker image, services, system prompt, budget, protected paths and the package
 allowlist. If two repositories need different ones, use two agents.
 
+Being on the list lets a run work in a repository; it starts nothing there.
+Reviews, mention follow-ups, fix rounds and mark-ready route by repository and
+trigger, so a pull request opened in a linked repository gets none of them by
+itself. For follow-ups, link the lead and the reviewer on each listed GitHub
+repository with the triggers they need.
+
 An agent with no repository links works only in its default repository.
 Changing an agent's `kind` is refused while it has write links without
 triggers; unlink them first.
+
+Every write link without triggers on a coding agent is on its list, whenever it
+was made. An agent converted from native to coding can hold such links from its
+native configuration: run `list_repositories` on converted agents and unlink any
+repository their runs should not work in.
+
 For the refusals, see [Repository required](../help/errors/repository-required.md)
 and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
 
