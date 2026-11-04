@@ -259,7 +259,7 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
         expect(await durableDelegate(bad, "w-1", "delegate_to_b", args)).toEqual({
           result: expect.stringContaining("secret_check_unavailable"),
         });
-        expect(await ledger.waitingChildAgentIds(l.session.id, "w-2")).toEqual([]);
+        expect(await ledger.waitingDelegations(l.session.id, "w-2")).toEqual([]);
 
         await db.run.update({ where: { id: sibling.id }, data: { status: "succeeded", finishedAt: new Date() } });
         expect(await durableDelegate(good, "w-2", "delegate_to_b", args)).toEqual({ pending: true });

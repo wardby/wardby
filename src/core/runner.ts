@@ -30,6 +30,9 @@ import {
   type StepRunner,
 } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
+import { delegationLimitRefusal, delegationSlot } from "./delegation-slots.js";
+
+export { delegationLimitRefusal };
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
@@ -239,44 +242,6 @@ export function parseDelegateArgs(argsJson: string): { args: z.infer<typeof Dele
     }
     throw err;
   }
-}
-
-/**
- * At most `limit` dispatches per run (default one: a classifier deciding plan-vs-implement
- * commits to exactly one child), and never the same child twice, so a retry can't leave two
- * children racing on the same task. A delegation waiting for budget holds its place.
- */
-export function delegationLimitRefusal(input: {
-  priorChildAgentIds: readonly string[];
-  waitingChildAgentIds: readonly string[];
-  childAgentId: string;
-  boundName: string;
-  limit: number;
-}): string | null {
-  const { priorChildAgentIds, waitingChildAgentIds, childAgentId, boundName, limit } = input;
-  if (priorChildAgentIds.includes(childAgentId) || waitingChildAgentIds.includes(childAgentId)) {
-    return JSON.stringify({
-      error: "already_dispatched",
-      message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
-    });
-  }
-  if (priorChildAgentIds.length < limit && priorChildAgentIds.length + waitingChildAgentIds.length >= limit) {
-    // Only a waiting delegation (parallelDelegations) holds the remaining place.
-    return JSON.stringify({
-      error: "already_dispatched",
-      message: `This run reached its limit of ${limit} delegations: ${priorChildAgentIds.length} made and ${waitingChildAgentIds.length} waiting for budget.`,
-    });
-  }
-  if (priorChildAgentIds.length >= limit) {
-    return JSON.stringify({
-      error: "already_dispatched",
-      message:
-        limit === 1
-          ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
-          : `This run already made ${limit} delegations, the most this agent allows per run.`,
-    });
-  }
-  return null;
 }
 
 const DELEGATION_CHILD_SELECT = {
@@ -1323,9 +1288,9 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           // (parallelDelegations) are admitted one at a time.
           const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
           const limitRefusal = delegationLimitRefusal({
-            priorChildAgentIds: priorDispatches.map((prior) => prior.agentId),
-            waitingChildAgentIds: [...waitingDelegations],
-            childAgentId: edge.childAgentId,
+            priorSlots: priorDispatches.map((prior) => delegationSlot(prior.agentId, null)),
+            waitingSlots: [...waitingDelegations],
+            slot: delegationSlot(edge.childAgentId, null),
             boundName,
             limit: loaded.maxDelegationsPerRun ?? 1,
           });
@@ -1358,14 +1323,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 { runId, boundName, exhaustedBy, siblingsInFlight: delegationSiblings.inFlight },
                 "delegation waiting for a sibling to free budget",
               );
-              waitingDelegations.add(edge.childAgentId);
+              waitingDelegations.add(delegationSlot(edge.childAgentId, null));
               waited = true;
               release();
               try {
                 await delegationSiblings.nextFinish(remainingMs, finishes);
               } finally {
                 release = await delegationGate.acquire();
-                waitingDelegations.delete(edge.childAgentId);
+                waitingDelegations.delete(delegationSlot(edge.childAgentId, null));
               }
             }
             // The parent may have been stopped while this delegation waited: start nothing for it.
@@ -1853,7 +1818,7 @@ export function sandboxWorkerInput(
 /** What the durable delegation needs from the gateway ledger (src/native-worker/ledger.ts). */
 export type DelegationLedger = Pick<
   PrismaGatewayLedger,
-  "claim" | "recordResult" | "setDelegation" | "delegation" | "waitingChildAgentIds"
+  "claim" | "recordResult" | "setDelegation" | "delegation" | "waitingDelegations"
 >;
 
 export interface DurableDelegationContext {
@@ -1996,9 +1961,11 @@ export async function durableDelegate(
     const refusalNow = async (reader: { run: { findMany: RunnerDb["run"]["findMany"] } }) => {
       const prior = await reader.run.findMany({ where: { parentRunId: runId }, select: { agentId: true } });
       return delegationLimitRefusal({
-        priorChildAgentIds: prior.map((p) => p.agentId),
-        waitingChildAgentIds: await ledger.waitingChildAgentIds(sessionId, callId),
-        childAgentId: edge.childAgentId,
+        priorSlots: prior.map((p) => delegationSlot(p.agentId, null)),
+        waitingSlots: (await ledger.waitingDelegations(sessionId, callId)).map((row) =>
+          delegationSlot(row.childAgentId, null),
+        ),
+        slot: delegationSlot(edge.childAgentId, null),
         boundName,
         limit,
       });

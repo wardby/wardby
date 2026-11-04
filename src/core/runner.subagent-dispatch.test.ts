@@ -1086,7 +1086,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           const row = rows.get(callId);
           return row ? { ...row } : null;
         },
-        async waitingChildAgentIds() {
+        async waitingDelegations() {
           return [];
         },
       };
