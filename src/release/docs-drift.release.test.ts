@@ -141,7 +141,7 @@ const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["update_budget_group", "list_budget_groups", "delete_budget_group", "detach_tool"],
   ...["create_datastore", "list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
-  ...["list_subagents", "get_agent_memory", "list_agent_memory", "delete_agent_memory"],
+  ...["get_agent_memory", "list_agent_memory", "delete_agent_memory"],
   ...["detach_secret", "create_webhook"],
 ]);
 
