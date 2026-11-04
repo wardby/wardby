@@ -270,6 +270,27 @@ describe("routeHostEvent", () => {
     );
   });
 
+  it("never starts a run for a write link without triggers, as a coding agent's extra repository is", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "coder", triggers: [], checkName: null }]);
+    const mention = (body: string): HostEvent => ({
+      kind: "mention",
+      provider: "github",
+      repository: REPO,
+      number: 7,
+      isPullRequest: true,
+      comment: { kind: "conversation", id: "4" },
+      body,
+      author: "chfields",
+      authorId: "1001",
+    });
+    for (const event of [mention("@wardby why is this slow?"), mention("@wardby review please"), pr]) {
+      const result = await routeHostEvent(event, d);
+      expect(result.runIds).toEqual([]);
+    }
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
   it("routes '@wardby review' to pull_request agents on the current head, and other mentions to the mention agent", async () => {
     vi.mocked(dispatchRun).mockClear();
     const d = deps([

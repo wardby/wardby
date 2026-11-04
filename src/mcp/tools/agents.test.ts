@@ -85,6 +85,8 @@ interface FakeLink {
   repository: string;
   authorizedVia: string | null;
   authorizedById?: string | null;
+  access?: string;
+  triggers?: string[];
 }
 
 interface FakeCodingProfile {
@@ -218,6 +220,13 @@ function fakeDb(
         principalIds.has(where.id) ? { id: where.id, subject: where.id, createdAt: new Date() } : null,
     },
     agentRepository: {
+      count: async ({ where }: { where: { agentId: string; access: string; triggers: { isEmpty: boolean } } }) =>
+        links.filter(
+          (l) =>
+            l.agentId === where.agentId &&
+            l.access === where.access &&
+            ((l.triggers ?? []).length === 0) === where.triggers.isEmpty,
+        ).length,
       findMany: async ({ where }: { where: { agentId: string; authorizedVia?: { in: string[] } } }) =>
         links.filter(
           (l) =>
@@ -931,6 +940,57 @@ describe("agent CRUD tools", () => {
     expect(result.isError).toBe(true);
     await client.close();
   });
+
+  it.each([
+    ["coding", "native"],
+    ["native", "coding"],
+  ] as const)(
+    "update_agent refuses changing kind from %s to %s while the agent has write links without triggers",
+    async (from, to) => {
+      const db = fakeDb(
+        [
+          {
+            id: "x",
+            name: "agent",
+            systemPrompt: "x",
+            model: "gpt-5.6-luna",
+            budgetUsd: 1,
+            maxTurns: 10,
+            schedule: null,
+            timezone: "UTC",
+            ownerId: "p1",
+            tools: [],
+            kind: from,
+            codingProfile:
+              from === "coding"
+                ? {
+                    provider: "codex",
+                    repository: "acme/default",
+                    baseRef: "main",
+                    defaultTask: null,
+                    timeoutSec: 600,
+                    protectedPaths: [],
+                  }
+                : null,
+          },
+        ],
+        [],
+        [],
+        [{ agentId: "x", repository: "acme/service-a", authorizedVia: "owner", access: "write", triggers: [] }],
+      );
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "x", kind: to, ...(to === "coding" ? { codingProfile: { repository: "acme/default" } } : {}) },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain("unlink");
+      await client.close();
+    },
+  );
 
   it("update_agent transitions native to coding and coding back to native atomically", async () => {
     const db = fakeDb([

@@ -12,9 +12,20 @@
  * See docs/private/2026-09-26-repo-access-authorization-spec-and-plan.md.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../../coding/protocol.js";
+import {
+  CodingBaseRefSchema,
+  isLocalRepository,
+  normalizeGitHubRepository,
+  normalizeLocalRepository,
+} from "../../coding/protocol.js";
 import { codeProviderOf, normalizeHostedRepository } from "../../coding/code-host.js";
-import { requireAgentAccess, requireBindable, requireBindingOwner, requireNotPublicWritable } from "../auth/access.js";
+import {
+  assertAgentAccess,
+  requireAgentAccess,
+  requireBindable,
+  requireBindingOwner,
+  requireNotPublicWritable,
+} from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
@@ -35,6 +46,7 @@ type LinkArgs = {
   reviewFixMaxRounds?: number;
   waitForCi?: boolean;
   markReadyWhenPassing?: boolean;
+  baseRef?: string;
   adminOverride?: boolean;
 };
 
@@ -86,7 +98,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     name: "link_repository",
     scope: "agents:write",
     description:
-      "Links a native agent you own to a repository on a code-review host, with its access, event triggers, and checkName. " +
+      "Links an agent you own to a repository on a code-review host, with its access, event triggers, and checkName. " +
       "Triggers: pull_request (review each PR push), mention (answer @mentions), push (start on merges to the default branch), " +
       "review_fix (automatic review fix rounds). The review_fix trigger makes this agent the one wardby starts, automatically " +
       "and without a human comment, when wardby's own review check requests changes on a pull request a wardby coding run " +
@@ -98,7 +110,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
       "reviewFixMaxRounds, waitForCi, and markReadyWhenPassing (an omitted field is cleared, not kept) and re-checks access " +
       "— always send the full desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes " +
-      "no triggers or checkName: it supports manual reviews only (trigger_agent with review).",
+      "no triggers or checkName: it supports manual reviews only (trigger_agent with review). " +
+      "On a coding agent, adds a repository its runs may work in, with write access and no triggers.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -130,6 +143,11 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
             "after every Wardby review check passed, CI is green and the wardby merge order check (if any) " +
             "is success (default false).",
         },
+        baseRef: {
+          type: "string",
+          description:
+            "Coding agents only: the base branch for runs in this repository. Default: the coding profile's baseRef.",
+        },
         adminOverride: {
           type: "boolean",
           description:
@@ -145,18 +163,19 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       let agent;
       if (args.adminOverride === true) {
         requireScope(ctx, ctx.canonicalUri, "agents:admin");
-        agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
+        agent = await ctx.db.agent.findUnique({
+          where: { id: args.agentId },
+          include: { codingProfile: { select: { repository: true } } },
+        });
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
         await requireNotPublicWritable(agent, ctx.db);
       } else {
-        agent = (await requireAgentAccess(ctx, args.agentId, "read")).agent;
+        const row = await ctx.db.agent.findUnique({
+          where: { id: args.agentId },
+          include: { codingProfile: { select: { repository: true } } },
+        });
+        agent = (await assertAgentAccess(ctx, row, args.agentId, "read")).agent;
         await requireBindable(ctx, agent);
-      }
-      if (agent.kind !== "native") {
-        throw new McpError(
-          400,
-          "Repository links are for native agents only; coding agents use codingProfile.repository.",
-        );
       }
       const provider = args.provider ?? (isLocalRepository(args.repository) ? "local" : "github");
       if ((provider === "local") !== isLocalRepository(args.repository)) {
@@ -167,6 +186,29 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           ? await canonicalLocalRepository(args.repository)
           : normalizeRepository(provider, args.repository);
       const triggers = [...new Set(args.triggers ?? [])];
+      if (agent.kind === "coding") {
+        if (args.access !== "write") throw new McpError(400, "A coding agent's repository link needs write access.");
+        if (
+          triggers.length > 0 ||
+          args.checkName !== undefined ||
+          args.reviewFixMaxRounds !== undefined ||
+          args.waitForCi !== undefined ||
+          args.markReadyWhenPassing !== undefined
+        ) {
+          throw new McpError(
+            400,
+            "A coding agent's repository link takes no triggers, checkName, reviewFixMaxRounds, waitForCi or markReadyWhenPassing.",
+          );
+        }
+        if (agent.codingProfile?.repository === repository) {
+          throw new McpError(400, `${repository} is already its default repository (codingProfile.repository).`);
+        }
+      } else if (args.baseRef !== undefined) {
+        throw new McpError(400, "baseRef applies only to a coding agent's repository link.");
+      }
+      const parsedBaseRef = args.baseRef === undefined ? null : CodingBaseRefSchema.safeParse(args.baseRef);
+      if (parsedBaseRef && !parsedBaseRef.success) throw new McpError(400, "baseRef must be a safe branch ref.");
+      const baseRef = parsedBaseRef ? parsedBaseRef.data : null;
       if (provider === "local") {
         if (triggers.length > 0) throw new McpError(400, "local repositories support manual review only");
         // A check is only published for a dispatched host PR; a local link has none.
@@ -223,6 +265,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               reviewFixMaxRounds,
               waitForCi,
               markReadyWhenPassing,
+              baseRef,
               ...authorization,
             };
             return tx.agentRepository.upsert({

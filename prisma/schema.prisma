@@ -574,6 +574,9 @@ model CodingRun {
   baseSha               String?
   /// Step in the request's merge order set by the delegating agent (1 = first); null = no order.
   mergeOrder            Int?
+  /// Fixed at dispatch: this run's repository came from an AgentRepository link, not the
+  /// profile, so that link must still exist whenever the run uses the repository.
+  viaRepositoryLink     Boolean             @default(false)
   /// When Wardby marked this run's pull request ready for review (at most once;
   /// a person moving it back to draft is final). Only set on a root coding run.
   markedReadyAt         DateTime?
@@ -848,6 +851,8 @@ model NativeGatewayCall {
   childRunId        String?
   /// A delegation's sub-agent, recorded at admission (it holds a place while waiting for budget).
   childAgentId      String?
+  /// A coding delegation's repository, recorded with childAgentId. Null = the child's default.
+  childRepository   String?
   createdAt         DateTime                @default(now())
   updatedAt         DateTime                @updatedAt
   completedAt       DateTime?
@@ -1472,6 +1477,9 @@ model AgentRepository {
   /// review check passed, CI is green and the merge order check (if any) is
   /// success. Default off.
   markReadyWhenPassing Boolean  @default(false)
+  /// Only on a coding agent's link: the base branch for runs in this repository.
+  /// Null = the coding profile's baseRef.
+  baseRef              String?
   createdAt            DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's

@@ -20,6 +20,7 @@ interface FakeAgentRow {
   name: string;
   ownerId: string | null;
   kind: "native" | "coding";
+  codingProfile?: { repository: string } | null;
 }
 
 interface FakeRepositoryRow {
@@ -33,6 +34,7 @@ interface FakeRepositoryRow {
   reviewFixMaxRounds?: number | null;
   waitForCi?: boolean;
   markReadyWhenPassing?: boolean;
+  baseRef?: string | null;
   createdAt: Date;
   authorizedVia?: string | null;
   authorizedById?: string | null;
@@ -223,7 +225,87 @@ describe("repository tools", () => {
     await client.close();
   });
 
-  it("rejects coding agents, bad repositories, bad access, and unknown triggers", async () => {
+  describe("coding agents", () => {
+    const agents = (): FakeAgentRow[] => [
+      { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" },
+      {
+        id: "c1",
+        name: "coder",
+        ownerId: "p1",
+        kind: "coding",
+        codingProfile: { repository: "acme/default" },
+      },
+    ];
+
+    it("links a coding agent to a repository, write only and without triggers", async () => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const ok = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "c1", repository: "acme/service-a", access: "write", baseRef: "develop" },
+      });
+      expect(ok.isError).toBeFalsy();
+      expect((parseText(ok as never) as { link: unknown }).link).toMatchObject({
+        repository: "acme/service-a",
+        access: "write",
+        triggers: [],
+        baseRef: "develop",
+      });
+      await client.close();
+    });
+
+    it.each([
+      [{ access: "read" }, "write"],
+      [{ access: "write", triggers: ["push"] }, "triggers"],
+      [{ access: "write", markReadyWhenPassing: true }, "markReadyWhenPassing"],
+    ])("refuses a coding link with %j", async (extra, message) => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "c1", repository: "acme/service-a", ...extra },
+      });
+      expect(result.isError).toBeTruthy();
+      expect(errorText(result as never)).toContain(message);
+      await client.close();
+    });
+
+    it("refuses the coding agent's own default repository", async () => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "c1", repository: "acme/default", access: "write" },
+      });
+      expect(errorText(result as never)).toContain("already its default");
+      await client.close();
+    });
+
+    it("refuses baseRef on a native agent's link", async () => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "a1", repository: "acme/service-a", access: "write", baseRef: "develop" },
+      });
+      expect(errorText(result as never)).toContain("baseRef");
+      await client.close();
+    });
+
+    it("refuses an unsafe baseRef without echoing it", async () => {
+      const { mcp } = setup(agents(), "p1");
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "c1", repository: "acme/service-a", access: "write", baseRef: "--evil;rm" },
+      });
+      expect(errorText(result as never)).toContain("safe branch ref");
+      expect(errorText(result as never)).not.toContain("evil");
+      await client.close();
+    });
+  });
+
+  it("rejects bad repositories, bad access, and unknown triggers", async () => {
     const { mcp } = setup(
       [
         { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" },
@@ -232,13 +314,6 @@ describe("repository tools", () => {
       "p1",
     );
     const client = await connectClient(mcp);
-
-    const codingResult = await client.callTool({
-      name: "link_repository",
-      arguments: { agentId: "c1", repository: "openai/example", access: "write" },
-    });
-    expect(codingResult.isError).toBeTruthy();
-    expect(errorText(codingResult as never)).toContain("native agents only");
 
     const badRepoResult = await client.callTool({
       name: "link_repository",
@@ -294,14 +369,8 @@ describe("repository tools", () => {
     await client.close();
   });
 
-  it("requires write access for the push trigger and keeps it native-only", async () => {
-    const { mcp } = setup(
-      [
-        { id: "a1", name: "watcher", ownerId: "p1", kind: "native" },
-        { id: "c1", name: "coder", ownerId: "p1", kind: "coding" },
-      ],
-      "p1",
-    );
+  it("requires write access for the push trigger", async () => {
+    const { mcp } = setup([{ id: "a1", name: "watcher", ownerId: "p1", kind: "native" }], "p1");
     const client = await connectClient(mcp);
     const readPush = await client.callTool({
       name: "link_repository",
@@ -309,12 +378,6 @@ describe("repository tools", () => {
     });
     expect(readPush.isError).toBeTruthy();
     expect(errorText(readPush as never)).toContain("Event triggers need write access.");
-    const codingPush = await client.callTool({
-      name: "link_repository",
-      arguments: { agentId: "c1", repository: "openai/example", access: "write", triggers: ["push"] },
-    });
-    expect(codingPush.isError).toBeTruthy();
-    expect(errorText(codingPush as never)).toContain("native agents only");
     await client.close();
   });
 
