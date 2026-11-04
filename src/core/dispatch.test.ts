@@ -23,6 +23,7 @@ import {
   type DispatchDb,
 } from "./dispatch.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
+import { RepositoryChoiceRefusedError } from "./coding-repository.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
@@ -37,6 +38,8 @@ interface FakeBudget {
   attributedRuns?: Record<string, string>;
   /** Pre-attribution runs with a RunIssueStatus: { runId: issueKey } (provider jira). */
   issueRuns?: Record<string, string>;
+  /** The agent's write links without triggers (its coding repository list). */
+  links?: { repository: string; baseRef: string | null }[];
 }
 
 function fakeDb(
@@ -68,7 +71,14 @@ function fakeDb(
       source: "issue_event",
     });
   }
+  const linkReads: unknown[] = [];
   const db: any = {
+    agentRepository: {
+      findMany: async (args: unknown) => {
+        linkReads.push(args);
+        return budget.links ?? [];
+      },
+    },
     agent: {
       findUnique: async ({ where }: any) => (where.id === agent.id ? agent : null),
       findUniqueOrThrow: async () => agent,
@@ -193,6 +203,7 @@ function fakeDb(
     attributions,
     workItems,
     rawStatements,
+    linkReads,
     budgetEvents,
     transactionActive: () => transactionActive,
   };
@@ -2185,6 +2196,160 @@ describe("coding-run services", () => {
     } else {
       expect(state.codingRuns[0]).toMatchObject({ provider, services: [resolvedFromDefinition(POSTGRES_16)] });
     }
+  });
+
+  describe("a coding repository list", () => {
+    const listed = [{ repository: "acme/service-a", baseRef: "develop" }];
+    const agent = () => ({
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "acme/default",
+        baseRef: "main",
+        defaultTask: "Do it",
+        timeoutSec: 900,
+        protectedPaths: [],
+        services: [],
+      },
+    });
+    const idle: Executor = { async start() {}, async stop() {} };
+
+    it("records a listed repository, its base branch and that it came from a link", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      const result = await dispatchRun({
+        db: state.db,
+        executor: idle,
+        agentId: a.id,
+        codingRepository: "acme/service-a",
+      });
+      expect(state.codingRuns[0]).toMatchObject({
+        repository: "acme/service-a",
+        baseRef: "develop",
+        viaRepositoryLink: true,
+      });
+      expect(result?.run.status).not.toBe("refused");
+    });
+
+    it("records the default repository as not via a link", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      await dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingRepository: "ACME/default" });
+      expect(state.codingRuns[0]).toMatchObject({
+        repository: "acme/default",
+        baseRef: "main",
+        viaRepositoryLink: false,
+      });
+    });
+
+    it("refuses an unlisted repository, creates no run, and never echoes it", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      const attempt = dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingRepository: "acme/sk-nope" });
+      await expect(attempt).rejects.toMatchObject({ code: "repository_not_listed" });
+      await expect(attempt).rejects.toBeInstanceOf(RepositoryChoiceRefusedError);
+      await expect(attempt).rejects.not.toThrow(/sk-nope/);
+      expect(state.runs).toEqual([]);
+      expect(state.codingRuns).toEqual([]);
+    });
+
+    it("refuses when the agent has links and nothing names a repository, only with requireExplicitRepository", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      await expect(
+        dispatchRun({ db: state.db, executor: idle, agentId: a.id, requireExplicitRepository: true }),
+      ).rejects.toMatchObject({ code: "repository_required" });
+      expect(state.runs).toEqual([]);
+      await dispatchRun({ db: state.db, executor: idle, agentId: a.id });
+      expect(state.codingRuns[0]).toMatchObject({ repository: "acme/default", viaRepositoryLink: false });
+    });
+
+    it("lets codingBaseRef override the link's base branch", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      await dispatchRun({
+        db: state.db,
+        executor: idle,
+        agentId: a.id,
+        codingRepository: "acme/service-a",
+        codingBaseRef: "hotfix",
+      });
+      expect(state.codingRuns[0]).toMatchObject({ repository: "acme/service-a", baseRef: "hotfix" });
+    });
+
+    it("reads the service declaration and knowledge index from the chosen repository at its base", async () => {
+      const a = { ...agent(), codingProfile: { ...agent().codingProfile, services: ["postgres"] } };
+      const state = fakeDb(a, [], { links: listed }, CATALOG);
+      const readCodingRepositoryFile = vi.fn(async () => null);
+      const readCodingServiceDeclaration = vi.fn(async () => DECLARATION);
+      await dispatchRun({
+        db: state.db,
+        executor: {
+          ...idle,
+          readCodingRepositoryFile,
+          readCodingServiceDeclaration,
+          supportsCodingServices: () => true,
+        },
+        agentId: a.id,
+        codingRepository: "acme/service-a",
+      });
+      expect(readCodingRepositoryFile).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: "acme/service-a", baseRef: "develop" }),
+      );
+      expect(readCodingServiceDeclaration).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: "acme/service-a", baseRef: "develop" }),
+      );
+      expect(readCodingRepositoryFile).not.toHaveBeenCalledWith(
+        expect.objectContaining({ repository: "acme/default" }),
+      );
+    });
+
+    it("does not read links when no repository is involved", async () => {
+      const a = agent();
+      const state = fakeDb(a, [], { links: listed });
+      await dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingTask: "fix" });
+      expect(state.linkReads).toEqual([]);
+    });
+
+    it("refuses a continuation of a run in another repository", async () => {
+      const a = agent();
+      const state = fakeDb(
+        a,
+        [
+          {
+            runId: "root_in_default",
+            repository: "acme/default",
+            baseRef: "main",
+            headRef: "wardby/run-root_in_default",
+            rootCodingRunId: null,
+            run: { agent: { ownerId: "owner_1" } },
+            result: null,
+          },
+        ],
+        { links: listed },
+      );
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: idle,
+          agentId: a.id,
+          codingRepository: "acme/service-a",
+          continuesCodingRunId: "root_in_default",
+        }),
+      ).rejects.toThrow(/different repository/);
+      // Only the seeded root: the fake does not roll back the run row, but no CodingRun was written.
+      expect(state.codingRuns.map((row) => row.runId)).toEqual(["root_in_default"]);
+    });
+
+    it("refuses a repository for a native agent", async () => {
+      const state = fakeDb(nativeAgent());
+      await expect(
+        dispatchRun({ db: state.db, executor: idle, agentId: "agent_1", codingRepository: "acme/service-a" }),
+      ).rejects.toThrow(/Coding overrides cannot be supplied for a native agent/);
+      expect(state.codingRuns).toEqual([]);
+    });
   });
 
   it("reads nothing for a native agent", async () => {

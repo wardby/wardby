@@ -76,6 +76,55 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("reports whether the agent's write link for a linked run's repository still exists", async () => {
+    const runId = `container-link-${randomUUID()}`;
+    try {
+      await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/example",
+          access: "write",
+          triggers: [],
+          authorizedVia: "admin",
+        },
+      });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+          viaRepositoryLink: true,
+        },
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.load(runId)).resolves.toMatchObject({
+        viaRepositoryLink: true,
+        repositoryLinkExists: true,
+        repositoryLinkAuthorizedVia: "admin",
+      });
+      await db.agentRepository.deleteMany({ where: { agentId } });
+      await expect(store.load(runId)).resolves.toMatchObject({
+        viaRepositoryLink: true,
+        repositoryLinkExists: false,
+        repositoryLinkAuthorizedVia: null,
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+      await db.agentRepository.deleteMany({ where: { agentId } });
+    }
+  });
+
   it("persists a sanitized failure category and opaque diagnostic ID separately from the terminal state", async () => {
     const failedRunId = `container-failed-${randomUUID()}`;
     try {
