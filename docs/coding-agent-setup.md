@@ -131,6 +131,19 @@ repository their runs should not work in.
 For the refusals, see [Repository required](../help/errors/repository-required.md)
 and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
 
+## See what a run was asked to do
+
+`get_run` returns a coding run's `request`: the task it received from
+`trigger_agent`, a webhook or a lead, or the agent's default task. It leaves out
+the agent's standing instructions. On a delegated run, this shows what the lead
+told the coding agent, so you can tell a vague task from a run that missed a
+clear one.
+
+The value is masked when it's read: the values of the agent's attached secrets
+and token-shaped values are replaced. If the agent's secrets can't be read,
+`get_run` returns `requestUnavailable: true` instead of the text. Runs from
+before this field have no `request`.
+
 ## Local repositories
 
 A coding agent (or a review agent) can work on a git repository on the same

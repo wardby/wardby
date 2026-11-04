@@ -2,12 +2,21 @@ import type { NativeExecutionMode } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { requireAgentAccess } from "../auth/access.js";
 import { findReadableRun } from "./run-access.js";
-import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
+import {
+  publicCodingRunResult,
+  redactTokenShapedValues,
+  sanitizeDependencyCacheReport,
+} from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
 import { loadBudgetEvents } from "../../core/budget-events.js";
+import { loadAgentSecretValues, maskNamedSecrets } from "../../core/secret-guard.js";
+import { logger } from "../../core/logger.js";
+import type { McpRequestContext } from "../context.js";
+
+const runsLog = logger.child({ module: "mcp-runs" });
 
 /**
  * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
@@ -21,6 +30,28 @@ function withOperatorMode<T extends { nativeExecutionMode?: NativeExecutionMode 
 ): Omit<T, "nativeExecutionMode"> & { nativeExecutionMode: "control-plane" | "sandbox" | null } {
   const mode = run.nativeExecutionMode;
   return { ...run, nativeExecutionMode: mode == null ? null : mode === "sandbox" ? "sandbox" : "control-plane" };
+}
+
+/**
+ * A coding run's request as its readers may see it. It can be text a caller or an issue wrote, so
+ * the agent's secret values and token-shaped values are masked here on every read. A secret that
+ * can't be read means the text can't be checked, so it is withheld; the log carries the error name only.
+ */
+async function requestForReader(
+  ctx: Pick<McpRequestContext, "db" | "providers">,
+  run: { id: string; agentId: string },
+  request: string,
+): Promise<{ request: string } | { requestUnavailable: true }> {
+  try {
+    const named = await loadAgentSecretValues(ctx.db, ctx.providers.secrets, run.agentId);
+    return { request: redactTokenShapedValues(maskNamedSecrets(request, named)) };
+  } catch (err) {
+    runsLog.warn(
+      { runId: run.id, errorName: err instanceof Error ? err.name : typeof err },
+      "could not read the agent's secrets to check a run's request; withholding it",
+    );
+    return { requestUnavailable: true };
+  }
 }
 
 export function registerRunTools(mcp: WardbyMcpServer): void {
@@ -75,6 +106,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         where: { runId: run.id },
         select: {
           result: true,
+          request: true,
           queuedAt: true,
           failureCategory: true,
           diagnosticId: true,
@@ -137,8 +169,11 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           : undefined;
       // Well-formed refusals only, with group, lead and agent budget filled as the run error's are.
       const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
+      // What the run was asked to do: the trigger's or lead's task, without the agent's standing instructions.
+      const request = codingRun?.request ? await requestForReader(ctx, run, codingRun.request) : {};
       return textResult({
         ...withOperatorMode(run),
+        ...request,
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
         ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),
