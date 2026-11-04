@@ -640,6 +640,208 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
       expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(0);
     });
 
+    describe("continuing a pull request", () => {
+      /** A finished run of the fixer that opened a pull request in `repository`. */
+      async function openedIn(repository: string) {
+        const root = await db.run.create({ data: { agentId: fixer, status: "succeeded", trigger: "manual" } });
+        const headRef = `wardby/run-${root.id}`;
+        await db.codingRun.create({
+          data: {
+            runId: root.id,
+            task: "t",
+            repository,
+            baseRef: "main",
+            headRef,
+            provider: "codex",
+            model: "gpt-5.6-luna",
+            timeoutSec: 60,
+            protectedPaths: [],
+            budgetReservedUsd: 0.1,
+            result: {
+              schemaVersion: 1,
+              outcome: "pull_request_opened",
+              repository,
+              baseRef: "main",
+              headRef,
+              commitSha: "a".repeat(40),
+              pullRequestUrl: `https://github.com/${repository}/pull/22`,
+              pullRequestNumber: 22,
+              summary: "opened",
+              tests: [],
+              usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+            },
+          },
+        });
+        return { rootId: root.id, headRef };
+      }
+
+      it("continues on a non-default repository without naming it", async () => {
+        const { rootId, headRef } = await openedIn(SERVICE_A);
+        const l = await lead();
+        const ex = controlledExecutor();
+        const outcome = await durableDelegate(
+          ctxFor(l, ex.executor),
+          "c-1",
+          "delegate_to_fixer",
+          fix(undefined, { continuePriorRun: rootId }),
+        );
+        expect(outcome).toEqual({ pending: true });
+        expect(vi.mocked(dispatchRun).mock.lastCall?.[0]).toMatchObject({
+          codingRepository: SERVICE_A,
+          continuesCodingRunId: rootId,
+          requireExplicitRepository: true,
+        });
+        expect(await db.codingRun.findUniqueOrThrow({ where: { runId: ex.started[0] } })).toMatchObject({
+          repository: SERVICE_A,
+          rootCodingRunId: rootId,
+          headRef,
+        });
+        expect(await gatewayCall(l.session.id, "c-1")).toMatchObject({ childRepository: SERVICE_A });
+      });
+
+      it("refuses it once that repository's link is gone, starting nothing", async () => {
+        const { rootId } = await openedIn(SERVICE_A);
+        await setLinks([SERVICE_B]);
+        const l = await lead();
+        const ex = controlledExecutor();
+        const outcome = await durableDelegate(
+          ctxFor(l, ex.executor),
+          "c-1",
+          "delegate_to_fixer",
+          fix(undefined, { continuePriorRun: rootId }),
+        );
+        expect(outcome).toEqual({ result: expect.stringContaining("continuation_refused") });
+        expect(ex.started).toEqual([]);
+        expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(0);
+      });
+    });
+
+    describe("across owners", () => {
+      const foreignOwner = `dd-foreign-${tag}`;
+      const hiddenNames = [DEFAULT, SERVICE_A, SERVICE_B];
+
+      beforeAll(() => db.principal.create({ data: { id: foreignOwner, subject: foreignOwner } }).then(() => undefined));
+      afterAll(() => db.principal.deleteMany({ where: { id: foreignOwner } }).then(() => undefined));
+
+      /** Hands the fixer to another owner for one test, with or without the opt-in and the lead owner's grant. */
+      async function asForeignChild(options: { optIn: boolean; grant?: boolean }, body: () => Promise<void>) {
+        await db.agent.update({ where: { id: fixer }, data: { ownerId: foreignOwner } });
+        await db.codingAgentProfile.update({
+          where: { agentId: fixer },
+          data: { allowWebhookTaskOverride: options.optIn },
+        });
+        if (options.grant ?? true) {
+          await db.resourceGrant.create({
+            data: {
+              resourceType: "agent",
+              resourceId: fixer,
+              granteeKind: "principal",
+              granteePrincipalId: ownerId,
+              granteeKey: `principal:${ownerId}`,
+              level: "execute",
+              source: "owner",
+            },
+          });
+        }
+        try {
+          await body();
+        } finally {
+          await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: fixer } });
+          await db.codingAgentProfile.update({ where: { agentId: fixer }, data: { allowWebhookTaskOverride: false } });
+          await db.agent.update({ where: { id: fixer }, data: { ownerId } });
+        }
+      }
+      const fixerTool = (l: Awaited<ReturnType<typeof lead>>) =>
+        l.loaded.tools.find((t) => t.name === "delegate_to_fixer")!;
+
+      it("loads no list for a child without the opt-in", async () => {
+        await asForeignChild({ optIn: false }, async () => {
+          const definition = JSON.stringify(fixerTool(await lead()));
+          expect(definition).not.toContain('"repository"');
+          for (const name of hiddenNames) expect(definition).not.toContain(name);
+        });
+      });
+
+      it("loads the list for a child with the opt-in", async () => {
+        await asForeignChild({ optIn: true }, async () => {
+          const { properties } = fixerTool(await lead()).jsonSchema as {
+            properties: Record<string, { enum?: string[] }>;
+          };
+          expect(properties.repository.enum).toEqual([DEFAULT, SERVICE_A, SERVICE_B]);
+        });
+      });
+
+      it("loads the list for a child of the same owner, opt-in or not", async () => {
+        const { properties } = fixerTool(await lead()).jsonSchema as {
+          properties: Record<string, { enum?: string[] }>;
+        };
+        expect(properties.repository.enum).toEqual([DEFAULT, SERVICE_A, SERVICE_B]);
+      });
+
+      it.each([
+        ["naming a repository", () => fix(SERVICE_A)],
+        ["naming none", () => fix()],
+      ])("refuses a child without the opt-in, %s, without showing its list", async (_name, args) => {
+        await asForeignChild({ optIn: false }, async () => {
+          const l = await lead();
+          const ex = controlledExecutor();
+          const outcome = await durableDelegate(ctxFor(l, ex.executor), "x-1", "delegate_to_fixer", args());
+          expect(outcome).toEqual({ result: expect.stringContaining("cross_owner_not_allowed") });
+          for (const name of hiddenNames) expect(JSON.stringify(outcome)).not.toContain(name);
+          expect(ex.started).toEqual([]);
+          expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(0);
+        });
+      });
+
+      it("refuses a child whose owner gave no execute access, without showing its list", async () => {
+        await asForeignChild({ optIn: true, grant: false }, async () => {
+          const l = await lead();
+          const ex = controlledExecutor();
+          const outcome = await durableDelegate(ctxFor(l, ex.executor), "x-1", "delegate_to_fixer", fix(SERVICE_A));
+          expect(outcome).toEqual({ result: expect.stringContaining("subagent_not_authorized") });
+          for (const name of hiddenNames) expect(JSON.stringify(outcome)).not.toContain(name);
+          expect(ex.started).toEqual([]);
+        });
+      });
+
+      it("runs a child with the opt-in in the repository named", async () => {
+        await asForeignChild({ optIn: true }, async () => {
+          const l = await lead();
+          const ex = controlledExecutor();
+          expect(await durableDelegate(ctxFor(l, ex.executor), "x-1", "delegate_to_fixer", fix(SERVICE_A))).toEqual({
+            pending: true,
+          });
+          expect(await repositoryOf(ex.started[0])).toBe(SERVICE_A);
+        });
+      });
+
+      it("still requires a child with the opt-in to name its repository", async () => {
+        await asForeignChild({ optIn: true }, async () => {
+          const l = await lead();
+          const ex = controlledExecutor();
+          expect(await durableDelegate(ctxFor(l, ex.executor), "x-1", "delegate_to_fixer", fix())).toEqual({
+            result: expect.stringContaining("repository_required"),
+          });
+          expect(ex.started).toEqual([]);
+        });
+      });
+
+      it("refuses continuePriorRun even with the opt-in", async () => {
+        await asForeignChild({ optIn: true }, async () => {
+          const l = await lead();
+          const ex = controlledExecutor();
+          const outcome = await durableDelegate(
+            ctxFor(l, ex.executor),
+            "x-1",
+            "delegate_to_fixer",
+            fix(undefined, { continuePriorRun: "any-run" }),
+          );
+          expect(outcome).toEqual({ result: expect.stringContaining("cross_owner_not_allowed") });
+          expect(ex.started).toEqual([]);
+        });
+      });
+    });
+
     describe("masks the lead's secret values before validating", () => {
       const FAKE = `fake-secret-value-${tag}`;
       const secretId = `dd-repo-secret-${tag}`;

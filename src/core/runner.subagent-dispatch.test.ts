@@ -2843,6 +2843,44 @@ describe("delegating to a coding sub-agent with a repository list", () => {
       const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
       expect(JSON.stringify(tool.parameters)).toBe(JSON.stringify(delegateToolDef("fixer", false).jsonSchema));
     });
+
+    describe("whose list only a lead allowed to choose from sees", () => {
+      const definitionFor = async (leadOwner: string | null, childOwner: string | null, optIn: boolean) => {
+        const { llm } = await runLead({
+          calls: [],
+          agents: [
+            leadAgent({ ownerId: leadOwner }),
+            fixerAgent({
+              ownerId: childOwner,
+              codingProfile: { ...profile, allowWebhookTaskOverride: optIn },
+            }),
+          ],
+        });
+        return llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      };
+
+      it.each([
+        ["another owner's child without the opt-in", "alice", "bob"],
+        ["an owner-less child under an owned lead", "alice", null],
+        ["an owned child under an owner-less lead", null, "bob"],
+      ])("omits it for %s, keeping the definition unchanged", async (_name, leadOwner, childOwner) => {
+        const tool = await definitionFor(leadOwner, childOwner, false);
+        expect(JSON.stringify(tool.parameters)).toBe(JSON.stringify(delegateToolDef("fixer", false).jsonSchema));
+        for (const repository of [DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]) {
+          expect(JSON.stringify(tool)).not.toContain(repository);
+        }
+      });
+
+      it.each([
+        ["another owner's child with the opt-in", "alice", "bob", true],
+        ["the same owner's child without the opt-in", "alice", "alice", false],
+        // authorizeDelegation and canDelegate count owner-less on both sides as the same owner.
+        ["an owner-less child under an owner-less lead", null, null, false],
+      ])("offers it for %s", async (_name, leadOwner, childOwner, optIn) => {
+        const tool = await definitionFor(leadOwner, childOwner, optIn);
+        expect((tool.parameters.properties as any).repository.enum).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
+      });
+    });
   });
 
   it("refuses a delegation to a multi-repository child that names no repository, starting nothing", async () => {

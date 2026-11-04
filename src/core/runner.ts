@@ -878,14 +878,27 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
               triggers: { isEmpty: true },
               agent: { kind: "coding" },
             },
-            include: { agent: { select: { codingProfile: { select: { repository: true } } } } },
+            include: {
+              agent: {
+                select: {
+                  ownerId: true,
+                  codingProfile: { select: { repository: true, allowWebhookTaskOverride: true } },
+                },
+              },
+            },
             orderBy: { repository: "asc" },
           })
         : [];
     const repositoriesOf = (childAgentId: string): string[] => {
       const links = childLinks.filter((link) => link.agentId === childAgentId);
-      const fallback = links[0]?.agent?.codingProfile?.repository;
-      return fallback ? [fallback, ...links.map((link) => link.repository)] : [];
+      const child = links[0]?.agent;
+      const profile = child?.codingProfile;
+      if (!profile) return [];
+      // Across owners, as authorizeDelegation compares them (owner-less on both sides is the same
+      // owner): the list is the child's owner's to show, and only a lead that could choose sees it.
+      const sameOwner = (agent.ownerId ?? null) === (child.ownerId ?? null);
+      if (!sameOwner && !profile.allowWebhookTaskOverride) return [];
+      return [profile.repository, ...links.map((link) => link.repository)];
     };
     // Only queried when the runner was given review hosts. buildReviewHosts
     // always includes the local host, so a configured server always queries;
