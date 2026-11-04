@@ -224,4 +224,19 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     expect(waiting).toContainEqual({ childAgentId: "agent-a", childRepository: "acme/service-a" });
     expect(waiting).toContainEqual({ childAgentId: "agent-b", childRepository: null });
   });
+
+  it("keeps a delegation's repository through a later call that does not name it", async () => {
+    const { created } = await session();
+    await ledger.claim(created.id, "k-1", "builtin.call");
+    await ledger.setDelegation(created.id, "k-1", {
+      status: "waiting_budget",
+      childAgentId: "agent-a",
+      childRepository: "acme/service-a",
+    });
+    await ledger.setDelegation(created.id, "k-1", { status: "pending", childAgentId: "agent-a" });
+    const row = await db.nativeGatewayCall.findUniqueOrThrow({
+      where: { sessionId_callId: { sessionId: created.id, callId: "k-1" } },
+    });
+    expect(row).toMatchObject({ status: "pending", childRepository: "acme/service-a" });
+  });
 });

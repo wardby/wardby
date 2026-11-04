@@ -7,6 +7,7 @@ import type { SecretCipher } from "../providers/secrets/types.js";
 import { NativeEngine } from "./engine-native.js";
 import { mentionTaskText } from "./host-events.js";
 import {
+  delegateToolDef,
   durableDelegate,
   executeRun,
   parseDelegateArgs,
@@ -16,6 +17,13 @@ import {
   type RunnerDb,
 } from "./runner.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "./grants.test-support.js";
+
+// Passes through to the real dispatchRun, so a test can read what a delegation asked it for.
+vi.mock("./dispatch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./dispatch.js")>();
+  return { ...actual, dispatchRun: vi.fn(actual.dispatchRun) };
+});
+const { dispatchRun } = await import("./dispatch.js");
 
 // End-to-end coverage of the delegate_to_<boundName> dispatch tool: a real
 // NativeEngine driven by a scripted LLM, actually exercising runSandboxTool
@@ -90,6 +98,14 @@ interface FakeEdge {
   boundName: string;
 }
 
+interface FakeRepositoryLink {
+  agentId: string;
+  repository: string;
+  baseRef?: string | null;
+  access?: string;
+  triggers?: string[];
+}
+
 function fakeDb(
   agents: FakeAgent[],
   edges: FakeEdge[],
@@ -97,6 +113,8 @@ function fakeDb(
   seedCodingRuns: Record<string, any>[] = [],
   grants: FakeGrantSeed[] = [],
   groups: FakeBudgetGroup[] = [],
+  /** Read live on every query: a test may unlink one mid-run. */
+  repositoryLinks: FakeRepositoryLink[] = [],
 ): RunnerDb {
   // Like the real column, allowedOverrunPercent defaults to 0. Set in place:
   // tests mutate their agent objects mid-run and expect the db to see it.
@@ -107,8 +125,28 @@ function fakeDb(
   let counter = 0;
 
   const db: any = {
-    // A continuation reads the coding agent's repository list; these fixtures have none.
-    agentRepository: { findMany: (async () => []) as any },
+    agentRepository: {
+      // Filters as the real table does on the fields the runner and resolver query by.
+      findMany: (async ({ where }: any) =>
+        repositoryLinks
+          .map((link) => ({
+            baseRef: null,
+            access: "write",
+            triggers: [] as string[],
+            ...link,
+            agent: agentsById.get(link.agentId),
+          }))
+          .filter(
+            (link) =>
+              (typeof where.agentId === "string"
+                ? link.agentId === where.agentId
+                : where.agentId.in.includes(link.agentId)) &&
+              (where.access === undefined || link.access === where.access) &&
+              (where.triggers?.isEmpty !== true || link.triggers.length === 0) &&
+              (where.agent?.kind === undefined || (link.agent?.kind ?? "native") === where.agent.kind),
+          )
+          .sort((a, b) => a.repository.localeCompare(b.repository))) as any,
+    },
     agent: {
       findUnique: (async ({ where }: any) => agentsById.get(where.id) ?? null) as any,
       findUniqueOrThrow: (async ({ where }: any) => {
@@ -2686,5 +2724,451 @@ describe("sub-agent delegation across owners (N1)", () => {
       where: { parentRunId: { in: [codingParent.id] } },
     })) as unknown as FakeRun[];
     expect(codingChildRun.triggeredById).toBe("carol");
+  });
+});
+
+describe("delegating to a coding sub-agent with a repository list", () => {
+  const DEFAULT_REPOSITORY = "acme/default";
+  const SERVICE_A = "acme/service-a";
+  const SERVICE_B = "acme/service-b";
+  const profile: FakeCodingProfile = {
+    provider: "codex",
+    repository: DEFAULT_REPOSITORY,
+    baseRef: "main",
+    defaultTask: null,
+    allowWebhookTaskOverride: false,
+    timeoutSec: 900,
+    allowedEgress: [],
+    protectedPaths: [],
+    toolchain: "node",
+    toolchainVersion: null,
+    workerImageRef: null,
+  };
+  const leadAgent = (extra: Partial<FakeAgent> = {}): FakeAgent => ({
+    id: "lead",
+    name: "lead",
+    systemPrompt: "sys",
+    model: "m",
+    budgetUsd: 20,
+    maxTurns: 10,
+    maxDelegationsPerRun: 5,
+    ...extra,
+  });
+  const fixerAgent = (extra: Partial<FakeAgent> = {}): FakeAgent => ({
+    id: "fixer",
+    name: "fixer",
+    systemPrompt: "unused",
+    model: "gpt-5.6-luna",
+    budgetUsd: 3,
+    maxTurns: 10,
+    kind: "coding",
+    codingProfile: profile,
+    ...extra,
+  });
+  const edge = (childAgentId: string, boundName = childAgentId): FakeEdge => ({
+    parentAgentId: "lead",
+    childAgentId,
+    boundName,
+  });
+  const twoLinks = (): FakeRepositoryLink[] => [
+    { agentId: "fixer", repository: SERVICE_A },
+    { agentId: "fixer", repository: SERVICE_B },
+  ];
+  const fix = (repository?: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ task: "fix", ...(repository === undefined ? {} : { repository }), ...extra });
+
+  const childrenOf = (db: RunnerDb, parentRunId: string) =>
+    db.run.findMany({ where: { parentRunId: { in: [parentRunId] } } });
+  const toolResults = (llm: { calls: LlmRequest[] }) =>
+    (llm.calls.at(-1)?.messages ?? []).filter((m) => m.role === "tool").map((m) => String(m.content));
+
+  /** A lead that makes `calls` one turn at a time, then answers. */
+  async function runLead(options: {
+    calls: string[];
+    links?: FakeRepositoryLink[];
+    agents?: FakeAgent[];
+    edges?: FakeEdge[];
+    codingRuns?: Record<string, any>[];
+  }) {
+    const db = fakeDb(
+      options.agents ?? [leadAgent(), fixerAgent()],
+      options.edges ?? [edge("fixer")],
+      [],
+      options.codingRuns ?? [],
+      [],
+      [],
+      options.links ?? twoLinks(),
+    );
+    const parentRun = await db.run.create({ data: { agentId: "lead" } });
+    const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+    const llm = scriptedLlm([
+      ...options.calls.map((args) => toolCall("delegate_to_fixer", args)),
+      finalAnswer("reported"),
+    ]);
+    const finished = await executeRun(parentRun.id, providers(llm, executor), db);
+    return { db, parentRun, llm, finished, results: toolResults(llm) };
+  }
+
+  describe("the tool definition", () => {
+    it("is byte-identical for a child with no links", () => {
+      expect(JSON.stringify(delegateToolDef("fixer", true, []))).toBe(JSON.stringify(delegateToolDef("fixer", true)));
+      expect(JSON.stringify(delegateToolDef("fixer", false, []))).toBe(JSON.stringify(delegateToolDef("fixer", false)));
+      expect(JSON.stringify(delegateToolDef("fixer", true))).not.toContain('"repository"');
+    });
+
+    it("offers a multi-repository child's list as an enum", () => {
+      const tool = delegateToolDef("fixer", true, [DEFAULT_REPOSITORY, SERVICE_A]);
+      expect(tool.jsonSchema.properties).toMatchObject({
+        repository: { type: "string", enum: [DEFAULT_REPOSITORY, SERVICE_A] },
+      });
+      expect(tool.jsonSchema.required).toEqual(["task"]);
+    });
+
+    it("reaches the lead's model with the default first, and only write links without triggers", async () => {
+      const { llm } = await runLead({
+        calls: [],
+        links: [
+          { agentId: "fixer", repository: SERVICE_B },
+          { agentId: "fixer", repository: SERVICE_A },
+          { agentId: "fixer", repository: "acme/triggered", triggers: ["mention"] },
+          { agentId: "fixer", repository: "acme/read-only", access: "read" },
+        ],
+      });
+      const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      expect((tool.parameters.properties as any).repository.enum).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
+    });
+
+    it("reaches the lead's model unchanged for a child with no links", async () => {
+      const { llm } = await runLead({ calls: [], links: [] });
+      const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      expect(JSON.stringify(tool.parameters)).toBe(JSON.stringify(delegateToolDef("fixer", false).jsonSchema));
+    });
+  });
+
+  it("refuses a delegation to a multi-repository child that names no repository, starting nothing", async () => {
+    const { db, parentRun, results } = await runLead({ calls: [fix()] });
+    expect(results[0]).toContain("repository_required");
+    expect(await childrenOf(db, parentRun.id)).toEqual([]);
+  });
+
+  it("refuses an unlisted repository without echoing it, starting nothing", async () => {
+    const { db, parentRun, results } = await runLead({ calls: [fix("acme/sk-fake-secret")] });
+    expect(results[0]).toContain("repository_not_listed");
+    expect(results[0]).not.toContain("sk-fake-secret");
+    expect(await childrenOf(db, parentRun.id)).toEqual([]);
+  });
+
+  it("refuses repository on a native child, starting nothing", async () => {
+    const db = fakeDb([leadAgent(), { ...leadAgent(), id: "researcher", name: "researcher" }], [edge("researcher")]);
+    const parentRun = await db.run.create({ data: { agentId: "lead" } });
+    const llm = scriptedLlm([toolCall("delegate_to_researcher", fix(SERVICE_A)), finalAnswer("reported")]);
+    await executeRun(parentRun.id, providers(llm), db);
+    expect(toolResults(llm)[0]).toContain("repository_requires_coding_agent");
+    expect(toolResults(llm)[0]).not.toContain(SERVICE_A);
+    expect(await childrenOf(db, parentRun.id)).toEqual([]);
+  });
+
+  it("refuses an oversized repository as an argument error that does not echo it", async () => {
+    const huge = `acme/${"x".repeat(400)}`;
+    const { results } = await runLead({ calls: [fix(huge)] });
+    expect(results[0]).toContain("validation_failed");
+    expect(results[0]).not.toContain("xxxx");
+  });
+
+  it("dispatches to a listed repository, re-validated at dispatch", async () => {
+    const { db, parentRun } = await runLead({ calls: [fix(SERVICE_A)] });
+    const [child] = await childrenOf(db, parentRun.id);
+    expect(dispatchRun).toHaveBeenLastCalledWith(
+      expect.objectContaining({ codingRepository: SERVICE_A, requireExplicitRepository: true }),
+    );
+    expect(await (db as any).codingRun.findUnique({ where: { runId: child.id } })).toMatchObject({
+      repository: SERVICE_A,
+    });
+  });
+
+  it("continues a pull request on a non-default repository without naming it", async () => {
+    const root = {
+      runId: "root",
+      repository: SERVICE_A,
+      baseRef: "main",
+      headRef: "wardby/run-root",
+      rootCodingRunId: null,
+      result: {
+        schemaVersion: 1,
+        outcome: "pull_request_opened",
+        repository: SERVICE_A,
+        baseRef: "main",
+        headRef: "wardby/run-root",
+        commitSha: "a".repeat(40),
+        pullRequestUrl: `https://github.com/${SERVICE_A}/pull/22`,
+        pullRequestNumber: 22,
+        summary: "opened",
+        tests: [],
+        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      },
+    };
+    const { db, parentRun, results } = await runLead({
+      calls: [fix(undefined, { continuePriorRun: "root" })],
+      codingRuns: [root],
+    });
+    expect(results[0]).not.toContain("repository_required");
+    expect(dispatchRun).toHaveBeenLastCalledWith(
+      expect.objectContaining({ codingRepository: SERVICE_A, continuesCodingRunId: "root" }),
+    );
+    const [child] = await childrenOf(db, parentRun.id);
+    expect(await (db as any).codingRun.findUnique({ where: { runId: child.id } })).toMatchObject({
+      repository: SERVICE_A,
+      rootCodingRunId: "root",
+    });
+  });
+
+  it("a single-repository child delegates as before, to its default", async () => {
+    const { db, parentRun, results } = await runLead({ calls: [fix()], links: [] });
+    expect(results[0]).toContain('"status":"succeeded"');
+    expect(dispatchRun).toHaveBeenLastCalledWith(expect.objectContaining({ codingRepository: DEFAULT_REPOSITORY }));
+    const [child] = await childrenOf(db, parentRun.id);
+    expect(await (db as any).codingRun.findUnique({ where: { runId: child.id } })).toMatchObject({
+      repository: DEFAULT_REPOSITORY,
+    });
+  });
+
+  describe("across owners", () => {
+    const executeGrant: FakeGrantSeed = {
+      resourceType: "agent",
+      resourceId: "fixer",
+      principalId: "alice",
+      level: "execute",
+    };
+    async function run(args: string, allowWebhookTaskOverride: boolean) {
+      const db = fakeDb(
+        [
+          leadAgent({ ownerId: "alice" }),
+          fixerAgent({ ownerId: "bob", codingProfile: { ...profile, allowWebhookTaskOverride } }),
+        ],
+        [edge("fixer")],
+        [],
+        [],
+        [executeGrant],
+        [],
+        twoLinks(),
+      );
+      const parentRun = await db.run.create({ data: { agentId: "lead" } });
+      const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+      const llm = scriptedLlm([toolCall("delegate_to_fixer", args), finalAnswer("reported")]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+      return { db, parentRun, results: toolResults(llm) };
+    }
+
+    it.each([
+      ["naming a repository", fix(SERVICE_A)],
+      ["naming none", fix()],
+    ])("refuses a child without the opt-in, %s", async (_name, args) => {
+      const { db, parentRun, results } = await run(args, false);
+      expect(results[0]).toContain("cross_owner_not_allowed");
+      expect(results[0]).not.toContain(SERVICE_A);
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
+
+    it("lets a child with the opt-in run in a named repository", async () => {
+      const { db, parentRun } = await run(fix(SERVICE_A), true);
+      const [child] = await childrenOf(db, parentRun.id);
+      expect(await (db as any).codingRun.findUnique({ where: { runId: child.id } })).toMatchObject({
+        repository: SERVICE_A,
+      });
+    });
+  });
+
+  describe("the once-per-run rule", () => {
+    it("delegates to one child in two repositories, and refuses the same repository twice", async () => {
+      const { db, parentRun, results } = await runLead({
+        calls: [fix(SERVICE_A), fix(SERVICE_B), JSON.stringify({ task: "again", repository: SERVICE_A })],
+      });
+      expect(results[0]).not.toContain("already_dispatched");
+      expect(results[1]).not.toContain("already_dispatched");
+      expect(results[2]).toContain("already_dispatched");
+      expect(await childrenOf(db, parentRun.id)).toHaveLength(2);
+    });
+
+    it("counts a repository named in a different case as the same one", async () => {
+      const { results } = await runLead({ calls: [fix(SERVICE_A), fix(SERVICE_A.toUpperCase())] });
+      expect(results[1]).toContain("already_dispatched");
+    });
+
+    it("counts each repository toward the delegation limit", async () => {
+      const { db, parentRun, results } = await runLead({
+        agents: [leadAgent({ maxDelegationsPerRun: 1 }), fixerAgent()],
+        calls: [fix(SERVICE_A), fix(SERVICE_B)],
+      });
+      expect(results[1]).toContain("already_dispatched");
+      expect(await childrenOf(db, parentRun.id)).toHaveLength(1);
+    });
+
+    it("refuses a second delegation to a child's default, when it has no links, as before", async () => {
+      const { results } = await runLead({ calls: [fix(), fix()], links: [] });
+      expect(results[1]).toContain("already_dispatched");
+    });
+  });
+
+  describe("delegations of one turn (parallelDelegations)", () => {
+    const group: FakeBudgetGroup = {
+      id: "g",
+      name: "g",
+      dailyBudgetUsd: 3,
+      weeklyBudgetUsd: null,
+      monthlyBudgetUsd: null,
+      warnThresholdRatio: 0.99,
+    };
+    const inGroup = { budgetGroupId: "g" };
+    const turn = (calls: [string, string][]): LlmStreamEvent[] => [
+      ...calls.map(([name, argsJson], i) => ({ type: "tool_call" as const, id: `call-${i}`, name, argsJson })),
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+    ];
+
+    /** The first sibling holds the group's whole budget for a moment; `onFinish` runs just before it frees it. */
+    async function runTurn(
+      calls: [string, string][],
+      options: { links?: FakeRepositoryLink[]; onFinish?: () => void; grouped?: boolean } = {},
+    ) {
+      const grouped = options.grouped ?? true;
+      const db = fakeDb(
+        [
+          leadAgent({ parallelDelegations: true }),
+          fixerAgent(grouped ? inGroup : {}),
+          fixerAgent({ id: "other", name: "other", ...(grouped ? inGroup : {}) }),
+        ],
+        [edge("fixer"), edge("other")],
+        [],
+        [],
+        [],
+        [group],
+        options.links ?? twoLinks(),
+      );
+      const parentRun = await db.run.create({ data: { agentId: "lead" } });
+      const executor = {
+        async start(runId: string) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          options.onFinish?.();
+          await (db as any).run.update({
+            where: { id: runId },
+            data: { status: "succeeded", finalText: "done", costUsd: 0.01, finishedAt: new Date() },
+          });
+        },
+        async stop() {},
+      };
+      const llm = scriptedLlm([turn(calls), finalAnswer("reported")]);
+      const finished = await executeRun(parentRun.id, providers(llm, executor), db);
+      const children = await childrenOf(db, parentRun.id);
+      const repositories = await Promise.all(
+        children.map(async (c) => (await (db as any).codingRun.findUnique({ where: { runId: c.id } }))?.repository),
+      );
+      return { finished, results: toolResults(llm), repositories };
+    }
+
+    it("a delegation waiting for budget on one repository doesn't block another, and does block its own", async () => {
+      const { finished, results, repositories } = await runTurn([
+        ["delegate_to_other", fix()],
+        ["delegate_to_fixer", fix(SERVICE_A)],
+        ["delegate_to_fixer", fix(SERVICE_A)],
+        ["delegate_to_fixer", fix(SERVICE_B)],
+      ]);
+      expect(finished.status).toBe("succeeded");
+      expect(results[1]).toContain('"status":"succeeded"');
+      expect(results[2]).toContain("already_dispatched");
+      expect(results[2]).toContain("for this repository");
+      expect(results[3]).toContain('"status":"succeeded"');
+      expect(repositories.sort()).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
+    });
+
+    it("admits a repository once when the calls start together", async () => {
+      const { results, repositories } = await runTurn(
+        [
+          ["delegate_to_fixer", fix(SERVICE_A)],
+          ["delegate_to_fixer", fix(SERVICE_A)],
+          ["delegate_to_fixer", fix(SERVICE_B)],
+        ],
+        { grouped: false },
+      );
+      expect(results[1]).toContain("already_dispatched");
+      expect(repositories.sort()).toEqual([SERVICE_A, SERVICE_B]);
+    });
+
+    it("every refusal lets the next delegation through the gate", async () => {
+      const { finished, results, repositories } = await runTurn(
+        [
+          ["delegate_to_fixer", fix()],
+          ["delegate_to_fixer", fix("acme/unlisted")],
+          ["delegate_to_fixer", '{"task":'],
+          ["delegate_to_fixer", fix(SERVICE_A)],
+        ],
+        { grouped: false },
+      );
+      expect(finished.status).toBe("succeeded");
+      expect(results[0]).toContain("repository_required");
+      expect(results[1]).toContain("repository_not_listed");
+      expect(results[2]).toContain("invalid_arguments_json");
+      expect(results[3]).toContain('"status":"succeeded"');
+      expect(repositories).toEqual([SERVICE_A]);
+    });
+
+    it("an unlink during the wait is the model's to report: nothing starts, and the gate opens", async () => {
+      const links = twoLinks();
+      const { finished, results, repositories } = await runTurn(
+        [
+          ["delegate_to_other", fix()],
+          ["delegate_to_fixer", fix(SERVICE_A)],
+          ["delegate_to_fixer", fix(SERVICE_B)],
+        ],
+        { links, onFinish: () => void links.splice(0, 1) },
+      );
+      expect(finished.status).toBe("succeeded");
+      expect(results[1]).toContain("repository_not_listed");
+      expect(results[2]).toContain('"status":"succeeded"');
+      expect(repositories.sort()).toEqual([DEFAULT_REPOSITORY, SERVICE_B]);
+    });
+  });
+
+  describe("a re-executed delegate call", () => {
+    const recall = (id: string, argsJson: string): LlmStreamEvent[] => [
+      { type: "tool_call", id, name: "delegate_to_fixer", argsJson },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+    ];
+    async function reexecute(argsJson: string, links: FakeRepositoryLink[]) {
+      const db = fakeDb([leadAgent({ maxDelegationsPerRun: 1 }), fixerAgent()], [edge("fixer")], [], [], [], [], links);
+      const parentRun = await db.run.create({ data: { agentId: "lead" } });
+      const child = await db.run.create({
+        data: {
+          agentId: "fixer",
+          trigger: "subagent",
+          parentRunId: parentRun.id,
+          parentCallId: "toolu_same",
+          status: "succeeded",
+          finalText: "fixed before the restart",
+        },
+      });
+      await (db as any).codingRun.create({ data: { runId: child.id, repository: SERVICE_A } });
+      const started: string[] = [];
+      const executor = {
+        async start(runId: string) {
+          started.push(runId);
+        },
+        async stop() {},
+      };
+      const llm = scriptedLlm([recall("toolu_same", argsJson), finalAnswer("reported")]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+      const children = await childrenOf(db, parentRun.id);
+      return { seen: toolResultSeen(llm, 1), started, children, child };
+    }
+
+    it.each([
+      ["with its links still there", fix(SERVICE_A), twoLinks()],
+      ["after its link was removed", fix(SERVICE_A), [{ agentId: "fixer", repository: SERVICE_B }]],
+      ["after every link was removed", fix(SERVICE_A), []],
+      ["whose args would now be refused as repository_required", fix(), twoLinks()],
+    ])("waits on the child it created, %s", async (_name, argsJson, links) => {
+      const { seen, started, children, child } = await reexecute(argsJson, links);
+      expect(seen).toMatchObject({ status: "succeeded", finalText: "fixed before the restart" });
+      expect(started).toEqual([]);
+      expect(children.map((c) => c.id)).toEqual([child.id]);
+    });
   });
 });

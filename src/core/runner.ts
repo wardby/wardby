@@ -30,9 +30,13 @@ import {
   type StepRunner,
 } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
-import { delegationLimitRefusal, delegationSlot } from "./delegation-slots.js";
+import {
+  type CodingRepositoryReader,
+  RepositoryChoiceRefusedError,
+  resolveCodingRepository,
+} from "./coding-repository.js";
+import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
 
-export { delegationLimitRefusal };
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
@@ -154,12 +158,28 @@ export const runnerLog = logger.child({ module: "runner" });
  * The `delegate_to_` prefix lives in core/tool-names.ts, which reserves it
  * so no user tool can be created under a name this dispatch would shadow.
  */
-function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
+export function delegateToolDef(
+  boundName: string,
+  parallel: boolean,
+  repositories: readonly string[] = [],
+): LoadedTool {
   // With the flag off the description stays byte-identical to before, so
   // existing leads keep their cached tool definitions.
   const timing = parallel
     ? "Blocks until it finishes. Several delegate_to_* calls made in the same turn run at the same time, so make them together when their tasks don't need each other's results. Its spend"
     : "Runs synchronously and blocks until it finishes; its spend";
+  // Only for a child with a repository list: any other keeps its cached definition too.
+  const repositoryProperty =
+    repositories.length > 0
+      ? {
+          repository: {
+            type: "string",
+            enum: [...repositories],
+            description:
+              "Which repository this sub-agent run works in. Required unless continuePriorRun names the run to continue.",
+          },
+        }
+      : {};
   return {
     name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
     description: `Delegates a task to your "${boundName}" sub-agent. ${timing} counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
@@ -188,6 +208,7 @@ function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
             "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
             "equal numbers have no order between them. Set it whenever one change spans several repositories.",
         },
+        ...repositoryProperty,
       },
       required: ["task"],
       additionalProperties: false,
@@ -210,6 +231,7 @@ const DelegateArgs = z
       .min(1, MERGE_ORDER_RANGE_MESSAGE)
       .max(99, MERGE_ORDER_RANGE_MESSAGE)
       .optional(),
+    repository: z.string().min(1).max(300).optional(),
   })
   .strict();
 
@@ -251,7 +273,7 @@ const DELEGATION_CHILD_SELECT = {
   budgetUsd: true,
   ownerId: true,
   nativeExecutionMode: true,
-  codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
+  codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true } },
 } as const satisfies Prisma.AgentSelect;
 
 /** The child agent fields a delegation decides on. */
@@ -315,6 +337,52 @@ export async function authorizeDelegation(
     };
   }
   return { childAgent };
+}
+
+/**
+ * A delegation's once-per-run slot and repository, or the tool result refusing it. Nothing here
+ * echoes args.repository: it is model-written and could hold a secret value.
+ */
+async function delegationTarget(
+  db: CodingRepositoryReader,
+  childAgentId: string,
+  childAgent: DelegationChildAgent,
+  args: z.infer<typeof DelegateArgs>,
+): Promise<{ slot: string; defaultRepository: string | null; repository?: string } | { refusal: string }> {
+  if (childAgent.kind !== "coding" || !childAgent.codingProfile) {
+    if (args.repository !== undefined) {
+      return {
+        refusal: JSON.stringify({
+          error: "repository_requires_coding_agent",
+          message: "repository is only supported when the sub-agent is coding-kind.",
+        }),
+      };
+    }
+    return { slot: delegationSlot(childAgentId, null), defaultRepository: null };
+  }
+  try {
+    const target = await resolveCodingRepository(db, {
+      agentId: childAgentId,
+      profile: childAgent.codingProfile,
+      requested: args.repository,
+      continuesCodingRunId: args.continuePriorRun,
+      requireExplicit: true,
+    });
+    return {
+      slot: delegationSlot(childAgentId, target.repository),
+      defaultRepository: childAgent.codingProfile.repository,
+      repository: target.repository,
+    };
+  } catch (err) {
+    if (err instanceof RepositoryChoiceRefusedError) {
+      return { refusal: repositoryRefusal(err) };
+    }
+    throw err;
+  }
+}
+
+function repositoryRefusal(err: RepositoryChoiceRefusedError): string {
+  return JSON.stringify({ error: err.code, message: err.message });
 }
 
 /** A native child's task text: the delegated task, with any datastore reference as a note. */
@@ -800,6 +868,25 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       where: { parentAgentId: agent.id },
       select: { boundName: true, childAgentId: true },
     });
+    // Each coding child's repository list, pinned for this run; dispatch re-validates the choice.
+    const childLinks =
+      subAgentEdges.length > 0
+        ? await db.agentRepository.findMany({
+            where: {
+              agentId: { in: subAgentEdges.map((edge) => edge.childAgentId) },
+              access: "write",
+              triggers: { isEmpty: true },
+              agent: { kind: "coding" },
+            },
+            include: { agent: { select: { codingProfile: { select: { repository: true } } } } },
+            orderBy: { repository: "asc" },
+          })
+        : [];
+    const repositoriesOf = (childAgentId: string): string[] => {
+      const links = childLinks.filter((link) => link.agentId === childAgentId);
+      const fallback = links[0]?.agent?.codingProfile?.repository;
+      return fallback ? [fallback, ...links.map((link) => link.repository)] : [];
+    };
     // Only queried when the runner was given review hosts. buildReviewHosts
     // always includes the local host, so a configured server always queries;
     // only a runner built without hosts (as in many tests) skips the table.
@@ -881,7 +968,9 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
         ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
-        ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName, agent.parallelDelegations)),
+        ...subAgentEdges.map((edge): LoadedTool =>
+          delegateToolDef(edge.boundName, agent.parallelDelegations, repositoriesOf(edge.childAgentId)),
+        ),
         ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
         ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
       ],
@@ -1280,21 +1369,6 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           });
         };
         try {
-          // At most maxDelegationsPerRun dispatches per run (default one: a
-          // classifier deciding plan-vs-implement commits to exactly one child),
-          // and never the same child twice, so a retry can't leave two children
-          // racing on the same task. Checked and the child row written under the
-          // run's delegation gate: delegations started together in one turn
-          // (parallelDelegations) are admitted one at a time.
-          const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
-          const limitRefusal = delegationLimitRefusal({
-            priorSlots: priorDispatches.map((prior) => delegationSlot(prior.agentId, null)),
-            waitingSlots: [...waitingDelegations],
-            slot: delegationSlot(edge.childAgentId, null),
-            boundName,
-            limit: loaded.maxDelegationsPerRun ?? 1,
-          });
-          if (limitRefusal) return limitRefusal;
           const parsedArgs = parseDelegateArgs(argsJson);
           if ("refusal" in parsedArgs) return parsedArgs.refusal;
           const { args } = parsedArgs;
@@ -1302,6 +1376,28 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           const authorized = await authorizeDelegation(db, loaded.agentId, edge, boundName, args);
           if ("refusal" in authorized) return authorized.refusal;
           const { childAgent } = authorized;
+
+          const delegation = await delegationTarget(db, edge.childAgentId, childAgent, args);
+          if ("refusal" in delegation) return delegation.refusal;
+
+          // At most maxDelegationsPerRun dispatches per run (default one: a
+          // classifier deciding plan-vs-implement commits to exactly one child),
+          // and never the same child and repository twice, so a retry can't leave
+          // two children racing on the same task. Checked and the child row written
+          // under the run's delegation gate: delegations started together in one
+          // turn (parallelDelegations) are admitted one at a time.
+          const priorDispatches = await db.run.findMany({
+            where: { parentRunId: { in: [runId] } },
+            include: { codingRun: { select: { repository: true } } },
+          });
+          const limitRefusal = delegationLimitRefusal({
+            priorSlots: priorDelegationSlots(priorDispatches, edge.childAgentId, delegation.defaultRepository),
+            waitingSlots: [...waitingDelegations],
+            slot: delegation.slot,
+            boundName,
+            limit: loaded.maxDelegationsPerRun ?? 1,
+          });
+          if (limitRefusal) return limitRefusal;
 
           // parallelDelegations: a child the budget would refuse (run_tree_exhausted or
           // budget_group_exhausted:*) while a sibling still runs waits for a sibling to finish and
@@ -1323,14 +1419,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 { runId, boundName, exhaustedBy, siblingsInFlight: delegationSiblings.inFlight },
                 "delegation waiting for a sibling to free budget",
               );
-              waitingDelegations.add(delegationSlot(edge.childAgentId, null));
+              waitingDelegations.add(delegation.slot);
               waited = true;
               release();
               try {
                 await delegationSiblings.nextFinish(remainingMs, finishes);
               } finally {
                 release = await delegationGate.acquire();
-                waitingDelegations.delete(delegationSlot(edge.childAgentId, null));
+                waitingDelegations.delete(delegation.slot);
               }
             }
             // The parent may have been stopped while this delegation waited: start nothing for it.
@@ -1380,6 +1476,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 codingTask: args.task,
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
+                codingRepository: delegation.repository,
+                requireExplicitRepository: true,
                 parentRunId: runId,
                 parentCallId: callId,
                 // The child's result flows back into this run, which the
@@ -1396,6 +1494,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 },
               });
             } catch (err) {
+              // An unlink since the check above (a wait for budget, say) is the model's to report.
+              if (err instanceof RepositoryChoiceRefusedError) return repositoryRefusal(err);
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
@@ -1957,15 +2057,26 @@ export async function durableDelegate(
     const maskedArgs = parseDelegateArgs(maskedArgsJson);
     if ("refusal" in maskedArgs) return finish(maskedArgs.refusal);
     const dispatchArgs = maskedArgs.args;
+    // On the masked args: a repository holding a secret value must never be matched, stored or echoed.
+    const delegation = await delegationTarget(db, edge.childAgentId, childAgent, dispatchArgs);
+    if ("refusal" in delegation) return finish(delegation.refusal);
     const limit = loaded.maxDelegationsPerRun ?? 1;
     const refusalNow = async (reader: { run: { findMany: RunnerDb["run"]["findMany"] } }) => {
-      const prior = await reader.run.findMany({ where: { parentRunId: runId }, select: { agentId: true } });
+      const prior = await reader.run.findMany({
+        where: { parentRunId: runId },
+        select: { agentId: true, codingRun: { select: { repository: true } } },
+      });
+      const waiting = await ledger.waitingDelegations(sessionId, callId);
       return delegationLimitRefusal({
-        priorSlots: prior.map((p) => delegationSlot(p.agentId, null)),
-        waitingSlots: (await ledger.waitingDelegations(sessionId, callId)).map((row) =>
-          delegationSlot(row.childAgentId, null),
+        priorSlots: priorDelegationSlots(prior, edge.childAgentId, delegation.defaultRepository),
+        // A row with no repository predates the column: it holds the child's default.
+        waitingSlots: waiting.map((row) =>
+          delegationSlot(
+            row.childAgentId,
+            row.childRepository ?? (row.childAgentId === edge.childAgentId ? delegation.defaultRepository : null),
+          ),
         ),
-        slot: delegationSlot(edge.childAgentId, null),
+        slot: delegation.slot,
         boundName,
         limit,
       });
@@ -1983,14 +2094,22 @@ export async function durableDelegate(
         const boundMs = (queueTimeoutSec + runTimeoutSec + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
         const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
         if (exhaustedBy && now() - startedAt < boundMs) {
-          await ledger.setDelegation(sessionId, callId, { status: "waiting_budget", childAgentId: edge.childAgentId });
+          await ledger.setDelegation(sessionId, callId, {
+            status: "waiting_budget",
+            childAgentId: edge.childAgentId,
+            childRepository: delegation.repository,
+          });
           return { pending: true };
         }
       }
     }
 
     // Recorded before dispatch, so a replica dying in between leaves a row the next call adopts.
-    await ledger.setDelegation(sessionId, callId, { status: "pending", childAgentId: edge.childAgentId });
+    await ledger.setDelegation(sessionId, callId, {
+      status: "pending",
+      childAgentId: edge.childAgentId,
+      childRepository: delegation.repository,
+    });
     let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
     let refusedUnderLock: string | null = null;
     try {
@@ -2005,6 +2124,8 @@ export async function durableDelegate(
               codingTask: dispatchArgs.task,
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
+              codingRepository: delegation.repository,
+              requireExplicitRepository: true,
             }
           : {
               taskOverride: delegationTaskOverride(dispatchArgs),
@@ -2022,6 +2143,8 @@ export async function durableDelegate(
         },
       });
     } catch (err) {
+      // An unlink since the check above (a wait for budget, say) is the model's to report.
+      if (err instanceof RepositoryChoiceRefusedError) return finish(repositoryRefusal(err));
       if (err instanceof ContinuationRefusedError) {
         return finish(
           JSON.stringify({
