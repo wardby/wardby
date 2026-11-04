@@ -13,6 +13,8 @@
   runs are billed.
 - [Agent recipes](agent-recipes.md) gives two copyable setups, an architecture
   keeper and a per-language builder, with the prerequisites each needs.
+- [Debugging an agent run](debugging-agent-runs.md) triages a run that failed,
+  opened no pull request, or missed what you expected.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy
   and isolated Codex or Claude Code workers.
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
