@@ -107,6 +107,8 @@ function fakeDb(
   let counter = 0;
 
   const db: any = {
+    // A continuation reads the coding agent's repository list; these fixtures have none.
+    agentRepository: { findMany: (async () => []) as any },
     agent: {
       findUnique: (async ({ where }: any) => agentsById.get(where.id) ?? null) as any,
       findUniqueOrThrow: (async ({ where }: any) => {

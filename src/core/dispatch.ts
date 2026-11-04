@@ -37,6 +37,11 @@ import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLoca
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
+import {
+  resolveCodingRepository,
+  type CodingRepositoryReader,
+  type CodingRepositoryTarget,
+} from "./coding-repository.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
@@ -44,12 +49,22 @@ const dispatchLog = logger.child({ module: "dispatch" });
 
 export type DispatchDb = Pick<
   PrismaClient,
-  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "budgetGroup" | "$transaction" | "$queryRaw"
+  | "agent"
+  | "agentRepository"
+  | "run"
+  | "runHostCheck"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "budgetGroup"
+  | "$transaction"
+  | "$queryRaw"
 >;
 
 export type DispatchTx = Pick<
   Prisma.TransactionClient,
   | "agent"
+  | "agentRepository"
   | "run"
   | "runHostCheck"
   | "runHostStatus"
@@ -139,6 +154,10 @@ export interface DispatchRunOptions {
    * mutually exclusive with it, since a native run has no CodingRun.
    */
   taskOverride?: string;
+  /** The repository for a coding run; must be on the agent's list. Default: codingProfile.repository. */
+  codingRepository?: string;
+  /** Refuse with repository_required when the agent has links and nothing names a repository. */
+  requireExplicitRepository?: boolean;
   /**
    * Replaces `agent.budgetUsd` as the requested ceiling for this run's coding
    * budget reservation. The reservation is still tightened by the agent's
@@ -449,6 +468,20 @@ export async function checkContinuation(
   };
 }
 
+function codingTarget(
+  reader: CodingRepositoryReader,
+  options: DispatchRunOptions,
+  profile: { repository: string; baseRef: string },
+) {
+  return resolveCodingRepository(reader, {
+    agentId: options.agentId,
+    profile,
+    requested: options.codingRepository,
+    continuesCodingRunId: options.continuesCodingRunId,
+    requireExplicit: options.requireExplicitRepository,
+  });
+}
+
 /**
  * Resolves a coding run's branch: an override, else a continuation root's
  * (see checkContinuation), else the profile's base.
@@ -691,19 +724,30 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // The native gateway's executor has no coding configuration: the run is recorded
   // unresolved and the process that starts it reads and resolves (resolveDeferredCodingRun).
   const deferCoding = options.executor.defersCodingResolution === true;
+  // The repository this run works in, resolved from the agent's list before any network read. A
+  // refusal propagates: nothing has been written, and it is not a retryable conflict.
+  const previewTarget =
+    !deferCoding && preview?.kind === "coding" && preview.codingProfile
+      ? await codingTarget(options.db, options, preview.codingProfile)
+      : undefined;
   // Only an agent allowed some service reads the repository's declaration; any
   // other coding agent never calls the host for it and gets no services.
   const declarationRead =
     !deferCoding &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
+    previewTarget &&
     parseAllowedServiceNames(preview.codingProfile.services).length > 0
-      ? await readServiceDeclaration(options, preview.codingProfile, preview.ownerId ?? null)
+      ? await readServiceDeclaration(options, previewTarget, preview.ownerId ?? null)
       : undefined;
   // The knowledge note's input: the repository's bundle index at the run's base (a network call).
   const knowledgeIndex =
-    !deferCoding && preview?.kind === "coding" && preview.codingProfile && options.executor.readCodingRepositoryFile
-      ? await readKnowledgeIndex(options, preview.codingProfile, declarationRead?.branch, preview.ownerId ?? null)
+    !deferCoding &&
+    preview?.kind === "coding" &&
+    preview.codingProfile &&
+    previewTarget &&
+    options.executor.readCodingRepositoryFile
+      ? await readKnowledgeIndex(options, previewTarget, declarationRead?.branch, preview.ownerId ?? null)
       : undefined;
   const persistOnce = () =>
     options.db.$transaction(
@@ -736,10 +780,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         let modelFailure: string | undefined;
         let services: ResolvedCodingService[] = [];
         let servicesRefusal: string | undefined;
+        let target: CodingRepositoryTarget | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           // An unknown coding provider is a broken profile, not a catalog state: still thrown.
           assertCodingProvider(agent.codingProfile.provider);
+          // Resolved again inside the transaction: an unlink since the preview refuses the run here.
+          target = await codingTarget(tx, options, agent.codingProfile);
           // Recorded on the run row below: the run is billed at this entry for its whole life.
           // A model the catalog cannot run (missing, disabled, or another provider's) fails
           // the run here instead of throwing: the run row commits with the reason, so the
@@ -753,10 +800,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             modelFailure = err.message;
           }
           if (!modelFailure && declarationRead) {
-            if (
-              declarationRead.repository !== agent.codingProfile.repository ||
-              declarationRead.profileBaseRef !== agent.codingProfile.baseRef
-            ) {
+            if (declarationRead.repository !== target.repository || declarationRead.profileBaseRef !== target.baseRef) {
               // The declaration was read for a profile that changed before this transaction.
               throw new Error("The coding agent's repository or base branch changed during dispatch; try again.");
             }
@@ -827,7 +871,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           now,
         );
 
-        if (agent.kind === "coding" && agent.codingProfile && codingBudget && !refusal) {
+        if (agent.kind === "coding" && agent.codingProfile && target && codingBudget && !refusal) {
           // Checked above too; repeated so the provider type narrows here.
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
           const request = options.codingTask ?? agent.codingProfile.defaultTask;
@@ -847,8 +891,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const budgetUsd = codingBudget.budgetUsd;
 
           // Resolved once: before the transaction when the declaration was read from it.
-          const branch =
-            declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile, agent.ownerId));
+          const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, target, agent.ownerId));
           const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
           const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
@@ -856,7 +899,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
             runId: run.id,
-            repository: agent.codingProfile.repository,
+            repository: target.repository,
             baseRef,
             headRef,
             task,
@@ -891,6 +934,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               request,
               repository: input.repository,
               baseRef: input.baseRef,
+              viaRepositoryLink: target.viaRepositoryLink,
               headRef: input.headRef,
               provider: agent.codingProfile.provider,
               model: input.model,
@@ -928,7 +972,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           agent.kind !== "coding" &&
           (options.codingTask !== undefined ||
             options.codingBaseRef !== undefined ||
-            options.continuesCodingRunId !== undefined)
+            options.continuesCodingRunId !== undefined ||
+            options.codingRepository !== undefined)
         ) {
           throw new Error("Coding overrides cannot be supplied for a native agent.");
         }
