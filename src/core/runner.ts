@@ -889,17 +889,32 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
             orderBy: { repository: "asc" },
           })
         : [];
-    const repositoriesOf = (childAgentId: string): string[] => {
+    const repositoriesOf = async (childAgentId: string): Promise<string[]> => {
       const links = childLinks.filter((link) => link.agentId === childAgentId);
       const child = links[0]?.agent;
       const profile = child?.codingProfile;
       if (!profile) return [];
       // Across owners, as authorizeDelegation compares them (owner-less on both sides is the same
-      // owner): the list is the child's owner's to show, and only a lead that could choose sees it.
-      const sameOwner = (agent.ownerId ?? null) === (child.ownerId ?? null);
-      if (!sameOwner && !profile.allowWebhookTaskOverride) return [];
+      // owner): the list is the child's owner's to show, so only a lead that could choose sees it.
+      // That takes the opt-in and the lead's owner's execute access; revoke_access leaves the edge.
+      const leadOwnerId = agent.ownerId ?? null;
+      const childOwnerId = child.ownerId ?? null;
+      if (
+        leadOwnerId !== childOwnerId &&
+        !(
+          profile.allowWebhookTaskOverride &&
+          (await canDelegate(db, { ownerId: leadOwnerId }, { id: childAgentId, ownerId: childOwnerId }))
+        )
+      ) {
+        return [];
+      }
       return [profile.repository, ...links.map((link) => link.repository)];
     };
+    const delegateTools = await Promise.all(
+      subAgentEdges.map(async (edge): Promise<LoadedTool> =>
+        delegateToolDef(edge.boundName, agent.parallelDelegations, await repositoriesOf(edge.childAgentId)),
+      ),
+    );
     // Only queried when the runner was given review hosts. buildReviewHosts
     // always includes the local host, so a configured server always queries;
     // only a runner built without hosts (as in many tests) skips the table.
@@ -981,9 +996,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
         ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
-        ...subAgentEdges.map((edge): LoadedTool =>
-          delegateToolDef(edge.boundName, agent.parallelDelegations, repositoriesOf(edge.childAgentId)),
-        ),
+        ...delegateTools,
         ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
         ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
       ],

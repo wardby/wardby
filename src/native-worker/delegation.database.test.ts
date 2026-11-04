@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
-import { durableDelegate, loadNativeRun, type LoadedNativeRun, type NativeRunProviders } from "../core/runner.js";
+import {
+  delegateToolDef,
+  durableDelegate,
+  loadNativeRun,
+  type LoadedNativeRun,
+  type NativeRunProviders,
+} from "../core/runner.js";
 import type { Executor } from "../providers/executor/types.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
@@ -758,6 +764,14 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
         await asForeignChild({ optIn: false }, async () => {
           const definition = JSON.stringify(fixerTool(await lead()));
           expect(definition).not.toContain('"repository"');
+          for (const name of hiddenNames) expect(definition).not.toContain(name);
+        });
+      });
+
+      it("loads no list for a child with the opt-in whose owner gave no execute access", async () => {
+        await asForeignChild({ optIn: true, grant: false }, async () => {
+          const definition = JSON.stringify(fixerTool(await lead()));
+          expect(definition).toBe(JSON.stringify(delegateToolDef("fixer", false)));
           for (const name of hiddenNames) expect(definition).not.toContain(name);
         });
       });

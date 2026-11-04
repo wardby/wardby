@@ -2789,13 +2789,14 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     agents?: FakeAgent[];
     edges?: FakeEdge[];
     codingRuns?: Record<string, any>[];
+    grants?: FakeGrantSeed[];
   }) {
     const db = fakeDb(
       options.agents ?? [leadAgent(), fixerAgent()],
       options.edges ?? [edge("fixer")],
       [],
       options.codingRuns ?? [],
-      [],
+      options.grants ?? [],
       [],
       options.links ?? twoLinks(),
     );
@@ -2845,9 +2846,18 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     });
 
     describe("whose list only a lead allowed to choose from sees", () => {
-      const definitionFor = async (leadOwner: string | null, childOwner: string | null, optIn: boolean) => {
+      const grantToAlice = (level: string): FakeGrantSeed[] => [
+        { resourceType: "agent", resourceId: "fixer", principalId: "alice", level },
+      ];
+      const definitionFor = async (
+        leadOwner: string | null,
+        childOwner: string | null,
+        optIn: boolean,
+        grants: FakeGrantSeed[] = [],
+      ) => {
         const { llm } = await runLead({
           calls: [],
+          grants,
           agents: [
             leadAgent({ ownerId: leadOwner }),
             fixerAgent({
@@ -2860,11 +2870,16 @@ describe("delegating to a coding sub-agent with a repository list", () => {
       };
 
       it.each([
-        ["another owner's child without the opt-in", "alice", "bob"],
-        ["an owner-less child under an owned lead", "alice", null],
-        ["an owned child under an owner-less lead", null, "bob"],
-      ])("omits it for %s, keeping the definition unchanged", async (_name, leadOwner, childOwner) => {
-        const tool = await definitionFor(leadOwner, childOwner, false);
+        ["another owner's child without the opt-in", "alice", "bob", false, grantToAlice("execute")],
+        ["an owner-less child under an owned lead", "alice", null, false, grantToAlice("execute")],
+        ["an owned child under an owner-less lead", null, "bob", false, []],
+        // The opt-in alone is not enough: revoke_access leaves the edge, so the grant is what's checked.
+        ["another owner's child with the opt-in and no grant", "alice", "bob", true, []],
+        ["another owner's child with the opt-in and only read access", "alice", "bob", true, grantToAlice("read")],
+        ["an owner-less child with the opt-in and no grant", "alice", null, true, []],
+        ["an owned child with the opt-in under an owner-less lead", null, "bob", true, []],
+      ])("omits it for %s, keeping the definition unchanged", async (_name, leadOwner, childOwner, optIn, grants) => {
+        const tool = await definitionFor(leadOwner, childOwner, optIn, grants);
         expect(JSON.stringify(tool.parameters)).toBe(JSON.stringify(delegateToolDef("fixer", false).jsonSchema));
         for (const repository of [DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]) {
           expect(JSON.stringify(tool)).not.toContain(repository);
@@ -2872,13 +2887,38 @@ describe("delegating to a coding sub-agent with a repository list", () => {
       });
 
       it.each([
-        ["another owner's child with the opt-in", "alice", "bob", true],
-        ["the same owner's child without the opt-in", "alice", "alice", false],
+        ["another owner's child with the opt-in and execute access", "alice", "bob", true, grantToAlice("execute")],
+        ["the same owner's child without the opt-in", "alice", "alice", false, []],
         // authorizeDelegation and canDelegate count owner-less on both sides as the same owner.
-        ["an owner-less child under an owner-less lead", null, null, false],
-      ])("offers it for %s", async (_name, leadOwner, childOwner, optIn) => {
-        const tool = await definitionFor(leadOwner, childOwner, optIn);
+        ["an owner-less child under an owner-less lead", null, null, false, []],
+      ])("offers it for %s", async (_name, leadOwner, childOwner, optIn, grants) => {
+        const tool = await definitionFor(leadOwner, childOwner, optIn, grants);
         expect((tool.parameters.properties as any).repository.enum).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
+      });
+
+      it.each([
+        ["a cross-owner child with no links", "bob", true, [], 0],
+        ["a cross-owner child without the opt-in", "bob", false, twoLinks(), 0],
+        ["the same owner's child with links", "alice", false, twoLinks(), 0],
+        ["a cross-owner child with links and the opt-in", "bob", true, twoLinks(), 1],
+      ])("at load, for %s, reads grants %i time(s)", async (_name, childOwner, optIn, links, reads) => {
+        const db = fakeDb(
+          [
+            leadAgent({ ownerId: "alice" }),
+            fixerAgent({ ownerId: childOwner, codingProfile: { ...profile, allowWebhookTaskOverride: optIn } }),
+          ],
+          [edge("fixer")],
+          [],
+          [],
+          [],
+          [],
+          links,
+        );
+        const findGrants = vi.spyOn((db as any).resourceGrant, "findMany");
+        const parentRun = await db.run.create({ data: { agentId: "lead" } });
+        const llm = scriptedLlm([finalAnswer("reported")]);
+        await executeRun(parentRun.id, providers(llm), db);
+        expect(findGrants).toHaveBeenCalledTimes(reads);
       });
     });
   });
