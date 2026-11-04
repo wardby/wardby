@@ -182,6 +182,35 @@ describe("core/webhooks", () => {
     });
   });
 
+  it("resolveWebhookRun reports invalid_repository for an unlisted repository and for a native agent", async () => {
+    const codingProfile = {
+      provider: "codex",
+      repository: "acme/service-a",
+      baseRef: "main",
+      defaultTask: "Default task",
+      allowWebhookTaskOverride: true,
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    const db: any = fakeDb([{ id: "a1", name: "coder", kind: "coding", codingProfile }]);
+    db.agentRepository = { findMany: async () => [{ repository: "acme/service-b", baseRef: null }] };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    await expect(resolveWebhookRun(id, secret, db, executor, "fix", { repository: "acme/nope" })).resolves.toEqual({
+      ok: false,
+      reason: "invalid_repository",
+    });
+    await expect(
+      resolveWebhookRun(id, secret, db, executor, "fix", { repository: "acme/service-b" }),
+    ).resolves.toMatchObject({ ok: true });
+
+    const native = fakeDb([{ id: "n1", name: "n", kind: "native" }]);
+    const hook = await createWebhook("n1", "p1", native);
+    await expect(
+      resolveWebhookRun(hook.id, hook.secret, native, executor, undefined, { repository: "acme/service-a" }),
+    ).resolves.toEqual({ ok: false, reason: "invalid_repository" });
+  });
+
   it("accepts webhook task input for a native agent unconditionally, storing it as Run.taskOverride", async () => {
     const db = fakeDb([{ id: "a1", name: "classifier", kind: "native" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);

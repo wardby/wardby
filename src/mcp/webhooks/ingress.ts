@@ -47,11 +47,22 @@ export async function handleWebhookIngress(
     return { status: 400, body: { error: "invalid_task" } };
   }
 
+  // `wardbyRepository`, not `repository`, for the same reason: a forwarded GitHub
+  // payload carries its own top-level `repository` object.
+  const repository = req.body.wardbyRepository;
+  if (
+    repository !== undefined &&
+    (typeof repository !== "string" || repository.length === 0 || repository.length > 300)
+  ) {
+    return { status: 400, body: { error: "invalid_repository" } };
+  }
+
   // `wardbyIssue`, not `issue`: forwarded third-party payloads (GitHub, Jira)
   // carry their own top-level `issue` object, which is not ours to read.
   const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask, {
     issue: req.body.wardbyIssue,
     issueTrackers,
+    repository,
   });
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
@@ -59,6 +70,8 @@ export async function handleWebhookIngress(
   switch (result.reason) {
     case "invalid_issue":
       return { status: 400, body: { error: "invalid_issue", error_description: result.message } };
+    case "invalid_repository":
+      return { status: 400, body: { error: "invalid_repository" } };
     case "not_found":
       return { status: 404, body: { error: "not_found" } };
     case "invalid_secret":
