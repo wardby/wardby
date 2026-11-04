@@ -393,10 +393,11 @@ Trust assumptions:
   secrets and repository. A repository is a binding: only the owner (or an
   admin's explicit approval) sets it, never a `write`-grantee.
 - **A task can steer a coding agent to any repository on its list.** A caller
-  who may pass `repository` (the owner, or anyone when
-  `allowWebhookTaskOverride` is on), and a lead that delegates to the agent,
-  can pick any listed repository, and the agent's one toolchain, services and
-  package allowlist apply to all of them. Keep the list small, and keep
+  who may pass `repository` (for `trigger_agent`, the owner, or anyone when
+  `allowWebhookTaskOverride` is on; for a webhook, whoever created it, and only
+  when `allowWebhookTaskOverride` is on), and a lead that delegates to the
+  agent, can pick any listed repository, and the agent's one toolchain,
+  services and package allowlist apply to all of them. Keep the list small, and keep
   repositories with different trust levels on separate agents. Refusals never
   repeat the requested value, and a lead sees a sub-agent's list only when it
   has the same owner or may choose (execute access and the opt-in).

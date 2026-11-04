@@ -95,9 +95,10 @@ The repository is chosen when the run starts and never changes during it:
   refused with `repository_not_listed`.
 - A webhook body can carry `wardbyRepository` the same way (not `repository`,
   which forwarded payloads already use). A refused value is a 400
-  `{ "error": "invalid_repository" }`. Like `task` and `baseRef`, a non-owner
-  can choose it only when `codingProfile.allowWebhookTaskOverride` is on;
-  otherwise the call is refused with 403.
+  `{ "error": "invalid_repository" }`. A webhook can carry `wardbyRepository`
+  only when `codingProfile.allowWebhookTaskOverride` is on, whoever created
+  the webhook. With the flag off the call is refused with 403
+  `{ "error": "disabled" }`, before the repository value is checked.
 - A lead's `delegate_to_<name>` call takes `repository`. When the sub-agent has
   more than its default repository the call must name one, unless
   `continuePriorRun` is given: a follow-up works in the repository of the run
@@ -108,8 +109,9 @@ Everything else about the agent is shared across its repositories: toolchain,
 worker image, services, system prompt, budget, protected paths and the package
 allowlist. If two repositories need different ones, use two agents.
 
-An agent with no repository links behaves as before. Changing an agent's
-`kind` is refused while it has write links without triggers; unlink them first.
+An agent with no repository links works only in its default repository.
+Changing an agent's `kind` is refused while it has write links without
+triggers; unlink them first.
 For the refusals, see [Repository required](../help/errors/repository-required.md)
 and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
 

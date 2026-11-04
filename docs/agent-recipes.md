@@ -525,9 +525,9 @@ call, and may delegate to the same builder once per repository:
 
 Set `maxDelegationsPerRun` (up to 20) for the number of calls, and use
 `mergeOrder` where the pull requests must land in order. A call without
-`repository` is refused with `repository_required` (unless it continues a prior
-run with `continuePriorRun`), and a repository not on the list with
-`repository_not_listed`. A native sub-agent refuses `repository` with
+`repository` is refused with `repository_required` when the builder has extra
+repositories (unless it continues a prior run with `continuePriorRun`), and a
+repository not on the list with `repository_not_listed`. A native sub-agent refuses `repository` with
 `repository_requires_coding_agent`. The lead sees the list in the tool
 definition only when it has the same owner as the builder, or another owner
 with execute access to a builder that sets `allowWebhookTaskOverride`. All

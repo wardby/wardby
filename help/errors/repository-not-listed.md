@@ -16,9 +16,10 @@ triggers). No run was started. The message lists the repositories that are
 allowed and never repeats the value that was sent.
 
 A webhook that sends `wardbyRepository` gets the same refusal as a 400
-`{ "error": "invalid_repository" }`. If the webhook's caller is not the agent's
-owner and `codingProfile.allowWebhookTaskOverride` is off, the call is refused
-with 403 instead.
+`{ "error": "invalid_repository" }`, but only when
+`codingProfile.allowWebhookTaskOverride` is on. With the flag off, a webhook
+that carries `wardbyRepository` is refused with 403 `{ "error": "disabled" }`
+before the repository is checked, whoever created the webhook.
 
 ## What to do
 
