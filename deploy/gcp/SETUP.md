@@ -115,14 +115,16 @@ gcloud artifacts repositories create wardby \
 docker build -f deploy/Dockerfile --target runtime \
   -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest .
 docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
-docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
+docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest \
+  | grep '^us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane@'
 
 docker build -f deploy/Dockerfile --target migration \
   -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest .
 docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
-docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
+docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest \
+  | grep '^us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate@'
 ```
 
 Instead of building the runtime image, you can pull the one each wardby release
@@ -134,9 +136,14 @@ docker pull ghcr.io/wardby/wardby/wardby-runtime:v<version>
 docker tag ghcr.io/wardby/wardby/wardby-runtime:v<version> \
   us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
 docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
-docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
+docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version> \
+  | grep '^us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane@'
 ```
+
+An image pulled from one registry and pushed to another has a digest for each,
+in no promised order, so pick the one in your registry as above rather than the
+first. The same applies to an image you built once and pushed to two registries.
 
 Releases also publish `wardby-coding-worker`, `wardby-claude-coding-worker` and
 `wardby-claude-tool-runner` under the same prefix, for deployments that run
