@@ -14,7 +14,9 @@ type WardbyMcpServers = {
 /**
  * The wardby_mcp server on a run with MCP tools. Codex reads the bearer from its own process env
  * (bearer_token_env_var; it refuses an inline bearer_token for an HTTP server), so the config, and
- * with it Codex's command line, never holds the token.
+ * with it Codex's command line, never holds the token. That does not hide it from the model: shell
+ * commands run in the same container and can still read the token from Codex's environment through
+ * /proc, which is why a Codex run gets only read-only MCP tools (isCodexCoding, core/mcp-tools.ts).
  */
 function wardbyMcpServers(config: WorkerClientConfig): Record<string, never> | { mcp_servers: WardbyMcpServers } {
   if (!config.mcpToken) return {};
@@ -35,7 +37,8 @@ function wardbyMcpServers(config: WorkerClientConfig): Record<string, never> | {
 export function codexSdkOptions(config: WorkerClientConfig) {
   return {
     apiKey: config.capability,
-    // The Codex process env. The shells get only shell_environment_policy.set, which never holds the MCP token.
+    // The Codex process env. The shells' own env is only shell_environment_policy.set, which never holds
+    // the MCP token, but a shell can still read Codex's env (and the token) through /proc.
     env: config.mcpToken ? { ...config.environment, [MCP_TOKEN_ENV]: config.mcpToken } : config.environment,
     config: {
       developer_instructions: config.developerInstructions,

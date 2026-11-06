@@ -96,6 +96,16 @@ deadline, and only its hash is stored.
   run's MCP token, so only tools that don't change anything are safe to give it. `readOnlyHint` is
   the server's own claim, which Wardby can't verify. The allowlist stays your control: allow only
   tools you trust to be read-only.
+
+  A run follows the provider it was started with, even if the agent's provider changes before the
+  run launches. A coding agent with no coding profile is treated as Codex when you attach.
+
+- **Switching an agent to Codex.** When `update_agent` makes an agent a Codex agent (changing
+  `codingProfile.provider` to `codex`, or making a native agent a coding agent, which uses Codex by
+  default) and some of its attached tools aren't marked read-only, the change still goes ahead and
+  the result's `warnings` names those tools: "These MCP tools aren't read-only and won't be
+  available to Codex runs: …". They stay attached but Codex runs don't get them. Detach them, or
+  re-attach the server with only read-only tools, to remove the warning's cause.
 - **Call limit.** A run may make `WARDBY_MCP_MAX_CALLS_PER_RUN` calls (default `100`). Every call
   counts, whatever its outcome. Past the limit a call returns
   [`mcp_call_limit`](../help/errors/mcp-call-limit.md); the run goes on.
@@ -108,8 +118,9 @@ deadline, and only its hash is stored.
   fail. Update the images together with the server.
 - **Repository configuration.** A repository's own MCP configuration (such as `.mcp.json`) is still
   never loaded; the attached servers are the only MCP tools a coding run has.
-- **Codex models that use tool search** to find MCP tools aren't supported yet; Codex then gets no
-  MCP tools from Wardby. Other models work.
+- **Codex models that use tool search** aren't supported by the coding proxy yet. The proxy refuses
+  those models' requests with `openai_tool_not_allowed`, whether or not the agent has MCP servers,
+  so their runs fail. Use a Codex model that doesn't use tool search.
 
 Time limits and the other rules in this guide apply to coding agents too. See
 [Coding worker isolation](coding-worker-isolation.md#remote-mcp-tools) for the security notes.
@@ -121,6 +132,12 @@ It must be at least `1000` and can't exceed `WARDBY_TOOL_MAX_TIMEOUT_MS`; a call
 the two, and never past the run's own deadline. `stop_run` aborts a call in
 flight. A call that runs out of time returns `mcp_call_timeout` to the model
 and the run goes on.
+
+A coding agent's calls have one more limit: the coding proxy gives up on a forwarded call after 5
+minutes, whatever `WARDBY_TOOL_MAX_TIMEOUT_MS` and `callTimeoutMs` say. The call then fails with
+[`mcp_unavailable`](../help/errors/mcp-unavailable.md) (`502`), the gateway stops the call, and it
+still counts against the run's call limit. A run that has been stopped or cancelled can't start new
+calls: its token is refused with `401`.
 
 ## Refreshing and changes
 

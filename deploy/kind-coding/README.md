@@ -134,8 +134,10 @@ The proxy also forwards MCP tool calls from coding workers to the native gateway
 `manifests/base/proxy.yaml`; the same value for every target). Two NetworkPolicy
 rules carry that traffic and nothing else: the proxy may reach gateway pods on
 `8790` only, and the gateway admits proxy pods on `8790`. Coding-run pods still
-reach only the proxy. Without a gateway the proxy answers `/mcp` with 503, and
-coding agents simply get no MCP tools.
+reach only the proxy. If no gateway pod is running, the proxy answers `/mcp`
+with `502` (`mcp_unavailable`) and the MCP calls fail; the rest of the run goes
+on. (`503` happens only when `WARDBY_MCP_GATEWAY_URL` is unset, which the base
+manifest never leaves it.)
 
 ## Run a real coding agent locally
 

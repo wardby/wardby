@@ -3,7 +3,7 @@ id: mcp-servers
 title: Remote MCP server tools for native and coding agents
 summary: Register a remote MCP server, then attach an allowlist of its tools to a native, Claude Code or Codex agent; credentials stay in brokered secrets.
 audience: operator
-tags: [mcp, coding-agent, codex, register_mcp_server, attach_mcp_server, refresh_mcp_server, readOnlyHint, brokered]
+tags: [mcp, mcp server, coding-agent, codex, register_mcp_server, attach_mcp_server, readOnlyHint, WARDBY_MCP_SERVERS]
 appliesTo: ">=0.8.0"
 ---
 
@@ -48,7 +48,12 @@ the coding proxy and the native gateway; the worker never sees the server's URL 
 - MCP for coding agents needs this release's Claude worker image and a new Codex driver image.
   Older images get no MCP tools, and runs don't fail.
 - A repository's MCP configuration is still never loaded. Codex models that use tool search
-  aren't supported yet.
+  aren't supported: the proxy refuses their requests (`openai_tool_not_allowed`), MCP or not, so
+  those runs fail.
+- Switching an agent to Codex with `update_agent` keeps its attachments, but tools not marked
+  read-only won't reach Codex runs; the result's `warnings` names them.
+- The proxy gives up on a coding run's MCP call after 5 minutes, whatever
+  `WARDBY_TOOL_MAX_TIMEOUT_MS` says ([`mcp_unavailable`](errors/mcp-unavailable.md)).
 
 Share a server with `grant_access` (`resourceType: "mcp_server"`; needs the `agents:write` scope,
 registering needs `tools:write`). `use` lets the grantee attach it, and its tools then run with your

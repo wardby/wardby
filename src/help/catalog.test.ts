@@ -170,8 +170,15 @@ describe("buildHelpCatalog", () => {
 
   it("ranks the MCP servers article first for coding agent MCP queries", async () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
-    for (const query of ["coding agent mcp", "readOnlyHint codex", "codex mcp tools"]) {
+    for (const query of ["coding agent mcp", "readOnlyHint codex", "codex mcp tools", "mcp server"]) {
       expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("mcp-servers");
+    }
+  });
+
+  it("ranks the pin-load failure article first for its run error code", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["coding_failure_mcp_pins_unavailable", "coding_mcp_pins_unavailable"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("errors/coding-mcp-pins-unavailable");
     }
   });
 

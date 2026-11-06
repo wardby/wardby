@@ -266,7 +266,13 @@ Where the token is exposed:
 A repository's own MCP configuration is never loaded. MCP tools need this
 release's Claude worker image and a new Codex driver image; an older image
 ignores the token and gets no MCP tools, and the run does not fail. Codex
-models that use tool search to find MCP tools aren't supported yet.
+models that use tool search aren't supported: the proxy refuses their requests
+with `openai_tool_not_allowed`, MCP or not, so those runs fail.
+
+The read-only rule follows the provider a run was started with
+(`CodingRun.provider`), at pin time and on every call, not the agent's current
+profile. At attach, a coding agent counts as Codex unless its provider is
+exactly `claude-code`, so an agent without a profile is held to the rule too.
 
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,

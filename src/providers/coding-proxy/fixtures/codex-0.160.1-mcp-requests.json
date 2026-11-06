@@ -38,7 +38,7 @@
         "accept": "text/event-stream, application/json",
         "content-type": "application/json"
       },
-      "body": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"callId\":\"exec-ad4a277f-2daf-479d-95c7-efaf788589fe\",\"x-codex-turn-metadata\":{\"session_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"thread_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"reasoning_effort\":\"low\",\"turn_id\":\"01a1b256-655d-7491-903f-c2b5d358212f\",\"model\":\"gpt-6.1-sol\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"codex_version\":\"0.160.1\"},\"threadId\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"sessionId\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"windowId\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a:0\",\"itemId\":\"ctc_spike\",\"progressToken\":1},\"name\":\"echo\",\"arguments\":{\"text\":\"hello-from-fake-model\"}}}"
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"callId\":\"exec-00000000-0000-7000-8000-000000000001\",\"x-codex-turn-metadata\":{\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"reasoning_effort\":\"low\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"model\":\"gpt-6.1-sol\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"codex_version\":\"0.160.1\"},\"threadId\":\"00000000-0000-7000-8000-000000000002\",\"sessionId\":\"00000000-0000-7000-8000-000000000002\",\"windowId\":\"00000000-0000-7000-8000-000000000002:0\",\"itemId\":\"ctc_spike\",\"progressToken\":1},\"name\":\"echo\",\"arguments\":{\"text\":\"hello-from-fake-model\"}}}"
     }
   ],
   "responses": [
@@ -50,7 +50,7 @@
         "input": [
           {
             "type": "additional_tools",
-            "id": "at_57d1a5ef-0d75-5c8e-b660-542480ac52ba",
+            "id": "at_00000000-0000-7000-8000-000000000004",
             "role": "developer",
             "tools": [
               {
@@ -353,7 +353,7 @@
           },
           {
             "type": "message",
-            "id": "msg_2e7d051c-5044-58e0-a29f-c3506f223048",
+            "id": "msg_00000000-0000-7000-8000-000000000005",
             "role": "developer",
             "content": [
               {
@@ -364,7 +364,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-204871312d27",
+            "id": "msg_00000000-0000-7000-8000-000000000006",
             "role": "developer",
             "content": [
               {
@@ -383,7 +383,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-205641a25bc3",
+            "id": "msg_00000000-0000-7000-8000-000000000007",
             "role": "developer",
             "content": [
               {
@@ -394,7 +394,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-20646c60345e",
+            "id": "msg_00000000-0000-7000-8000-000000000008",
             "role": "developer",
             "content": [
               {
@@ -405,7 +405,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-20763eaed040",
+            "id": "msg_00000000-0000-7000-8000-000000000009",
             "role": "user",
             "content": [
               {
@@ -416,7 +416,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-657b-7f21-b1eb-1878392d6aed",
+            "id": "msg_00000000-0000-7000-8000-00000000000a",
             "role": "user",
             "content": [
               {
@@ -435,18 +435,18 @@
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": "01a1b256-64dd-7050-b458-888b4b0d7b9a",
+        "prompt_cache_key": "00000000-0000-7000-8000-000000000002",
         "text": {
           "verbosity": "low"
         },
         "client_metadata": {
-          "turn_id": "01a1b256-655d-7491-903f-c2b5d358212f",
-          "root_turn_id": "01a1b256-655d-7491-903f-c2b5d358212f",
-          "x-codex-turn-metadata": "{\"installation_id\":\"b89bcf99-5e16-45eb-b08d-3432eaf6c541\",\"session_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"thread_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"agent_name\":\"/root\",\"turn_id\":\"01a1b256-655d-7491-903f-c2b5d358212f\",\"window_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a:0\",\"window_number\":0,\"context_window_id\":\"01a1b256-64e9-7f12-a3b6-ee502b7ff68e\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a1b256-655d-7491-903f-c2b5d358212f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
-          "session_id": "01a1b256-64dd-7050-b458-888b4b0d7b9a",
-          "x-codex-installation-id": "b89bcf99-5e16-45eb-b08d-3432eaf6c541",
-          "thread_id": "01a1b256-64dd-7050-b458-888b4b0d7b9a",
-          "x-codex-window-id": "01a1b256-64dd-7050-b458-888b4b0d7b9a:0"
+          "turn_id": "00000000-0000-7000-8000-000000000003",
+          "root_turn_id": "00000000-0000-7000-8000-000000000003",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+          "session_id": "00000000-0000-7000-8000-000000000002",
+          "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+          "thread_id": "00000000-0000-7000-8000-000000000002",
+          "x-codex-window-id": "00000000-0000-7000-8000-000000000002:0"
         }
       }
     },
@@ -458,7 +458,7 @@
         "input": [
           {
             "type": "additional_tools",
-            "id": "at_57d1a5ef-0d75-5c8e-b660-542480ac52ba",
+            "id": "at_00000000-0000-7000-8000-000000000004",
             "role": "developer",
             "tools": [
               {
@@ -761,7 +761,7 @@
           },
           {
             "type": "message",
-            "id": "msg_2e7d051c-5044-58e0-a29f-c3506f223048",
+            "id": "msg_00000000-0000-7000-8000-000000000005",
             "role": "developer",
             "content": [
               {
@@ -772,7 +772,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-204871312d27",
+            "id": "msg_00000000-0000-7000-8000-000000000006",
             "role": "developer",
             "content": [
               {
@@ -791,7 +791,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-205641a25bc3",
+            "id": "msg_00000000-0000-7000-8000-000000000007",
             "role": "developer",
             "content": [
               {
@@ -802,7 +802,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-20646c60345e",
+            "id": "msg_00000000-0000-7000-8000-000000000008",
             "role": "developer",
             "content": [
               {
@@ -813,7 +813,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-6575-7dd0-9716-20763eaed040",
+            "id": "msg_00000000-0000-7000-8000-000000000009",
             "role": "user",
             "content": [
               {
@@ -824,7 +824,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-657b-7f21-b1eb-1878392d6aed",
+            "id": "msg_00000000-0000-7000-8000-00000000000a",
             "role": "user",
             "content": [
               {
@@ -843,7 +843,7 @@
           },
           {
             "type": "custom_tool_call_output",
-            "id": "ctco_01a1b256-681e-7112-a9cd-bdd253b39da3",
+            "id": "ctco_00000000-0000-7000-8000-00000000000d",
             "call_id": "call_cm1",
             "output": [
               {
@@ -870,18 +870,18 @@
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": "01a1b256-64dd-7050-b458-888b4b0d7b9a",
+        "prompt_cache_key": "00000000-0000-7000-8000-000000000002",
         "text": {
           "verbosity": "low"
         },
         "client_metadata": {
-          "session_id": "01a1b256-64dd-7050-b458-888b4b0d7b9a",
-          "x-codex-window-id": "01a1b256-64dd-7050-b458-888b4b0d7b9a:0",
-          "turn_id": "01a1b256-655d-7491-903f-c2b5d358212f",
-          "x-codex-installation-id": "b89bcf99-5e16-45eb-b08d-3432eaf6c541",
-          "root_turn_id": "01a1b256-655d-7491-903f-c2b5d358212f",
-          "x-codex-turn-metadata": "{\"installation_id\":\"b89bcf99-5e16-45eb-b08d-3432eaf6c541\",\"session_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"thread_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a\",\"agent_name\":\"/root\",\"turn_id\":\"01a1b256-655d-7491-903f-c2b5d358212f\",\"window_id\":\"01a1b256-64dd-7050-b458-888b4b0d7b9a:0\",\"window_number\":0,\"context_window_id\":\"01a1b256-64e9-7f12-a3b6-ee502b7ff68e\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a1b256-655d-7491-903f-c2b5d358212f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
-          "thread_id": "01a1b256-64dd-7050-b458-888b4b0d7b9a"
+          "session_id": "00000000-0000-7000-8000-000000000002",
+          "x-codex-window-id": "00000000-0000-7000-8000-000000000002:0",
+          "turn_id": "00000000-0000-7000-8000-000000000003",
+          "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+          "root_turn_id": "00000000-0000-7000-8000-000000000003",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+          "thread_id": "00000000-0000-7000-8000-000000000002"
         }
       }
     },
@@ -893,7 +893,7 @@
         "input": [
           {
             "type": "additional_tools",
-            "id": "at_664e142c-c436-5020-ad8b-e8b3a6e496a1",
+            "id": "at_00000000-0000-7000-8000-00000000000e",
             "role": "developer",
             "tools": [
               {
@@ -1135,7 +1135,7 @@
           },
           {
             "type": "message",
-            "id": "msg_2155a58b-ab61-5302-ba65-f2edcab9b277",
+            "id": "msg_00000000-0000-7000-8000-00000000000f",
             "role": "developer",
             "content": [
               {
@@ -1146,7 +1146,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-77d4-7cb2-9b7f-878071a042a2",
+            "id": "msg_00000000-0000-7000-8000-000000000010",
             "role": "developer",
             "content": [
               {
@@ -1161,7 +1161,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-77d4-7cb2-9b7f-87934e66484f",
+            "id": "msg_00000000-0000-7000-8000-000000000011",
             "role": "developer",
             "content": [
               {
@@ -1172,7 +1172,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-77d4-7cb2-9b7f-87a100a90640",
+            "id": "msg_00000000-0000-7000-8000-000000000012",
             "role": "developer",
             "content": [
               {
@@ -1183,7 +1183,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-77d4-7cb2-9b7f-87bc866e4e88",
+            "id": "msg_00000000-0000-7000-8000-000000000013",
             "role": "user",
             "content": [
               {
@@ -1194,7 +1194,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b256-77d8-77c3-b5f7-5a3016e49359",
+            "id": "msg_00000000-0000-7000-8000-000000000014",
             "role": "user",
             "content": [
               {
@@ -1213,7 +1213,7 @@
           },
           {
             "type": "custom_tool_call_output",
-            "id": "ctco_01a1b256-77fb-7261-b957-700814403bcd",
+            "id": "ctco_00000000-0000-7000-8000-000000000015",
             "call_id": "call_cm1",
             "output": [
               {
@@ -1240,18 +1240,18 @@
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": "01a1b256-77ae-7da3-8845-de52f58ac5ee",
+        "prompt_cache_key": "00000000-0000-7000-8000-000000000016",
         "text": {
           "verbosity": "low"
         },
         "client_metadata": {
-          "x-codex-turn-metadata": "{\"installation_id\":\"b89bcf99-5e16-45eb-b08d-3432eaf6c541\",\"session_id\":\"01a1b256-77ae-7da3-8845-de52f58ac5ee\",\"thread_id\":\"01a1b256-77ae-7da3-8845-de52f58ac5ee\",\"agent_name\":\"/root\",\"turn_id\":\"01a1b256-77ce-7b72-85bb-f511f1510277\",\"window_id\":\"01a1b256-77ae-7da3-8845-de52f58ac5ee:0\",\"window_number\":0,\"context_window_id\":\"01a1b256-77af-7b83-975a-9b68cdc99698\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a1b256-77ce-7b72-85bb-f511f1510277\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993373647,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
-          "turn_id": "01a1b256-77ce-7b72-85bb-f511f1510277",
-          "x-codex-installation-id": "b89bcf99-5e16-45eb-b08d-3432eaf6c541",
-          "root_turn_id": "01a1b256-77ce-7b72-85bb-f511f1510277",
-          "session_id": "01a1b256-77ae-7da3-8845-de52f58ac5ee",
-          "x-codex-window-id": "01a1b256-77ae-7da3-8845-de52f58ac5ee:0",
-          "thread_id": "01a1b256-77ae-7da3-8845-de52f58ac5ee"
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_id\":\"00000000-0000-7000-8000-000000000016\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000017\",\"window_id\":\"00000000-0000-7000-8000-000000000016:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000017\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993373647,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
+          "turn_id": "00000000-0000-7000-8000-000000000017",
+          "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+          "root_turn_id": "00000000-0000-7000-8000-000000000017",
+          "session_id": "00000000-0000-7000-8000-000000000016",
+          "x-codex-window-id": "00000000-0000-7000-8000-000000000016:0",
+          "thread_id": "00000000-0000-7000-8000-000000000016"
         }
       }
     },
@@ -1264,7 +1264,7 @@
         "input": [
           {
             "type": "message",
-            "id": "msg_01a1b255-52d2-7d71-8257-1219d75350d9",
+            "id": "msg_00000000-0000-7000-8000-000000000019",
             "role": "developer",
             "content": [
               {
@@ -1279,7 +1279,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b255-52d2-7d71-8257-122f97e423d4",
+            "id": "msg_00000000-0000-7000-8000-00000000001a",
             "role": "user",
             "content": [
               {
@@ -1290,7 +1290,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b255-52d7-71c0-88a3-7c4eca36f9c9",
+            "id": "msg_00000000-0000-7000-8000-00000000001b",
             "role": "user",
             "content": [
               {
@@ -1788,15 +1788,15 @@
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": "01a1b255-52b0-73f0-a7a8-7f0a71a2baf1",
+        "prompt_cache_key": "00000000-0000-7000-8000-00000000001c",
         "client_metadata": {
-          "root_turn_id": "01a1b255-52cc-72d2-8652-d0faf291264a",
-          "thread_id": "01a1b255-52b0-73f0-a7a8-7f0a71a2baf1",
-          "x-codex-turn-metadata": "{\"installation_id\":\"b89bcf99-5e16-45eb-b08d-3432eaf6c541\",\"session_id\":\"01a1b255-52b0-73f0-a7a8-7f0a71a2baf1\",\"thread_id\":\"01a1b255-52b0-73f0-a7a8-7f0a71a2baf1\",\"agent_name\":\"/root\",\"turn_id\":\"01a1b255-52cc-72d2-8652-d0faf291264a\",\"window_id\":\"01a1b255-52b0-73f0-a7a8-7f0a71a2baf1:0\",\"window_number\":0,\"context_window_id\":\"01a1b255-52b0-73f0-a7a8-7f2173e3f955\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a1b255-52cc-72d2-8652-d0faf291264a\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993298638,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
-          "session_id": "01a1b255-52b0-73f0-a7a8-7f0a71a2baf1",
-          "x-codex-installation-id": "b89bcf99-5e16-45eb-b08d-3432eaf6c541",
-          "turn_id": "01a1b255-52cc-72d2-8652-d0faf291264a",
-          "x-codex-window-id": "01a1b255-52b0-73f0-a7a8-7f0a71a2baf1:0"
+          "root_turn_id": "00000000-0000-7000-8000-00000000001d",
+          "thread_id": "00000000-0000-7000-8000-00000000001c",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-00000000001c\",\"thread_id\":\"00000000-0000-7000-8000-00000000001c\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"window_id\":\"00000000-0000-7000-8000-00000000001c:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000001e\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993298638,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
+          "session_id": "00000000-0000-7000-8000-00000000001c",
+          "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+          "turn_id": "00000000-0000-7000-8000-00000000001d",
+          "x-codex-window-id": "00000000-0000-7000-8000-00000000001c:0"
         }
       }
     },
@@ -1809,7 +1809,7 @@
         "input": [
           {
             "type": "message",
-            "id": "msg_01a1b252-2ccf-75a1-8291-deec9111f874",
+            "id": "msg_00000000-0000-7000-8000-00000000001f",
             "role": "developer",
             "content": [
               {
@@ -1824,7 +1824,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b252-2ccf-75a1-8291-def0bc88c87c",
+            "id": "msg_00000000-0000-7000-8000-000000000020",
             "role": "user",
             "content": [
               {
@@ -1835,7 +1835,7 @@
           },
           {
             "type": "message",
-            "id": "msg_01a1b252-2cd8-7de3-8d41-d6707e9dedd1",
+            "id": "msg_00000000-0000-7000-8000-000000000021",
             "role": "user",
             "content": [
               {
@@ -2160,18 +2160,18 @@
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
-        "prompt_cache_key": "01a1b252-2c3b-7613-b75f-4989462a952f",
+        "prompt_cache_key": "00000000-0000-7000-8000-000000000022",
         "text": {
           "verbosity": "low"
         },
         "client_metadata": {
-          "root_turn_id": "01a1b252-2caa-7b32-8a4e-d9bd165790dd",
-          "x-codex-turn-metadata": "{\"installation_id\":\"b89bcf99-5e16-45eb-b08d-3432eaf6c541\",\"session_id\":\"01a1b252-2c3b-7613-b75f-4989462a952f\",\"thread_id\":\"01a1b252-2c3b-7613-b75f-4989462a952f\",\"agent_name\":\"/root\",\"turn_id\":\"01a1b252-2caa-7b32-8a4e-d9bd165790dd\",\"window_id\":\"01a1b252-2c3b-7613-b75f-4989462a952f:0\",\"window_number\":0,\"context_window_id\":\"01a1b252-2c41-71f0-9ade-06805b90461b\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a1b252-2caa-7b32-8a4e-d9bd165790dd\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993092271,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
-          "session_id": "01a1b252-2c3b-7613-b75f-4989462a952f",
-          "thread_id": "01a1b252-2c3b-7613-b75f-4989462a952f",
-          "x-codex-installation-id": "b89bcf99-5e16-45eb-b08d-3432eaf6c541",
-          "x-codex-window-id": "01a1b252-2c3b-7613-b75f-4989462a952f:0",
-          "turn_id": "01a1b252-2caa-7b32-8a4e-d9bd165790dd"
+          "root_turn_id": "00000000-0000-7000-8000-000000000023",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993092271,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
+          "session_id": "00000000-0000-7000-8000-000000000022",
+          "thread_id": "00000000-0000-7000-8000-000000000022",
+          "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+          "x-codex-window-id": "00000000-0000-7000-8000-000000000022:0",
+          "turn_id": "00000000-0000-7000-8000-000000000023"
         }
       }
     }
