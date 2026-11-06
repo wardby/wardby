@@ -17,6 +17,7 @@ import { ModelRequestSeal } from "./dependency-cache/model-request-seal.js";
 import { DependencyCacheService } from "./dependency-cache/service.js";
 import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";
+import { createMcpRoute } from "./mcp-route.js";
 import { createMockUpstream, mockUpstreamFromEnv } from "./mock-upstream.js";
 import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
@@ -62,6 +63,33 @@ export function createRegistryUpstream(pinned: typeof globalThis.fetch): Upstrea
     });
 }
 
+/**
+ * WARDBY_MCP_GATEWAY_URL: the native gateway's base URL, which the /mcp route forwards to (its
+ * /coding-mcp route). Unset or empty: /mcp answers 503 mcp_unavailable. Anything but an http(s) URL
+ * without credentials, query or fragment stops start-up (the value is not echoed).
+ */
+export function loadMcpGatewayUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.WARDBY_MCP_GATEWAY_URL?.trim();
+  if (!value) return undefined;
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  if (
+    !url ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("WARDBY_MCP_GATEWAY_URL must be an http(s) URL without credentials, query or fragment");
+  }
+  return url.href.replace(/\/+$/, "");
+}
+
 export interface CodingProxyRuntimeOptions {
   db: PrismaClient;
   /** The package registry's own client, so its traffic (many concurrent
@@ -100,6 +128,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const audit: ProxyAuditSink | undefined = mock
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
+  // Throws on an invalid setting, before anything listens.
+  const mcpGatewayUrl = loadMcpGatewayUrl(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -170,8 +200,9 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   }
 
   const seal = modelRequestSeal;
+  const ledger = new PrismaProxyLedger(options.db);
   const proxy = new CodingProxy({
-    ledger: new PrismaProxyLedger(options.db),
+    ledger,
     credentials: new EnvironmentCredentialResolver(env),
     audit,
     // WARDBY_TEST_SIMULATORS (test only; refused alongside the mock upstream): the scripted model,
@@ -193,6 +224,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
       expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
       registry,
       ...(dependencyCache ? { dependencyCache } : {}),
+      mcp: createMcpRoute({ ledger, gatewayUrl: mcpGatewayUrl }),
       onRequest: options.onRequest,
     });
   } catch (error) {

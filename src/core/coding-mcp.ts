@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import type { PrismaClient } from "#prisma";
 import { loadMcpMaxCallsPerRun } from "../config/mcp-call-limit.js";
-import { mcpTokenHash, isMcpToken } from "../coding/mcp-token.js";
+import { MCP_TOKEN_REQUIRED_MESSAGE, mcpTokenHash, isMcpToken } from "../coding/mcp-token.js";
 import { HTTP_LIMITS } from "../mcp/transport/http-limits.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
@@ -175,7 +175,7 @@ async function handle(
   }
   const session = await authenticate(authorization, deps);
   // No WWW-Authenticate: a client must not start OAuth discovery against this route.
-  if (!session) return rpcError(401, null, -32001, "A valid MCP token for an active run is required.");
+  if (!session) return rpcError(401, null, -32001, MCP_TOKEN_REQUIRED_MESSAGE);
   seen.sessionId = session.id;
 
   let message: unknown;

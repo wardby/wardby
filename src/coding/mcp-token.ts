@@ -9,6 +9,13 @@ import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
 
 export const MCP_TOKEN_ENV = "WARDBY_MCP_TOKEN";
 
+/** The worker's MCP server key; Claude Code names its tools `mcp__<key>__<exposed name>`. */
+export const WORKER_MCP_SERVER_KEY = "wardby_mcp";
+export const CLAUDE_MCP_TOOL_PREFIX = `mcp__${WORKER_MCP_SERVER_KEY}__`;
+
+/** The 401 text of both /mcp (coding proxy) and /coding-mcp (native gateway). */
+export const MCP_TOKEN_REQUIRED_MESSAGE = "A valid MCP token for an active run is required.";
+
 /** Exactly what mintMcpToken makes; launchers refuse to deliver anything else. */
 export function isMcpToken(value: string | undefined): value is string {
   return value !== undefined && /^rmt_[A-Za-z0-9_-]{43}$/.test(value);

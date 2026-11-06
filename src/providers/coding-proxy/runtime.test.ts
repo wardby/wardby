@@ -1,4 +1,5 @@
 import type { PrismaClient } from "#prisma";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { logger } from "../../core/logger.js";
@@ -6,7 +7,7 @@ import { MemoryProxyLedger } from "./memory-ledger.js";
 import type { CodingProxy, CodingProxyOptions, ProxyResponseSink } from "./proxy.js";
 import { DependencyCacheService } from "./dependency-cache/service.js";
 import { RegistryService } from "./registry/service.js";
-import { createRegistryUpstream, startConfiguredCodingProxy } from "./runtime.js";
+import { createRegistryUpstream, loadMcpGatewayUrl, startConfiguredCodingProxy } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
 
@@ -146,6 +147,60 @@ describe("configured coding proxy runtime", () => {
       }),
     ).rejects.toThrow("EADDRINUSE");
     expect(closed).toEqual(["proxy"]);
+  });
+});
+
+describe("configured coding proxy runtime: /mcp", () => {
+  const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+  const startDenyPort = async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} });
+  /** Starts the runtime and answers one POST /mcp with no token through the route it wired. */
+  const mcpStatus = async (env: NodeJS.ProcessEnv) => {
+    const startServer = vi.fn(async () => handle);
+    await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+    const config = (startServer.mock.calls[0] as unknown as [unknown, { mcp?: unknown }])[1];
+    expect(config.mcp).toEqual(expect.any(Function));
+    const route = config.mcp as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+    const res = { statusCode: 0, headersSent: false, writableFinished: false } as unknown as ServerResponse;
+    Object.assign(res, {
+      setHeader: () => res,
+      writeHead: (status: number) => Object.assign(res, { statusCode: status, headersSent: true }),
+      end: () => res,
+    });
+    await route({ method: "POST", headers: {}, complete: true } as unknown as IncomingMessage, res);
+    return res.statusCode;
+  };
+
+  it("wires /mcp; without WARDBY_MCP_GATEWAY_URL it answers 503", async () => {
+    expect(await mcpStatus({ OPENAI_API_KEY: "test-secret" })).toBe(503);
+  });
+
+  it("with WARDBY_MCP_GATEWAY_URL, /mcp checks the token (401 without one)", async () => {
+    expect(
+      await mcpStatus({ OPENAI_API_KEY: "test-secret", WARDBY_MCP_GATEWAY_URL: "http://wardby-gateway:8790/" }),
+    ).toBe(401);
+  });
+
+  it.each(["not a url", "ftp://gateway", "http://user:pass@gateway", "http://gateway?x=1", "http://gateway#x"])(
+    "refuses to start with WARDBY_MCP_GATEWAY_URL=%j, without echoing it",
+    async (value) => {
+      const startServer = vi.fn(async () => handle);
+      const start = startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { OPENAI_API_KEY: "test-secret", WARDBY_MCP_GATEWAY_URL: value },
+        startServer,
+        startDenyPort,
+      });
+      await expect(start).rejects.toThrow("WARDBY_MCP_GATEWAY_URL must be an http(s) URL");
+      await expect(start).rejects.not.toThrow(value);
+      expect(startServer).not.toHaveBeenCalled();
+    },
+  );
+
+  it("normalizes the gateway URL", () => {
+    expect(loadMcpGatewayUrl({})).toBeUndefined();
+    expect(loadMcpGatewayUrl({ WARDBY_MCP_GATEWAY_URL: "  " })).toBeUndefined();
+    expect(loadMcpGatewayUrl({ WARDBY_MCP_GATEWAY_URL: "https://gw.internal:8790/" })).toBe("https://gw.internal:8790");
+    expect(loadMcpGatewayUrl({ WARDBY_MCP_GATEWAY_URL: "http://gw:8790/base/" })).toBe("http://gw:8790/base");
   });
 });
 

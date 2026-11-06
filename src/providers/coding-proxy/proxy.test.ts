@@ -19,6 +19,7 @@ import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
 import type { LlmEffort } from "../llm/types.js";
 import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
+import type { McpToolPin } from "../../core/mcp-tools.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const PRICE: ModelPricing = {
@@ -95,6 +96,7 @@ async function harness(
     protocol?: ProxyProtocol;
     allowedModels?: string[];
     terms?: ProxyModelTerms;
+    mcpTools?: McpToolPin[];
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger({ now: overrides.now ?? (() => NOW) });
@@ -124,6 +126,7 @@ async function harness(
     deadlineAt: overrides.deadlineAt ?? new Date(NOW.getTime() + 60_000),
     budgetUsd: overrides.budgetUsd ?? 1,
     terms: overrides.terms,
+    ...(overrides.mcpTools ? { mcpTools: overrides.mcpTools, mcpTokenHash: `mcp-hash-${Math.random()}` } : {}),
   });
   return { proxy, ledger, session, fetch, events };
 }
@@ -2117,5 +2120,252 @@ describe("cache-aware holds", () => {
     });
     await execute(h, "t0", new TestSink(), turnBody(0));
     expect(h.events.find((e) => e.type === "request.reserved")).toMatchObject({ reservationBasis: "full" });
+  });
+});
+
+describe("MCP tool names in the model-request allowlist", () => {
+  const mcpPin = (exposedName: string): McpToolPin => ({
+    exposedName,
+    toolName: exposedName.split("__")[1] ?? exposedName,
+    serverId: "server-1",
+    serverName: exposedName.split("__")[0],
+    definition: { description: "A tool", inputSchema: { type: "object" } },
+  });
+  const LIST_ISSUES = "mcp__wardby_mcp__github__list_issues";
+  const runCommandTool = {
+    name: "mcp__wardby_tools__run_command",
+    description: "Run a command",
+    input_schema: { type: "object", properties: { command: { type: "string" } } },
+  };
+  const structuredOutputTool = { name: "StructuredOutput", description: "Report", input_schema: { type: "object" } };
+  const mcpTool = (name: string) => ({
+    name,
+    description: "List issues",
+    input_schema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
+  });
+  const anthropicReply = async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    return async () => Response.json(response);
+  };
+  const claude = async (mcpTools?: McpToolPin[]) =>
+    harness({ protocol: "anthropic-messages", fetch: await anthropicReply(), mcpTools });
+  const body = async (change: (body: Record<string, unknown>) => void) => {
+    const value = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    value.stream = false;
+    change(value);
+    return JSON.stringify(value);
+  };
+  const withToolTurn = (name: string) => (value: Record<string, unknown>) => {
+    (value.messages as unknown[]).push(
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_mcp_1", name, input: { repo: "a/b" } }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_mcp_1",
+            content: [{ type: "text", text: "[]" }],
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    );
+  };
+
+  it("forwards a request advertising a pinned MCP tool next to run_command", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await execute(
+      h,
+      "mcp-tools",
+      new TestSink(),
+      await body((v) => (v.tools = [runCommandTool, mcpTool(LIST_ISSUES)])),
+    );
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(forwarded.tools.map((tool: { name: string }) => tool.name)).toEqual([runCommandTool.name, LIST_ISSUES]);
+  });
+
+  it("forwards a pinned MCP tool's tool_use and tool_result blocks", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await execute(
+      h,
+      "mcp-turn",
+      new TestSink(),
+      await body((v) => {
+        v.tools = [runCommandTool, mcpTool(LIST_ISSUES)];
+        withToolTurn(LIST_ISSUES)(v);
+      }),
+    );
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a tool definition whose MCP name is not pinned", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await expect(
+      execute(
+        h,
+        "mcp-unpinned",
+        new TestSink(),
+        await body((v) => (v.tools = [runCommandTool, mcpTool("mcp__wardby_mcp__github__delete_repo")])),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a tool_use block whose MCP name is not pinned", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await expect(
+      execute(h, "mcp-unpinned-use", new TestSink(), await body(withToolTurn("mcp__wardby_mcp__github__delete_repo"))),
+    ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a pinned MCP tool whose definition carries keys Claude Code never sends", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await expect(
+      execute(
+        h,
+        "mcp-extra-key",
+        new TestSink(),
+        await body((v) => (v.tools = [{ ...mcpTool(LIST_ISSUES), type: "web_search_20250305" }])),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      execute(
+        h,
+        "mcp-no-schema",
+        new TestSink(),
+        await body((v) => (v.tools = [{ name: LIST_ISSUES, description: "x" }])),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("allows two tools plus one per pin, and no more", async () => {
+    const pins = [mcpPin("github__list_issues"), mcpPin("github__get_issue")];
+    const all = [
+      runCommandTool,
+      structuredOutputTool,
+      mcpTool(LIST_ISSUES),
+      mcpTool("mcp__wardby_mcp__github__get_issue"),
+    ];
+    const h = await claude(pins);
+    await execute(h, "mcp-four", new TestSink(), await body((v) => (v.tools = all)));
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    await expect(
+      execute(h, "mcp-duplicate", new TestSink(), await body((v) => (v.tools = [...all, mcpTool(LIST_ISSUES)]))),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+  });
+
+  it("keeps today's behaviour exactly for a session without pins", async () => {
+    const h = await claude();
+    await expect(
+      execute(h, "no-pins-def", new TestSink(), await body((v) => (v.tools = [runCommandTool, mcpTool(LIST_ISSUES)]))),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    await expect(
+      execute(h, "no-pins-use", new TestSink(), await body(withToolTurn(LIST_ISSUES))),
+    ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+    await expect(
+      execute(
+        h,
+        "no-pins-three",
+        new TestSink(),
+        await body(
+          (v) => (v.tools = [runCommandTool, structuredOutputTool, { ...structuredOutputTool, name: "Other" }]),
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    await execute(
+      h,
+      "no-pins-ok",
+      new TestSink(),
+      await body((v) => (v.tools = [runCommandTool, structuredOutputTool])),
+    );
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take a pin's exposed name without the wardby_mcp prefix", async () => {
+    const h = await claude([mcpPin("github__list_issues")]);
+    await expect(
+      execute(h, "mcp-bare", new TestSink(), await body((v) => (v.tools = [mcpTool("github__list_issues")]))),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+  });
+
+  describe("recorded Claude Code 2.1.286 MCP turn", () => {
+    const recorded = async () =>
+      JSON.parse(await fixture("claude-code-2.1.286-mcp-requests.json")) as {
+        anthropic: { scenario: string; anthropicBeta: string; body: Record<string, unknown> }[];
+      };
+
+    it("forwards both recorded requests for a session that pins the tool", async () => {
+      const { anthropic } = await recorded();
+      expect(anthropic).toHaveLength(2);
+      for (const [index, { scenario, anthropicBeta, body }] of anthropic.entries()) {
+        const h = await claude([mcpPin("echo")]);
+        await h.proxy.execute(
+          {
+            bearer: h.session.capability,
+            protocol: "anthropic-messages",
+            rawBody: JSON.stringify({ ...body, model: "claude-sonnet-5", stream: false }),
+            requestKey: `claude-mcp-${index}`,
+            anthropicBeta,
+          },
+          new TestSink(),
+        );
+        expect(h.fetch, scenario).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("refuses the recorded requests for a session without that pin", async () => {
+      const { anthropic } = await recorded();
+      for (const [index, { anthropicBeta, body }] of anthropic.entries()) {
+        const h = await claude(index === 0 ? undefined : [mcpPin("other")]);
+        await expect(
+          h.proxy.execute(
+            {
+              bearer: h.session.capability,
+              protocol: "anthropic-messages",
+              rawBody: JSON.stringify({ ...body, model: "claude-sonnet-5", stream: false }),
+              requestKey: `claude-mcp-refused-${index}`,
+              anthropicBeta,
+            },
+            new TestSink(),
+          ),
+        ).rejects.toMatchObject({ status: 400 });
+        expect(h.fetch).not.toHaveBeenCalled();
+      }
+    });
+  });
+
+  describe("recorded Codex 0.160.1 MCP requests", () => {
+    const recorded = async () =>
+      JSON.parse(await fixture("codex-0.160.1-mcp-requests.json")) as {
+        responses: { scenario: string; outcome: "forwarded" | "refused"; body: Record<string, unknown> }[];
+      };
+
+    it("forwards the code-mode and namespace layouts for a session with pins", async () => {
+      const forwarded = (await recorded()).responses.filter((entry) => entry.outcome === "forwarded");
+      expect(forwarded.length).toBeGreaterThanOrEqual(4);
+      for (const [index, { scenario, body }] of forwarded.entries()) {
+        const h = await harness({
+          fetch: async () => new Response(completedSse(), { status: 200 }),
+          mcpTools: [mcpPin("echo")],
+        });
+        await execute(h, `codex-mcp-${index}`, new TestSink(), JSON.stringify({ ...body, model: "test-model" }));
+        expect(h.fetch, scenario).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("still refuses the tool_search layout (gpt-5.5), with or without pins", async () => {
+      const refused = (await recorded()).responses.filter((entry) => entry.outcome === "refused");
+      expect(refused).toHaveLength(1);
+      for (const mcpTools of [undefined, [mcpPin("echo")]]) {
+        const h = await harness({ mcpTools });
+        await expect(
+          execute(h, "codex-tool-search", new TestSink(), JSON.stringify({ ...refused[0].body, model: "test-model" })),
+        ).rejects.toMatchObject({ status: 400, code: "openai_tool_not_allowed:tool_search" });
+        expect(h.fetch).not.toHaveBeenCalled();
+      }
+    });
   });
 });

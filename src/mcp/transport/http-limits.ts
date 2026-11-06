@@ -32,7 +32,12 @@ export function canonicalUrl(value: string): URL {
   return url;
 }
 
-export function readBody(req: IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<string> {
+export async function readBody(req: IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<string> {
+  return (await readBodyBytes(req, maxBytes, signal)).toString("utf8");
+}
+
+/** readBody's bytes, undecoded (for a route that forwards the body unchanged). */
+export function readBodyBytes(req: IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
   const length = req.headers["content-length"];
   if (length && (!/^\d+$/.test(length) || Number(length) > maxBytes)) return Promise.reject(new PayloadTooLargeError());
   if (req.headers["content-encoding"] && req.headers["content-encoding"] !== "identity")
@@ -61,7 +66,7 @@ export function readBody(req: IncomingMessage, maxBytes: number, signal: AbortSi
     };
     const end = () => {
       clean();
-      resolve(Buffer.concat(chunks, size).toString("utf8"));
+      resolve(Buffer.concat(chunks, size));
     };
     req.on("data", data);
     req.once("end", end);

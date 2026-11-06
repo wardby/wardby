@@ -10,6 +10,7 @@ import { RegistryError } from "../../coding/registry/types.js";
 import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
 import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
+import { MCP_ROUTE_PATH } from "./mcp-route.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
 
@@ -32,6 +33,8 @@ export interface CodingProxyServerConfig {
   dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
   /** Time to receive a whole request (default HTTP_LIMITS.requestMs); a cache upload gets its upload window instead. */
   requestMs?: number;
+  /** The worker's MCP route (`/mcp`, createMcpRoute); absent, /mcp is not found. */
+  mcp?: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -285,6 +288,15 @@ export async function startCodingProxyServer(
         pipeline(Readable.fromWeb(result.stream as WebReadableStream), response, (error) => {
           if (error && !response.destroyed) response.destroy();
         });
+        return;
+      }
+      if (request.url === MCP_ROUTE_PATH || request.url?.startsWith(`${MCP_ROUTE_PATH}?`)) {
+        if (!config.mcp) {
+          closeIfBodyUnread(request, response);
+          sendError(response, 404, "not_found");
+          return;
+        }
+        await config.mcp(request, response);
         return;
       }
       if (request.method === "HEAD" && request.url === "/api/hello") {
