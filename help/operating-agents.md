@@ -41,6 +41,13 @@ every run of the agents you own and only the runs you started on the others.
 model, coding provider, budget, owner and your access, without the full
 configuration.
 
+From Wardby 0.8.0, `get_run` and `list_runs` without an `agentId` also return
+`triggerInfo` (the pull request or issue that started the run, and whether it
+was a review or a mention), `outcomes` (pull requests opened, comments, checks)
+and `serviceReadiness` (each coding-run service's state). They use the admin
+viewer API's shapes. Match one run's pull-request outcome to another run's
+trigger to follow a pull request through its review and fix rounds.
+
 To stop a run that is pending, queued, or running (for example one a schedule
 started that you did not want), call `stop_run` with its id. It ends as
 `cancelled`, along with the sub-agent runs it still has in flight. Search help
