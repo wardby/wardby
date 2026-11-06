@@ -7,7 +7,7 @@ import { createGatewayServer } from "../native-worker/http-server.js";
 import { handleCodingMcpRequest, type CodingMcpDeps } from "./coding-mcp.js";
 import { createPrismaClient } from "./db.js";
 import type { Logger } from "./logger.js";
-import { loadMcpToolPins } from "./mcp-tools.js";
+import { isCodexCoding, loadMcpToolPins } from "./mcp-tools.js";
 import { fakeMcpServer, textResult } from "./mcp-tools.test-support.js";
 import { createSecret } from "./secrets.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
@@ -165,6 +165,42 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
     });
     expect((await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl))).status).toBe(401);
     expect(server.seen).toEqual([]);
+  });
+
+  it("judges Codex by the run's dispatched provider: a profile switched to claude-code before launch gets no write tool", async () => {
+    // Dispatched as Codex; the agent then switched to claude-code. The tool is not marked read-only.
+    await db.codingRun.update({ where: { runId }, data: { provider: "codex" } });
+    await db.agent.update({
+      where: { id: agentId },
+      data: {
+        kind: "coding",
+        codingProfile: {
+          create: { provider: "claude-code", repository: "your-org/your-repo", protectedPaths: [] },
+        },
+      },
+    });
+    try {
+      const { provider } = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+      // Pin time (the executor passes the run's provider): no write pin.
+      expect(await loadMcpToolPins(db, agentId, { readOnlyOnly: isCodexCoding(provider) })).toEqual([]);
+      // Per call (the session's pins were taken before): refused, the server never asked.
+      const server = fakeMcpServer(() => textResult("ran"));
+      const res = await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl));
+      expect(res.status).toBe(200);
+      const result = resultOf(res.body);
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ error: "mcp_tool_not_allowed" });
+      expect(result.content[0].text).toContain("read-only");
+      expect(server.seen).toEqual([]);
+    } finally {
+      await db.codingAgentProfile.deleteMany({ where: { agentId } });
+      await db.agent.update({ where: { id: agentId }, data: { kind: "native" } });
+      await db.codingRun.update({ where: { runId }, data: { provider: "claude-code" } });
+    }
+    // A Claude Code run is unchanged: the same tool runs.
+    const server = fakeMcpServer(() => textResult("ran"));
+    const res = await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl));
+    expect(resultOf(res.body)).toEqual({ content: [{ type: "text", text: "ran" }] });
   });
 
   it("counts calls in the database and never lets concurrent calls past the limit", async () => {

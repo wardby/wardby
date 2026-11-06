@@ -5,6 +5,7 @@ import { createSecret } from "./secrets.js";
 import { loadAgentSecretValues } from "./secret-guard.js";
 import {
   handleMcpTool,
+  isCodexCoding,
   loadMcpToolPins,
   mcpSecretValuesForAgent,
   mcpToolDefs,
@@ -130,29 +131,25 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     };
   };
 
-  it("keeps a tool out of a Codex run once a refresh drops its readOnlyHint, and refuses a call already pinned", async () => {
-    const codexId = `mcpt-codex-${suffix}`;
-    const claudeId = `mcpt-claude-${suffix}`;
-    for (const [id, provider] of [
-      [codexId, "codex"],
-      [claudeId, "claude-code"],
-    ] as const) {
-      await db.agent.create({
-        data: {
-          id,
-          name: id,
-          systemPrompt: "x",
-          model: "m",
-          budgetUsd: 1,
-          ownerId: owner,
-          kind: "coding",
-          codingProfile: { create: { provider, repository: "your-org/your-repo", protectedPaths: [] } },
-        },
-      });
-      await db.agentMcpServer.create({
-        data: { agentId: id, serverId, allowedTools: ["search"], attachedById: owner },
-      });
-    }
+  it("keeps a tool out of a read-only (Codex) run once a refresh drops its readOnlyHint, and refuses a call already pinned", async () => {
+    // The rule follows the caller's readOnlyOnly (the run's dispatched provider), not the agent's profile:
+    // this agent's profile says claude-code, yet a run pinned as Codex still gets read-only tools only.
+    const codingId = `mcpt-coding-${suffix}`;
+    await db.agent.create({
+      data: {
+        id: codingId,
+        name: codingId,
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        ownerId: owner,
+        kind: "coding",
+        codingProfile: { create: { provider: "claude-code", repository: "your-org/your-repo", protectedPaths: [] } },
+      },
+    });
+    await db.agentMcpServer.create({
+      data: { agentId: codingId, serverId, allowedTools: ["search"], attachedById: owner },
+    });
     const setSnapshot = (annotations?: Record<string, boolean>) =>
       db.mcpServer.update({
         where: { id: serverId },
@@ -160,21 +157,23 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
       });
     try {
       await setSnapshot({ readOnlyHint: true });
-      const codexPins = await loadMcpToolPins(db, codexId);
+      const codexPins = await loadMcpToolPins(db, codingId, { readOnlyOnly: true });
       expect(codexPins.map((p) => p.toolName)).toEqual(["search"]);
 
       await setSnapshot({ readOnlyHint: false });
-      expect(await loadMcpToolPins(db, codexId)).toEqual([]);
-      expect((await loadMcpToolPins(db, claudeId)).map((p) => p.toolName)).toEqual(["search"]);
+      expect(await loadMcpToolPins(db, codingId, { readOnlyOnly: true })).toEqual([]);
+      expect((await loadMcpToolPins(db, codingId)).map((p) => p.toolName)).toEqual(["search"]);
 
       // A pin taken before the refresh is refused at call time.
       const server = fakeServer(() => textResult("ran"));
       const base = ctx(server.impl).ctx;
-      const refused = JSON.parse(await handleMcpTool(codexPins[0], "{}", { ...base, agentId: codexId }));
+      const refused = JSON.parse(
+        await handleMcpTool(codexPins[0], "{}", { ...base, agentId: codingId, readOnlyOnly: true }),
+      );
       expect(refused.error).toBe("mcp_tool_not_allowed");
       expect(refused.message).toContain("read-only");
       expect(server.seen).toEqual([]);
-      expect(await handleMcpTool(codexPins[0], "{}", { ...base, agentId: claudeId })).toBe("ran");
+      expect(await handleMcpTool(codexPins[0], "{}", { ...base, agentId: codingId })).toBe("ran");
     } finally {
       await db.mcpServer.update({
         where: { id: serverId },
@@ -186,9 +185,14 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
           ],
         },
       });
-      await db.agentMcpServer.deleteMany({ where: { agentId: { in: [codexId, claudeId] } } });
-      await db.agent.deleteMany({ where: { id: { in: [codexId, claudeId] } } });
+      await db.agentMcpServer.deleteMany({ where: { agentId: codingId } });
+      await db.agent.deleteMany({ where: { id: codingId } });
     }
+  });
+
+  it("isCodexCoding fails closed: only exactly claude-code is exempt", () => {
+    expect(isCodexCoding("claude-code")).toBe(false);
+    for (const provider of ["codex", "Claude-Code", "", null, undefined]) expect(isCodexCoding(provider)).toBe(true);
   });
 
   it("pins only allowed tools present in the snapshot, without the URL, secret names or owner id", async () => {

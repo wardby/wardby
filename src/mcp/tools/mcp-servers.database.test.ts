@@ -377,6 +377,77 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       ]);
     });
 
+    it("treats a coding agent with no profile as Codex: a tool not marked read-only is refused", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      fake.tools = [{ name: "search", annotations: { readOnlyHint: true } }, { name: "plain" }];
+      const { id } = await register(call);
+      const bare = await db.agent.create({
+        data: {
+          name: `mcp-agent-${randomUUID()}`,
+          systemPrompt: "x",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          ownerId: p.id,
+          kind: "coding",
+        },
+      });
+      agentIds.push(bare.id);
+      const refused = await call("attach_mcp_server", { agentId: bare.id, serverId: id, allowedTools: ["plain"] });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("Codex agents can use only tools the server marks read-only (plain isn't).");
+      ok(await call("attach_mcp_server", { agentId: bare.id, serverId: id, allowedTools: ["search"] }));
+    });
+
+    it("warns when update_agent switches an agent to Codex while it has tools not marked read-only", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      fake.tools = [
+        { name: "search", annotations: { readOnlyHint: true } },
+        { name: "get_issue", annotations: { readOnlyHint: false } },
+        { name: "plain" },
+      ];
+      const { id } = await register(call);
+      const coding = await agent(p, "coding", "claude-code");
+      // update_agent re-validates the stored profile, which needs at least one protected path.
+      await db.codingAgentProfile.update({ where: { agentId: coding.id }, data: { protectedPaths: [".github/**"] } });
+      ok(
+        await call("attach_mcp_server", {
+          agentId: coding.id,
+          serverId: id,
+          allowedTools: ["search", "get_issue", "plain"],
+        }),
+      );
+      const switched = ok(await call("update_agent", { id: coding.id, codingProfile: { provider: "codex" } }));
+      expect(switched.codingProfile.provider).toBe("codex");
+      expect(switched.warnings).toEqual([
+        "These MCP tools aren't read-only and won't be available to Codex runs: acme__get_issue, acme__plain.",
+      ]);
+      // Already Codex: no repeat on an unrelated edit.
+      expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "y" })).warnings).toBeUndefined();
+      // Back to Claude Code: nothing to warn about.
+      const back = ok(
+        await call("update_agent", {
+          id: coding.id,
+          model: "claude-sonnet-5",
+          codingProfile: { provider: "claude-code" },
+        }),
+      );
+      expect(back.warnings).toBeUndefined();
+    });
+
+    it("gives no warning on a switch to Codex when every attached tool is read-only", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      fake.tools = [{ name: "search", annotations: { readOnlyHint: true } }];
+      const { id } = await register(call);
+      const coding = await agent(p, "coding", "claude-code");
+      await db.codingAgentProfile.update({ where: { agentId: coding.id }, data: { protectedPaths: [".github/**"] } });
+      ok(await call("attach_mcp_server", { agentId: coding.id, serverId: id, allowedTools: ["search"] }));
+      const switched = ok(await call("update_agent", { id: coding.id, codingProfile: { provider: "codex" } }));
+      expect(switched.warnings).toBeUndefined();
+    });
+
     it("leaves native agents free to attach tools that are not read-only", async () => {
       const p = await principal();
       const call = await connect(p);

@@ -236,7 +236,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     sessions,
     capabilities,
     // Remote MCP servers: a coding run gets its agent's pinned tools and an MCP token ([] when off).
-    mcpToolPins: (agentId) => loadMcpToolPins(options.db, agentId),
+    mcpToolPins: (agentId, pinOptions) => loadMcpToolPins(options.db, agentId, pinOptions),
     artifactRoot,
     workerImage: config.workerImage,
     claudeWorkerImage: config.claudeWorkerImage,

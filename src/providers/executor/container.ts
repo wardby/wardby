@@ -12,7 +12,7 @@ import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
 import { withBaseCommit } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
-import type { McpToolPin } from "../../core/mcp-tools.js";
+import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
@@ -1049,9 +1049,10 @@ export interface ContainerExecutorOptions {
   /**
    * The agent's MCP tool pins (composition wires loadMcpToolPins; [] when WARDBY_MCP_SERVERS=off).
    * Absent = no coding run gets MCP tools. A run with pins gets an MCP token, delivered as
-   * WARDBY_MCP_TOKEN; one without gets neither.
+   * WARDBY_MCP_TOKEN; one without gets neither. `readOnlyOnly` comes from the run's dispatched
+   * provider (isCodexCoding(run.provider)), never the agent's current profile.
    */
-  mcpToolPins?: (agentId: string) => Promise<McpToolPin[]>;
+  mcpToolPins?: (agentId: string, options: { readOnlyOnly: boolean }) => Promise<McpToolPin[]>;
   artifactRoot: string;
   /**
    * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
@@ -1334,7 +1335,10 @@ export class ContainerExecutor implements Executor {
         const deadlineAt = new Date(this.now().getTime() + run.timeoutSec * 1_000);
         // The agent's MCP tools, pinned for the run; only a run with some gets a token. The token is
         // never logged: only its hash goes to the session, the value only into the vault.
-        const mcpTools = (await this.options.mcpToolPins?.(run.agentId)) ?? [];
+        // A Codex run's shell commands can read the token, so it gets read-only tools only; decided by
+        // the provider the run was dispatched with, which is what jobSpec launches.
+        const mcpTools =
+          (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
         const mcpToken = mcpTools.length > 0 ? mintMcpToken() : undefined;
         const session = await this.options.sessions.createSession({
           runId,

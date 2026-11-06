@@ -23,7 +23,7 @@ import {
   snapshotOf,
   type McpServerRow,
 } from "../../core/mcp-servers.js";
-import { isMarkedReadOnly } from "../../core/mcp-tools.js";
+import { isCodexCoding, isMarkedReadOnly } from "../../core/mcp-tools.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
@@ -166,6 +166,31 @@ export async function agentMcpServerViews(db: Pick<PrismaClient, "agentMcpServer
       callTimeoutMs: row.callTimeoutMs,
       missingTools: row.allowedTools.filter((name) => !present.has(name)),
     };
+  });
+}
+
+/** The update_agent warning when an agent becomes Codex with attached tools the server doesn't mark read-only. */
+export function codexWriteToolsWarning(names: readonly string[]): string {
+  return `These MCP tools aren't read-only and won't be available to Codex runs: ${names.join(", ")}.`;
+}
+
+/**
+ * The exposed names of an agent's attached, allowed tools that the saved tool list doesn't mark read-only:
+ * a Codex run never gets them (loadMcpToolPins with readOnlyOnly). Tools no longer listed are left out.
+ */
+export async function codexUnavailableMcpTools(
+  db: Pick<PrismaClient, "agentMcpServer">,
+  agentId: string,
+): Promise<string[]> {
+  const rows = await db.agentMcpServer.findMany({
+    where: { agentId },
+    include: { server: { select: { name: true, toolSnapshot: true } } },
+    orderBy: [{ createdAt: "asc" }, { serverId: "asc" }],
+  });
+  return rows.flatMap((row) => {
+    const byName = new Map(snapshotOf(row.server).map((t) => [t.name, t]));
+    const writers = row.allowedTools.filter((name) => byName.has(name) && !isMarkedReadOnly(byName.get(name)));
+    return exposedNames(row.server.name, writers);
   });
 }
 
@@ -437,7 +462,8 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
                 where: { agentId: agent.id },
                 select: { provider: true },
               });
-              if (profile?.provider === "codex") {
+              // Fails closed: a coding agent with no profile, or any provider but claude-code, is Codex here.
+              if (isCodexCoding(profile?.provider)) {
                 const byName = new Map(snapshotOf(server).map((t) => [t.name, t]));
                 const writer = input.allowedTools.find((t) => !isMarkedReadOnly(byName.get(t)));
                 if (writer !== undefined) {

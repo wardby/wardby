@@ -1482,6 +1482,27 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("succeeded");
     });
 
+    it("asks for read-only pins by the run's dispatched provider, not the agent's profile", async () => {
+      const asked: boolean[] = [];
+      const pins = async (_agentId: string, options: { readOnlyOnly: boolean }) => {
+        asked.push(options.readOnlyOnly);
+        return [pin];
+      };
+      // The default snapshot is a Codex run.
+      const codex = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: pins });
+      await codex.executor.start("run-1");
+      const claude = await harness(
+        { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE },
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+        { mcpToolPins: pins },
+      );
+      await claude.executor.start("run-1");
+      expect(asked).toEqual([true, false]);
+      expect(claude.store.run.status).toBe("succeeded");
+    });
+
     it("clears the token with the capability when the launch fails", async () => {
       const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
       created.jobs.launchError = new Error("boom");

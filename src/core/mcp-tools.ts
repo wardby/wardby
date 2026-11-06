@@ -59,9 +59,27 @@ export function isMarkedReadOnly(entry: { annotations?: Record<string, unknown> 
   return entry?.annotations?.readOnlyHint === true;
 }
 
+/**
+ * Whether a coding provider gets the Codex read-only rule. Fails closed: anything but exactly
+ * "claude-code" (Codex, an unknown value, or a coding agent with no profile) counts as Codex. A run
+ * is judged by the provider it was dispatched with (CodingRun.provider), never the agent's current
+ * profile, which can change between dispatch and launch.
+ */
+export function isCodexCoding(provider: string | null | undefined): boolean {
+  return provider !== "claude-code";
+}
+
 type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret" | "resourceGrant">;
 /** Redaction reads attachments and secrets only: it covers every attached server, usable or not. */
 type McpSecretsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
+
+export interface McpToolPinOptions {
+  /**
+   * Pin only tools the server marks read-only: the caller sets it for a Codex coding run, from the
+   * provider the run was dispatched with (isCodexCoding(run.provider)). Native runs leave it unset.
+   */
+  readOnlyOnly?: boolean;
+}
 
 /**
  * Builds pins for an agent's attachments: allowed tools present in the snapshot only, from servers the
@@ -70,26 +88,23 @@ type McpSecretsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
 export async function loadMcpToolPins(
   db: Pick<PrismaClient, "agentMcpServer" | "resourceGrant">,
   agentId: string,
+  options: McpToolPinOptions = {},
 ): Promise<McpToolPin[]> {
   if (loadMcpServersMode() === "off") return [];
   const rows = await db.agentMcpServer.findMany({
     where: { agentId },
-    include: {
-      server: true,
-      agent: { select: { ownerId: true, kind: true, codingProfile: { select: { provider: true } } } },
-    },
+    include: { server: true, agent: { select: { ownerId: true } } },
     orderBy: [{ createdAt: "asc" }, { serverId: "asc" }],
   });
   const pins: McpToolPin[] = [];
   for (const row of rows) {
     if (!(await ownerCanUseMcpServer(db, row.agent.ownerId, row.server))) continue;
     const byName = new Map(snapshotOf(row.server).map((t) => [t.name, t]));
-    const codex = row.agent.kind === "coding" && row.agent.codingProfile?.provider === "codex";
     for (const toolName of row.allowedTools) {
       const entry = byName.get(toolName);
       if (!entry) continue;
       // A refresh can drop readOnlyHint after attach: such a tool stays out of a Codex run.
-      if (codex && !isMarkedReadOnly(entry)) continue;
+      if (options.readOnlyOnly === true && !isMarkedReadOnly(entry)) continue;
       let exposedName: string;
       try {
         exposedName = exposedToolName(row.server.name, toolName);
@@ -151,6 +166,11 @@ export interface McpToolContext {
   signal: AbortSignal;
   /** A sandboxed run's session deadline; the call's time limit never runs past it. */
   deadlineAt?: Date;
+  /**
+   * Refuse any tool the live tool list doesn't mark read-only: set by the coding gateway for a Codex
+   * run, from the run's dispatched provider (isCodexCoding(codingRun.provider)). Native runs leave it unset.
+   */
+  readOnlyOnly?: boolean;
   fetchImpl?: typeof safeFetch;
   log: Pick<Logger, "info">;
 }
@@ -199,10 +219,7 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     if (loadMcpServersMode() === "off") return fail("mcp_servers_off", MCP_SERVERS_OFF_MESSAGE);
     const row = await ctx.db.agentMcpServer.findUnique({
       where: { agentId_serverId: { agentId: ctx.agentId, serverId: pin.serverId } },
-      include: {
-        server: true,
-        agent: { select: { ownerId: true, kind: true, codingProfile: { select: { provider: true } } } },
-      },
+      include: { server: true, agent: { select: { ownerId: true } } },
     });
     if (!row || !row.allowedTools.includes(pin.toolName)) {
       return fail(
@@ -224,7 +241,7 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
         `The tool "${pin.exposedName}" is no longer in MCP server "${row.server.name}"'s tool list.`,
       );
     }
-    if (row.agent.kind === "coding" && row.agent.codingProfile?.provider === "codex" && !isMarkedReadOnly(live)) {
+    if (ctx.readOnlyOnly === true && !isMarkedReadOnly(live)) {
       return fail(
         "mcp_tool_not_allowed",
         `The tool "${pin.exposedName}" is no longer allowed for this agent: Codex agents can use only tools the server marks read-only.`,

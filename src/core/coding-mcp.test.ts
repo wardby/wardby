@@ -30,6 +30,7 @@ interface FakeSession {
   mcpTools: unknown;
   mcpTokenHash: string;
   mcpCallCount: number;
+  run: { provider: string };
 }
 
 function fakeDb(session: Partial<FakeSession> = {}) {
@@ -41,6 +42,7 @@ function fakeDb(session: Partial<FakeSession> = {}) {
     mcpTools: [PIN],
     mcpTokenHash: mcpTokenHash(TOKEN),
     mcpCallCount: 0,
+    run: { provider: "claude-code" },
     ...session,
   };
   const counts: { sql: string; values: unknown[] }[] = [];

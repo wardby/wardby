@@ -5,6 +5,9 @@
  * proxy is not trusted, so the token is checked here again: its hash must name a proxy session that
  * is active and before its deadline.
  *
+ * A Codex run (by the provider it was dispatched with, CodingRun.provider) may call only tools the
+ * live tool list marks read-only: its shell commands can read the token.
+ *
  * tools/list serves the session's pins (no URLs or secrets); tools/call counts the call against the
  * run's limit (WARDBY_MCP_MAX_CALLS_PER_RUN) and runs it through phase 1's handleMcpTool, which
  * re-checks the live attachment and redacts the result against the server's secrets before it gets
@@ -20,7 +23,7 @@ import { HTTP_LIMITS } from "../mcp/transport/http-limits.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import type { Logger } from "./logger.js";
-import { handleMcpTool, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
+import { handleMcpTool, isCodexCoding, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
 import { TOOL_STOP_POLL_MS, watchRunStop } from "./runner.js";
 
 export const CODING_MCP_PATH = "/coding-mcp";
@@ -143,6 +146,7 @@ interface Session {
   runId: string;
   deadlineAt: Date;
   mcpTools: unknown;
+  run: { provider: string };
 }
 
 /** Handles one JSON-RPC request body for /coding-mcp. Never throws. */
@@ -234,7 +238,14 @@ async function authenticate(authorization: string | undefined, deps: CodingMcpDe
   if (!isMcpToken(token)) return undefined;
   const session = await deps.db.codingProxySession.findUnique({
     where: { mcpTokenHash: mcpTokenHash(token) },
-    select: { id: true, runId: true, status: true, deadlineAt: true, mcpTools: true },
+    select: {
+      id: true,
+      runId: true,
+      status: true,
+      deadlineAt: true,
+      mcpTools: true,
+      run: { select: { provider: true } },
+    },
   });
   if (!session || session.status !== "active") return undefined;
   if ((deps.now?.() ?? new Date()).getTime() >= session.deadlineAt.getTime()) return undefined;
@@ -269,6 +280,7 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps) 
       runId: session.runId,
       signal: stop.signal,
       deadlineAt: session.deadlineAt,
+      readOnlyOnly: isCodexCoding(session.run.provider),
       fetchImpl: deps.fetchImpl,
       log: deps.log,
     });
