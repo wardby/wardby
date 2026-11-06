@@ -51,14 +51,22 @@ export function secretNamesIn(value: unknown, named: readonly NamedSecretValues[
 }
 
 const MAX_MESSAGE_LENGTH = 1000;
+const MCP_SECRET_PREFIX = "mcp:";
 
 function refusal(names: readonly string[], listed: number): string {
   const shown = names.slice(0, listed).map((n) => JSON.stringify(n));
   const more = names.length - listed;
   const list = shown.join(", ") + (more > 0 ? `, and ${more} more` : "");
   const noun = names.length > 1 ? "secrets" : "secret";
-  const first = JSON.stringify(names[0]);
-  return `secret_in_value: not stored. The value contains the value of ${noun} ${list} attached to this agent, and secret values are never stored. Store the secret's name instead and read it when you need it: secrets.get(${first}), or fetch(url, { secrets: [${first}] }) if it is brokered.`;
+  const head = `secret_in_value: not stored. The value contains the value of ${noun} ${list} attached to this agent, and secret values are never stored.`;
+  // An MCP server's secret (`mcp:<server>/<secret>`) is not readable by the agent, so it gets no secrets.get hint.
+  const readable = names.find((n) => !n.startsWith(MCP_SECRET_PREFIX));
+  const mcpNote = names.some((n) => n.startsWith(MCP_SECRET_PREFIX))
+    ? " A name starting with mcp: is an MCP server's secret: it is used only by that server's tools and can't be stored or read."
+    : "";
+  if (readable === undefined) return head + mcpNote;
+  const first = JSON.stringify(readable);
+  return `${head} Store the secret's name instead and read it when you need it: secrets.get(${first}), or fetch(url, { secrets: [${first}] }) if it is brokered.${mcpNote}`;
 }
 
 /** The agent-visible refusal: names the secrets, never a value. At most 1000 characters. */

@@ -11,9 +11,20 @@ function truncate(text: string): string {
   return `${text.slice(0, MCP_RESULT_MAX_CHARS)}\n[truncated: ${text.length - MCP_RESULT_MAX_CHARS} characters omitted]`;
 }
 
-export function toolResultText(result: unknown): string {
+export interface ToolResultText {
+  /** The text the model sees: redacted, then capped at MCP_RESULT_MAX_CHARS. */
+  text: string;
+  /** True when the server reported an error or the result was unreadable. */
+  isError: boolean;
+}
+
+/**
+ * The model-facing text of a CallToolResult. `redact` runs on the assembled text before it is
+ * truncated, so a secret that straddles the cut is still matched whole.
+ */
+export function toolResultText(result: unknown, redact: (text: string) => string = (t) => t): ToolResultText {
   if (result === null || typeof result !== "object" || Array.isArray(result)) {
-    return errorText("The MCP server returned an unreadable result.");
+    return { text: errorText("The MCP server returned an unreadable result."), isError: true };
   }
   const r = result as { content?: unknown; structuredContent?: unknown; isError?: unknown };
   const parts: string[] = [];
@@ -32,6 +43,7 @@ export function toolResultText(result: unknown): string {
   if (!hasText && r.structuredContent !== undefined && r.structuredContent !== null) {
     text = JSON.stringify(r.structuredContent);
   }
-  if (r.isError === true) return errorText(truncate(text));
-  return truncate(text);
+  const safe = truncate(redact(text));
+  if (r.isError === true) return { text: errorText(safe), isError: true };
+  return { text: safe, isError: false };
 }

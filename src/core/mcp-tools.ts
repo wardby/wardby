@@ -227,6 +227,8 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
       });
     });
     aborted.catch(() => {});
+    // A stop that fired while the secrets were loading came before the listener; act on it now.
+    if (ctx.signal.aborted) onStop();
     const client = new McpHttpClient({
       fetch: serverFetch(server, secrets.accessor, { timeoutMs: limitMs, fetchImpl: ctx.fetchImpl }),
       signal: controller.signal,
@@ -239,9 +241,8 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
         })(),
         aborted,
       ]);
-      const text = redactForServer(toolResultText(result), values);
-      const outcome = text.startsWith('{"error":"mcp_server_error"') ? "mcp_server_error" : "ok";
-      return done(text, outcome);
+      const { text, isError } = toolResultText(result, (raw) => redactForServer(raw, values));
+      return done(text, isError ? "mcp_server_error" : "ok");
     } catch (err) {
       if (controller.signal.aborted) {
         return fail("mcp_call_timeout", stopped ? "The call was stopped." : timedOut);

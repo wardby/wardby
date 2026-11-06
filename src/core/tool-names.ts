@@ -88,8 +88,8 @@ export async function findSameNamedMcpTool(
 }
 
 /** The refusal for a Tool whose name is an exposed MCP tool name on the agent (findSameNamedMcpTool). */
-export function sameNamedMcpToolMessage(agentId: string, toolName: string, serverName: string): string {
-  return `Agent "${agentId}" already has the tool "${toolName}" from MCP server "${serverName}"; detach it or allow a different tool first.`;
+export function sameNamedMcpToolMessage(agentRef: string, toolName: string, serverName: string): string {
+  return `Agent "${agentRef}" already has the tool "${toolName}" from MCP server "${serverName}"; detach it or allow a different tool first.`;
 }
 
 /**

@@ -13,6 +13,7 @@ import {
 } from "./mcp-tools.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { fakeMcpServer as fakeServer, textResult } from "./mcp-tools.test-support.js";
+import { MCP_RESULT_MAX_CHARS } from "./mcp-client/results.js";
 import type { Logger } from "./logger.js";
 
 // Fake values only.
@@ -237,6 +238,45 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
       await handleMcpTool(await pinFor("slow"), "{}", ctx(server.impl, { signal: controller.signal }).ctx),
     );
     expect(out).toEqual({ error: "mcp_call_timeout", message: "The call was stopped." });
+  });
+
+  it("stops a call whose stop signal fires while the server's secrets are loading", async () => {
+    const controller = new AbortController();
+    const server = fakeServer(() => textResult("never"));
+    const stoppingCipher = {
+      ...cipher,
+      decrypt: async (s: string) => {
+        controller.abort(new Error("run_cancelled"));
+        return s;
+      },
+    };
+    const c = { ...ctx(server.impl, { signal: controller.signal }).ctx, cipher: stoppingCipher };
+    const out = JSON.parse(await handleMcpTool(await pinFor("slow"), "{}", c));
+    expect(out).toEqual({ error: "mcp_call_timeout", message: "The call was stopped." });
+    expect(server.seen.map((s) => s.method)).not.toContain("tools/call");
+  });
+
+  it("redacts a secret that straddles the result cap before truncating it", async () => {
+    const encoded = Buffer.from(SECRET).toString("base64");
+    for (const value of [SECRET, encoded]) {
+      const pad = "x".repeat(MCP_RESULT_MAX_CHARS - Math.floor(value.length / 2));
+      for (const isError of [false, true]) {
+        const server = fakeServer(() => ({
+          isError,
+          content: [{ type: "text", text: `${pad}${value}${"y".repeat(200)}` }],
+        }));
+        const { ctx: c, info } = ctx(server.impl);
+        const out = await handleMcpTool(await pinFor("search"), "{}", c);
+        const prefix = value.slice(0, Math.floor(value.length / 2));
+        const text = isError ? (JSON.parse(out) as { message: string }).message : out;
+        expect(text.startsWith(pad)).toBe(true);
+        expect(text.slice(pad.length)).not.toContain(prefix);
+        expect(text).toContain("[REDACTED]");
+        expect(text).toMatch(/\[truncated: \d+ characters omitted\]$/);
+        const [fields] = info.mock.calls[0] as [Record<string, unknown>];
+        expect(fields.outcome).toBe(isError ? "mcp_server_error" : "ok");
+      }
+    }
   });
 
   it("refuses arguments that are not a JSON object", async () => {
