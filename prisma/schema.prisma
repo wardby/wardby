@@ -20,18 +20,18 @@ datasource db {
 }
 
 model Agent {
-  id            String              @id @default(cuid())
-  name          String              @unique
-  systemPrompt  String
-  model         String
-  budgetUsd     Decimal             @db.Decimal(10, 4)
+  id                    String              @id @default(cuid())
+  name                  String              @unique
+  systemPrompt          String
+  model                 String
+  budgetUsd             Decimal             @db.Decimal(10, 4)
   /// Percent above budgetUsd a run may spend: each coding run's limit, or (on a lead agent) its run tree's ceiling for coding sub-agents; native model calls are unaffected; group caps still apply.
-  allowedOverrunPercent Int @default(0)
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  runs          Run[]
-  kind          AgentKind           @default(native)
-  codingProfile CodingAgentProfile?
+  allowedOverrunPercent Int                 @default(0)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  runs                  Run[]
+  kind                  AgentKind           @default(native)
+  codingProfile         CodingAgentProfile?
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -432,6 +432,7 @@ model Run {
   /// text, no FK.
   triggeredById           String?
 
+  @@unique([parentRunId, parentCallId])
   @@index([agentId, triggeredById])
   /// The admin viewer's graph window (runs started since a time, or still
   /// pending/running) and its ancestor/children walks (docs/viewer-api.md).
@@ -440,7 +441,6 @@ model Run {
   @@index([parentRunId])
   @@index([startDeferredAt])
   @@index([stopRequestedAt])
-  @@unique([parentRunId, parentCallId])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
@@ -1693,23 +1693,23 @@ model AgentIssueProject {
 
 /// A remote MCP server an owner registered (Streamable HTTP, HTTPS only).
 model McpServer {
-  id          String           @id @default(cuid())
-  ownerId     String
-  owner       Principal        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id           String           @id @default(cuid())
+  ownerId      String
+  owner        Principal        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   /// Unique per owner; the prefix of the tool names the model sees.
-  name        String
+  name         String
   /// https only; no userinfo, no fragment; the query string is kept.
-  url         String
+  url          String
   /// The owner's brokered secrets sent on every request (each brokered to the URL's host).
-  secretNames String[]         @default([])
+  secretNames  String[]         @default([])
   /// Last tools/list result, redacted: [{ name, description, inputSchema, annotations? }].
-  toolSnapshot Json            @default("[]")
-  snapshotAt  DateTime?
+  toolSnapshot Json             @default("[]")
+  snapshotAt   DateTime?
   /// From initialize: { name?, version?, protocolVersion }.
-  serverInfo  Json?
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  agents      AgentMcpServer[]
+  serverInfo   Json?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  agents       AgentMcpServer[]
 
   @@unique([ownerId, name])
   @@index([ownerId])
