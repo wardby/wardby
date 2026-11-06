@@ -25,6 +25,8 @@ import {
   usage,
 } from "./fixtures.test-support.js";
 import { createGatewayServer, NATIVE_GATEWAY_PATH } from "./http-server.js";
+import { createSecret } from "../core/secrets.js";
+import { fakeMcpServer, textResult } from "../core/mcp-tools.test-support.js";
 import { processWorkerLauncher, startSandboxRun } from "./launch.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -268,6 +270,94 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
       providers.sandboxFetch = undefined;
       await db.agentTool.deleteMany({ where: { toolId: `${toolId}-gh` } });
     }
+  });
+
+  describe("with an attached MCP server", () => {
+    const MCP_SECRET = "sk-fake-gateway-mcp-0123456789";
+    const EXPOSED = "datadog__search";
+    let serverId = "";
+    beforeAll(async () => {
+      await createSecret("DD_KEY", MCP_SECRET, ownerId, identityCipher, db, {
+        broker: {
+          hosts: ["mcp.example.com"],
+          placement: { kind: "header", name: "Authorization", format: "Bearer {value}" },
+        },
+      });
+      const server = await db.mcpServer.create({
+        data: {
+          ownerId,
+          name: "datadog",
+          url: "https://mcp.example.com/mcp",
+          secretNames: ["DD_KEY"],
+          toolSnapshot: [{ name: "search", description: "Searches logs.", inputSchema: { type: "object" } }],
+        },
+      });
+      serverId = server.id;
+      await db.agentMcpServer.create({ data: { agentId, serverId, allowedTools: ["search"], attachedById: ownerId } });
+    });
+    afterAll(async () => {
+      providers.sandboxFetch = undefined;
+      await db.agentMcpServer.deleteMany({ where: { agentId } });
+      await db.mcpServer.deleteMany({ where: { id: serverId } });
+      await db.secretBrokerChange.deleteMany({ where: { ownerId } });
+      await db.secret.deleteMany({ where: { ownerId, name: "DD_KEY" } });
+    });
+
+    it("serves the exposed tool through builtin.call and records only the redacted result", async () => {
+      const upstream = fakeMcpServer((_name, args) => textResult(`found ${String(args.q)} with key ${MCP_SECRET}`));
+      providers.sandboxFetch = upstream.impl;
+      const sandboxed = await runSandboxed(scriptFor(EXPOSED, { q: "errors" }, ["Searched."]));
+      expect(sandboxed.exitCode).toBe(0);
+      expect(sandboxed.finished.status).toBe("succeeded");
+      expect(upstream.seen[0].authorization).toBe(`Bearer ${MCP_SECRET}`);
+      const toolResult = sandboxed.model.requests[1].messages.find((m) => m.role === "tool");
+      expect(JSON.stringify(toolResult)).toContain("found errors with key [REDACTED]");
+      const calls = await db.nativeGatewayCall.findMany({
+        where: { session: { runId: sandboxed.finished.id }, method: "builtin.call" },
+      });
+      expect(calls).toHaveLength(1);
+      expect(JSON.stringify(calls[0].result)).toContain("found errors with key [REDACTED]");
+      const everything = await db.nativeGatewayCall.findMany({ where: { session: { runId: sandboxed.finished.id } } });
+      expect(JSON.stringify(everything)).not.toContain(MCP_SECRET);
+      expect(sandboxed.finished.finalText).not.toContain(MCP_SECRET);
+    });
+
+    it("cuts a call to the session's deadline", async () => {
+      providers.sandboxFetch = fakeMcpServer(() => new Promise(() => {})).impl;
+      const run = await db.run.create({ data: { agentId, nativeExecutionMode: "sandbox", status: "running" } });
+      const { createSandboxSession } = await import("../core/runner.js");
+      const { PrismaGatewayLedger } = await import("./ledger.js");
+      const live = await createSandboxSession({
+        runId: run.id,
+        providers,
+        db,
+        ledger: new PrismaGatewayLedger(db),
+        gatewayUrl: serviceUrl,
+      });
+      if (live.kind !== "started") throw new Error("expected a session");
+      expect(live.input.builtinTools).toContain(EXPOSED);
+      expect((await live.secretValues()).includes(MCP_SECRET)).toBe(true);
+      await db.nativeGatewaySession.update({
+        where: { runId: run.id },
+        data: { deadlineAt: new Date(Date.now() + 1_500) },
+      });
+      const started = Date.now();
+      const response = await fetch(`${urlB}${NATIVE_GATEWAY_PATH}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${live.capability}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          v: 1,
+          runId: run.id,
+          callId: "mcp-1",
+          method: "builtin.call",
+          params: { name: EXPOSED, argsJson: "{}" },
+        }),
+      });
+      const text = await response.text();
+      expect(text).toContain("mcp_call_timeout");
+      expect(Date.now() - started).toBeLessThan(10_000);
+      await db.run.update({ where: { id: run.id }, data: { status: "cancelled" } });
+    }, 20_000);
   });
 
   it("finishes the run when the gateway replica serving it stops mid-run", async () => {

@@ -1,13 +1,13 @@
 ---
 id: mcp-access
-title: Connect an MCP client
+title: Connect a client to Wardby
 summary: Use Wardby's local stdio or protected HTTP MCP transport safely.
 audience: developer
 tags: [mcp, oauth, codex, claude-code]
 appliesTo: >=0.2.1
 ---
 
-# Connect an MCP client
+# Connect a client to Wardby
 
 For local use, `wardby quickstart` can register the local stdio MCP server with
 Codex or Claude Code. Local stdio trusts the local operator.

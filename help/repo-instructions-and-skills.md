@@ -81,6 +81,8 @@ never loaded in either mode.
 
 ## See also
 
+- [Remote MCP servers](../docs/mcp-servers.md) (0.8.0+) are for native agents only; a coding run loads no
+  MCP configuration.
 - [Choose a native or coding agent](creating-agents.md) for `codingProfile`
   basics and the other fields it accepts.
 - [Bring-Your-Own Coding-Worker Images](../docs/coding-worker-byo-images.md)

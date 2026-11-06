@@ -122,6 +122,8 @@ function buildCombinedDb(
       // same-named tools to one agent.
       findFirst: async () => null,
     },
+    // No MCP servers attached (src/core/mcp-tools.ts).
+    agentMcpServer: { findMany: async () => [], findUnique: async () => null },
     agentSecret: {
       findFirst: async () => null,
     },

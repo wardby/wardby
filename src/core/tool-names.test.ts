@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   duplicateToolNames,
   findSameNamedAttachedTool,
+  findSameNamedMcpTool,
   reservedToolNameReason,
   resolveToolRef,
   type ToolLookupDb,
@@ -109,5 +110,28 @@ describe("findSameNamedAttachedTool", () => {
     expect(await findSameNamedAttachedTool(db, "a1", tools[1])).toMatchObject({ id: "t1" });
     expect(await findSameNamedAttachedTool(db, "a1", tools[0])).toBeNull();
     expect(await findSameNamedAttachedTool(db, "a2", tools[1])).toBeNull();
+  });
+});
+
+describe("findSameNamedMcpTool", () => {
+  const rows = [{ agentId: "a1", allowedTools: ["search", "get.logs"], server: { id: "s1", name: "datadog" } }];
+  const db = {
+    agentMcpServer: {
+      findMany: async ({ where }: { where: { agentId: string } }) => rows.filter((r) => r.agentId === where.agentId),
+    },
+  } as unknown as Parameters<typeof findSameNamedMcpTool>[0];
+
+  it("finds an MCP attachment that exposes the name, after mapping", async () => {
+    expect(await findSameNamedMcpTool(db, "a1", "datadog__search")).toEqual({ serverId: "s1", serverName: "datadog" });
+    expect(await findSameNamedMcpTool(db, "a1", "datadog__get_logs")).toEqual({
+      serverId: "s1",
+      serverName: "datadog",
+    });
+  });
+
+  it("finds nothing for another agent, an unallowed tool, or a name without the separator", async () => {
+    expect(await findSameNamedMcpTool(db, "a2", "datadog__search")).toBeNull();
+    expect(await findSameNamedMcpTool(db, "a1", "datadog__other")).toBeNull();
+    expect(await findSameNamedMcpTool(db, "a1", "search")).toBeNull();
   });
 });

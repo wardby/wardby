@@ -123,6 +123,8 @@ export interface SandboxedEngineOptions {
    * the run's values is not sent to the worker; without this, no cause code is sent.
    */
   readableSecretValues?: (tool: string) => Promise<string[]>;
+  /** Every secret value of the run's attached MCP servers, checked the same way. */
+  mcpSecretValues?: () => Promise<string[]>;
   drivability: () => Promise<RunDrivability>;
   launcher: WorkerLauncher;
 }
@@ -191,8 +193,12 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
 
   /** The run's readable secret values, for checking a failure's cause code before the worker sees it. */
   const readable = options.readableSecretValues;
+  const mcpValues = options.mcpSecretValues;
   const runSecretValues = readable
-    ? async () => (await Promise.all(Object.keys(input.userTools).map((tool) => readable(tool)))).flat()
+    ? async () => [
+        ...(await Promise.all(Object.keys(input.userTools).map((tool) => readable(tool)))).flat(),
+        ...(mcpValues ? await mcpValues() : []),
+      ]
     : undefined;
 
   const served: NativeGateway = {

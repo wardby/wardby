@@ -27,7 +27,7 @@ import {
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { toolSubject, zod3ToolWarnings } from "../core/zod3-window.js";
-import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
+import { findSameNamedAttachedTool, findSameNamedMcpTool, reservedToolNameReason } from "../core/tool-names.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
 import type { DatastoreValue } from "../providers/datastore/types.js";
@@ -250,6 +250,13 @@ export async function createFromBundle(
     if (clash) {
       warnings.push(
         `agent-tool ${at.agentName}/${at.toolName}: skipped — the agent already has a different tool with the same name (${clash.id})`,
+      );
+      continue;
+    }
+    const mcpClash = await findSameNamedMcpTool(db, agentId, eff(at.toolName));
+    if (mcpClash) {
+      warnings.push(
+        `agent-tool ${at.agentName}/${at.toolName}: skipped — the agent already has a tool with this name from MCP server "${mcpClash.serverName}"`,
       );
       continue;
     }

@@ -15,6 +15,7 @@ import {
   setSecretBroker,
   WEBHOOK_SECRET_ATTACHED,
 } from "../../core/secrets.js";
+import { mcpServersUsingSecret } from "../../core/mcp-servers.js";
 import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
 import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
@@ -381,6 +382,14 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         throw new McpError(
           409,
           `This secret is used by host provider ${providers.map((p) => `"${p}"`).join(", ")}; re-register it or delete_host_provider first.`,
+        );
+      }
+      const secret = await ctx.db.secret.findUnique({ where: { id: args.id }, select: { name: true } });
+      const servers = secret ? await mcpServersUsingSecret(ctx.db, ctx.principal.id, secret.name) : [];
+      if (servers.length > 0) {
+        throw new McpError(
+          409,
+          `Secret "${secret!.name}" is used by MCP server(s) ${servers.join(", ")}; update or delete them first.`,
         );
       }
       await deleteSecret(args.id, ctx.db);

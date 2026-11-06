@@ -131,6 +131,8 @@ function fakeDb(
   const transactionDb = {
     // The database clock a schedule start records (core/schedule-start.ts).
     $queryRaw: async () => [{ now: new Date() }],
+    // make_owner's SET LOCAL enable_seqscan = off (core/serializable-retry.ts preferIndexScans).
+    $executeRawUnsafe: async () => 0,
     // The coding-run service catalog: the built-in names only.
     codingService: {
       findMany: async ({ where }: { where: { name: { in: string[] } } }) =>
@@ -142,6 +144,8 @@ function fakeDb(
     agentDatastore: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
     agentSubAgent: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
     webhook: { findMany: async () => [] },
+    // get_agent's mcpServers and make_owner's cleanup; these fixtures attach none.
+    agentMcpServer: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
     agent: {
       create: async ({
         data,

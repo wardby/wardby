@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import semver from "semver";
 import { buildHelpCatalog } from "./catalog.js";
+import { searchHelp } from "./search.js";
 import { SERVICE_REFUSAL_CODES, SERVICE_UNREADY_CATEGORY } from "../coding/services/wording.js";
 import { PROTECTED_PATH_CATEGORY } from "../coding/protected-path-wording.js";
 import { MERGE_CONFLICT_CATEGORY, TARGET_MERGE_CATEGORY } from "../coding/merge-wording.js";
@@ -133,5 +134,58 @@ describe("buildHelpCatalog", () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)), version);
     expect(catalog.pages.length).toBeGreaterThan(0);
     expect(catalog.pages.every((entry) => semver.satisfies(version, entry.appliesTo))).toBe(true);
+  });
+
+  it.each(["mcp", "mcp server", "attach_mcp_server", "register_mcp_server"])(
+    "ranks the remote MCP servers article first for %s",
+    async (query) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(searchHelp(catalog, query)[0]?.page.id).toBe("mcp-servers");
+    },
+  );
+
+  it("ranks the MCP client article in the top 3 for 'mcp client'", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, "mcp client")
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("mcp-access");
+  });
+
+  it.each([
+    "mcp_server_unreachable",
+    "mcp_server_auth_failed",
+    "mcp_server_error",
+    "mcp_tool_not_allowed",
+    "mcp_tool_removed",
+    "mcp_call_timeout",
+    "mcp_servers_off",
+  ])("ranks the article for %s first", async (code) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(searchHelp(catalog, code)[0]?.page.id).toBe(`errors/${code.replaceAll("_", "-")}`);
+  });
+
+  it("leaves invalid_arguments (shared by many built-in tools) out of the MCP error articles", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const page of catalog.pages.filter((entry) => entry.id.startsWith("errors/mcp-"))) {
+      expect(page.markdown, page.id).not.toMatch(/invalid_arguments\b/);
+    }
+  });
+
+  it("has a page for each MCP server error code", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const code of [
+      "mcp_server_unreachable",
+      "mcp_server_auth_failed",
+      "mcp_server_error",
+      "mcp_tool_not_allowed",
+      "mcp_tool_removed",
+      "mcp_call_timeout",
+      "mcp_servers_off",
+    ]) {
+      const id = `errors/${code.replaceAll("_", "-")}`;
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}`);
+    }
   });
 });

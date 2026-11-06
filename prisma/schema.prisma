@@ -20,18 +20,18 @@ datasource db {
 }
 
 model Agent {
-  id            String              @id @default(cuid())
-  name          String              @unique
-  systemPrompt  String
-  model         String
-  budgetUsd     Decimal             @db.Decimal(10, 4)
+  id                    String              @id @default(cuid())
+  name                  String              @unique
+  systemPrompt          String
+  model                 String
+  budgetUsd             Decimal             @db.Decimal(10, 4)
   /// Percent above budgetUsd a run may spend: each coding run's limit, or (on a lead agent) its run tree's ceiling for coding sub-agents; native model calls are unaffected; group caps still apply.
-  allowedOverrunPercent Int @default(0)
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  runs          Run[]
-  kind          AgentKind           @default(native)
-  codingProfile CodingAgentProfile?
+  allowedOverrunPercent Int                 @default(0)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  runs                  Run[]
+  kind                  AgentKind           @default(native)
+  codingProfile         CodingAgentProfile?
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -60,6 +60,7 @@ model Agent {
   repositories         AgentRepository[]
   deferredReviews      DeferredReview[]
   issueProjects        AgentIssueProject[]
+  mcpServers           AgentMcpServer[]
   notificationChannels NotificationChannel[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
@@ -431,6 +432,7 @@ model Run {
   /// text, no FK.
   triggeredById           String?
 
+  @@unique([parentRunId, parentCallId])
   @@index([agentId, triggeredById])
   /// The admin viewer's graph window (runs started since a time, or still
   /// pending/running) and its ancestor/children walks (docs/viewer-api.md).
@@ -439,7 +441,6 @@ model Run {
   @@index([parentRunId])
   @@index([startDeferredAt])
   @@index([stopRequestedAt])
-  @@unique([parentRunId, parentCallId])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
@@ -1132,6 +1133,7 @@ model Principal {
   webhooks     Webhook[]
   authUser     AuthUser?
   budgetGroups BudgetGroup[]
+  mcpServers   McpServer[]
 
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
@@ -1146,7 +1148,7 @@ model Principal {
 /// AgentRepository.provider, so a new type or level needs no enum migration.
 model ResourceGrant {
   id                 String     @id @default(cuid())
-  /// "agent" | "tool" | "budget_group" (later "secret" | "datastore").
+  /// "agent" | "tool" | "budget_group" | "mcp_server" (later "secret" | "datastore").
   resourceType       String
   resourceId         String
   /// "principal" | "everyone" (later "group").
@@ -1687,6 +1689,48 @@ model AgentIssueProject {
 
   @@unique([agentId, provider, projectKey])
   @@index([provider, projectKey])
+}
+
+/// A remote MCP server an owner registered (Streamable HTTP, HTTPS only).
+model McpServer {
+  id           String           @id @default(cuid())
+  ownerId      String
+  owner        Principal        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// Unique per owner; the prefix of the tool names the model sees.
+  name         String
+  /// https only; no userinfo, no fragment; the query string is kept.
+  url          String
+  /// The owner's brokered secrets sent on every request (each brokered to the URL's host).
+  secretNames  String[]         @default([])
+  /// Last tools/list result, redacted: [{ name, description, inputSchema, annotations? }].
+  toolSnapshot Json             @default("[]")
+  snapshotAt   DateTime?
+  /// From initialize: { name?, version?, protocolVersion }.
+  serverInfo   Json?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  agents       AgentMcpServer[]
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+}
+
+/// An MCP server attached to a native agent, with the server tools it may call.
+model AgentMcpServer {
+  agentId       String
+  agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  serverId      String
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// Exact tool names from the server's saved list. Never empty.
+  allowedTools  String[]
+  /// Per call; null = 30000. Capped by WARDBY_TOOL_MAX_TIMEOUT_MS at call time.
+  callTimeoutMs Int?
+  attachedById  String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@id([agentId, serverId])
+  @@index([serverId])
 }
 
 /// Dedupe record: an issue wardby created for a fingerprint (several over time — regressions).

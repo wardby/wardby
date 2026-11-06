@@ -117,6 +117,7 @@ export function runSecretValues(
   return async () => [
     capability,
     ...(await userToolSecretValues(ctx.tools, Object.keys(ctx.snapshot.input.userTools))),
+    ...(await ctx.tools.mcpSecretValues()),
   ];
 }
 
@@ -265,6 +266,7 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
       repoAccess,
       issueTrackers,
       reviewReads,
+      deadlineAt: session.deadlineAt,
     }),
     finishContext: { runId: session.runId, db, providers, reviewHosts, repoAccess, issueTrackers },
     delegation: {
