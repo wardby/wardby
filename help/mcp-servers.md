@@ -62,6 +62,7 @@ at once, and their runs' next call is refused with `mcp_tool_not_allowed`.
 
 Errors a call can return: [`mcp_server_unreachable`](errors/mcp-server-unreachable.md),
 [`mcp_server_auth_failed`](errors/mcp-server-auth-failed.md),
+[`mcp_server_credentials_unavailable`](errors/mcp-server-credentials-unavailable.md),
 [`mcp_server_error`](errors/mcp-server-error.md),
 [`mcp_tool_not_allowed`](errors/mcp-tool-not-allowed.md),
 [`mcp_tool_removed`](errors/mcp-tool-removed.md),

@@ -16,6 +16,7 @@ import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { fakeMcpServer as fakeServer, textResult } from "./mcp-tools.test-support.js";
 import { MCP_RESULT_MAX_CHARS } from "./mcp-client/results.js";
 import type { Logger } from "./logger.js";
+import { AppKeySecretCipher } from "../providers/secrets/app-key.js";
 
 // Fake values only.
 const SECRET = "sk-fake-mcp-tools-ABCDEF123456";
@@ -513,6 +514,64 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
         expect(server.seen).toEqual([]);
       } finally {
         await db.mcpServer.update({ where: { id: serverId }, data: { secretNames: before.secretNames } });
+      }
+    });
+
+    it("reports mcp_server_credentials_unavailable when the secret can't be decrypted, generic for a grantee", async () => {
+      // Fake keys: the secret is stored under one key and read with another.
+      const keyA = new AppKeySecretCipher("a".repeat(64));
+      const keyB = new AppKeySecretCipher("b".repeat(64));
+      const where = { ownerId_name: { ownerId: owner, name: "DD_KEY" } };
+      const before = await db.secret.findUniqueOrThrow({ where });
+      const ciphertext = await keyA.encrypt(SECRET);
+      await db.secret.update({ where, data: { ciphertext } });
+      try {
+        const server = fakeServer(() => textResult("never"));
+        const ownLog = fakeLog();
+        const own = await handleMcpTool(await pinFor("search"), "{}", {
+          ...ctx(server.impl).ctx,
+          cipher: keyB,
+          log: ownLog.log,
+        });
+        expect(JSON.parse(own)).toEqual({
+          error: "mcp_server_credentials_unavailable",
+          message:
+            "The MCP server's credentials can't be decrypted on this server. Check that every Wardby process (control plane, scheduler, native gateway) uses the same SECRET_APP_KEY, or set the secret again.",
+        });
+        expect(ownLog.info.mock.calls[0][0]).toMatchObject({ outcome: "mcp_server_credentials_unavailable" });
+        expect(ownLog.warn.mock.calls).toEqual([
+          [
+            { reason: "mcp_secret_decrypt_failed", serverId, serverName: "datadog", secretName: "DD_KEY" },
+            "MCP server secret could not be decrypted",
+          ],
+        ]);
+
+        const guestLog = fakeLog();
+        const shared = await handleMcpTool(await guestPin(), "{}", {
+          ...guestCtx(server.impl),
+          cipher: keyB,
+          log: guestLog.log,
+        });
+        expect(JSON.parse(shared)).toEqual({
+          error: "mcp_server_credentials_unavailable",
+          message: "The MCP server's credentials can't be used; ask its owner to check it.",
+        });
+        expect(guestLog.warn).toHaveBeenCalledTimes(1);
+
+        for (const text of [
+          own,
+          shared,
+          JSON.stringify(ownLog.info.mock.calls),
+          JSON.stringify(ownLog.warn.mock.calls),
+          JSON.stringify(guestLog.warn.mock.calls),
+        ]) {
+          expect(text).not.toContain(SECRET);
+          expect(text).not.toContain(ciphertext);
+          expect(text).not.toContain("Unsupported state");
+        }
+        expect(server.seen).toEqual([]);
+      } finally {
+        await db.secret.update({ where, data: { ciphertext: before.ciphertext } });
       }
     });
   });
