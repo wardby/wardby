@@ -104,6 +104,7 @@ import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { toolTimeoutProblem } from "./sandbox/tool-timeout.js";
 import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
 import { loadMcpServersMode } from "./config/mcp-servers.js";
+import { loadMcpMaxCallsPerRun } from "./config/mcp-call-limit.js";
 import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
@@ -920,6 +921,7 @@ async function scheduler(args: string[]): Promise<void> {
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
   loadMcpServersMode();
+  loadMcpMaxCallsPerRun();
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
@@ -992,6 +994,7 @@ async function nativeGateway(): Promise<void> {
   try {
     loadToolMaxTimeoutMs();
     loadMcpServersMode();
+    loadMcpMaxCallsPerRun();
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
@@ -1014,7 +1017,12 @@ async function nativeGateway(): Promise<void> {
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
     executor: new DeferredExecutor(prisma),
   };
-  const server = await startGatewayServer(listen, { db: prisma, providers });
+  const server = await startGatewayServer(listen, {
+    db: prisma,
+    providers,
+    // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
+    codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
+  });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
   // gateway port but not this one proves its NetworkPolicy is programmed and port-scoped.
   const denyPort = Number(process.env.NATIVE_GATEWAY_DENY_PORT ?? NATIVE_GATEWAY_DENY_PORT);
