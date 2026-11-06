@@ -29,7 +29,7 @@ import {
   pruneUnusableMcpAttachments,
   type ResourceType,
 } from "../../core/grants.js";
-import { withSerializableRetry } from "../../core/serializable-retry.js";
+import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { agentNotFound, assertAgentAccess, agentAccess } from "../auth/access.js";
 import { permissionsOf } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
@@ -127,7 +127,13 @@ type GrantTx = Pick<
  */
 function inSerializable<T>(ctx: McpRequestContext, fn: (tx: GrantTx) => Promise<T>): Promise<T> {
   return withSerializableRetry(() =>
-    ctx.db.$transaction((tx) => fn(tx), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
+    ctx.db.$transaction(
+      async (tx) => {
+        await preferIndexScans(tx);
+        return fn(tx);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    ),
   );
 }
 

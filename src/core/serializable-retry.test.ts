@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { withSerializableRetry } from "./serializable-retry.js";
+import { preferIndexScans, withSerializableRetry } from "./serializable-retry.js";
 
 const conflict = () => Object.assign(new Error("could not serialize access"), { code: "P2034" });
 const noSleep = async () => {};
@@ -43,5 +43,13 @@ describe("withSerializableRetry", () => {
     });
     await expect(withSerializableRetry(fn, { sleep: noSleep })).rejects.toBe(other);
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("preferIndexScans", () => {
+  it("turns sequential scans off for the current transaction only", async () => {
+    const tx = { $executeRawUnsafe: vi.fn(async () => 0) };
+    await preferIndexScans(tx);
+    expect(tx.$executeRawUnsafe).toHaveBeenCalledExactlyOnceWith("SET LOCAL enable_seqscan = off");
   });
 });

@@ -37,7 +37,7 @@ import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { scheduleStartFields } from "../../core/schedule-start.js";
-import { withSerializableRetry } from "../../core/serializable-retry.js";
+import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { agentMcpServerViews } from "./mcp-servers.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
@@ -1223,6 +1223,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const result = await withSerializableRetry(() =>
         ctx.db.$transaction(
           async (tx) => {
+            await preferIndexScans(tx);
             const agent = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
             if (!agent) throw agentNotFound(args.agentId);
             // Admin and grandfathered repository approvals were granted to the

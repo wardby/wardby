@@ -68,6 +68,11 @@ function fakeDb(
     $queryRaw: async () => [],
   };
   db.isolationLevels = [];
+  db.rawStatements = [];
+  db.$executeRawUnsafe = async (query: string) => {
+    db.rawStatements.push(query);
+    return 0;
+  };
   db.$transaction = async (fn: (tx: unknown) => unknown, options?: { isolationLevel?: string }) => {
     db.isolationLevels.push(options?.isolationLevel);
     return fn(db);
@@ -167,6 +172,8 @@ describe("grant_access / revoke_access / list_access", () => {
       arguments: { resourceType: "agent", resourceId: "a1", grantee: { principalId: "alice" } },
     });
     expect((db as any).isolationLevels).toEqual(["Serializable", "Serializable"]);
+    // Each one steers its reads to index scans first (core/serializable-retry.ts preferIndexScans).
+    expect((db as any).rawStatements).toEqual(["SET LOCAL enable_seqscan = off", "SET LOCAL enable_seqscan = off"]);
     await client.close();
   });
 

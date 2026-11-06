@@ -16,6 +16,21 @@ function delayMs(attempt: number): number {
   return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
 }
 
+/**
+ * Run first inside each of those transactions (make_owner, attach_mcp_server, grant/revoke). Postgres's Serializable mode takes a predicate (SIREAD)
+ * lock on everything a statement reads, and a sequential scan locks the whole relation and checks every
+ * row in it for conflicts. On small tables (a fresh deployment, or a test database) the planner picks a
+ * sequential scan even for a primary-key lookup, so two admin actions on unrelated agents read each
+ * other's rows and abort one another, retry after retry, while either keeps running. The Postgres manual
+ * ("Serializable Isolation Level") recommends steering these transactions to index scans; their queries
+ * are keyed by indexed agent, server or resource ids, so turning sequential scans off for this
+ * transaction only (SET LOCAL) narrows the locks to the rows and index pages actually read. It changes
+ * plans, never results: a query with no usable index still scans.
+ */
+export async function preferIndexScans(tx: { $executeRawUnsafe(query: string): Promise<number> }): Promise<void> {
+  await tx.$executeRawUnsafe("SET LOCAL enable_seqscan = off");
+}
+
 export async function withSerializableRetry<T>(
   fn: () => Promise<T>,
   options: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},

@@ -24,7 +24,7 @@ import {
   type McpServerRow,
 } from "../../core/mcp-servers.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
-import { withSerializableRetry } from "../../core/serializable-retry.js";
+import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
 import { agentAccessResolver, assertAgentAccess, requireAgentAccess, requireBindable } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -412,6 +412,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       await withSerializableRetry(() =>
         ctx.db.$transaction(
           async (tx) => {
+            await preferIndexScans(tx);
             const { agent } = await assertAgentAccess(
               ctx,
               await tx.agent.findUnique({ where: { id: input.agentId } }),
