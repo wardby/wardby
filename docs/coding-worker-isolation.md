@@ -158,8 +158,15 @@ deeply to process is refused with `request_nesting_too_deep`.
     `previous_response_id`, `conversation` and `metadata`, is refused with
     `openai_request_key_not_allowed:<key>`.
   - Tools: `function` and `custom` definitions, and `namespace` groups of
-    them, either in `tools` or in Codex's `additional_tools` input item. Every
-    other tool type, including all hosted tools (`web_search`, `mcp`,
+    them, either in `tools` or in Codex's `additional_tools` input item. A
+    `tool_search` tool is accepted only in the top-level `tools`, only with
+    `execution: "client"` (Codex runs the search over its own tools) and only
+    with `type`, `execution`, `description` and `parameters`; a
+    server-executed search is refused with
+    `openai_tool_not_allowed:tool_search`. Each tool list holds at most 512
+    tools, and a request at most 512 distinct tools in all; a definition
+    repeated in replayed tool search results counts once. Every other tool
+    type, including all hosted tools (`web_search`, `mcp`,
     `code_interpreter`, `image_generation`, `file_search`, `local_shell`, and
     so on), is refused with `openai_tool_not_allowed:<type>`. Tool names are
     checked for shape (`[A-Za-z0-9_-]{1,128}`) but not against a fixed list:
@@ -170,10 +177,17 @@ deeply to process is refused with `request_nesting_too_deep`.
   - Input items: `message` (`input_text`/`input_image` for user, developer
     and system; `output_text` for assistant), `reasoning`, `function_call`,
     `function_call_output`, `custom_tool_call`, `custom_tool_call_output`,
-    `agent_message` and `additional_tools`, each with only the keys Codex
-    sends. Anything else (`input_file`, `input_audio`, `item_reference`,
-    replayed hosted-tool calls, `compaction`, `local_shell_call`) is refused
-    with `openai_input_not_allowed:<type>`. An `input_image` must be an inline
+    `agent_message`, `additional_tools`, `tool_search_call` and
+    `tool_search_output`, each with only the keys Codex sends. The two tool
+    search items must say `execution: "client"`. A `tool_search_call` may
+    carry only a string `query` and a positive integer `limit` as its
+    arguments. Every tool a `tool_search_output` brings into the conversation
+    passes the same checks as a top-level tool, except another `tool_search`;
+    a `function` there may also carry `defer_loading: true`, which Codex sets
+    on the tools it loads through tool search, and nowhere else. Anything
+    else (`input_file`, `input_audio`, `item_reference`, replayed hosted-tool
+    calls, `compaction`, `local_shell_call`) is refused with
+    `openai_input_not_allowed:<type>`. An `input_image` must be an inline
     `data:image/{png,jpeg,gif,webp};base64,` URL, as Codex's `view_image`
     produces; a remote URL or a `file_id` is refused with
     `openai_remote_input_not_allowed`.
@@ -266,8 +280,9 @@ Where the token is exposed:
 A repository's own MCP configuration is never loaded. MCP tools need this
 release's Claude worker image and a new Codex driver image; an older image
 ignores the token and gets no MCP tools, and the run does not fail. Codex
-models that use tool search aren't supported: the proxy refuses their requests
-with `openai_tool_not_allowed`, MCP or not, so those runs fail.
+models that use tool search get their MCP tools through `tool_search_output`
+items; the proxy checks every tool in them like a top-level tool (see
+[Model request allowlist](#model-request-allowlist)).
 
 The read-only rule follows the provider a run was started with
 (`CodingRun.provider`), at pin time and on every call, not the agent's current

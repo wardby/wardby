@@ -192,7 +192,8 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
     for (const task of cleanup.splice(0).reverse()) await task();
   });
 
-  it.each(["gpt-5.6-terra", "gpt-4.1"])(
+  // gpt-5.5's Codex metadata asks for the tool_search layout: a tool_search tool on every request.
+  it.each(["gpt-5.6-terra", "gpt-4.1", "gpt-5.5"])(
     "completes a tool-using turn with %s without a single rejected request",
     async (model) => {
       const forwarded: Record<string, unknown>[] = [];
@@ -288,8 +289,10 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
       const itemTypes = new Set(
         forwarded.flatMap((body) => (body.input as Array<{ type: string }>).map((item) => item.type)),
       );
-      expect(itemTypes).toContain(model === "gpt-4.1" ? "function_call_output" : "custom_tool_call_output");
+      expect(itemTypes).toContain(model === "gpt-5.6-terra" ? "custom_tool_call_output" : "function_call_output");
       expect(JSON.stringify(forwarded)).toContain("data:image/png;base64,");
+      const toolTypes = ((forwarded[0]?.tools as Array<{ type: string }> | undefined) ?? []).map((tool) => tool.type);
+      expect(toolTypes.includes("tool_search")).toBe(model === "gpt-5.5");
     },
     120_000,
   );
@@ -357,8 +360,36 @@ async function fakeGateway(token: string) {
   };
 }
 
-/** Code mode (the Responses-lite models in use): the model calls the MCP tool from Codex's exec runtime. */
-function scriptedMcpTurn(call: number): string {
+/** Code mode (the Responses-lite models in use): the model calls the MCP tool from Codex's exec runtime.
+ *  The tool_search layout (gpt-5.5): the model searches, Codex loads the deferred MCP tool, the model calls it. */
+function scriptedMcpTurn(call: number, model: string): string {
+  if (model === "gpt-5.5") {
+    if (call === 1) {
+      return sse(`resp_${call}`, [
+        {
+          type: "tool_search_call",
+          id: "ts_1",
+          call_id: "call_ts_1",
+          status: "completed",
+          execution: "client",
+          arguments: { query: "echo" },
+        },
+      ]);
+    }
+    if (call === 2) {
+      return sse(`resp_${call}`, [
+        {
+          type: "function_call",
+          id: "fc_1",
+          call_id: "call_1",
+          namespace: "mcp__wardby_mcp",
+          name: "echo",
+          arguments: JSON.stringify({ text: "hello-from-fake-model" }),
+        },
+      ]);
+    }
+    return sse(`resp_${call}`, [finalMessage(`msg_${call}`)]);
+  }
   if (call === 1) {
     const input = [
       'const r = await tools.mcp__wardby_mcp__echo({ text: "hello-from-fake-model" });',
@@ -377,113 +408,122 @@ describe.skipIf(RECORD || !codexBinaryInstalled())(
       for (const task of cleanup.splice(0).reverse()) await task();
     });
 
-    it("runs one MCP tool call with the worker's options, the token only as a bearer", async () => {
-      const model = "gpt-5.6-terra";
-      const token = mintMcpToken();
-      const gateway = await fakeGateway(token);
-      cleanup.push(gateway.close);
-      const forwarded: Record<string, unknown>[] = [];
-      const ledger = new MemoryProxyLedger();
-      const proxy = new CodingProxy({
-        ledger,
-        credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
-        pricing: () => ({
-          encoding: "o200k_base",
-          inputPerMTok: 1,
-          cachedInputPerMTok: 0.1,
-          cacheWritePerMTok: 1,
-          outputPerMTok: 1,
-        }),
-        fetch: async (_input, init) => {
-          const body = JSON.parse(init?.body as string) as Record<string, unknown>;
-          forwarded.push(body);
-          return new Response(scriptedMcpTurn(forwarded.length), {
-            status: 200,
-            headers: { "content-type": "text/event-stream" },
-          });
-        },
-      });
-      const session = await proxy.createSession({
-        runId: "codex-compat-mcp",
-        credentialRef: "openai/compatibility",
-        protocol: "openai-responses",
-        allowedModels: [model],
-        deadlineAt: new Date(Date.now() + 120_000),
-        budgetUsd: 10,
-        mcpTools: [
-          {
-            exposedName: "echo",
-            toolName: "echo",
-            serverId: "srv_compat",
-            serverName: "compat",
-            definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+    it.each(["gpt-5.6-terra", "gpt-5.5"])(
+      "runs one MCP tool call on %s with the worker's options, the token only as a bearer",
+      async (model) => {
+        const token = mintMcpToken();
+        const gateway = await fakeGateway(token);
+        cleanup.push(gateway.close);
+        const forwarded: Record<string, unknown>[] = [];
+        const ledger = new MemoryProxyLedger();
+        const proxy = new CodingProxy({
+          ledger,
+          credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+          pricing: () => ({
+            encoding: "o200k_base",
+            inputPerMTok: 1,
+            cachedInputPerMTok: 0.1,
+            cacheWritePerMTok: 1,
+            outputPerMTok: 1,
+          }),
+          fetch: async (_input, init) => {
+            const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+            forwarded.push(body);
+            return new Response(scriptedMcpTurn(forwarded.length, model), {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
           },
-        ],
-        mcpTokenHash: mcpTokenHash(token),
-      });
-      const rejected: string[] = [];
-      let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
-        host: "127.0.0.1",
-        port: 0,
-        onRequest: (event) => {
-          if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
-        },
-        mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
-      });
-      cleanup.push(async () => {
-        await server?.close();
-        server = undefined;
-      });
-      const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-"));
-      cleanup.push(() => rm(root, { recursive: true, force: true }));
-      const home = join(root, "home");
-      const workspace = join(root, "workspace");
-      await mkdir(home, { recursive: true });
-      await mkdir(workspace, { recursive: true });
+        });
+        const session = await proxy.createSession({
+          runId: `codex-compat-mcp-${model}`,
+          credentialRef: "openai/compatibility",
+          protocol: "openai-responses",
+          allowedModels: [model],
+          deadlineAt: new Date(Date.now() + 120_000),
+          budgetUsd: 10,
+          mcpTools: [
+            {
+              exposedName: "echo",
+              toolName: "echo",
+              serverId: "srv_compat",
+              serverName: "compat",
+              definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+            },
+          ],
+          mcpTokenHash: mcpTokenHash(token),
+        });
+        const rejected: string[] = [];
+        let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+          host: "127.0.0.1",
+          port: 0,
+          onRequest: (event) => {
+            if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+          },
+          mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
+        });
+        cleanup.push(async () => {
+          await server?.close();
+          server = undefined;
+        });
+        const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-"));
+        cleanup.push(() => rm(root, { recursive: true, force: true }));
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        await mkdir(home, { recursive: true });
+        await mkdir(workspace, { recursive: true });
 
-      const blocked = "http://127.0.0.1:9";
-      const client = createCodexSdkClient({
-        proxyBaseUrl: `http://127.0.0.1:${server.port}`,
-        capability: session.capability,
-        developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
-        environment: {
-          HOME: home,
-          LANG: "C.UTF-8",
-          PATH: "/usr/local/bin:/usr/bin:/bin",
-          TMPDIR: root,
-          HTTPS_PROXY: blocked,
-          HTTP_PROXY: blocked,
-          ALL_PROXY: blocked,
-          NO_PROXY: "127.0.0.1,localhost",
-        },
-        disabledSkills: [...CODEX_BUILTIN_SKILLS],
-        mcpToken: token,
-      });
-      const thread = client.startThread({
-        model,
-        sandboxMode: "danger-full-access",
-        workingDirectory: workspace,
-        skipGitRepoCheck: true,
-        networkAccessEnabled: false,
-        webSearchMode: "disabled",
-        approvalPolicy: "never",
-      });
-      const streamed = await thread.runStreamed("Echo hello.", {
-        outputSchema: CODING_OUTPUT_JSON_SCHEMA,
-        signal: AbortSignal.timeout(90_000),
-      });
-      const events: Array<{ type: string }> = [];
-      for await (const event of streamed.events) events.push(event);
+        const blocked = "http://127.0.0.1:9";
+        const client = createCodexSdkClient({
+          proxyBaseUrl: `http://127.0.0.1:${server.port}`,
+          capability: session.capability,
+          developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
+          environment: {
+            HOME: home,
+            LANG: "C.UTF-8",
+            PATH: "/usr/local/bin:/usr/bin:/bin",
+            TMPDIR: root,
+            HTTPS_PROXY: blocked,
+            HTTP_PROXY: blocked,
+            ALL_PROXY: blocked,
+            NO_PROXY: "127.0.0.1,localhost",
+          },
+          disabledSkills: [...CODEX_BUILTIN_SKILLS],
+          mcpToken: token,
+        });
+        const thread = client.startThread({
+          model,
+          sandboxMode: "danger-full-access",
+          workingDirectory: workspace,
+          skipGitRepoCheck: true,
+          networkAccessEnabled: false,
+          webSearchMode: "disabled",
+          approvalPolicy: "never",
+        });
+        const streamed = await thread.runStreamed("Echo hello.", {
+          outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+          signal: AbortSignal.timeout(90_000),
+        });
+        const events: Array<{ type: string }> = [];
+        for await (const event of streamed.events) events.push(event);
 
-      expect(rejected).toEqual([]);
-      expect(events.map((event) => event.type)).toContain("turn.completed");
-      expect(gateway.calls.every((call) => call.authorized)).toBe(true);
-      const toolCalls = gateway.calls.filter((call) => call.method === "tools/call");
-      expect(toolCalls).toHaveLength(1);
-      expect(toolCalls[0]?.params).toMatchObject({ name: "echo", arguments: { text: "hello-from-fake-model" } });
-      // The tool's result reached the model; the token never did.
-      expect(JSON.stringify(forwarded)).toContain("ECHO:hello-from-fake-model");
-      expect(JSON.stringify(forwarded)).not.toContain(token);
-    }, 120_000);
+        expect(rejected).toEqual([]);
+        expect(events.map((event) => event.type)).toContain("turn.completed");
+        expect(gateway.calls.every((call) => call.authorized)).toBe(true);
+        const toolCalls = gateway.calls.filter((call) => call.method === "tools/call");
+        expect(toolCalls).toHaveLength(1);
+        expect(toolCalls[0]?.params).toMatchObject({ name: "echo", arguments: { text: "hello-from-fake-model" } });
+        // The tool's result reached the model; the token never did.
+        expect(JSON.stringify(forwarded)).toContain("ECHO:hello-from-fake-model");
+        expect(JSON.stringify(forwarded)).not.toContain(token);
+        if (model === "gpt-5.5") {
+          const itemTypes = forwarded.flatMap((body) =>
+            (body.input as Array<{ type: string }>).map((item) => item.type),
+          );
+          expect(itemTypes).toEqual(expect.arrayContaining(["tool_search_call", "tool_search_output"]));
+        }
+      },
+      120_000,
+    );
   },
 );
