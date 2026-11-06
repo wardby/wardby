@@ -284,6 +284,8 @@ spec:
           value: wardby-proxy-database-url
         - name: NODE_ENV
           value: production
+        - name: WARDBY_MCP_GATEWAY_URL
+          value: http://wardby-native-gateway:8790
         envFrom:
         - secretRef:
             name: wardby-coding-proxy-env
@@ -860,6 +862,13 @@ spec:
         matchLabels:
           k8s-app: kube-dns
   - ports:
+    - port: 8790
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: wardby-native-gateway
+  - ports:
     - port: 443
       protocol: TCP
     to:
@@ -1077,6 +1086,13 @@ spec:
     - port: 8790
       protocol: TCP
     - port: 8791
+      protocol: TCP
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: wardby-coding-proxy
+    ports:
+    - port: 8790
       protocol: TCP
   podSelector:
     matchLabels:

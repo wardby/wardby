@@ -47,6 +47,37 @@ describe("native gateway on GKE Autopilot", () => {
     expect(ingress.ports.map((p) => p.port).sort()).toEqual([8790, 8791]);
   });
 
+  it("lets the coding proxy reach the gateway's HTTP port only, for MCP tool calls", () => {
+    const proxyBase = load("../../base/proxy.yaml");
+    const proxyEnv = Object.fromEntries(
+      find(proxyBase, "Deployment", "wardby-coding-proxy").spec.template.spec.containers[0].env.map((e) => [
+        e.name,
+        e.value,
+      ]),
+    );
+    expect(proxyEnv.WARDBY_MCP_GATEWAY_URL).toBe("http://wardby-native-gateway:8790");
+    const proxyPolicy = find(proxyBase, "NetworkPolicy", "wardby-coding-proxy");
+    const toGateway = proxyPolicy.spec.egress.filter((r) =>
+      (r.to ?? []).some((t) => t.podSelector?.matchLabels?.["app.kubernetes.io/name"] === "wardby-native-gateway"),
+    );
+    expect(toGateway).toEqual([
+      {
+        to: [{ podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-native-gateway" } } }],
+        ports: [{ protocol: "TCP", port: 8790 }],
+      },
+    ]);
+    const fromProxy = gatewayPolicy.spec.ingress.filter((r) =>
+      (r._from ?? r.from ?? []).some(
+        (f) => f.podSelector?.matchLabels?.["app.kubernetes.io/name"] === "wardby-coding-proxy",
+      ),
+    );
+    expect(fromProxy).toHaveLength(1);
+    expect(fromProxy[0].ports).toEqual([{ protocol: "TCP", port: 8790 }]);
+    // Coding run pods are not admitted to the gateway.
+    const runPods = gatewayPolicy.spec.ingress.flatMap((r) => r._from ?? r.from ?? []);
+    expect(JSON.stringify(runPods)).not.toContain("coding-run");
+  });
+
   it("logs in to Cloud SQL as its own identity through an Auth Proxy pinned like the proxy's", () => {
     expect(find(cloudsql, "ServiceAccount", "wardby-native-gateway").metadata.annotations).toEqual({
       "iam.gke.io/gcp-service-account": "wardby-gateway-gsa-email",

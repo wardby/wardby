@@ -129,6 +129,14 @@ the run pod's own egress policy is the only thing that can block it. The shared
 resources live in `manifests/base/`; `manifests/overlays/kind/` provides the
 local harness and `manifests/overlays/gke-autopilot/` provides the GKE target.
 
+The proxy also forwards MCP tool calls from coding workers to the native gateway
+(`WARDBY_MCP_GATEWAY_URL=http://wardby-native-gateway:8790`, set in
+`manifests/base/proxy.yaml`; the same value for every target). Two NetworkPolicy
+rules carry that traffic and nothing else: the proxy may reach gateway pods on
+`8790` only, and the gateway admits proxy pods on `8790`. Coding-run pods still
+reach only the proxy. Without a gateway the proxy answers `/mcp` with 503, and
+coding agents simply get no MCP tools.
+
 ## Run a real coding agent locally
 
 Preflight only proves the platform _can_ run an isolated coding pod; it never
@@ -210,7 +218,8 @@ sandbox-mode native agents run as pods in this cluster
 - applies the native gateway from `manifests/base/native-gateway.yaml`: a Deployment
   running `wardby native-gateway` with no service-account token and no RBAC, a
   ClusterIP Service exposing both the gateway port `8790` and the deny port
-  `8791`, and a NetworkPolicy that admits `native-run` pods on both ports
+  `8791`, and a NetworkPolicy that admits `native-run` pods on both ports (and
+  the coding proxy on `8790`, for MCP tool calls from coding workers)
   (`native-gateway-database-egress.yaml` in the kind overlay lets it reach the
   local Postgres), then restarts it and waits for the rollout.
 

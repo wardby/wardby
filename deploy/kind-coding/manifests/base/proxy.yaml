@@ -37,6 +37,11 @@ spec:
           env:
             - name: NODE_ENV
               value: production
+            # POST /mcp forwards MCP tool calls from coding workers to the native gateway's
+            # /coding-mcp route. The in-cluster Service name and port are the same for every
+            # operator; without a gateway the proxy answers /mcp with 503 mcp_unavailable.
+            - name: WARDBY_MCP_GATEWAY_URL
+              value: http://wardby-native-gateway:8790
           ports:
             - name: proxy
               containerPort: 8787
@@ -144,6 +149,15 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # The native gateway's HTTP port (8790) only, for the /mcp forwarder; the gateway's
+    # policy admits this proxy back (native-gateway.yaml). Never the deny port.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-native-gateway
+      ports:
+        - protocol: TCP
+          port: 8790
     # HTTPS to the model providers — the whole internet minus RFC1918 /
     # link-local / carrier-grade-NAT ranges (the database rule is
     # per-environment; see overlays/kind/proxy-database-egress.yaml).
