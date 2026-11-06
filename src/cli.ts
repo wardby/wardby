@@ -97,6 +97,7 @@ import {
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { toolTimeoutProblem } from "./sandbox/tool-timeout.js";
 import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
+import { loadMcpServersMode } from "./config/mcp-servers.js";
 import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
@@ -910,6 +911,7 @@ async function scheduler(args: string[]): Promise<void> {
   }
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
+  loadMcpServersMode();
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
@@ -981,6 +983,7 @@ async function nativeGateway(): Promise<void> {
   const listen = parseGatewayListen(process.env.NATIVE_GATEWAY_LISTEN) ?? { host: "0.0.0.0", port: 8790 };
   try {
     loadToolMaxTimeoutMs();
+    loadMcpServersMode();
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }

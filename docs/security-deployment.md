@@ -622,9 +622,10 @@ covers the whole call: each `fetch` may run until it, and a timer can't be set
 for longer. A call never outlasts its run: stopping the run aborts it, and a
 sandboxed run's deadline cuts it off.
 
-| Variable                     | Default  | Meaning                                                                                                                                                                                                                                 |
-| ---------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WARDBY_TOOL_MAX_TIMEOUT_MS` | `300000` | The longest `timeoutMs` a tool may set, in milliseconds (at least `10000`). A larger value is refused when the tool is saved. A run uses the lower of the tool's `timeoutMs` and this value, so lowering it also covers existing tools. |
+| Variable                     | Default  | Meaning                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WARDBY_TOOL_MAX_TIMEOUT_MS` | `300000` | The longest `timeoutMs` a tool may set, in milliseconds (at least `10000`). A larger value is refused when the tool is saved. A run uses the lower of the tool's `timeoutMs` and this value, so lowering it also covers existing tools.                                                                                                                      |
+| `WARDBY_MCP_SERVERS`         | `owners` | Who may register remote MCP servers for native agents: `owners` (the default: owners may register servers), `admins` (registering, updating and refreshing a server needs `hosts:admin`), or `off` (every MCP-server tool is refused with a 403 that names this variable, and attached servers' tools are left out of runs). Any other value stops start-up. |
 
 Set it on every process that runs tools or serves the native sandbox gateway:
 `wardby serve`, `wardby scheduler` and the gateway. An invalid value stops
@@ -639,6 +640,15 @@ ceiling only as far as your tools need.
 `timeoutMs` to its worker, so update the native worker image together with the
 server: an older image refuses the run of an agent that has a tool with
 `timeoutMs`. Tools without `timeoutMs` run on either image.
+
+### Remote MCP servers
+
+Owners can register a remote MCP server (Streamable HTTP, HTTPS only) and attach
+an allowlisted subset of its tools to a native agent, which then calls them
+through Wardby's control plane. `WARDBY_MCP_SERVERS` decides who may register
+servers: `owners` (the default), `admins` (only `hosts:admin` holders), or `off`
+to disable the feature. Secret values for a server are never sent to the model,
+stored in run records, or returned by Wardby's MCP tools.
 
 ## Slack workflow notifications
 
