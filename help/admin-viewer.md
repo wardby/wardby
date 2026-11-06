@@ -19,6 +19,10 @@ It requires the Wardby `admin` role and the `admin:view` scope, which only the
 provider and map it like `agents:admin`. See
 [Configure identity and privileged access](identity-and-access.md).
 
+From an MCP client, an admin gets the same deployment-wide listing with
+`list_agents` and `list_runs` and `all: true` (Wardby 0.8.0 and later; also
+`admin:view`). Without the role the call is refused.
+
 Endpoints, all `GET`:
 
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.

@@ -13,6 +13,10 @@ the `admin` role.
 
 ## Access
 
+From an MCP client, an admin gets a deployment-wide listing without this API:
+`list_agents` and `list_runs` with `all: true` (Wardby 0.8.0 and later) need the
+same `admin:view` scope and `admin` role, and are refused otherwise.
+
 A caller needs an access token for the Wardby MCP resource that carries the
 `admin:view` scope, and the Wardby `admin` role. Send it as
 `Authorization: Bearer <token>`.
