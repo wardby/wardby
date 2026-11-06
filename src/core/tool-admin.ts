@@ -32,6 +32,8 @@ export interface ToolChanges {
   description?: string;
   paramsZod?: string;
   code?: string;
+  /** null clears it (back to the default limit). Checked against the ceiling by the caller (toolTimeoutProblem). */
+  timeoutMs?: number | null;
 }
 
 /**
@@ -55,7 +57,12 @@ export class ToolAttachedError extends Error {
 
 /** Whether `changes` names at least one field to change. */
 export function hasToolChanges(changes: ToolChanges): boolean {
-  return changes.description !== undefined || changes.paramsZod !== undefined || changes.code !== undefined;
+  return (
+    changes.description !== undefined ||
+    changes.paramsZod !== undefined ||
+    changes.code !== undefined ||
+    changes.timeoutMs !== undefined
+  );
 }
 
 /**
@@ -71,6 +78,7 @@ export async function prepareToolUpdate(
   const data: Prisma.ToolUpdateInput = {
     ...(changes.description !== undefined ? { description: changes.description } : {}),
     ...(changes.code !== undefined ? { code: changes.code } : {}),
+    ...(changes.timeoutMs !== undefined ? { timeoutMs: changes.timeoutMs } : {}),
   };
   if (changes.paramsZod !== undefined) {
     const schemaResult = await deriveJsonSchema(changes.paramsZod);
@@ -151,8 +159,11 @@ export async function deleteToolGuarded(
 }
 
 /** One `wardby tool list` line: names are only unique per owner, so the id and owner disambiguate. */
-export function formatToolLine(tool: Pick<Tool, "id" | "name" | "description" | "ownerId">): string {
-  return `${tool.id}  ${tool.name}  owner:${tool.ownerId ?? "public"}  ${tool.description}`;
+export function formatToolLine(
+  tool: Pick<Tool, "id" | "name" | "description" | "ownerId"> & { timeoutMs?: number | null },
+): string {
+  const timeout = tool.timeoutMs === null || tool.timeoutMs === undefined ? "" : `  timeoutMs:${tool.timeoutMs}`;
+  return `${tool.id}  ${tool.name}  owner:${tool.ownerId ?? "public"}${timeout}  ${tool.description}`;
 }
 
 /** Attached agents for an operator-facing refusal: unlike MCP's, nothing is redacted. */

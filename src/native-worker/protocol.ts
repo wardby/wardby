@@ -165,7 +165,10 @@ const LoadedToolSchema = z
   .strict();
 
 /** A user tool as the worker runs it: code and schema only. Capabilities stay on the gateway. */
-const WorkerUserToolSchema = z.object({ code: z.string(), paramsZod: z.string() }).strict();
+/** `timeoutMs`: the tool's time limit for this run, already capped by the server; absent = the default. */
+const WorkerUserToolSchema = z
+  .object({ code: z.string(), paramsZod: z.string(), timeoutMs: z.number().int().positive().optional() })
+  .strict();
 
 const PricingSchema = z
   .object({

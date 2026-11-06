@@ -47,6 +47,17 @@ describe("native worker protocol", () => {
     );
   });
 
+  it("carries a user tool's own time limit, and only a positive whole number", () => {
+    const withLimit = { ...input, userTools: { double: { ...input.userTools.double, timeoutMs: 120_000 } } };
+    expect(parseMessage(JSON.stringify(withLimit), WorkerInputSchema)).toEqual(withLimit);
+    for (const timeoutMs of [0, 1.5, "120000"]) {
+      const bad = { ...input, userTools: { double: { ...input.userTools.double, timeoutMs } } };
+      expect(() => parseMessage(JSON.stringify(bad), WorkerInputSchema)).toThrow(
+        expect.objectContaining({ code: "message_invalid" }),
+      );
+    }
+  });
+
   it("cannot carry a user tool's capabilities or secret names to the worker", () => {
     const withSecrets = {
       ...input,

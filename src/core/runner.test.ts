@@ -11,6 +11,7 @@ import {
   runAgent,
   RunCancelledError,
   RunOwnershipLostError,
+  TOOL_STOP_POLL_MS,
   type RunnerDb,
 } from "./runner.js";
 import { WITHHELD_TEXT_NOTICE } from "./secret-guard.js";
@@ -49,6 +50,7 @@ interface FakeTool {
   paramsZod: string;
   jsonSchema: Record<string, unknown>;
   code: string;
+  timeoutMs?: number | null;
 }
 
 interface FakeAttachment {
@@ -698,6 +700,124 @@ describe("runAgent", () => {
     expect(JSON.parse(results[0])).toEqual({ doubled: 42 });
     expect(JSON.parse(results[1]).error).toBe("validation_failed");
     expect(JSON.parse(results[2]).error).toBe("unknown_tool");
+  });
+
+  it("gives a user tool its own timeoutMs, capped by the current WARDBY_TOOL_MAX_TIMEOUT_MS", async () => {
+    const tool = (id: string, name: string, timeoutMs?: number): FakeTool => ({
+      id,
+      name,
+      description: "waits",
+      paramsZod: "z.object({ ms: z.number() })",
+      jsonSchema: { type: "object" },
+      code: "await new Promise((resolve) => setTimeout(resolve, params.ms)); return 'done';",
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+    const db = fakeDb(
+      [{ id: "a1", name: "waiter", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [tool("t1", "short", 1_000), tool("t2", "capped", 120_000)],
+      [
+        { agentId: "a1", toolId: "t1" },
+        { agentId: "a1", toolId: "t2" },
+      ],
+    );
+    // Lowered below the stored 120000: the run uses the ceiling.
+    vi.stubEnv("WARDBY_TOOL_MAX_TIMEOUT_MS", "10000");
+    const results: string[] = [];
+    const engine: Engine = {
+      async run(ctx) {
+        results.push(await ctx.runSandboxTool("short", JSON.stringify({ ms: 1_500 })));
+        results.push(await ctx.runSandboxTool("short", JSON.stringify({ ms: 100 })));
+        results.push(await ctx.runSandboxTool("capped", JSON.stringify({ ms: 100 })));
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+    try {
+      await runAgent(
+        "waiter",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(JSON.parse(results[0])).toMatchObject({ error: "timeout" });
+    expect(JSON.parse(results[0]).message).toContain("Exceeded the 1000ms wall-time limit");
+    expect(JSON.parse(results[1])).toBe("done");
+    expect(JSON.parse(results[2])).toBe("done");
+  });
+
+  it("caps a stored timeoutMs at a lowered ceiling (a sleep past the ceiling is refused)", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "sleeper", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [
+        {
+          id: "t1",
+          name: "nap",
+          description: "naps",
+          paramsZod: "z.object({})",
+          jsonSchema: { type: "object" },
+          code: "await __bridge_sleep(JSON.stringify([10500])); return 'slept';",
+          timeoutMs: 120_000,
+        },
+      ],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+    vi.stubEnv("WARDBY_TOOL_MAX_TIMEOUT_MS", "10000");
+    let result = "";
+    const engine: Engine = {
+      async run(ctx) {
+        result = await ctx.runSandboxTool("nap", "{}");
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+    try {
+      await runAgent(
+        "sleeper",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(JSON.parse(result)).toMatchObject({ error: "thrown" });
+    expect(JSON.parse(result).message).toContain("sleep_limit");
+  });
+
+  it("aborts a long user tool call when its run is stopped", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "stoppable", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [
+        {
+          id: "t1",
+          name: "wait",
+          description: "waits",
+          paramsZod: "z.object({})",
+          jsonSchema: { type: "object" },
+          code: "await new Promise((resolve) => setTimeout(resolve, 15000)); return 'done';",
+          timeoutMs: 20_000,
+        },
+      ],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+    let result = "";
+    let elapsed = 0;
+    const engine: Engine = {
+      async run(ctx) {
+        const started = Date.now();
+        // stop_run makes the row terminal while the call is under way.
+        setTimeout(() => void db.run.update({ where: { id: "run_1" }, data: { status: "cancelled" } }), 300);
+        result = await ctx.runSandboxTool("wait", "{}");
+        elapsed = Date.now() - started;
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+    await runAgent(
+      "stoppable",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+    expect(JSON.parse(result)).toMatchObject({ error: "cancelled" });
+    expect(elapsed).toBeLessThan(TOOL_STOP_POLL_MS + 2_000);
   });
 
   it("appends the built-in memory tools only when the agent has memoryEnabled", async () => {

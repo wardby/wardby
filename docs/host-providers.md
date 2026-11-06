@@ -118,14 +118,17 @@ bound `getRepositoryPermission`.
 
 ## Change a tool
 
-Registering copies each tool's code and schema, and only that copy ever runs.
+Registering copies each tool's code, schema and `timeoutMs` (its time limit), and only that
+copy ever runs.
 `update_tool` changes nothing until you approve it, so the last approved version keeps
 working in the meantime.
 
 1. Call `update_tool`.
 2. Call `get_host_provider` with `includeCode: true`. Changed tools show `status: "changed"`.
    Each operation has `approvedCode` and `approvedParamsZod`, and a changed one also has
-   `currentCode` and `currentParamsZod`, because a change can be to the schema alone.
+   `currentCode` and `currentParamsZod`, because a change can be to the schema alone. Every
+   operation also shows `approvedTimeoutMs` and `currentTimeoutMs` (`null` is the default
+   10 seconds), since a change can be to the time limit alone.
 3. Read the change, then call `approve_host_provider_tools` with the operation names. It
    applies from the next call.
 

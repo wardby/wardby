@@ -11,7 +11,7 @@ import { getQuickJsModule } from "./quickjs-module.js";
 import { MAX_INTERRUPT_CHECKS, MAX_STACK_SIZE_BYTES, MEMORY_LIMIT_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
 import { BRIDGE_RESULT_BYTES } from "./limits.js";
 
-export type SandboxErrorKind = "thrown" | "timeout" | "memory" | "cpu" | "non_serializable";
+export type SandboxErrorKind = "thrown" | "timeout" | "memory" | "cpu" | "non_serializable" | "cancelled";
 
 export type SandboxResult =
   { ok: true; value: unknown } | { ok: false; errorKind: SandboxErrorKind; errorMessage: string };
@@ -75,13 +75,30 @@ export function classifyEvalError(dumped: { name?: string; message?: string }): 
   };
 }
 
+export interface EvalOptions {
+  /**
+   * Ends the evaluation early when it aborts (a stopped run): the result is `aborted(reason)`,
+   * and every host call still in flight is aborted with it.
+   */
+  signal?: AbortSignal;
+  aborted?: (reason: unknown) => SandboxResult;
+  /** The wall-time error's text; defaults to naming the limit. */
+  timeoutMessage?: (limitMs: number) => string;
+}
+
+const defaultAborted = (): SandboxResult => ({ ok: false, errorKind: "cancelled", errorMessage: "Cancelled." });
+
 export async function evalToJson(
   code: string,
   limitsOverride: Partial<SandboxLimits> | undefined,
   installExtras: (context: QuickJSContext, runtime: QuickJSRuntime, signal: AbortSignal) => void,
+  options: EvalOptions = {},
 ): Promise<SandboxResult> {
   const limits: SandboxLimits = { ...DEFAULT_SANDBOX_LIMITS, ...limitsOverride };
+  const aborted = options.aborted ?? defaultAborted;
+  if (options.signal?.aborted) return aborted(options.signal.reason);
   const controller = new AbortController();
+  let onAbort: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = Date.now() + limits.wallTimeLimitMs;
 
@@ -93,7 +110,7 @@ export async function evalToJson(
   let steps = 0;
   runtime.setInterruptHandler(() => {
     steps += 1;
-    return steps > limits.maxInterruptChecks || Date.now() >= deadline;
+    return steps > limits.maxInterruptChecks || Date.now() >= deadline || options.signal?.aborted === true;
   });
 
   const context = runtime.newContext();
@@ -168,13 +185,21 @@ export async function evalToJson(
           resolve({
             ok: false,
             errorKind: "timeout",
-            errorMessage: `Exceeded the ${limits.wallTimeLimitMs}ms wall-time limit.`,
+            errorMessage: options.timeoutMessage
+              ? options.timeoutMessage(limits.wallTimeLimitMs)
+              : `Exceeded the ${limits.wallTimeLimitMs}ms wall-time limit.`,
           }),
         limits.wallTimeLimitMs,
       );
     });
+    const external = options.signal;
+    const abortPromise = new Promise<SandboxResult>((resolve) => {
+      if (!external) return;
+      onAbort = () => resolve(aborted(external.reason));
+      external.addEventListener("abort", onAbort, { once: true });
+    });
 
-    return await Promise.race([runPromise, timeoutPromise]);
+    return await Promise.race([runPromise, timeoutPromise, abortPromise]);
   } catch (err) {
     return {
       ok: false,
@@ -183,6 +208,7 @@ export async function evalToJson(
     };
   } finally {
     clearTimeout(timer);
+    if (onAbort) options.signal?.removeEventListener("abort", onAbort);
     controller.abort();
     disposeAll();
   }

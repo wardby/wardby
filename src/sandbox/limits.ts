@@ -19,7 +19,10 @@ export const MAX_INTERRUPT_CHECKS = 20_000_000;
  */
 export const WALL_TIME_LIMIT_MS = 10_000;
 
-/** Timeout for the sandbox's `fetch` host bridge, independent of the wall-time cap. */
+/**
+ * safeFetch's timeout when its caller gives none. A sandboxed tool's fetches get
+ * fetchTimeoutFor(the tool's limit) instead (tool-timeout.ts), just past its wall time.
+ */
 export const FETCH_TIMEOUT_MS = 8_000;
 
 /** QuickJS interpreter stack size cap (bytes). */

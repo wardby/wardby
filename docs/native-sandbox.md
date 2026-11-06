@@ -131,13 +131,14 @@ The gateway is the same Wardby build as the server, started with the
 `native-gateway` command. It needs the server's database, LLM, secrets, and
 integration settings, and **no Docker access**.
 
-| Gateway variable        | Purpose                                                                                                                                                                                                                                                    |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_GATEWAY_LISTEN` | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
-| `DATABASE_URL`          | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
-| LLM provider keys       | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
-| `SECRET_APP_KEY`        | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
-| Integration settings    | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
+| Gateway variable             | Purpose                                                                                                                                                                                                                                                    |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_GATEWAY_LISTEN`      | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
+| `DATABASE_URL`               | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
+| LLM provider keys            | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
+| `SECRET_APP_KEY`             | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
+| Integration settings         | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
+| `WARDBY_TOOL_MAX_TIMEOUT_MS` | Same value as the server, if you set it: the longest time limit a tool may use ([details](security-deployment.md#tool-time-limits)).                                                                                                                       |
 
 For local development, the repository ships a compose overlay
 (`deploy/local/docker-compose.native-sandbox.yml`) that runs the gateway next to
@@ -549,6 +550,12 @@ set on the gateway, not the server.
 - A sandbox run has a maximum lifetime of 60 minutes. Past it the worker is
   stopped and the run fails with `native_sandbox_deadline_exceeded`.
 - The agent's own turn and budget limits still apply as for any native agent.
+- Each tool call has the tool's own time limit (`timeoutMs`, default 10
+  seconds, capped by `WARDBY_TOOL_MAX_TIMEOUT_MS`). The worker enforces it; the
+  gateway gives each host call the limit plus 20 seconds, never past the run's
+  deadline. Update the worker image with the server: an older image refuses a
+  run whose agent has a tool with `timeoutMs`
+  ([details](security-deployment.md#tool-time-limits)).
 
 ## Stopping a run
 
@@ -558,7 +565,8 @@ run whether it is still waiting for a worker or already running:
 1. The run is recorded `cancelled` with the caller's reason, unless it already
    finished (the first terminal state wins; a finished run is not changed).
 2. Its gateway session ends. The worker's next call (a model turn, a tool, or
-   its result) is refused, and the worker exits on its own.
+   its result) is refused, and the worker exits on its own. A tool's host call
+   still running on the gateway is aborted within a few seconds.
 3. A worker still running 5 seconds later is killed. Either way the worker is
    then removed; a worker claimed from the warm pool is discarded with its pool
    row and never returned to the pool.

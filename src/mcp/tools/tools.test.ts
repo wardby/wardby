@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -20,6 +20,7 @@ interface FakeToolRow {
   jsonSchema: unknown;
   code: string;
   ownerId: string | null;
+  timeoutMs?: number | null;
 }
 interface FakeAgentRow {
   id: string;
@@ -1402,6 +1403,124 @@ describe("tool authoring tools", () => {
       expect(result.isError).toBe(true);
       expect(errorText(result)).toMatch(/still attached/);
       expect(errorText(result)).not.toContain("Foreign key");
+      await client.close();
+    });
+  });
+
+  describe("timeoutMs", () => {
+    const owned = (overrides: Partial<FakeToolRow> = {}): FakeToolRow => ({
+      id: "t1",
+      name: "greet",
+      description: "d",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "return 1;",
+      ownerId: "p1",
+      ...overrides,
+    });
+    async function setup(tools: FakeToolRow[] = []) {
+      const db = fakeDb(tools);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const create = (timeoutMs: unknown) => ({
+      name: "create_tool",
+      arguments: { name: "slow", description: "d", paramsZod: "z.object({})", code: "return 1;", timeoutMs },
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+    const errorText = (result: unknown) => (result as { content: { text: string }[] }).content[0].text;
+
+    it("create_tool stores a timeoutMs within the ceiling", async () => {
+      const { db, client } = await setup();
+      const result = await client.callTool(create(20_000));
+      expect(result.isError).toBeFalsy();
+      expect(parseText(result as never)).toMatchObject({ name: "slow", timeoutMs: 20_000 });
+      expect((await db.tool.findUnique({ where: { id: "tool_1" } }))?.timeoutMs).toBe(20_000);
+      await client.close();
+    });
+
+    it("create_tool refuses a timeoutMs above the ceiling with a 400 naming it, and stores nothing", async () => {
+      vi.stubEnv("WARDBY_TOOL_MAX_TIMEOUT_MS", "60000");
+      const { db, client } = await setup();
+      const result = await client.callTool(create(60_001));
+      expect(result.isError).toBe(true);
+      expect(errorText(result)).toContain("ceiling of 60000 ms (WARDBY_TOOL_MAX_TIMEOUT_MS)");
+      expect(await db.tool.findUnique({ where: { id: "tool_1" } })).toBeNull();
+      // The default ceiling is five minutes.
+      vi.unstubAllEnvs();
+      const over = await client.callTool(create(300_001));
+      expect(errorText(over)).toContain("ceiling of 300000 ms");
+      await client.close();
+    });
+
+    it("create_tool refuses a timeoutMs below one second or not a whole number", async () => {
+      const { client } = await setup();
+      for (const bad of [999, 1500.5]) {
+        const result = await client.callTool(create(bad));
+        expect(result.isError).toBe(true);
+      }
+      await client.close();
+    });
+
+    it("update_tool sets, refuses above the ceiling, and clears timeoutMs with null", async () => {
+      vi.stubEnv("WARDBY_TOOL_MAX_TIMEOUT_MS", "60000");
+      const { db, client } = await setup([owned()]);
+      const set = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", timeoutMs: 30_000 } });
+      expect(set.isError).toBeFalsy();
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.timeoutMs).toBe(30_000);
+
+      const over = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", timeoutMs: 90_000 } });
+      expect(over.isError).toBe(true);
+      expect(errorText(over)).toContain("ceiling of 60000 ms");
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.timeoutMs).toBe(30_000);
+
+      const cleared = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", timeoutMs: null } });
+      expect(cleared.isError).toBeFalsy();
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.timeoutMs).toBeNull();
+      await client.close();
+    });
+
+    it("list_tools shows each tool's timeoutMs, also on a tool the caller doesn't own", async () => {
+      const { client } = await setup([
+        owned({ timeoutMs: 45_000 }),
+        owned({ id: "t2", ownerId: null, timeoutMs: 20_000 }),
+      ]);
+      const rows = parseText((await client.callTool({ name: "list_tools", arguments: {} })) as never) as {
+        id: string;
+        timeoutMs: number;
+      }[];
+      expect(rows.map((r) => [r.id, r.timeoutMs])).toEqual([
+        ["t1", 45_000],
+        ["t2", 20_000],
+      ]);
+      await client.close();
+    });
+
+    it("dry_run_tool gives the tool the timeoutMs it would have, and refuses one above the ceiling", async () => {
+      const { client } = await setup();
+      const run = (timeoutMs?: number) =>
+        client.callTool({
+          name: "dry_run_tool",
+          arguments: {
+            paramsZod: "z.object({})",
+            code: "await new Promise((resolve) => setTimeout(resolve, 1500)); return 'done';",
+            sampleArgs: {},
+            ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          },
+        });
+      const short = parseText((await run(1_000)) as never) as { result: { errorKind: string; errorMessage: string } };
+      expect(short.result.errorKind).toBe("timeout");
+      expect(short.result.errorMessage).toContain("Exceeded the 1000ms wall-time limit");
+      expect(short.result.errorMessage).toContain("timeoutMs");
+      const enough = parseText((await run(5_000)) as never) as { result: unknown };
+      expect(enough.result).toEqual({ ok: true, value: "done" });
+      vi.stubEnv("WARDBY_TOOL_MAX_TIMEOUT_MS", "10000");
+      expect((await run(10_001)).isError).toBe(true);
       await client.close();
     });
   });

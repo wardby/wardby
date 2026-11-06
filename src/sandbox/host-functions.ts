@@ -74,6 +74,8 @@ export interface HostFunctionOptions {
   redactSecretValues?: readonly string[];
   /** Overrides the network call — tests only. */
   fetchImpl?: typeof safeFetch;
+  /** Each fetch's timeout (fetchTimeoutFor the tool's limit); the default fetch timeout when absent. */
+  fetchTimeoutMs?: number;
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -151,7 +153,11 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
     async __bridge_fetch(argsJson) {
       const [url, init = {}, secretNames] =
         args<[string, { method?: string; headers?: Record<string, string>; body?: string }?, unknown?]>(argsJson);
-      const policy = { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal };
+      const policy = {
+        ...sandboxFetchPolicy(allowedFetchHosts ?? []),
+        signal,
+        ...(options.fetchTimeoutMs !== undefined ? { timeoutMs: options.fetchTimeoutMs } : {}),
+      };
       if (secretNames === undefined || (Array.isArray(secretNames) && secretNames.length === 0)) {
         return fetchImpl(url, init, policy);
       }
@@ -241,6 +247,8 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
 export interface SandboxApiOptions {
   privileged: PrivilegedHost;
   signal?: AbortSignal;
+  /** The tool's time limit, which also caps sleep(); the default wall-time cap when absent. */
+  wallTimeLimitMs?: number;
   /** Overrides the shared default parser-worker pool — mainly for tests. */
   parserPool?: ParserWorkerPool;
 }
@@ -248,6 +256,7 @@ export interface SandboxApiOptions {
 /** Registers the whole sandbox API: the local bridges directly, the privileged ones through `privileged`. */
 export function installSandboxApi(context: QuickJSContext, runtime: QuickJSRuntime, options: SandboxApiOptions): void {
   const { privileged, signal } = options;
+  const sleepLimitMs = options.wallTimeLimitMs ?? WALL_TIME_LIMIT_MS;
   const register = (name: string, fn: HostBridge) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
   const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
 
@@ -255,7 +264,7 @@ export function installSandboxApi(context: QuickJSContext, runtime: QuickJSRunti
 
   register("__bridge_sleep", async (argsJson) => {
     const [ms] = args<[number]>(argsJson);
-    if (!Number.isFinite(ms) || ms < 0 || ms > WALL_TIME_LIMIT_MS) throw new Error("sleep_limit");
+    if (!Number.isFinite(ms) || ms < 0 || ms > sleepLimitMs) throw new Error("sleep_limit");
     await sleep(ms, undefined, { signal });
     return null;
   });

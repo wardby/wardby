@@ -5,7 +5,9 @@ import {
   CONSOLE_WITHHELD_MESSAGE,
   failureResponse,
   finish,
+  GATEWAY_HOST_CALL_MARGIN_MS,
   hostCall,
+  hostCallTimeoutMs,
   runSecretValues,
   serveGatewayRequest,
   streamModel,
@@ -346,6 +348,56 @@ describe("console bridge when the tool's redaction list cannot be read", () => {
     expect(consoleCalls.length).toBe(0);
     expect(JSON.stringify(warned).includes(FAKE_CONSOLE)).toBe(false);
     expect(warned).toEqual([[{ tool: "lookup" }, CONSOLE_WITHHELD_MESSAGE]]);
+  });
+});
+
+describe("a host call's time limit", () => {
+  const session = (msLeft: number, now: number) => ({ deadlineAt: new Date(now + msLeft) });
+  const tools = (timeoutMs: number | undefined) => ({ toolTimeoutMs: () => timeoutMs });
+
+  it("is the tool's limit plus a margin (30 s for a default tool), cut to the run's deadline", () => {
+    const now = 1_000_000;
+    expect(hostCallTimeoutMs({ session: session(3_600_000, now), tools: tools(undefined) }, "t", now)).toBe(30_000);
+    expect(hostCallTimeoutMs({ session: session(3_600_000, now), tools: tools(10_000) }, "t", now)).toBe(30_000);
+    // Not cut off at 30 s when the tool may run longer.
+    expect(hostCallTimeoutMs({ session: session(3_600_000, now), tools: tools(240_000) }, "t", now)).toBe(
+      240_000 + GATEWAY_HOST_CALL_MARGIN_MS,
+    );
+    expect(hostCallTimeoutMs({ session: session(5_000, now), tools: tools(240_000) }, "t", now)).toBe(5_000);
+    expect(hostCallTimeoutMs({ session: session(-1, now), tools: tools(240_000) }, "t", now)).toBe(0);
+  });
+
+  it("aborts a host call in progress when the run is stopped", async () => {
+    const stop = new AbortController();
+    const done = vi.fn();
+    let seen: AbortSignal | undefined;
+    const ctx = {
+      session: { id: "s1", deadlineAt: new Date(Date.now() + 3_600_000) },
+      snapshot: { input: { userTools: { slow: {} } } },
+      tools: {
+        toolTimeoutMs: () => 240_000,
+        watchStop: () => ({ signal: stop.signal, done }),
+        privilegedHostFor: (_tool: string, signal: AbortSignal) => {
+          seen = signal;
+          return {
+            __bridge_secretsGet: () =>
+              new Promise((_resolve, reject) =>
+                signal.addEventListener("abort", () => reject(new Error("fetch_cancelled_or_timeout"))),
+              ),
+          };
+        },
+      },
+    } as unknown as Parameters<typeof hostCall>[0];
+    setTimeout(() => stop.abort(new Error("run_cancelled")), 50);
+    const call = hostCall(ctx, {} as never, "call_1", {
+      tool: "slow",
+      invocation: "inv_1",
+      bridge: "__bridge_secretsGet",
+      argsJson: JSON.stringify(["k"]),
+    });
+    await expect(call).rejects.toMatchObject({ code: "bridge_error", message: "fetch_cancelled_or_timeout" });
+    expect(seen?.aborted).toBe(true);
+    expect(done).toHaveBeenCalled();
   });
 });
 

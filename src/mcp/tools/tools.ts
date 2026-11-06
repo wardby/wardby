@@ -20,6 +20,8 @@ import {
   zod3WindowWarning,
 } from "../../core/zod3-window.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
+import { effectiveToolTimeoutMs, toolTimeoutProblem } from "../../sandbox/tool-timeout.js";
+import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../../core/tool-names.js";
@@ -68,9 +70,18 @@ async function describeAgents(agents: AttachedAgent[], ctx: McpRequestContext): 
  */
 export function projectTool(tool: Tool, principalId: string) {
   if (tool.ownerId !== null && tool.ownerId === principalId) return tool;
-  return tool.ownerId === null
-    ? { id: tool.id, name: tool.name, description: tool.description, public: true }
-    : { id: tool.id, name: tool.name, description: tool.description, public: false, ownerIsCaller: false };
+  // timeoutMs is not code: anyone who sees the tool sees how long its calls may take.
+  const shown = { id: tool.id, name: tool.name, description: tool.description, timeoutMs: tool.timeoutMs };
+  return tool.ownerId === null ? { ...shown, public: true } : { ...shown, public: false, ownerIsCaller: false };
+}
+
+const TIMEOUT_MS_DESCRIPTION =
+  "The tool's time limit per call, in milliseconds (at least 1000). Omitted: the default of 10000. Capped by the server's WARDBY_TOOL_MAX_TIMEOUT_MS (default 300000); a larger value is refused. Each fetch times out just before it, and sleep() is capped at it.";
+
+/** Refuses (400) a timeoutMs this server can't store, naming its ceiling. */
+function assertToolTimeout(timeoutMs: unknown): void {
+  const problem = toolTimeoutProblem(timeoutMs, loadToolMaxTimeoutMs());
+  if (problem) throw new McpError(400, problem);
 }
 
 /**
@@ -111,11 +122,16 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         description: { type: "string" },
         paramsZod: { type: "string" },
         code: { type: "string" },
+        timeoutMs: { type: "integer", description: TIMEOUT_MS_DESCRIPTION },
       },
       required: ["name", "description", "paramsZod", "code"],
     },
-    handler: async (args: { name: string; description: string; paramsZod: string; code: string }, ctx) => {
+    handler: async (
+      args: { name: string; description: string; paramsZod: string; code: string; timeoutMs?: number },
+      ctx,
+    ) => {
       assertToolNameAllowed(args.name);
+      if (args.timeoutMs !== undefined) assertToolTimeout(args.timeoutMs);
       const schemaResult = await deriveJsonSchema(args.paramsZod);
       if (!schemaResult.ok) {
         return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
@@ -129,6 +145,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             code: args.code,
             jsonSchema: schemaResult.value as object,
             ownerId: ctx.principal.id,
+            ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
           },
         });
         const warnings = await zod3ToolWarnings(toolSubject(tool.name), args.paramsZod);
@@ -146,7 +163,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "update_tool",
     scope: "tools:write",
     description:
-      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including owner-less ones and agents shared with you, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
+      "Replaces a tool's description, paramsZod, code and/or timeoutMs (null: back to the default limit) in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including owner-less ones and agents shared with you, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -155,14 +172,27 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         description: { type: "string" },
         paramsZod: { type: "string" },
         code: { type: "string" },
+        timeoutMs: {
+          type: ["integer", "null"],
+          description: `${TIMEOUT_MS_DESCRIPTION} Pass null to go back to the default.`,
+        },
       },
       required: ["toolId"],
     },
-    handler: async (args: { toolId: string; description?: string; paramsZod?: string; code?: string }, ctx) => {
-      const changes = { description: args.description, paramsZod: args.paramsZod, code: args.code };
+    handler: async (
+      args: { toolId: string; description?: string; paramsZod?: string; code?: string; timeoutMs?: number | null },
+      ctx,
+    ) => {
+      const changes = {
+        description: args.description,
+        paramsZod: args.paramsZod,
+        code: args.code,
+        timeoutMs: args.timeoutMs,
+      };
       if (!hasToolChanges(changes)) {
-        throw new McpError(400, "update_tool needs at least one of description, paramsZod or code.");
+        throw new McpError(400, "update_tool needs at least one of description, paramsZod, code or timeoutMs.");
       }
+      if (args.timeoutMs !== undefined && args.timeoutMs !== null) assertToolTimeout(args.timeoutMs);
       // Checked once up front so a non-owner never gets as far as a sandbox
       // compile, and again (with the attachments) inside the transaction.
       await requireStrictlyOwnedTool(ctx.db, args.toolId, ctx.principal.id);
@@ -238,7 +268,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "dry_run_tool",
     scope: "tools:write",
     description:
-      "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch(). For this release a paramsZod is still compiled with Zod 3; a `warnings` list in the result means the next release, which compiles it with Zod 4 only, will reject it or treat the sample args differently.",
+      "Test-runs tool code against sample args without persisting it, with the same time limit a run would give it (timeoutMs, as on create_tool). Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch(). For this release a paramsZod is still compiled with Zod 3; a `warnings` list in the result means the next release, which compiles it with Zod 4 only, will reject it or treat the sample args differently.",
     inputSchema: {
       type: "object",
       properties: {
@@ -246,10 +276,15 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         code: { type: "string" },
         sampleArgs: { type: "object" },
         allowedHosts: { type: "array", items: { type: "string" } },
+        timeoutMs: { type: "integer", description: TIMEOUT_MS_DESCRIPTION },
       },
       required: ["paramsZod", "code", "sampleArgs"],
     },
-    handler: async (args: { paramsZod: string; code: string; sampleArgs: unknown; allowedHosts?: string[] }, ctx) => {
+    handler: async (
+      args: { paramsZod: string; code: string; sampleArgs: unknown; allowedHosts?: string[]; timeoutMs?: number },
+      ctx,
+    ) => {
+      if (args.timeoutMs !== undefined) assertToolTimeout(args.timeoutMs);
       const hosts = ToolCapabilitiesPatchSchema.pick({ allowedHosts: true }).safeParse({
         allowedHosts: args.allowedHosts,
       });
@@ -300,6 +335,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         sharedDatastore: buildSharedDatastoreAccessor(ctx.principal.id, ctx.providers.datastore, ctx.db),
         toolName: "dry_run_tool",
         allowedFetchHosts: hosts.data.allowedHosts ?? [],
+        timeoutMs: effectiveToolTimeoutMs(args.timeoutMs, loadToolMaxTimeoutMs()),
       });
       return textResult({ jsonSchema, result: sandboxResult, ...warnings });
     },
