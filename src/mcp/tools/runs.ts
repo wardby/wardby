@@ -1,6 +1,10 @@
-import type { NativeExecutionMode } from "#prisma";
+import type { NativeExecutionMode, Prisma, RunStatus } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
-import { requireAgentAccess } from "../auth/access.js";
+import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
+import { requireScope } from "../auth/resource-server.js";
+import { McpError } from "../errors.js";
+import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
+import { loadJiraConfig } from "../../config/providers.js";
 import { findReadableRun } from "./run-access.js";
 import {
   publicCodingRunResult,
@@ -54,49 +58,196 @@ async function requestForReader(
   }
 }
 
+/** The issue-tracker sites issue links are built from (the admin viewer's own source); none when unset or invalid. */
+function issueSites(): IssueSites {
+  try {
+    const jira = loadJiraConfig();
+    return jira ? { jira: jira.siteUrl } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * What started each run and what it produced, in the admin viewer API's shapes (docs/viewer-api.md):
+ * `triggerInfo` (the pull request, issue, schedule or lead behind it), `outcomes` (pull requests opened,
+ * comments, checks) and `serviceReadiness` (each coding-run service's state). Only ids and links:
+ * repositories, numbers, issue keys, URLs, states and times, never free text. A service's failure
+ * `reason` is left out, since it can quote what the service printed.
+ */
+async function runGraphFields(ctx: Pick<McpRequestContext, "db">, runIds: readonly string[]) {
+  const graph = await loadGraphRuns(ctx.db, runIds, issueSites());
+  return new Map(
+    graph.map((run) => [
+      run.id,
+      {
+        triggerInfo: run.trigger,
+        outcomes: run.outcomes,
+        serviceReadiness: run.services.map(({ name, state, attempts, readyAt, failedAt }) => ({
+          name,
+          state,
+          attempts,
+          readyAt,
+          failedAt,
+        })),
+      },
+    ]),
+  );
+}
+
+/** Statuses `active: true` keeps, and that `since` always keeps. */
+const ACTIVE_STATUSES: RunStatus[] = ["pending", "running"];
+/** Rows returned without an agentId: a default and a cap, since it spans every agent the caller can see. */
+const ACROSS_AGENTS_DEFAULT_LIMIT = 50;
+const ACROSS_AGENTS_MAX_LIMIT = 200;
+
+/** The `active` and `since` filters, as clauses to AND onto the visibility rule. */
+function runFilters(args: { active?: boolean; since?: string }): Prisma.RunWhereInput[] {
+  const filters: Prisma.RunWhereInput[] = [];
+  if (args.active === true) filters.push({ status: { in: ACTIVE_STATUSES } });
+  if (args.since !== undefined) {
+    const since = new Date(args.since);
+    if (Number.isNaN(since.getTime())) throw new McpError(400, "since must be an ISO date or time");
+    filters.push({
+      OR: [{ startedAt: { gte: since } }, { finishedAt: { gte: since } }, { status: { in: ACTIVE_STATUSES } }],
+    });
+  }
+  return filters;
+}
+
+/**
+ * Runs across every agent the caller can read, under the same rule as one agent's listing: all runs of
+ * agents they own, only the runs they triggered on the rest. With `all` (admin:view, checked by the
+ * caller), every run in the deployment, as the admin viewer shows. Rows name their agent and leave
+ * out finalText, which can be long and is one get_run away.
+ */
+async function listRunsAcrossAgents(
+  ctx: McpRequestContext,
+  filters: Prisma.RunWhereInput[],
+  opts: { status?: string; limit?: number; all: boolean },
+) {
+  const [where, accessOf] = await Promise.all([
+    opts.all ? Promise.resolve({}) : readableAgentsWhere(ctx),
+    agentAccessResolver(ctx),
+  ]);
+  const agents = await ctx.db.agent.findMany({
+    where,
+    select: { id: true, ownerId: true, name: true, budgetUsd: true },
+  });
+  const owned = agents.filter((agent) => opts.all || accessOf(agent) === "owner").map((agent) => agent.id);
+  const others = agents.filter((agent) => !opts.all && accessOf(agent) !== "owner").map((agent) => agent.id);
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  // A limit that isn't a finite number falls back to the default rather than reaching the query as NaN.
+  const requested = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : ACROSS_AGENTS_DEFAULT_LIMIT;
+  const take = Math.min(Math.max(1, requested), ACROSS_AGENTS_MAX_LIMIT);
+  const status = opts.status;
+  const runs = await ctx.db.run.findMany({
+    where: {
+      OR: [{ agentId: { in: owned } }, { agentId: { in: others }, triggeredById: ctx.principal.id }],
+      ...(status ? { status: status as never } : {}),
+      ...(filters.length > 0 ? { AND: filters } : {}),
+    },
+    omit: { finalText: true, pricingSnapshot: true },
+    take,
+    orderBy: { startedAt: "desc" },
+  });
+  const graph = await runGraphFields(
+    ctx,
+    runs.map((run) => run.id),
+  );
+  return runs.map((run) => {
+    const agent = byId.get(run.agentId);
+    return {
+      ...run,
+      agentName: agent?.name ?? null,
+      agentBudgetUsd: agent ? Number(agent.budgetUsd) : null,
+      ...(graph.get(run.id) ?? { triggerInfo: null, outcomes: [], serviceReadiness: [] }),
+    };
+  });
+}
+
+/** Same rule as get_run: a pending coding run with queuedAt is waiting for a concurrency slot (CODING_MAX_CONCURRENT), not stuck. */
+async function withQueuedAt<T extends { id: string; status: string; nativeExecutionMode?: NativeExecutionMode | null }>(
+  ctx: McpRequestContext,
+  runs: T[],
+) {
+  const pendingIds = runs.filter((run) => run.status === "pending").map((run) => run.id);
+  const queued =
+    pendingIds.length > 0
+      ? await ctx.db.codingRun.findMany({
+          where: { runId: { in: pendingIds }, queuedAt: { not: null } },
+          select: { runId: true, queuedAt: true },
+        })
+      : [];
+  const queuedAtByRun = new Map(queued.map((row) => [row.runId, row.queuedAt?.toISOString()]));
+  return runs.map((run) => {
+    const codingQueuedAt = queuedAtByRun.get(run.id);
+    return codingQueuedAt ? { ...withOperatorMode(run), codingQueuedAt } : withOperatorMode(run);
+  });
+}
+
 export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_runs",
     scope: "agents:read",
+    description:
+      "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
+      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes and serviceReadiness, and leaves out finalText " +
+      `and pricingSnapshot; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
+      `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
+      "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
+      "plus any still pending or running. all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
+      "Use get_run for one run's detail.",
     inputSchema: {
       type: "object",
-      properties: { agentId: { type: "string" }, status: { type: "string" }, limit: { type: "number" } },
-      required: ["agentId"],
+      properties: {
+        agentId: { type: "string" },
+        status: { type: "string" },
+        active: { type: "boolean" },
+        since: { type: "string", description: "ISO date or time" },
+        all: { type: "boolean" },
+        limit: { type: "number" },
+      },
     },
-    handler: async (args: { agentId: string; status?: string; limit?: number }, ctx) => {
+    handler: async (
+      args: { agentId?: string; status?: string; active?: boolean; since?: string; all?: boolean; limit?: number },
+      ctx,
+    ) => {
+      const filters = runFilters(args);
+      if (args.all === true) {
+        if (args.agentId !== undefined) throw new McpError(400, "all lists every agent's runs; leave out agentId");
+        if (!ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
+      }
+      if (args.agentId === undefined) {
+        const runs = await listRunsAcrossAgents(ctx, filters, {
+          status: args.status,
+          limit: args.limit,
+          all: args.all === true,
+        });
+        return textResult(await withQueuedAt(ctx, runs));
+      }
       const { access } = await requireAgentAccess(ctx, args.agentId, "read");
       const runs = await ctx.db.run.findMany({
         where: {
           agentId: args.agentId,
           ...(args.status ? { status: args.status as never } : {}),
           ...(access === "owner" ? {} : { triggeredById: ctx.principal.id }),
+          ...(filters.length > 0 ? { AND: filters } : {}),
         },
         take: args.limit,
         orderBy: { startedAt: "desc" },
       });
-      // Same rule as get_run: a pending coding run with queuedAt is waiting
-      // for a concurrency slot (CODING_MAX_CONCURRENT), not stuck.
-      const pendingIds = runs.filter((run) => run.status === "pending").map((run) => run.id);
-      const queued =
-        pendingIds.length > 0
-          ? await ctx.db.codingRun.findMany({
-              where: { runId: { in: pendingIds }, queuedAt: { not: null } },
-              select: { runId: true, queuedAt: true },
-            })
-          : [];
-      const queuedAtByRun = new Map(queued.map((row) => [row.runId, row.queuedAt?.toISOString()]));
-      return textResult(
-        runs.map((run) => {
-          const codingQueuedAt = queuedAtByRun.get(run.id);
-          return codingQueuedAt ? { ...withOperatorMode(run), codingQueuedAt } : withOperatorMode(run);
-        }),
-      );
+      return textResult(await withQueuedAt(ctx, runs));
     },
   });
 
   mcp.registerTool({
     name: "get_run",
     scope: "agents:read",
+    description:
+      "One run in full: status, cost, request, result, errors and budget events, plus triggerInfo (what started it: " +
+      "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
+      "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two.",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       // Its triggerer keeps seeing it even after losing access to the agent;
@@ -169,11 +320,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           : undefined;
       // Well-formed refusals only, with group, lead and agent budget filled as the run error's are.
       const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
+      // What started the run and what it produced, as the admin viewer shows them.
+      const graph = (await runGraphFields(ctx, [run.id])).get(run.id);
       // What the run was asked to do: the trigger's or lead's task, without the agent's standing instructions.
       const request = codingRun?.request ? await requestForReader(ctx, run, codingRun.request) : {};
       return textResult({
         ...withOperatorMode(run),
         ...request,
+        ...(graph ?? {}),
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
         ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),

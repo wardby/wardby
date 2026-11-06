@@ -66,7 +66,14 @@ build -f src/claude-tool-runner/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby
 for image in wardby-sim wardby-runtime wardby-coding-worker wardby-claude-coding-worker wardby-claude-tool-runner; do
   docker push -q "localhost:${REGISTRY_PORT}/${image}:${TAG}" >/dev/null
 done
-digest() { docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/$1:${TAG}"; }
+# The digest in this registry: an image also tagged for another registry has a
+# digest for each, in no promised order.
+digest() {
+  local repo="localhost:${REGISTRY_PORT}/$1" found
+  found="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${repo}:${TAG}" | awk -v want="${repo}@" 'index($0, want) == 1 { print; exit }')"
+  [ -n "$found" ] || { echo "flow-g-up.sh: ${repo}:${TAG} has no digest in its registry after the push." >&2; return 1; }
+  printf '%s\n' "$found"
+}
 SIM_DIGEST="$(digest wardby-sim)"
 RUNTIME_DIGEST="$(digest wardby-runtime)"
 

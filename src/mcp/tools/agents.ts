@@ -1115,10 +1115,43 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     name: "list_agents",
     scope: "agents:read",
     description:
-      "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async (_args: Record<string, never>, ctx) => {
-      const [where, accessOf] = await Promise.all([readableAgentsWhere(ctx), agentAccessResolver(ctx)]);
+      "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column. " +
+      "summary: true returns only id, name, kind, model, codingProvider, budgetUsd, ownerId and access per agent, for listings that don't need the full configuration. " +
+      "all: true lists every agent in the deployment (admins only, admin:view); an agent you have no grant on shows access `none`.",
+    inputSchema: {
+      type: "object",
+      properties: { summary: { type: "boolean" }, all: { type: "boolean" } },
+      additionalProperties: false,
+    },
+    handler: async (args: { summary?: boolean; all?: boolean }, ctx) => {
+      if (args.all === true && !ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
+      const [where, accessOf] = await Promise.all([
+        args.all === true ? Promise.resolve({}) : readableAgentsWhere(ctx),
+        agentAccessResolver(ctx),
+      ]);
+      if (args.summary === true) {
+        const agents = await ctx.db.agent.findMany({
+          where,
+          select: {
+            id: true,
+            name: true,
+            kind: true,
+            model: true,
+            budgetUsd: true,
+            ownerId: true,
+            codingProfile: { select: { provider: true } },
+          },
+          orderBy: { name: "asc" },
+        });
+        return textResult(
+          agents.map(({ codingProfile, budgetUsd, ...agent }) => ({
+            ...agent,
+            codingProvider: codingProfile?.provider ?? null,
+            budgetUsd: Number(budgetUsd),
+            access: accessOf(agent),
+          })),
+        );
+      }
       const agents = await ctx.db.agent.findMany({ where, include: { codingProfile: true } });
       return textResult(agents.map((agent) => ({ ...withOperatorMode(agent), access: accessOf(agent) })));
     },

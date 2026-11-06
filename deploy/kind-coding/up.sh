@@ -162,13 +162,24 @@ docker push "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-native-worker:dev"
-WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
-WORKER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
-RUNTIME_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
-NATIVE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-native-worker:dev")"
-CLAUDE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
-CLAUDE_TOOL_RUNNER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
-CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev")"
+# The digest in this registry: an image also tagged for another registry has a
+# digest for each, in no promised order.
+registry_digest() {
+  local repo="${1%:*}" digest
+  digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" | awk -v want="${repo}@" 'index($0, want) == 1 { print; exit }')"
+  if [ -z "$digest" ]; then
+    echo "up.sh: $1 has no digest in its registry after the push." >&2
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
+WORKER_NODE_PYTHON_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
+RUNTIME_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
+NATIVE_WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-native-worker:dev")"
+CLAUDE_WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
+CLAUDE_TOOL_RUNNER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
+CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev")"
 
 echo "==> 6/${TOTAL_STEPS} verify the worker images have tar, head, and test"
 # Both worker images (plain node, and the node-python toolchain agents on CODING_WORKER_IMAGE_NODE_PYTHON_3_12

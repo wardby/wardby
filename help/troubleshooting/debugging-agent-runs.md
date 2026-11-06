@@ -10,6 +10,8 @@ appliesTo: >=0.7.0
 # Debug an agent run
 
 Find the run with `list_runs`, read it with `get_run`, then follow what you see.
+Without an `agentId`, `list_runs` lists your runs across every agent (from
+Wardby 0.8.0); add `active: true` or `since` to narrow it.
 
 | What you see                  | What to check                                                                                      |
 | ----------------------------- | -------------------------------------------------------------------------------------------------- |

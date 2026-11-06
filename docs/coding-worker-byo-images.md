@@ -95,8 +95,10 @@ the exact command.
 On a local quickstart install with the Docker launcher, `workerImageRef` can be
 the local image ID (`docker image inspect --format '{{.Id}}' <your-tag>`).
 Otherwise, build it, push it to your own registry, and note the resulting digest —
-`docker inspect --format '{{index .RepoDigests 0}}' <your-tag>` after a push,
-or read it straight from `docker buildx build --push`'s output.
+`docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' <your-tag>`
+after a push lists one digest per registry the image is in: take the one in
+the registry your cluster pulls from, not simply the first. Or read it straight
+from `docker buildx build --push`'s output.
 
 ## Pointing an agent at it
 

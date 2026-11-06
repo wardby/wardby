@@ -460,7 +460,21 @@ done
 
 # Digests, not tags. The launcher refuses a tag, and a digest is the only
 # reference that still means the same bytes tomorrow.
-digest_of() { docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/$1:latest"; }
+# --- digest_of ---
+# The digest in THIS registry. An image whose bytes were also pushed to another
+# registry (the same build tagged for a second deployment target) carries a
+# digest for each, in no promised order; taking the first could hand the
+# cluster an image it cannot pull. Stops the deploy when there is none.
+digest_of() {
+  local repo="${REGISTRY}/$1" digest
+  digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${repo}:latest" | awk -v want="${repo}@" 'index($0, want) == 1 { print; exit }')"
+  if [ -z "$digest" ]; then
+    echo "up.sh: ${repo}:latest has no digest in ${REGISTRY} after the push." >&2
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+# --- end digest_of ---
 RUNTIME_IMAGE="$(digest_of runtime)"
 MIGRATION_IMAGE="$(digest_of migration)"
 WORKER_IMAGE="$(digest_of coding-worker)"
