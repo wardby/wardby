@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
+import { createMcpRoute } from "./mcp-route.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
 import type { RegistryAdapter } from "../../coding/registry/types.js";
@@ -197,6 +201,108 @@ describe("coding proxy HTTP boundary", () => {
     });
     expect(response.status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
+  });
+});
+
+describe("coding proxy /mcp route", () => {
+  const token = mintMcpToken();
+  let gateway: Server;
+  let gatewayUrl: string;
+  let gatewayDelayMs = 0;
+  const forwarded: { authorization?: string; body: string }[] = [];
+  let ledger: MemoryProxyLedger;
+
+  beforeAll(async () => {
+    gateway = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        forwarded.push({ authorization: req.headers.authorization, body: Buffer.concat(chunks).toString("utf8") });
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" }).end('{"jsonrpc":"2.0","id":1,"result":{}}');
+        }, gatewayDelayMs);
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    gatewayUrl = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+    ledger = new MemoryProxyLedger();
+    await ledger.createSession({
+      id: "mcp-session",
+      runId: "mcp-run",
+      capabilityHash: "cap",
+      credentialRef: "anthropic/test",
+      protocol: "anthropic-messages",
+      allowedModels: ["test-model"],
+      deadlineAt: new Date(Date.now() + 60 * 60_000),
+      budgetUsd: 1,
+      registryTokenHash: "reg",
+      mcpTools: [
+        {
+          exposedName: "docs__search",
+          toolName: "search",
+          serverId: "server-1",
+          serverName: "docs",
+          definition: { description: "Search", inputSchema: { type: "object" } },
+        },
+      ],
+      mcpTokenHash: mcpTokenHash(token),
+    });
+  });
+
+  afterAll(async () => new Promise<void>((resolve) => gateway.close(() => resolve())));
+
+  const start = (options: { requestMs?: number; dependencyCache?: boolean } = {}) =>
+    startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      requestMs: options.requestMs,
+      ...(options.dependencyCache ? { dependencyCache: { handle: async () => undefined, uploadMs: 1_000 } } : {}),
+      mcp: createMcpRoute({ ledger, gatewayUrl }),
+    });
+
+  it("forwards POST /mcp to the gateway with the worker's Authorization", async () => {
+    const server = await start();
+    const body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}';
+    const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('{"jsonrpc":"2.0","id":1,"result":{}}');
+    expect(forwarded.at(-1)).toEqual({ authorization: `Bearer ${token}`, body });
+    await server.close();
+  });
+
+  it("answers GET, DELETE and HEAD on /mcp with 405, and still answers HEAD /api/hello", async () => {
+    const server = await start();
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const method of ["GET", "DELETE", "HEAD"]) {
+      const response = await fetch(`${base}/mcp`, { method, headers: { authorization: `Bearer ${token}` } });
+      expect(response.status, method).toBe(405);
+      expect(response.headers.get("allow")).toBe("POST");
+      expect(response.headers.get("www-authenticate")).toBeNull();
+    }
+    expect((await fetch(`${base}/api/hello`, { method: "HEAD" })).status).toBe(200);
+    await server.close();
+  });
+
+  it("lets a forwarded call outlast the server's request window", async () => {
+    // A 200 ms request window, enforced per request by the body timer the dependency cache turns
+    // on, and a gateway that takes 1.5 s: the window covers receiving the request only.
+    gatewayDelayMs = 1_500;
+    try {
+      const server = await start({ requestMs: 200, dependencyCache: true });
+      const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/call"}',
+      });
+      expect(response.status).toBe(200);
+      await server.close();
+    } finally {
+      gatewayDelayMs = 0;
+    }
   });
 });
 

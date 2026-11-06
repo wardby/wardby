@@ -68,7 +68,10 @@ pods; see [Native sandbox](../../docs/native-sandbox.md). The gateway has its
 own Workload Identity and database login (table above), its own Cloud SQL Auth
 Proxy sidecar, egress to the database on 3307 and the metadata server, DNS
 egress to NodeLocal DNSCache (`169.254.20.10`), and the control-plane priority
-class. Its `wardby-native-gateway-env` Secret comes from External Secrets and
+class. It also serves MCP tool calls that the coding proxy forwards for coding
+agents: the proxy's `WARDBY_MCP_GATEWAY_URL` points at the in-cluster Service
+(`http://wardby-native-gateway:8790`), and the NetworkPolicies allow only that
+proxy-to-gateway path on `8790`. Its `wardby-native-gateway-env` Secret comes from External Secrets and
 reuses existing Secret Manager entries (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `SECRET_APP_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`; no new ones), with
 Jira settings from `wardby-jira-env` when configured. `DATABASE_URL` is a plain

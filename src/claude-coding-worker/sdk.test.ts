@@ -108,6 +108,48 @@ describe("Claude SDK configuration", () => {
     expect(buildClaudeSdkOptions({ ...config(), stderr }).stderr).toBe(stderr);
   });
 
+  describe("with MCP tools (the run's MCP token is set)", () => {
+    const TOKEN = "rmt_fake_token_for_claude_sdk_options_test01";
+    const mcp = { url: "http://wardby-proxy:8787/mcp", token: TOKEN };
+
+    it("adds the wardby_mcp HTTP server and the server-level allow rule, keeping wardby_tools", () => {
+      const without = buildClaudeSdkOptions(config());
+      const options = buildClaudeSdkOptions({ ...config(), mcp });
+      expect(options.mcpServers).toEqual({
+        ...(without.mcpServers as Record<string, unknown>),
+        wardby_mcp: {
+          type: "http",
+          url: "http://wardby-proxy:8787/mcp",
+          headers: { Authorization: `Bearer ${TOKEN}` },
+          alwaysLoad: true,
+          timeout: 300_000,
+        },
+      });
+      expect(options.allowedTools).toEqual(["mcp__wardby_tools__run_command", "mcp__wardby_mcp"]);
+      expect(options.strictMcpConfig).toBe(true);
+      expect(options.disallowedTools).toEqual(without.disallowedTools);
+      const skills = buildClaudeSdkOptions({ ...config(), mcp, contextDirectory: "/tmp/wardby-context", skills: true });
+      expect(skills.allowedTools).toEqual(["mcp__wardby_tools__run_command", "Skill", "mcp__wardby_mcp"]);
+    });
+
+    it("puts the token only in the wardby_mcp header, never in an environment", () => {
+      const options = buildClaudeSdkOptions({ ...config(), mcp });
+      const servers = options.mcpServers as { wardby_tools: { env: unknown } };
+      expect(JSON.stringify(options.env)).not.toContain(TOKEN);
+      expect(JSON.stringify(servers.wardby_tools)).not.toContain(TOKEN);
+      expect(JSON.stringify({ ...options, mcpServers: { wardby_tools: servers.wardby_tools } })).not.toContain(TOKEN);
+    });
+
+    it("is unchanged without MCP tools", () => {
+      const strip = (options: Record<string, unknown>) => {
+        const { abortController: _ignored, ...rest } = options;
+        return rest;
+      };
+      expect(strip(buildClaudeSdkOptions(config()))).not.toHaveProperty("mcpServers.wardby_mcp");
+      expect(JSON.stringify(strip(buildClaudeSdkOptions(config())))).not.toContain("wardby_mcp");
+    });
+  });
+
   it("bridges host cancellation to the SDK abort controller", () => {
     const controller = new AbortController();
     const options = buildClaudeSdkOptions(config(controller.signal));

@@ -161,9 +161,25 @@ describe("buildHelpCatalog", () => {
     "mcp_tool_removed",
     "mcp_call_timeout",
     "mcp_servers_off",
+    "mcp_call_limit",
+    "mcp_unavailable",
   ])("ranks the article for %s first", async (code) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     expect(searchHelp(catalog, code)[0]?.page.id).toBe(`errors/${code.replaceAll("_", "-")}`);
+  });
+
+  it("ranks the MCP servers article first for coding agent MCP queries", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["coding agent mcp", "readOnlyHint codex", "codex mcp tools", "mcp server"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("mcp-servers");
+    }
+  });
+
+  it("ranks the pin-load failure article first for its run error code", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["coding_failure_mcp_pins_unavailable", "coding_mcp_pins_unavailable"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("errors/coding-mcp-pins-unavailable");
+    }
   });
 
   it("leaves invalid_arguments (shared by many built-in tools) out of the MCP error articles", async () => {
@@ -183,6 +199,8 @@ describe("buildHelpCatalog", () => {
       "mcp_tool_removed",
       "mcp_call_timeout",
       "mcp_servers_off",
+      "mcp_call_limit",
+      "mcp_unavailable",
     ]) {
       const id = `errors/${code.replaceAll("_", "-")}`;
       expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}`);

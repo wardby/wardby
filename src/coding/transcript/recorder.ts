@@ -56,9 +56,10 @@ export interface RunTranscriptRecorderDeps {
   db: { runTranscript: Pick<PrismaClient["runTranscript"], "upsert" | "findMany" | "deleteMany"> };
   blobs: BlobStore | undefined;
   /**
-   * The agent's attached secret values; rejects when any can't be loaded. The run capability (rrp_) and the
-   * registry token derived from it (rrg_) are not listed: they have fixed token shapes that redactSecrets
-   * (redact.ts) removes whatever their value, and the vault no longer holds the capability by now.
+   * The agent's attached secret values; rejects when any can't be loaded. The run capability (rrp_), the
+   * registry token derived from it (rrg_) and the run's MCP token (rmt_) are not listed: they have fixed
+   * token shapes that redactSecrets (redact.ts) removes whatever their value, and the vault no longer holds
+   * the capability or the MCP token by now.
    */
   secretValues: (agentId: string) => Promise<string[]>;
   retentionDays: number;
@@ -78,7 +79,7 @@ export interface RecordTranscriptInput {
  * Stores a coding run's session transcript for local resume. The worker's file is not trusted: it is
  * sanitised again here, then every string in each record (values and object keys) is redacted by exact
  * value against the agent's attached secret values (and their JSON-escaped forms); the run capability
- * (rrp_) and the registry token (rrg_) are removed by their fixed token shape. Only that copy is stored.
+ * (rrp_), the registry token (rrg_) and the MCP token (rmt_) are removed by their fixed token shape. Only that copy is stored.
  * Rows carry fixed codes, never content. Never throws.
  */
 export class RunTranscriptRecorder {

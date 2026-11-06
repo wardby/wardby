@@ -26,6 +26,7 @@ import {
   type RunnerDb,
   type SandboxSessionSnapshot,
 } from "../core/runner.js";
+import type { CodingMcpDeps } from "../core/coding-mcp.js";
 import { ReviewReadLedger } from "../core/review-reads.js";
 import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { relayedOutputTokens } from "../providers/coding-proxy/interrupted.js";
@@ -56,6 +57,8 @@ export interface GatewayServerDeps {
   providers: NativeRunProviders;
   /** Delegation long-poll window; tests shorten it. */
   pollWindowMs?: number;
+  /** Serves POST /coding-mcp on the same listener (remote MCP servers for coding runs); unset → 404. */
+  codingMcp?: CodingMcpDeps;
 }
 
 /** What a request gets back: one JSON value, or a stream of model events. */

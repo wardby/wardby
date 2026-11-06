@@ -14,6 +14,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       NODE_ENV: production
+      # Optional: base URL of a native gateway (`wardby native-gateway`, see
+      # docker-compose.native-sandbox.yml) that serves MCP tool calls for coding
+      # agents, e.g. http://wardby-native-gateway:8790 on a shared network. Unset
+      # by default: the proxy then answers /mcp with 503 and coding agents simply
+      # get no MCP tools.
+      # WARDBY_MCP_GATEWAY_URL: http://wardby-native-gateway:8790
       # Run dependency cache. Off unless WARDBY_DEPENDENCY_CACHE=true is in the
       # quickstart env file (.wardby/.env) or the shell: then the proxy keeps
       # snapshots on the named volume below. The flag alone switches it; the

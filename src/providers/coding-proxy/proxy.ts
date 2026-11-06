@@ -1,9 +1,12 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { capabilityHash } from "./capability-hash.js";
+import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
+import type { McpToolPin } from "../../core/mcp-tools.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -96,6 +99,10 @@ export interface CreateCodingProxySession {
   budgetUsd: number;
   /** The run's catalog entry recorded at dispatch; the session then prices and shapes requests from it. */
   terms?: ProxyModelTerms;
+  /** The run's pinned MCP tools (no URLs or secrets); only with mcpTokenHash, and only when there is one. */
+  mcpTools?: McpToolPin[];
+  /** SHA-256 (base64url) of the run's MCP token; the control plane mints and delivers the token itself. */
+  mcpTokenHash?: string;
 }
 
 export interface CreatedCodingProxySession {
@@ -156,9 +163,7 @@ interface RelayProgress {
   marked?: boolean;
 }
 
-export function capabilityHash(capability: string): string {
-  return createHash("sha256").update(capability).digest("base64url");
-}
+export { capabilityHash };
 
 // OpenAI Responses allowlist. Everything a request may carry is listed here;
 // anything else is refused before a credential is resolved. It mirrors what the
@@ -637,20 +642,42 @@ function validateStructuredOutputTool(value: unknown): void {
   if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
 }
 
-function validateApprovedTool(value: unknown): void {
+/**
+ * One of the run's pinned MCP tools, as Claude Code advertises it: a plain client tool named
+ * `mcp__wardby_mcp__<exposed name>` (fixtures/claude-code-2.1.286-mcp-requests.json). Only the name
+ * is checked against the pins; the gateway checks the call itself again.
+ */
+function validateMcpTool(tool: Record<string, unknown>): void {
+  onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
+  if (
+    (tool.description !== undefined &&
+      (typeof tool.description !== "string" || tool.description.length > MAX_TOOL_TEXT_BYTES)) ||
+    (tool.type !== undefined && tool.type !== "custom")
+  ) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  record(tool.input_schema, "tools_not_allowed");
+  if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
+}
+
+function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>): void {
   const tool = record(value, "tools_not_allowed");
   if (tool.name === WARDBY_COMMAND_TOOL) return validateCommandTool(tool);
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
+  if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
 
-function validateToolUseBlock(value: Record<string, unknown>): void {
+function validateToolUseBlock(value: Record<string, unknown>, mcpTools: ReadonlySet<string>): void {
   onlyKeys(value, ["type", "id", "name", "input"]);
   if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
   if (value.name === WARDBY_COMMAND_TOOL) return validateCommandInput(value.input);
   if (value.name === STRUCTURED_OUTPUT_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  if (typeof value.name === "string" && mcpTools.has(value.name)) {
+    return void record(value.input, "unsupported_anthropic_feature");
+  }
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
 }
 
@@ -677,14 +704,14 @@ function validateThinkingBlock(value: Record<string, unknown>): void {
   }
 }
 
-function validateMessageBlocks(value: unknown, role: unknown): void {
+function validateMessageBlocks(value: unknown, role: unknown, mcpTools: ReadonlySet<string>): void {
   if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
   for (const candidate of value) {
     const block = record(candidate);
     if (block.type === "text") {
       validateTextBlock(block);
     } else if (block.type === "tool_use" && role === "assistant") {
-      validateToolUseBlock(block);
+      validateToolUseBlock(block, mcpTools);
     } else if (block.type === "tool_result" && role === "user") {
       validateToolResultBlock(block);
     } else if (block.type === "thinking" && role === "assistant") {
@@ -758,6 +785,7 @@ function parseAnthropicRequest(
   rawBody: string,
   betaHeader: string | undefined,
   shape: AnthropicModelShape,
+  mcpTools: ReadonlySet<string>,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -819,17 +847,20 @@ function parseAnthropicRequest(
         continue;
       }
     }
-    validateMessageBlocks(message.content, message.role);
+    validateMessageBlocks(message.content, message.role, mcpTools);
   }
   if (body.tools !== undefined) {
-    if (!Array.isArray(body.tools) || body.tools.length > 2) throw new CodingProxyError(400, "tools_not_allowed");
+    // run_command and StructuredOutput, plus one per pinned MCP tool.
+    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size) {
+      throw new CodingProxyError(400, "tools_not_allowed");
+    }
     const names = new Set<string>();
     for (const tool of body.tools) {
       const definition = record(tool, "tools_not_allowed");
       if (typeof definition.name !== "string" || names.has(definition.name))
         throw new CodingProxyError(400, "tools_not_allowed");
       names.add(definition.name);
-      validateApprovedTool(definition);
+      validateApprovedTool(definition, mcpTools);
     }
   }
   if (body.metadata !== undefined) {
@@ -887,18 +918,24 @@ function parseAnthropicRequest(
   };
 }
 
+/** The Claude tool names of a session's pinned MCP tools; empty for a session without pins. */
+function claudeMcpToolNames(pins: readonly McpToolPin[] | null | undefined): ReadonlySet<string> {
+  return new Set((pins ?? []).map((pin) => `${CLAUDE_MCP_TOOL_PREFIX}${pin.exposedName}`));
+}
+
 function parseRequest(
   protocol: ProxyProtocol,
   rawBody: string,
   anthropicBeta: string | undefined,
   shape: AnthropicModelShape,
+  mcpTools: ReadonlySet<string>,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta, shape)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
@@ -999,6 +1036,11 @@ export class CodingProxy {
     if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0) throw new Error("invalid_proxy_budget");
     if (input.deadlineAt.getTime() <= this.now().getTime()) throw new Error("invalid_proxy_deadline");
     if (!input.credentialRef || input.credentialRef.length > 200) throw new Error("invalid_proxy_credential_reference");
+    // Both or neither: pins without a token could never be called, a token without pins lists nothing.
+    const mcp = input.mcpTools !== undefined || input.mcpTokenHash !== undefined;
+    if (mcp && (!input.mcpTools || input.mcpTools.length === 0 || !input.mcpTokenHash)) {
+      throw new Error("invalid_proxy_mcp_tools");
+    }
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
@@ -1013,6 +1055,7 @@ export class CodingProxy {
       budgetUsd: input.budgetUsd,
       registryTokenHash,
       terms: input.terms,
+      ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -1062,7 +1105,13 @@ export class CodingProxy {
     };
     let parsed: ParsedRequest;
     try {
-      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta, shape);
+      parsed = parseRequest(
+        input.protocol,
+        input.rawBody,
+        input.anthropicBeta,
+        shape,
+        claudeMcpToolNames(session.mcpTools),
+      );
     } catch (error) {
       // The session is already authenticated and no credential has been
       // resolved; record the refusal against the run so a smuggling attempt

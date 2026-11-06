@@ -181,3 +181,64 @@ describe("MemoryProxyLedger previousReply", () => {
     });
   });
 });
+
+describe("MemoryProxyLedger MCP sessions", () => {
+  const pin = {
+    exposedName: "docs__search",
+    toolName: "search",
+    serverId: "server-1",
+    serverName: "docs",
+    definition: { description: "Search docs", inputSchema: { type: "object" } },
+  };
+  const base = {
+    credentialRef: "openai/test",
+    protocol: "openai-responses" as const,
+    allowedModels: ["m"],
+    deadlineAt: new Date(Date.now() + 60_000),
+    budgetUsd: 1,
+  };
+
+  it("finds a session with pinned MCP tools by its MCP token hash", async () => {
+    const ledger = new MemoryProxyLedger();
+    await ledger.createSession({
+      ...base,
+      id: "s1",
+      runId: "r1",
+      capabilityHash: "hash",
+      registryTokenHash: "registry-hash",
+      mcpTools: [pin],
+      mcpTokenHash: "mcp-hash",
+    });
+    const found = await ledger.findSessionByMcpTokenHash("mcp-hash");
+    expect(found).toMatchObject({ id: "s1", mcpTools: [pin], mcpTokenHash: "mcp-hash", mcpCallCount: 0 });
+    expect(await ledger.findSessionByMcpTokenHash("other")).toBeUndefined();
+    // A copy: changing it changes nothing stored.
+    found!.mcpTools![0].exposedName = "changed";
+    expect((await ledger.findSessionByMcpTokenHash("mcp-hash"))?.mcpTools?.[0]?.exposedName).toBe("docs__search");
+  });
+
+  it("gives a session without MCP tools no pins, no hash and no calls", async () => {
+    const ledger = new MemoryProxyLedger();
+    await ledger.createSession({
+      ...base,
+      id: "s2",
+      runId: "r2",
+      capabilityHash: "hash-2",
+      registryTokenHash: "registry-hash-2",
+    });
+    expect(await ledger.findSessionByCapabilityHash("hash-2")).toMatchObject({
+      mcpTools: null,
+      mcpTokenHash: null,
+      mcpCallCount: 0,
+    });
+  });
+
+  it("refuses a second session with the same MCP token hash", async () => {
+    const ledger = new MemoryProxyLedger();
+    const session = { ...base, mcpTools: [pin], mcpTokenHash: "same" };
+    await ledger.createSession({ ...session, id: "a", runId: "ra", capabilityHash: "ha", registryTokenHash: "ga" });
+    await expect(
+      ledger.createSession({ ...session, id: "b", runId: "rb", capabilityHash: "hb", registryTokenHash: "gb" }),
+    ).rejects.toThrow("proxy_mcp_token_collision");
+  });
+});

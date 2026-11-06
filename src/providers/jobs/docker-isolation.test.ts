@@ -116,6 +116,70 @@ function validWorkerInspection(): DockerContainerInspection {
   };
 }
 
+describe("Docker MCP token delivery", () => {
+  const TOKEN = `rmt_${"m".repeat(43)}`;
+  const claude = {
+    ...spec,
+    provider: "claude-code" as const,
+    toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+    limits: { ...spec.limits, pids: 128 },
+  };
+  const envNames = (args: string[]) => args.filter((_value, index) => args[index - 1] === "--env");
+  const withEnv = (extra: string[]): DockerContainerInspection => {
+    const inspection = validWorkerInspection();
+    inspection.Config!.Env = [...inspection.Config!.Env!, ...extra];
+    return inspection;
+  };
+
+  it("names WARDBY_MCP_TOKEN on the agent's command line, never its value, only for a run with MCP tools", () => {
+    expect(envNames(buildWorkerCreateArgs({ ...spec, mcpTools: true }))).toEqual([
+      "WARDBY_PROXY_URL=http://wardby-proxy:8787",
+      "WARDBY_RUN_CAPABILITY",
+      "WARDBY_MCP_TOKEN",
+    ]);
+    expect(envNames(buildClaudeAgentCreateArgs({ ...claude, mcpTools: true }))).toContain("WARDBY_MCP_TOKEN");
+    expect(buildWorkerCreateArgs(spec)).not.toContain("WARDBY_MCP_TOKEN");
+    expect(buildClaudeAgentCreateArgs(claude)).not.toContain("WARDBY_MCP_TOKEN");
+    expect(JSON.stringify(buildDockerIsolationPlan({ ...spec, mcpTools: true }, "proxy"))).not.toContain("rmt_");
+  });
+
+  it("never gives Claude's tool runner the token", () => {
+    expect(buildClaudeToolRunnerCreateArgs({ ...claude, mcpTools: true }).join(" ")).not.toContain("MCP");
+  });
+
+  it("attests the exact token on a run with MCP tools, and refuses one on a run without", () => {
+    const mcp = { ...spec, mcpTools: true as const };
+    expect(() =>
+      assertWorkerContainerInspection(withEnv([`WARDBY_MCP_TOKEN=${TOKEN}`]), mcp, "test-capability", undefined, TOKEN),
+    ).not.toThrow();
+    // Missing, different, or not expected.
+    expect(() =>
+      assertWorkerContainerInspection(validWorkerInspection(), mcp, "test-capability", undefined, TOKEN),
+    ).toThrow("docker_isolation_unsupported");
+    expect(() =>
+      assertWorkerContainerInspection(
+        withEnv(["WARDBY_MCP_TOKEN=rmt_other"]),
+        mcp,
+        "test-capability",
+        undefined,
+        TOKEN,
+      ),
+    ).toThrow("docker_isolation_unsupported");
+    expect(() =>
+      assertWorkerContainerInspection(withEnv([`WARDBY_MCP_TOKEN=${TOKEN}`]), mcp, "test-capability"),
+    ).toThrow("docker_isolation_unsupported");
+    expect(() =>
+      assertWorkerContainerInspection(withEnv([`WARDBY_MCP_TOKEN=${TOKEN}`]), spec, "test-capability"),
+    ).toThrow("docker_isolation_unsupported");
+  });
+
+  it("refuses an mcpTools flag that is not true", () => {
+    expect(() => buildWorkerCreateArgs({ ...spec, mcpTools: false as unknown as true })).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+});
+
 describe("Docker isolation policy", () => {
   it("builds opaque names and fixed arguments without expanding untrusted values", () => {
     const plan = buildDockerIsolationPlan(spec, "trusted-proxy");

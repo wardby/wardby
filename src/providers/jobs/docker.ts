@@ -53,6 +53,7 @@ import {
   type DockerServiceContainer,
 } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
+import { isMcpToken, MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import {
   reportServiceState,
   type ServiceFailureReason,
@@ -175,7 +176,11 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
   async run(args: readonly string[], options: DockerCommandOptions = {}): Promise<DockerCommandResult> {
     if (args.some((argument) => argument.includes("\0"))) throw new Error("docker_argument_invalid");
     const extraEnv = options.env ?? {};
-    if (Object.keys(extraEnv).some((key) => key !== "WARDBY_RUN_CAPABILITY" && key !== CLAUDE_TOOL_SETUP_ENV))
+    if (
+      Object.keys(extraEnv).some(
+        (key) => key !== "WARDBY_RUN_CAPABILITY" && key !== MCP_TOKEN_ENV && key !== CLAUDE_TOOL_SETUP_ENV,
+      )
+    )
       throw new Error("docker_environment_invalid");
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
@@ -436,6 +441,12 @@ export interface DockerJobLauncherOptions {
   workspaceRoot: string;
   proxyContainer: string;
   resolveCapability: (runId: string) => Promise<string>;
+  /**
+   * The run's MCP token (the capability vault), asked for only when the spec has mcpTools; the agent
+   * container gets it as WARDBY_MCP_TOKEN, through the docker process's environment like the
+   * capability. Absent = a run with MCP tools can't be launched.
+   */
+  resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   /** Consult the durable application state before a startup sweep deletes resources. */
   isRunActive: (runId: string, handle: JobHandle) => Promise<boolean>;
   docker?: DockerCommandRunner;
@@ -472,6 +483,8 @@ interface DockerJobRecord {
   createdAt: number;
   deadlineAt: number;
   capabilityHash: string;
+  /** SHA-256 (hex) of the run's MCP token; only on a record whose spec has mcpTools. */
+  mcpTokenHash?: string;
   phase: DockerJobPhase;
   result?: JobResult;
 }
@@ -606,6 +619,11 @@ function capabilityFromInspection(container: DockerContainerInspection): string 
   return container.Config?.Env?.find((value) => value.startsWith("WARDBY_RUN_CAPABILITY="))?.slice(
     "WARDBY_RUN_CAPABILITY=".length,
   );
+}
+
+function mcpTokenFromInspection(container: DockerContainerInspection): string | undefined {
+  const prefix = `${MCP_TOKEN_ENV}=`;
+  return container.Config?.Env?.find((value) => value.startsWith(prefix))?.slice(prefix.length);
 }
 
 function dockerState(inspection: {
@@ -808,14 +826,19 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       }
       const capability = ensureCapability(await this.options.resolveCapability(spec.runId));
       if (hash(capability) !== existing.capabilityHash) throw new Error("docker_capability_changed");
+      const mcpToken = await this.mcpTokenFor(spec);
+      if ((mcpToken === undefined ? undefined : hash(mcpToken)) !== existing.mcpTokenHash) {
+        throw new Error("docker_mcp_token_changed");
+      }
       if (existing.phase === "active") {
         await this.refresh(existing);
         return clone(existing.handle);
       }
-      return this.provision(existing, plan, services, capability);
+      return this.provision(existing, plan, services, capability, mcpToken);
     }
     await this.validateInputArtifact(spec.inputArtifact);
     const capability = ensureCapability(await this.options.resolveCapability(spec.runId));
+    const mcpToken = await this.mcpTokenFor(spec);
     const record: DockerJobRecord = {
       schemaVersion: STATE_SCHEMA_VERSION,
       runId: spec.runId,
@@ -826,12 +849,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       createdAt: this.now(),
       deadlineAt: this.now() + plan.deadlineMs,
       capabilityHash: hash(capability),
+      ...(mcpToken !== undefined ? { mcpTokenHash: hash(mcpToken) } : {}),
       phase: "provisioning",
     };
     // This durable record is the idempotency fence before any Docker side effect.
     await this.writeRecord(record);
     try {
-      return await this.provision(record, plan, services, capability);
+      return await this.provision(record, plan, services, capability, mcpToken);
     } catch (error) {
       await this.options
         .onProvisionFailure?.({ runId: record.runId, keeperContainer: plan.names.keeperContainer })
@@ -844,11 +868,20 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
+  /** The run's MCP token for a spec with mcpTools (refused unless well formed); undefined otherwise, unasked. */
+  private async mcpTokenFor(spec: JobSpec): Promise<string | undefined> {
+    if (!spec.mcpTools) return undefined;
+    const token = await this.options.resolveMcpToken?.(spec.runId);
+    if (!isMcpToken(token)) throw new Error("docker_mcp_token_invalid");
+    return token;
+  }
+
   private async provision(
     record: DockerJobRecord,
     plan: ReturnType<typeof buildDockerIsolationPlan>,
     services: readonly DockerServiceContainer[],
     capability: string,
+    mcpToken?: string,
   ): Promise<JobHandle> {
     await this.assertHost();
     const labels = resourceLabels(record);
@@ -926,13 +959,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       (value) => {
         const inspected = value as DockerContainerInspection;
         if (record.spec.provider === "claude-code") {
-          assertClaudeAgentContainerInspection(inspected, record.spec, capability);
+          assertClaudeAgentContainerInspection(inspected, record.spec, capability, mcpToken);
         } else {
-          assertWorkerContainerInspection(inspected, record.spec, capability, networkKeeperId);
+          assertWorkerContainerInspection(inspected, record.spec, capability, networkKeeperId, mcpToken);
         }
         if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
       },
-      { env: { WARDBY_RUN_CAPABILITY: capability } },
+      { env: { WARDBY_RUN_CAPABILITY: capability, ...(mcpToken !== undefined ? { [MCP_TOKEN_ENV]: mcpToken } : {}) } },
     );
     await this.startContainer(plan.names.workerContainer);
     record.phase = "active";
@@ -1132,8 +1165,12 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const capability = capabilityFromInspection(inspection);
     if (!capability || hash(capability) !== record.capabilityHash)
       throw new Error("docker_resource_attestation_failed");
+    // Only a run with MCP tools carries a token, and only the one its record hashed.
+    const mcpToken = record.spec.mcpTools ? mcpTokenFromInspection(inspection) : undefined;
+    if (record.spec.mcpTools && (!mcpToken || hash(mcpToken) !== record.mcpTokenHash))
+      throw new Error("docker_resource_attestation_failed");
     if (record.spec.provider === "claude-code") {
-      assertClaudeAgentContainerInspection(inspection, record.spec, capability);
+      assertClaudeAgentContainerInspection(inspection, record.spec, capability, mcpToken);
       const tool = await this.inspect<DockerContainerInspection & { State?: { Running?: boolean; Status?: string } }>([
         "container",
         "inspect",
@@ -1153,7 +1190,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         return;
       }
     } else {
-      assertWorkerContainerInspection(inspection, record.spec, capability, await this.attestedNetworkKeeperId(record));
+      assertWorkerContainerInspection(
+        inspection,
+        record.spec,
+        capability,
+        await this.attestedNetworkKeeperId(record),
+        mcpToken,
+      );
     }
     const phase = dockerState(inspection);
     if (!phase || phase === "provisioning" || phase === "active") return;

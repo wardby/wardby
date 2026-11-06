@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import type { JobSpec } from "./types.js";
 
@@ -239,6 +240,7 @@ function validateSpec(spec: JobSpec): void {
   if (spec.sessionResume !== undefined && (spec.sessionResume !== true || spec.provider !== "claude-code")) {
     throw isolationError();
   }
+  if (spec.mcpTools !== undefined && spec.mcpTools !== true) throw isolationError();
   if (spec.services !== undefined) {
     // docker-services.ts re-validates every entry against the catalog schema. Both providers' shells
     // share the network keeper's namespace: Codex's worker, and Claude Code's tool runner.
@@ -455,6 +457,33 @@ function workerNetworkMode(spec: JobSpec): string {
   return spec.services === undefined ? names.network : `container:${names.networkKeeperContainer}`;
 }
 
+/**
+ * A run with MCP tools only: the agent's MCP token, by name. Like the capability, its value comes
+ * from the docker process's own environment (DockerCommandOptions.env), never the command line.
+ */
+function mcpTokenEnvArgs(spec: JobSpec): string[] {
+  return spec.mcpTools ? ["--env", MCP_TOKEN_ENV] : [];
+}
+
+/**
+ * The agent container's exact WARDBY_ environment: the proxy URL, the capability, and for a run with
+ * MCP tools its MCP token. Anything missing, changed or extra fails the attestation.
+ */
+function agentEnvironmentMatches(
+  environment: readonly string[],
+  spec: JobSpec,
+  expectedCapability: string,
+  expectedMcpToken: string | undefined,
+): boolean {
+  if (spec.mcpTools && expectedMcpToken === undefined) return false;
+  const expected = [
+    `WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    `WARDBY_RUN_CAPABILITY=${expectedCapability}`,
+    ...(spec.mcpTools ? [`${MCP_TOKEN_ENV}=${expectedMcpToken}`] : []),
+  ];
+  return environment.length === expected.length && expected.every((value) => environment.includes(value));
+}
+
 export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PORT): string[] {
   validateSpec(spec);
   assertIntegerRange(proxyPort, 1, 65_535);
@@ -509,6 +538,7 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     `WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
     "--env",
     "WARDBY_RUN_CAPABILITY",
+    ...mcpTokenEnvArgs(spec),
     "--restart",
     "no",
     "--stop-signal",
@@ -611,6 +641,7 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
     `WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
     "--env",
     "WARDBY_RUN_CAPABILITY",
+    ...mcpTokenEnvArgs(spec),
     "--restart",
     "no",
     "--stop-signal",
@@ -968,6 +999,7 @@ export function assertWorkerContainerInspection(
   spec: JobSpec,
   expectedCapability: string,
   networkKeeperId?: string,
+  expectedMcpToken?: string,
 ): void {
   validateSpec(spec);
   const names = isolationNames(spec.runId);
@@ -1012,11 +1044,7 @@ export function assertWorkerContainerInspection(
   ) {
     throw isolationError();
   }
-  if (
-    wardbyEnvironment.length !== 2 ||
-    !wardbyEnvironment.includes(`WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
-    !wardbyEnvironment.includes(`WARDBY_RUN_CAPABILITY=${expectedCapability}`)
-  ) {
+  if (!agentEnvironmentMatches(wardbyEnvironment, spec, expectedCapability, expectedMcpToken)) {
     throw isolationError();
   }
   const tmpfs = host.Tmpfs ?? {};
@@ -1103,18 +1131,14 @@ export function assertClaudeAgentContainerInspection(
   container: DockerContainerInspection,
   spec: JobSpec,
   expectedCapability: string,
+  expectedMcpToken?: string,
 ): void {
   validateSpec(spec);
   if (spec.provider !== "claude-code") throw isolationError();
   const names = isolationNames(spec.runId);
   assertClaudeContainerBaseline(container, spec.image, spec, claudeAgentLimits(spec));
   const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
-  if (
-    environment.length !== 2 ||
-    !environment.includes(`WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
-    !environment.includes(`WARDBY_RUN_CAPABILITY=${expectedCapability}`)
-  )
-    throw isolationError();
+  if (!agentEnvironmentMatches(environment, spec, expectedCapability, expectedMcpToken)) throw isolationError();
   assertExactMountSet(container, names, [
     { path: WORKER_PATHS.input, writable: false, subpath: "input" },
     { path: WORKER_PATHS.output, writable: true, subpath: "output" },

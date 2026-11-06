@@ -152,6 +152,8 @@ class FakeDocker implements DockerCommandRunner {
   private volumeRemoved = false;
   private proxyConnected = false;
   output = "";
+  /** The MCP token the worker was created with (by-name --env); a test may swap it to fake tampering. */
+  workerMcpToken?: string;
 
   constructor(
     readonly job: JobSpec,
@@ -179,6 +181,10 @@ class FakeDocker implements DockerCommandRunner {
       const name = nameIndex >= 0 ? args[nameIndex + 1] : args.at(-1);
       if (!name) throw new Error("fake_docker_name_missing");
       this.resourceLabels.set(name, labels(args));
+      // Like Docker, a by-name `--env` takes its value from the docker process's environment.
+      if (name === this.plan.names.workerContainer && args.includes("WARDBY_MCP_TOKEN")) {
+        this.workerMcpToken = options?.env?.WARDBY_MCP_TOKEN;
+      }
       return this.ok();
     }
     if (group === "network" && action === "connect") {
@@ -356,7 +362,11 @@ class FakeDocker implements DockerCommandRunner {
       Config: {
         User: "10001:10001",
         Image: this.job.image,
-        Env: ["WARDBY_PROXY_URL=http://wardby-proxy:8787", `WARDBY_RUN_CAPABILITY=${capability}`],
+        Env: [
+          "WARDBY_PROXY_URL=http://wardby-proxy:8787",
+          `WARDBY_RUN_CAPABILITY=${capability}`,
+          ...(this.workerMcpToken !== undefined ? [`WARDBY_MCP_TOKEN=${this.workerMcpToken}`] : []),
+        ],
         Labels: this.resourceLabels.get(this.plan.names.workerContainer),
       },
       HostConfig: {
@@ -486,7 +496,11 @@ class FakeDocker implements DockerCommandRunner {
   }
 }
 
-async function harness(runId = "docker-run-1", override: Partial<JobSpec> = {}) {
+async function harness(
+  runId = "docker-run-1",
+  override: Partial<JobSpec> = {},
+  launcherOptions: Partial<DockerJobLauncherOptions> = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
   temporaryRoots.push(root);
   const job = { ...spec(runId), ...override };
@@ -507,6 +521,7 @@ async function harness(runId = "docker-run-1", override: Partial<JobSpec> = {}) 
     isRunActive: async () => false,
     docker,
     transfer,
+    ...launcherOptions,
   });
   return { launcher, docker, spec: job, transfer, runRoot, root };
 }
@@ -522,6 +537,62 @@ jobLauncherContract("Docker", async () => {
     finish: async (_handle: JobHandle, _result?: JobResult) => created.docker.finish(),
     lose: async (_handle: JobHandle) => created.docker.lose(),
   };
+});
+
+describe("DockerJobLauncher MCP token", () => {
+  const TOKEN = `rmt_${"m".repeat(43)}`;
+  const createOf = (created: Awaited<ReturnType<typeof harness>>, name: string) =>
+    created.docker.calls.find(
+      (call) => call.args[0] === "container" && call.args[1] === "create" && call.args.includes(name),
+    )!;
+
+  it("gives a Codex worker with MCP tools its token through the docker process's environment only", async () => {
+    const created = await harness("docker-mcp", { mcpTools: true }, { resolveMcpToken: async () => TOKEN });
+    const handle = await created.launcher.launch(created.spec);
+    const worker = createOf(created, created.docker.plan.names.workerContainer);
+    expect(worker.args.filter((_value, index) => worker.args[index - 1] === "--env")).toContain("WARDBY_MCP_TOKEN");
+    expect(worker.options?.env).toEqual({ WARDBY_RUN_CAPABILITY: capability, WARDBY_MCP_TOKEN: TOKEN });
+    expect(JSON.stringify(created.docker.calls.map((call) => call.args))).not.toContain(TOKEN);
+    // The token is attested on every status read, against the hash the record keeps.
+    expect(await created.launcher.status(handle)).toEqual({ state: "running" });
+    created.docker.workerMcpToken = `rmt_${"x".repeat(43)}`;
+    await expect(created.launcher.status(handle)).rejects.toThrow("docker_resource_attestation_failed");
+  });
+
+  it("gives Claude's agent the token and its tool runner never", async () => {
+    const created = await harness(
+      "docker-mcp-claude",
+      { provider: "claude-code", toolImage, limits: claudeLimits, mcpTools: true },
+      { resolveMcpToken: async () => TOKEN },
+    );
+    const handle = await created.launcher.launch(created.spec);
+    expect(createOf(created, created.docker.plan.names.workerContainer).options?.env?.WARDBY_MCP_TOKEN).toBe(TOKEN);
+    const tool = createOf(created, created.docker.plan.names.toolContainer);
+    expect(Object.keys(tool.options?.env ?? {})).toEqual(["WARDBY_TOOL_SETUP"]);
+    expect(tool.args.join(" ")).not.toContain("WARDBY_MCP_TOKEN");
+    expect(tool.options!.env!.WARDBY_TOOL_SETUP).not.toContain(TOKEN);
+    expect(await created.launcher.status(handle)).toEqual({ state: "running" });
+  });
+
+  it("never asks for a token, nor passes one, for a run without MCP tools", async () => {
+    let asked = 0;
+    const created = await harness("docker-mcp-none", {}, { resolveMcpToken: async () => (asked++, TOKEN) });
+    await created.launcher.launch(created.spec);
+    expect(asked).toBe(0);
+    const worker = createOf(created, created.docker.plan.names.workerContainer);
+    expect(worker.args).not.toContain("WARDBY_MCP_TOKEN");
+    expect(Object.keys(worker.options?.env ?? {})).toEqual(["WARDBY_RUN_CAPABILITY"]);
+  });
+
+  it.each([
+    ["no resolver", {}],
+    ["no token", { resolveMcpToken: async () => undefined }],
+    ["a malformed token", { resolveMcpToken: async () => "rmt_short" }],
+  ])("refuses to launch a run with MCP tools given %s, before creating anything", async (_label, options) => {
+    const created = await harness("docker-mcp-bad", { mcpTools: true }, options);
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("docker_mcp_token_invalid");
+    expect(created.docker.calls.some((call) => call.args[1] === "create")).toBe(false);
+  });
 });
 
 describe("DockerJobLauncher", () => {

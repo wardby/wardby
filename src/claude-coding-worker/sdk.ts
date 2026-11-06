@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
 import { PREPARE_DEPENDENCIES_TOOL } from "./tool-socket.js";
+import { WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS } from "../coding-worker/mcp-config.js";
 
 const runtimeRequire = createRequire(import.meta.url);
 const TOOL_NAME = "mcp__wardby_tools__run_command";
@@ -27,7 +28,9 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
     tools: skills ? ["Skill"] : [],
-    allowedTools: skills ? [TOOL_NAME, "Skill"] : [TOOL_NAME],
+    // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
+    // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
+    allowedTools: [TOOL_NAME, ...(skills ? ["Skill"] : []), ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : [])],
     disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME],
     strictMcpConfig: true,
     mcpServers: {
@@ -38,6 +41,19 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
         timeout: 120_000,
         alwaysLoad: true,
       },
+      // The token rides only in this header (Claude Code passes it on its own command line, inside
+      // this container, which runs no model commands); never in an environment.
+      ...(config.mcp
+        ? {
+            [WARDBY_MCP_SERVER]: {
+              type: "http",
+              url: config.mcp.url,
+              headers: { Authorization: `Bearer ${config.mcp.token}` },
+              alwaysLoad: true,
+              timeout: WARDBY_MCP_TIMEOUT_MS,
+            },
+          }
+        : {}),
     },
     settingSources: context ? ["project"] : [],
     // Second layer for native mode: only hooks from managed settings may run, and there are none, so

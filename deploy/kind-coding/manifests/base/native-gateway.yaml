@@ -125,6 +125,15 @@ spec:
         # then read "blocked" for a run pod whose own policy was never programmed.
         - protocol: TCP
           port: 8791
+    # The coding proxy forwards MCP tool calls from coding workers to /coding-mcp on the HTTP
+    # port. Coding run pods themselves still reach only the proxy.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-coding-proxy
+      ports:
+        - protocol: TCP
+          port: 8790
   egress:
     # DNS
     - to:

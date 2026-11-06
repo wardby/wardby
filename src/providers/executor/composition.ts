@@ -41,6 +41,7 @@ import {
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
 import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
+import { loadMcpToolPins } from "../../core/mcp-tools.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
@@ -171,6 +172,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       config: kubernetes,
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
+      resolveMcpToken: (runId) => capabilities.mcpToken(runId),
       readyTimeoutMs: kubernetes.readyTimeoutMs,
       enforcementExecTimeoutMs: kubernetes.enforcementExecTimeoutMs,
       power: options.power ?? DISABLED_POWER,
@@ -194,6 +196,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       workspaceRoot,
       proxyContainer: proxyContainer as string,
       resolveCapability: (runId) => capabilities.get(runId),
+      resolveMcpToken: (runId) => capabilities.mcpToken(runId),
       isRunActive: async (runId, handle) => {
         const coding = await options.db.codingRun.findUnique({
           where: { runId },
@@ -232,6 +235,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     vcs,
     sessions,
     capabilities,
+    // Remote MCP servers: a coding run gets its agent's pinned tools and an MCP token ([] when off).
+    mcpToolPins: (agentId, pinOptions) => loadMcpToolPins(options.db, agentId, pinOptions),
     artifactRoot,
     workerImage: config.workerImage,
     claudeWorkerImage: config.claudeWorkerImage,

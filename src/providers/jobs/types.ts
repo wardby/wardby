@@ -33,6 +33,12 @@ export interface JobSpec {
    * scratch so a long session never fills the worker's shared /tmp.
    */
   sessionResume?: true;
+  /**
+   * Set only when the run has pinned MCP tools (remote MCP servers); absent otherwise, never false.
+   * The launcher then delivers the run's MCP token, from the capability vault, as WARDBY_MCP_TOKEN to
+   * the agent container only (never Claude's tool runner). The token itself is never in the spec.
+   */
+  mcpTools?: true;
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;

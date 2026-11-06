@@ -54,6 +54,8 @@ export interface WorkerClientConfig {
   environment: Record<string, string>;
   /** Codex skills to turn off by name (src/coding-worker/skills.ts): always the built-ins, plus the repo's when repoSkills is off. */
   disabledSkills: string[];
+  /** The run's MCP token, set only when the run has MCP tools: sdk.ts then adds the wardby_mcp server. */
+  mcpToken?: string;
 }
 
 export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentClient;
@@ -70,4 +72,6 @@ export interface WorkerRunOptions {
   trace?: DebugTracer;
   /** Tests only: replaces loading the dependency cache module, which happens only when the run asks for it. */
   loadDependencyCache?: () => Promise<DependencyCacheModule>;
+  /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
+  mcpToken?: string;
 }

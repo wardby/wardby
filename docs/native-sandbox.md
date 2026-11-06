@@ -78,6 +78,13 @@ container to it under the alias `wardby-native-gateway`, and starts the worker
 on it. When the run ends the worker, the network, and the gateway's membership
 of it are removed.
 
+The gateway also serves coding agents' remote MCP tools: the coding proxy
+forwards a coding run's `/mcp` requests to the gateway's HTTP port, on the
+`/coding-mcp` route, where the run's MCP token is checked again. Set
+`WARDBY_MCP_GATEWAY_URL` on the coding proxy to the gateway's base URL
+([details](security-deployment.md#remote-mcp-servers)). The proxy holds no
+gateway credentials, and each route authenticates separately.
+
 The gateway is stateless: all state is in Postgres. You can restart it while
 runs are in flight; workers retry their calls. It must not be given the Docker
 socket, because workers can reach it.
@@ -131,14 +138,15 @@ The gateway is the same Wardby build as the server, started with the
 `native-gateway` command. It needs the server's database, LLM, secrets, and
 integration settings, and **no Docker access**.
 
-| Gateway variable             | Purpose                                                                                                                                                                                                                                                    |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_GATEWAY_LISTEN`      | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
-| `DATABASE_URL`               | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
-| LLM provider keys            | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
-| `SECRET_APP_KEY`             | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
-| Integration settings         | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
-| `WARDBY_TOOL_MAX_TIMEOUT_MS` | Same value as the server, if you set it: the longest time limit a tool may use ([details](security-deployment.md#tool-time-limits)).                                                                                                                       |
+| Gateway variable               | Purpose                                                                                                                                                                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_GATEWAY_LISTEN`        | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
+| `DATABASE_URL`                 | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
+| LLM provider keys              | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
+| `SECRET_APP_KEY`               | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
+| Integration settings           | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
+| `WARDBY_TOOL_MAX_TIMEOUT_MS`   | Same value as the server, if you set it: the longest time limit a tool may use ([details](security-deployment.md#tool-time-limits)).                                                                                                                       |
+| `WARDBY_MCP_MAX_CALLS_PER_RUN` | Same value as the server, if you set it: the most remote MCP tool calls one coding run may make (default `100`; [details](security-deployment.md#remote-mcp-servers)).                                                                                     |
 
 For local development, the repository ships a compose overlay
 (`deploy/local/docker-compose.native-sandbox.yml`) that runs the gateway next to

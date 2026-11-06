@@ -157,6 +157,19 @@ describe("workerDebugTracer", () => {
     expect(workerDebugTracer({ runId: "run_123", debugTrace: true }, CAPABILITY, write)).toBeDefined();
   });
 
+  it("redacts the run's MCP token by exact value, and the token-shaped form too", () => {
+    for (const token of ["fake-mcp-token-not-token-shaped-0001", `rmt_${"B".repeat(43)}`]) {
+      const lines: string[] = [];
+      const tracer = workerDebugTracer({ runId: "run_123", debugTrace: true }, CAPABILITY, (line) => lines.push(line), [
+        token,
+      ]);
+      tracer!.record("sdk_stderr", `MCP server wardby_mcp: Authorization: Bearer ${token} refused`);
+      tracer!.record("message", { headers: { Authorization: token }, [token]: token });
+      expect(lines.join("\n")).not.toContain(token);
+      expect(lines.join("\n")).toContain("[REDACTED]");
+    }
+  });
+
   it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {
     const big = "x".repeat(15_000);
     const run = (debugTraceMaxMb?: number) => {

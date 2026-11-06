@@ -1,6 +1,7 @@
 import { parseStoredEntry, type CatalogEntry } from "../llm/catalog-types.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import type { ProxyRefusalDetails } from "../../core/budget-events.js";
+import type { McpToolPin } from "../../core/mcp-tools.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
@@ -55,6 +56,12 @@ export interface ProxySession {
   upstreamFailure?: string | null;
   /** The run's catalog entry, copied at session creation; null on sessions from before the catalog. */
   terms?: ProxyModelTerms | null;
+  /** The run's pinned MCP tools (no URLs or secrets); null when the run has none, and on older sessions. */
+  mcpTools: McpToolPin[] | null;
+  /** SHA-256 (base64url) of the run's MCP token; null when the run has no MCP tools. */
+  mcpTokenHash: string | null;
+  /** The run's MCP tools/call count so far. */
+  mcpCallCount: number;
 }
 
 export interface ProxyRequest {
@@ -102,6 +109,10 @@ export interface CreateProxySessionInput {
   budgetUsd: number;
   registryTokenHash: string;
   terms?: ProxyModelTerms;
+  /** The run's pinned MCP tools; set together with mcpTokenHash, and only when there is at least one. */
+  mcpTools?: McpToolPin[];
+  /** SHA-256 (base64url) of the run's MCP token (mcpTokenHash in src/coding/mcp-token.ts). */
+  mcpTokenHash?: string;
 }
 
 export interface ReserveProxyRequestInput {
@@ -131,6 +142,8 @@ export type ReserveProxyRequestResult =
 export interface ProxyLedger {
   createSession(input: CreateProxySessionInput): Promise<void>;
   findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null>;
+  /** The session whose MCP token hashes to this; any status (the caller checks it is active and in time). */
+  findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined>;
   reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult>;
   complete(requestId: string, usage: ProxyUsage, actualCostUsd: number, upstreamStatus: number): Promise<ProxyRequest>;
   release(requestId: string, upstreamStatus: number): Promise<void>;

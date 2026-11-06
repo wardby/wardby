@@ -905,6 +905,12 @@ model CodingProxySession {
   dependencyCacheLockHashes String[]                 @default([])
   /// Set when the run's dependency step is over; after it the cache refuses this session.
   dependencyCacheSealedAt   DateTime?
+  /// Phase 2 of remote MCP servers: the run's pinned MCP tools (no URLs or secrets), or null.
+  mcpTools                  Json?
+  /// SHA-256 (base64url) of the run's MCP token; null when the run has no MCP tools.
+  mcpTokenHash              String?                  @unique
+  /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
+  mcpCallCount              Int                      @default(0)
 
   @@index([deadlineAt])
 }
@@ -1715,7 +1721,7 @@ model McpServer {
   @@index([ownerId])
 }
 
-/// An MCP server attached to a native agent, with the server tools it may call.
+/// An MCP server attached to an agent, with the server tools it may call.
 model AgentMcpServer {
   agentId       String
   agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)

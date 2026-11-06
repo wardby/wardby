@@ -39,7 +39,8 @@ import { validateCronExpression } from "../../core/cron.js";
 import { scheduleStartFields } from "../../core/schedule-start.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
-import { agentMcpServerViews } from "./mcp-servers.js";
+import { agentMcpServerViews, codexUnavailableMcpTools, codexWriteToolsWarning } from "./mcp-servers.js";
+import { isCodexCoding } from "../../core/mcp-tools.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import { requireReadableBudgetGroup } from "../auth/ownership.js";
@@ -1096,7 +1097,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           "coding package audit mode set",
         );
       }
-      return textResult(withProfileWarnings(withOperatorMode(agent)));
+      const shown = withProfileWarnings(withOperatorMode(agent));
+      // Becoming Codex (a provider switch, or a native agent becoming coding) leaves out every attached
+      // MCP tool the server doesn't mark read-only: say which, so the owner isn't surprised by a run.
+      const wasCodex = before.kind === "coding" && isCodexCoding(before.codingProfile?.provider);
+      if (agent.kind === "coding" && isCodexCoding(agent.codingProfile?.provider) && !wasCodex) {
+        const writers = await codexUnavailableMcpTools(ctx.db, agent.id);
+        if (writers.length > 0) {
+          return textResult({ ...shown, warnings: [...(shown.warnings ?? []), codexWriteToolsWarning(writers)] });
+        }
+      }
+      return textResult(shown);
     },
   });
 

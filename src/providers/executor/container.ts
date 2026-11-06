@@ -11,6 +11,8 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
 import { withBaseCommit } from "../../coding/base-commit.js";
+import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
+import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
@@ -988,6 +990,10 @@ export interface CodingSessionController {
     budgetUsd: number;
     /** The run's catalog entry; the proxy prices and shapes the run's requests from it. */
     terms?: ProxyModelTerms;
+    /** The run's pinned MCP tools; set with mcpTokenHash, only when the agent has at least one. */
+    mcpTools?: McpToolPin[];
+    /** The hash of the run's MCP token (src/coding/mcp-token.ts); the token itself stays in the vault. */
+    mcpTokenHash?: string;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -996,9 +1002,14 @@ export interface CodingSessionController {
   upstreamFailure?(sessionId: string): Promise<string | null>;
 }
 
-/** Plain capabilities live only for the short provisioning window. */
+/**
+ * Plain capabilities live only for the short provisioning window. A run with MCP tools keeps its
+ * MCP token here too, next to the capability, so the launcher delivers it the same way; both are
+ * deleted together.
+ */
 export class RunCapabilityVault {
   private readonly values = new Map<string, string>();
+  private readonly mcpTokens = new Map<string, string>();
 
   set(runId: string, capability: string): void {
     if (this.values.has(runId)) throw new Error("coding_capability_exists");
@@ -1011,8 +1022,19 @@ export class RunCapabilityVault {
     return capability;
   }
 
+  setMcpToken(runId: string, token: string): void {
+    if (this.mcpTokens.has(runId)) throw new Error("coding_mcp_token_exists");
+    this.mcpTokens.set(runId, token);
+  }
+
+  /** The run's MCP token; undefined for a run without MCP tools (and once the launch is over). */
+  async mcpToken(runId: string): Promise<string | undefined> {
+    return this.mcpTokens.get(runId);
+  }
+
   delete(runId: string): void {
     this.values.delete(runId);
+    this.mcpTokens.delete(runId);
   }
 }
 
@@ -1024,6 +1046,13 @@ export interface ContainerExecutorOptions {
   vcs: VcsProvider;
   sessions: CodingSessionController;
   capabilities: RunCapabilityVault;
+  /**
+   * The agent's MCP tool pins (composition wires loadMcpToolPins; [] when WARDBY_MCP_SERVERS=off).
+   * Absent = no coding run gets MCP tools. A run with pins gets an MCP token, delivered as
+   * WARDBY_MCP_TOKEN; one without gets neither. `readOnlyOnly` comes from the run's dispatched
+   * provider (isCodexCoding(run.provider)), never the agent's current profile.
+   */
+  mcpToolPins?: (agentId: string, options: { readOnlyOnly: boolean }) => Promise<McpToolPin[]>;
   artifactRoot: string;
   /**
    * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
@@ -1304,6 +1333,19 @@ export class ContainerExecutor implements Executor {
         const beforeSession = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeSession.status)) throw new Error("coding_run_no_longer_active");
         const deadlineAt = new Date(this.now().getTime() + run.timeoutSec * 1_000);
+        // The agent's MCP tools, pinned for the run; only a run with some gets a token. The token is
+        // never logged: only its hash goes to the session, the value only into the vault.
+        // A Codex run's shell commands can read the token, so it gets read-only tools only; decided by
+        // the provider the run was dispatched with, which is what jobSpec launches. A failed read fails
+        // the run with a fixed code (the cause goes to the operator log only, redacted).
+        let mcpTools: McpToolPin[];
+        try {
+          mcpTools =
+            (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
+        } catch (error) {
+          throw new Error(MCP_PINS_UNAVAILABLE_ERROR, { cause: error });
+        }
+        const mcpToken = mcpTools.length > 0 ? mintMcpToken() : undefined;
         const session = await this.options.sessions.createSession({
           runId,
           credentialRef: this.credentialRef(run.provider),
@@ -1312,14 +1354,16 @@ export class ContainerExecutor implements Executor {
           deadlineAt,
           budgetUsd: run.budgetUsd,
           terms: this.modelTerms(run),
+          ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
         });
         spendEnabled = true;
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
+        if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
         const inputArtifact = await this.writeInput(run, deadlineAt, workspace);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        const spec = this.jobSpec(run, inputArtifact);
+        const spec = this.jobSpec(run, inputArtifact, { mcpTools: Boolean(mcpToken) });
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         planned = this.options.jobs.plannedHandle?.(spec);
@@ -2542,7 +2586,7 @@ export class ContainerExecutor implements Executor {
     return false;
   }
 
-  private jobSpec(run: ContainerRunSnapshot, inputArtifact: string): JobSpec {
+  private jobSpec(run: ContainerRunSnapshot, inputArtifact: string, options: { mcpTools?: boolean } = {}): JobSpec {
     const provider = run.provider === "claude-code" ? "claude-code" : "codex";
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
@@ -2570,6 +2614,8 @@ export class ContainerExecutor implements Executor {
       ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
       // Claude Code only: the launcher gives the SDK's config dir, where the session grows, its own scratch.
       ...(run.sessionResume && provider === "claude-code" ? { sessionResume: true as const } : {}),
+      // Only for a run with MCP tools: the launcher then delivers WARDBY_MCP_TOKEN from the vault.
+      ...(options.mcpTools ? { mcpTools: true as const } : {}),
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
@@ -3008,6 +3054,11 @@ function safeError(error: unknown): string {
   return `coding_executor:${redactAndTruncate(message, 200).replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
 }
 
+/** The agent's MCP tool pins could not be read at launch (a database error): the run fails, nothing launched. */
+export const MCP_PINS_UNAVAILABLE_ERROR = "coding_mcp_pins_unavailable";
+/** Its category: the run's error is coding_failure_mcp_pins_unavailable:<diagnostic id>. */
+export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
+
 /**
  * Error-code prefixes that name their category outright, checked before the
  * substring heuristics below. Those heuristics filed every `github_*` error
@@ -3044,6 +3095,8 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   // The same for any other host: a repository whose provider this server has not registered.
   ["vcs_host_provider_not_configured", "preflight"],
   ["vcs_", "workspace"],
+  // The agent's MCP tool pins could not be read at launch: nothing was launched.
+  [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
   // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
   ["local_", "workspace"],
   ["git_", "workspace"],

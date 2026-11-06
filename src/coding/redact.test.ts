@@ -9,4 +9,10 @@ describe("redactSecrets", () => {
     expect(out).not.toContain("rrp_abcdefghij");
     expect(out).toContain(REDACTED);
   });
+
+  it("redacts a coding run's MCP token", () => {
+    const token = `rmt_${"Q".repeat(43)}`;
+    const out = redactSecrets(`token ${token} and rmt_${"z".repeat(20)}`);
+    expect(out).toBe(`token ${REDACTED} and ${REDACTED}`);
+  });
 });

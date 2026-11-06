@@ -49,9 +49,13 @@ interface SessionRow {
   registryTokenHash: string | null;
   budgetExhaustedAt?: Date | null;
   upstreamFailure?: string | null;
-  /** Selected by findSessionByCapabilityHash only. */
+  /** Selected by findSessionByCapabilityHash and findSessionByMcpTokenHash only. */
   pricingVersion?: string | null;
   catalogEntry?: unknown;
+  /** Selected by findSessionByCapabilityHash and findSessionByMcpTokenHash only. */
+  mcpTools?: unknown;
+  mcpTokenHash?: string | null;
+  mcpCallCount?: number | null;
 }
 
 interface RequestRow {
@@ -99,7 +103,30 @@ function sessionFromRow(row: SessionRow): ProxySession {
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
     upstreamFailure: row.upstreamFailure ?? null,
     terms: sessionTerms(row),
+    mcpTools: sessionMcpTools(row),
+    mcpTokenHash: row.mcpTokenHash ?? null,
+    mcpCallCount: Number(row.mcpCallCount ?? 0),
   };
+}
+
+/** The session's pinned MCP tools; null when it has none. Anything but a list of pins refuses the session. */
+function sessionMcpTools(row: SessionRow): ProxySession["mcpTools"] {
+  const stored = row.mcpTools ?? null;
+  if (stored === null) return null;
+  if (
+    !Array.isArray(stored) ||
+    !stored.every(
+      (pin) =>
+        typeof pin === "object" &&
+        pin !== null &&
+        typeof (pin as { exposedName?: unknown }).exposedName === "string" &&
+        typeof (pin as { toolName?: unknown }).toolName === "string" &&
+        typeof (pin as { serverId?: unknown }).serverId === "string",
+    )
+  ) {
+    throw new Error("invalid_proxy_session_mcp_tools");
+  }
+  return stored as NonNullable<ProxySession["mcpTools"]>;
 }
 
 /**
@@ -175,11 +202,13 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "createdAt", "updatedAt")
+         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash",
+         "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
+         ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
@@ -187,10 +216,19 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
+  }
+
+  async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {
+    const rows = await this.db.$queryRaw<SessionRow[]>`
+      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount"
+      FROM "CodingProxySession" WHERE "mcpTokenHash" = ${mcpTokenHash}
+    `;
+    return rows[0] ? sessionFromRow(rows[0]) : undefined;
   }
 
   async reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult> {

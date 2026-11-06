@@ -7,10 +7,16 @@
  *   POST /native-gateway/v1/call   body: GatewayRequest
  *   → application/json            { ok: true, result } | { ok: false, error: { code, message } }
  *   → application/x-ndjson        (llm.stream) { event } … then { end: true } or { error: { code, message, causeCode? } }
+ *
+ *   POST /coding-mcp               a coding run's MCP calls, forwarded by the coding proxy's /mcp route
+ *                                  (src/core/coding-mcp.ts); its own auth: the run's MCP token, not a
+ *                                  gateway capability. 404 when the listener was started without it.
  */
 
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { CODING_MCP_PATH, handleCodingMcpRequest, type CodingMcpDeps } from "../core/coding-mcp.js";
 import { logger } from "../core/logger.js";
+import { HTTP_LIMITS, HttpBoundaryError, readBody as readLimitedBody } from "../mcp/transport/http-limits.js";
 import { logUnexpectedError } from "./gateway.js";
 import { serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
 import { GatewayError, MAX_MESSAGE_BYTES, toGatewayError } from "./protocol.js";
@@ -71,6 +77,10 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         send(healthy ? 200 : 503, { ok: healthy });
         return;
       }
+      if (new URL(req.url ?? "/", "http://gateway").pathname === CODING_MCP_PATH && deps.codingMcp) {
+        await serveCodingMcp(req, res, deps.codingMcp);
+        return;
+      }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {
         send(404, { ok: false, error: { code: "not_found", message: "not found" } });
         return;
@@ -109,6 +119,46 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
       res.end();
     });
   });
+}
+
+/** /coding-mcp: one JSON-RPC message per POST, answered as one JSON body (or 202 with none). */
+async function serveCodingMcp(req: IncomingMessage, res: ServerResponse, deps: CodingMcpDeps): Promise<void> {
+  if (req.method !== "POST") {
+    res.setHeader("allow", "POST");
+    res.setHeader("content-type", "application/json");
+    res.writeHead(405);
+    res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Use POST." } }));
+    return;
+  }
+  let body: string;
+  try {
+    body = await readLimitedBody(req, HTTP_LIMITS.json, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+  } catch (err) {
+    const status = err instanceof HttpBoundaryError ? err.status : 400;
+    res.setHeader("content-type", "application/json");
+    res.writeHead(status);
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32600, message: "The request body could not be read." },
+      }),
+    );
+    // A body left unread would otherwise keep the socket busy.
+    if (status === 413) req.resume();
+    return;
+  }
+  // The proxy gives up on a call at its forward limit (or its worker goes away): the closed response
+  // aborts the call in flight rather than leave it running against the MCP server.
+  const closed = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) closed.abort();
+  });
+  const response = await handleCodingMcpRequest(req.headers.authorization, body, deps, closed.signal);
+  if (closed.signal.aborted) return;
+  res.setHeader("content-type", response.contentType);
+  res.writeHead(response.status);
+  res.end(response.body);
 }
 
 /** Starts the listener; resolves once it is accepting connections. */

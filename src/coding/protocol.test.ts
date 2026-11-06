@@ -490,6 +490,14 @@ describe("bounded duplicate-safe JSON parsing", () => {
 });
 
 describe("redactTokenShapedValues", () => {
+  it("redacts a coding run's MCP token", () => {
+    const token = `rmt_${"Ab3_-".repeat(8)}xyz`;
+    expect(redactTokenShapedValues(`WARDBY_MCP_TOKEN=${token} failed`)).toBe("WARDBY_MCP_TOKEN=[REDACTED] failed");
+    expect(redactTokenShapedValues(`rmt_${"a".repeat(20)}`)).toBe("[REDACTED]");
+    // Too short to be a token: ordinary words stay.
+    expect(redactTokenShapedValues("rmt_short")).toBe("rmt_short");
+  });
+
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
   it("redacts the credential shapes an operator log can pick up from a cause chain", () => {

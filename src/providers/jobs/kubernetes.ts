@@ -70,6 +70,7 @@ import {
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
+import { isMcpToken } from "../../coding/mcp-token.js";
 import { podQuotaUsage, quotaShortfall, type PodQuotaUsage } from "./kubernetes-quota.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
@@ -307,6 +308,11 @@ export interface KubernetesJobLauncherOptions {
   config: KubernetesJobConfig;
   workspaceRoot: string; // same root the VCS provider prepares workspaces under
   resolveCapability: (runId: string) => Promise<string>;
+  /**
+   * The run's MCP token (the capability vault), asked for only when the spec has mcpTools; it goes into
+   * the run's Secret next to the capability. Absent = a run with MCP tools can't be launched.
+   */
+  resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   /**
    * Cluster preflight run once before the first launch; failure fails every launch. It may return the
    * proxy ClusterIP it validated; otherwise the launcher reads the proxy witness once itself. Either way
@@ -1007,6 +1013,10 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
     const capability = await this.options.resolveCapability(spec.runId);
     if (!CAPABILITY.test(capability)) throw new Error("kubernetes_capability_invalid");
+    const mcpToken = spec.mcpTools ? await this.options.resolveMcpToken?.(spec.runId) : undefined;
+    if (spec.mcpTools && !isMcpToken(mcpToken)) {
+      throw new Error("kubernetes_mcp_token_invalid");
+    }
     // Re-read (not just the ClusterIP): the gate below reads "deny port unreachable" as evidence,
     // which is only meaningful against a Service that actually exposes it with a ready backend.
     const witness = await readProxyWitness(this.api, this.namespace, proxyService);
@@ -1022,7 +1032,10 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const policy = buildRunNetworkPolicy(spec, this.namespace);
     const toolSetup = spec.provider === "claude-code" ? claudeToolSetup(spec, capability) : undefined;
     await this.createIfMissing(() =>
-      this.api.createSecret(this.namespace, buildCapabilitySecret(spec, this.namespace, capability, toolSetup)),
+      this.api.createSecret(
+        this.namespace,
+        buildCapabilitySecret(spec, this.namespace, capability, toolSetup, mcpToken),
+      ),
     );
     await this.createIfMissing(() => this.api.createNetworkPolicy(this.namespace, policy));
     await this.createIfMissing(() => this.api.createPod(this.namespace, pod));

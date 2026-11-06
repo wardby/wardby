@@ -825,6 +825,38 @@ describe("KubernetesJobLauncher planned handles", () => {
   });
 });
 
+describe("MCP token", () => {
+  const TOKEN = `rmt_${"m".repeat(43)}`;
+  const secretOf = (h: Awaited<ReturnType<typeof harness>>) =>
+    (h.api.objects.get(`secret/wardby-coding/${h.names.secret}`) as { stringData: Record<string, string> }).stringData;
+
+  it("puts a run's MCP token in its Secret, and nowhere in the pod or a warning", async () => {
+    const h = await harness("run-mcp-ok", {}, { resolveMcpToken: async () => TOKEN });
+    await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(secretOf(h)).toEqual({ capability: CAPABILITY, "mcp-token": TOKEN });
+    expect(JSON.stringify(h.api.objects.get(`pod/wardby-coding/${h.names.pod}`))).not.toContain(TOKEN);
+    expect(JSON.stringify(h.warnings)).not.toContain(TOKEN);
+  });
+
+  it("never asks for a token for a run without MCP tools", async () => {
+    let asked = 0;
+    const h = await harness("run-mcp-none", {}, { resolveMcpToken: async () => (asked++, TOKEN) });
+    await h.launcher.launch(h.spec);
+    expect(asked).toBe(0);
+    expect(Object.keys(secretOf(h))).toEqual(["capability"]);
+  });
+
+  it.each([
+    ["no resolver", {}],
+    ["no token", { resolveMcpToken: async () => undefined }],
+    ["a malformed token", { resolveMcpToken: async () => "rmt_short" }],
+  ])("refuses to launch a run with MCP tools given %s", async (_label, launcherOptions) => {
+    const h = await harness("run-mcp-bad", {}, launcherOptions);
+    await expect(h.launcher.launch({ ...h.spec, mcpTools: true })).rejects.toThrow("kubernetes_mcp_token_invalid");
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+  });
+});
+
 describe("Claude Code", () => {
   const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
   const claudeOf = (spec: JobSpec): JobSpec => ({ ...spec, provider: "claude-code", toolImage: TOOL_IMAGE });
