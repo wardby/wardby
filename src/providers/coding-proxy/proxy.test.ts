@@ -1506,6 +1506,36 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       "invalid_openai_tool",
     ],
     ["invalid tool name", { tools: [{ type: "function", name: "bad name", parameters: {} }] }, "invalid_openai_tool"],
+    [
+      "server-executed tool_search",
+      { tools: [{ type: "tool_search", execution: "server", description: "", parameters: {} }] },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    ["tool_search without an execution", { tools: [{ type: "tool_search" }] }, "openai_tool_not_allowed:tool_search"],
+    [
+      "tool_search with an unknown key",
+      { tools: [{ type: "tool_search", execution: "client", parameters: {}, vector_store_ids: ["vs_1"] }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "tool_search inside a namespace",
+      {
+        tools: [
+          { type: "namespace", name: "ns", description: "", tools: [{ type: "tool_search", execution: "client" }] },
+        ],
+      },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    [
+      "non-boolean defer_loading",
+      { tools: [{ type: "function", name: "f", parameters: {}, defer_loading: "yes" }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "defer_loading on a custom tool",
+      { tools: [{ type: "custom", name: "f", defer_loading: true }] },
+      "invalid_openai_tool",
+    ],
     ["hosted tool choice", { tool_choice: { type: "web_search" } }, "openai_tool_choice_not_allowed"],
     [
       "extra include",
@@ -1623,6 +1653,85 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       "extra key on a function call",
       { type: "function_call", call_id: "c", name: "f", arguments: "{}", server_url: "https://attacker.example" },
       "invalid_openai_request",
+    ],
+    [
+      "a server-executed tool_search_call",
+      { type: "tool_search_call", call_id: "c", status: "completed", execution: "server", arguments: { query: "x" } },
+      "openai_input_not_allowed:tool_search_call",
+    ],
+    [
+      "a tool_search_call with string arguments",
+      { type: "tool_search_call", call_id: "c", status: "completed", execution: "client", arguments: "{}" },
+      "invalid_openai_request",
+    ],
+    [
+      "extra key on a tool_search_call",
+      {
+        type: "tool_search_call",
+        call_id: "c",
+        execution: "client",
+        arguments: { query: "x" },
+        server_url: "https://attacker.example",
+      },
+      "invalid_openai_request",
+    ],
+    [
+      "a server-executed tool_search_output",
+      { type: "tool_search_output", call_id: "c", status: "completed", execution: "server", tools: [] },
+      "openai_input_not_allowed:tool_search_output",
+    ],
+    [
+      "a hosted tool smuggled through tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        status: "completed",
+        execution: "client",
+        tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }],
+      },
+      "openai_tool_not_allowed:mcp",
+    ],
+    [
+      "a hosted tool inside a namespace in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "namespace", name: "ns", description: "", tools: [{ type: "web_search" }] }],
+      },
+      "openai_tool_not_allowed:web_search",
+    ],
+    [
+      "a tool_search tool inside tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "tool_search", execution: "client" }],
+      },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    [
+      "a function with an extra key in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [
+          { type: "function", name: "f", parameters: {}, defer_loading: true, server_url: "https://attacker.example" },
+        ],
+      },
+      "invalid_openai_tool",
+    ],
+    [
+      "a non-boolean defer_loading in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "function", name: "f", parameters: {}, defer_loading: "yes" }],
+      },
+      "invalid_openai_tool",
     ],
     [
       "output_text annotations",
@@ -2356,15 +2465,28 @@ describe("MCP tool names in the model-request allowlist", () => {
       }
     });
 
-    it("still refuses the tool_search layout (gpt-5.5), with or without pins", async () => {
-      const refused = (await recorded()).responses.filter((entry) => entry.outcome === "refused");
-      expect(refused).toHaveLength(1);
+    it("forwards the tool_search layout (gpt-5.5) unchanged, with or without pins", async () => {
+      const toolSearch = (await recorded()).responses.filter((entry) =>
+        entry.scenario.startsWith("gpt-5.5 tool_search"),
+      );
+      expect(toolSearch).toHaveLength(3);
+      const inputTypes = toolSearch.map(({ body }) => (body.input as { type: string }[]).map((item) => item.type));
+      expect(inputTypes[1]).toContain("tool_search_output");
+      expect(inputTypes[2]).toContain("function_call");
       for (const mcpTools of [undefined, [mcpPin("echo")]]) {
-        const h = await harness({ mcpTools });
-        await expect(
-          execute(h, "codex-tool-search", new TestSink(), JSON.stringify({ ...refused[0].body, model: "test-model" })),
-        ).rejects.toMatchObject({ status: 400, code: "openai_tool_not_allowed:tool_search" });
-        expect(h.fetch).not.toHaveBeenCalled();
+        for (const [index, { scenario, body }] of toolSearch.entries()) {
+          const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }), mcpTools });
+          const request = { ...body, model: "test-model" };
+          await execute(h, `codex-tool-search-${index}`, new TestSink(), JSON.stringify(request));
+          expect(h.fetch, scenario).toHaveBeenCalledTimes(1);
+          const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+          expect(forwarded, scenario).toEqual({
+            ...request,
+            max_output_tokens: PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+            store: false,
+            background: false,
+          });
+        }
       }
     });
   });
