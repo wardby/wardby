@@ -238,6 +238,10 @@ After connecting, try:
 > List my Wardby agents, show the latest run and its actual cost, then create a
 > new agent with a maximum budget of $0.50. Do not run it yet.
 
+From Wardby 0.8.0, Claude Code can also show your runs in a pane beside the
+chat: `npx @wardby/cli@latest claude-plugin install`, then `/wardby-runs`. See
+the [Claude Code plugin](claude-code-plugin.md) guide.
+
 ### Reasoning effort
 
 A native agent can set `effort` (`low`, `medium`, `high`, `xhigh`, or `max`)
@@ -464,6 +468,7 @@ help article.
 ## Next steps
 
 - [Agent recipes](agent-recipes.md)
+- [Claude Code plugin](claude-code-plugin.md): your runs beside the chat (0.8.0+)
 - [Runtime architecture](architecture-runtime.md)
 - [Coding-agent setup](coding-agent-setup.md) and its
   [local repositories](coding-agent-setup.md#local-repositories) section

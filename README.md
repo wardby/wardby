@@ -387,6 +387,9 @@ for the repository's own dependency-override policy.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
   repository and allowed per agent, for Codex and Claude Code runs on the
   Kubernetes and Docker launchers.
+- A [Claude Code plugin](https://github.com/wardby/wardby/blob/main/docs/claude-code-plugin.md) (0.8.0+) that
+  shows your runs beside the chat, grouped by pull request, with run details and
+  Continue locally; `wardby claude-plugin install` sets it up.
 - In-process reconciliation and optional DBOS durable workflows.
 - Self-hosted or delegated OAuth for remote MCP access.
 - Prometheus metrics and provisioned Grafana dashboards for local operations.
@@ -405,6 +408,8 @@ src/mcp/        MCP transports, authentication, and management tools
 src/providers/  Swappable model, job, VCS, email, auth, secret, and storage seams
 src/coding-worker/ and src/claude-coding-worker/
                 Isolated Codex and Claude Code execution
+plugins/claude-code/
+                The wardby-runs Claude Code plugin (this repository is its marketplace)
 deploy/         Local, production-reference, observability, and cloud deployment
 prisma/         Schema and reviewed migrations
 docs/           Architecture, security, setup, and operator guidance
