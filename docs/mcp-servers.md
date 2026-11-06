@@ -25,3 +25,9 @@ default, anyone), `admins` (registering, updating and refreshing need
 `get_agent` shows each attached server under `mcpServers`, with the exposed
 tool names and any allowed tools the server no longer lists
 (`missingTools`).
+
+An attachment belongs to the server's owner, because the server's secrets act
+for that owner. When `make_owner` gives an agent a new owner, servers the new
+owner doesn't own are detached and listed under `bindingsRemoved` with
+`kind: "mcp_server"`. `wardby grants adopt-public` and
+`wardby grants prune-bindings` remove them the same way.

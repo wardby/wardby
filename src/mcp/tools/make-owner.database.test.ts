@@ -28,6 +28,7 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     await db.agentSecret.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.agentDatastore.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.resourceGrant.deleteMany({ where: { resourceId: { in: agentIds } } });
+    await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.tool.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.secret.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.datastore.deleteMany({ where: { ownerId: { in: principalIds } } });
@@ -231,6 +232,58 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     const secrets = buildSecretsAccessor(agent.id, cipher, db);
     expect(await secrets.get("A_SECRET")).toBeUndefined();
     expect(await secrets.get("B_SECRET")).toBe("b-value");
+  });
+
+  it("make_owner detaches MCP servers the new owner doesn't own, in the same change", async () => {
+    const [admin, a, b] = [await principal(), await principal(), await principal()];
+    const agent = await db.agent.create({
+      data: { name: `make-owner-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1, ownerId: a.id },
+    });
+    agentIds.push(agent.id);
+    const server = (ownerId: string, name: string) =>
+      db.mcpServer.create({ data: { ownerId, name, url: `https://mcp.example.com/${name}` } });
+    const aServer = await server(a.id, "asrv");
+    const bServer = await server(b.id, "bsrv");
+    await db.agentMcpServer.createMany({
+      data: [
+        { agentId: agent.id, serverId: aServer.id, allowedTools: ["search"], attachedById: a.id },
+        { agentId: agent.id, serverId: bServer.id, allowedTools: ["search"], attachedById: b.id },
+      ],
+    });
+
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext({
+      principal: admin,
+      scopes: new Set(["agents:admin"]),
+      roles: ["admin"],
+      canonicalUri: "https://host/mcp",
+      providers,
+      db,
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    });
+    registerAgentTools(mcp);
+    const mcpServer = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
+    await mcpServer.connect(st);
+    await client.connect(ct);
+    const result = (await client.callTool({ name: "make_owner", arguments: { agentId: agent.id, ownerId: b.id } })) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    await client.close();
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(result.content[0].text).bindingsRemoved).toEqual([
+      { kind: "mcp_server", boundName: "asrv", resourceId: aServer.id },
+    ]);
+    // The old owner's server is detached; the new owner's own server stays.
+    expect((await db.agentMcpServer.findMany({ where: { agentId: agent.id } })).map((r) => r.serverId)).toEqual([
+      bServer.id,
+    ]);
+    // The server itself is untouched.
+    expect(await db.mcpServer.count({ where: { id: aServer.id } })).toBe(1);
   });
 
   it("adopting an owner-less agent keeps its grants", async () => {

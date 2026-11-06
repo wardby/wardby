@@ -10,7 +10,8 @@ import type { safeFetch } from "../../sandbox/safe-fetch.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
-import { registerMcpServerTools } from "./mcp-servers.js";
+import { assertNoClash, registerMcpServerTools } from "./mcp-servers.js";
+import { McpError } from "../errors.js";
 
 const logged = vi.hoisted(() => [] as unknown[]);
 vi.mock("../../core/logger.js", () => {
@@ -434,5 +435,44 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
     const cross = await call("attach_mcp_server", { agentId: a.id, serverId: odd2.id, allowedTools: ["issue"] });
     expect(cross.isError).toBe(true);
     expect(cross.text).toContain("odd__get__issue");
+  });
+
+  it("the clash check refuses a built-in repository tool name (no server and tool name can produce one)", async () => {
+    const p = await principal();
+    const a = await agent(p);
+    const refused = assertNoClash(db, a.id, "no-server", ["acme__search", "repo_read_file"]);
+    await expect(refused).rejects.toBeInstanceOf(McpError);
+    await expect(refused).rejects.toMatchObject({
+      httpStatus: 409,
+      message: expect.stringContaining('"repo_read_file" clashes with a built-in repository tool'),
+    });
+    await expect(assertNoClash(db, a.id, "no-server", ["acme__search"])).resolves.toBeUndefined();
+  });
+
+  it("attach to an agent the caller can't read is a 404; only the agent's owner may detach", async () => {
+    const p = await principal();
+    const call = await connect(p);
+    const { id } = await register(call);
+    const a = await agent(p);
+    ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+
+    const q = await principal();
+    const qCall = await connect(q);
+    const qServer = await register(qCall, "qserver");
+    // q has no grant on p's agent at all: the same answer as a missing agent.
+    const hidden = await qCall("attach_mcp_server", { agentId: a.id, serverId: qServer.id, allowedTools: ["search"] });
+    const missing = await qCall("attach_mcp_server", {
+      agentId: "no-such-agent",
+      serverId: qServer.id,
+      allowedTools: ["search"],
+    });
+    expect(hidden.isError).toBe(true);
+    expect(missing.isError).toBe(true);
+    expect(hidden.text).toBe(missing.text.replace("no-such-agent", a.id));
+    expect(hidden.text).toMatch(/not found/i);
+
+    const detach = await qCall("detach_mcp_server", { agentId: a.id, serverId: id });
+    expect(detach.isError).toBe(true);
+    expect(await db.agentMcpServer.count({ where: { agentId: a.id, serverId: id } })).toBe(1);
   });
 });

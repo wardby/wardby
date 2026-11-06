@@ -1192,7 +1192,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     name: "make_owner",
     scope: "agents:admin",
     description:
-      "Admins: gives an agent a new owner (an existing principal id). Secret and datastore bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset (adopting an owner-less agent keeps them). Returns what changed.",
+      "Admins: gives an agent a new owner (an existing principal id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset (adopting an owner-less agent keeps them). Returns what changed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1295,9 +1295,23 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               where: { agentId: agent.id, datastoreId: { in: foreignDatastores.map((b) => b.datastoreId) } },
             });
           }
+          // MCP server attachments: the server's brokered secrets act for its
+          // owner, so a server the new owner doesn't own is detached.
+          const mcpServers = await tx.agentMcpServer.findMany({
+            where: { agentId: agent.id },
+            include: { server: { select: { name: true, ownerId: true } } },
+            orderBy: { serverId: "asc" },
+          });
+          const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== newOwner);
+          if (foreignMcpServers.length > 0) {
+            await tx.agentMcpServer.deleteMany({
+              where: { agentId: agent.id, serverId: { in: foreignMcpServers.map((b) => b.serverId) } },
+            });
+          }
           const bindingsRemoved = [
             ...foreignSecrets.map((b) => ({ kind: "secret", boundName: b.boundName, resourceId: b.secretId })),
             ...foreignDatastores.map((b) => ({ kind: "datastore", boundName: b.boundName, resourceId: b.datastoreId })),
+            ...foreignMcpServers.map((b) => ({ kind: "mcp_server", boundName: b.server.name, resourceId: b.serverId })),
           ];
 
           // Tool capabilities: rows aren't rewritten; the runner ignores any

@@ -430,8 +430,11 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   });
 }
 
-/** 409 naming the first exposed name that clashes with a built-in, an attached tool or another MCP attachment. */
-async function assertNoClash(
+/**
+ * 409 naming the first exposed name that clashes with a built-in, an attached tool or another MCP attachment.
+ * Exported for tests: no valid server and tool name maps to a built-in repository tool name.
+ */
+export async function assertNoClash(
   tx: Prisma.TransactionClient,
   agentId: string,
   serverId: string,

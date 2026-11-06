@@ -324,7 +324,7 @@ someone else's agent (it can adopt the agent first). An HTTP user whose
 subject equals `LOCAL_PRINCIPAL` is not the operator. **Admins** get no
 implicit access to others' agents: they can `list_access` any agent (incident
 response) and reassign one with `make_owner`, which removes bindings the new
-owner doesn't own, suspends tool capabilities the new owner never granted,
+owner doesn't own (secrets, datastores and MCP server attachments), suspends tool capabilities the new owner never granted,
 cuts sub-agent edges the new owner can't delegate, and, between two owners,
 resets every grant. Adopting an owner-less agent keeps its grants but lowers
 an everyone grant to `read` unless `keepEveryoneExecute` is set.
@@ -359,7 +359,7 @@ without their tools' capabilities. Operator runbook:
    printed for review, with the `attach_tool` call that re-grants any
    capabilities it had. The subject must already exist.
 4. `wardby grants prune-bindings` removes, and prints, every remaining
-   binding of one owner's secret or datastore to another owner's agent
+   binding of one owner's secret, datastore or MCP server to another owner's agent
    (already inert).
 5. `wardby grants migration-report > after.txt`.
 

@@ -14,7 +14,7 @@
  *   owner's own bindings, deleting the rest, and stamping the new owner's
  *   consent on attachments of its own tools. Other attachments stay inert
  *   and are printed with the attach_tool call that re-grants them.
- * - prune-bindings deletes the secret/datastore bindings on owned agents
+ * - prune-bindings deletes the secret/datastore/MCP server bindings on owned agents
  *   whose resource another principal owns (inert at run time since the
  *   grants release) and prints each one: the "removed and listed" record.
  */
@@ -361,11 +361,14 @@ export function formatMigrationReport(report: MigrationReport): string {
   return lines.join("\n").trimStart();
 }
 
+/** A binding that belongs to its resource's owner; for an MCP server, boundName is the server name. */
+export type BindingKind = "secret" | "datastore" | "mcp_server";
+
 export interface AdoptedAgent {
   agentId: string;
   name: string;
-  bindingsRemoved: { kind: "secret" | "datastore"; boundName: string; resourceId: string }[];
-  bindingsKept: { kind: "secret" | "datastore"; boundName: string }[];
+  bindingsRemoved: { kind: BindingKind; boundName: string; resourceId: string }[];
+  bindingsKept: { kind: BindingKind; boundName: string }[];
   capabilitiesStamped: string[];
   /** Every attached tool the new owner doesn't own (review M7); `regrant` only when it had capabilities. */
   foreignTools: { toolId: string; toolName: string; toolOwnerId: string | null; regrant: string | null }[];
@@ -417,8 +420,14 @@ export async function adoptPublic(
             include: { datastore: { select: { ownerId: true } } },
             orderBy: { boundName: "asc" },
           });
+          const mcpServers = await tx.agentMcpServer.findMany({
+            where: { agentId: id },
+            include: { server: { select: { name: true, ownerId: true } } },
+            orderBy: { serverId: "asc" },
+          });
           const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== owner.id);
           const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== owner.id);
+          const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== owner.id);
           for (const b of foreignSecrets) {
             await tx.agentSecret.delete({ where: { agentId_secretId: { agentId: id, secretId: b.secretId } } });
           }
@@ -426,6 +435,9 @@ export async function adoptPublic(
             await tx.agentDatastore.delete({
               where: { agentId_datastoreId: { agentId: id, datastoreId: b.datastoreId } },
             });
+          }
+          for (const b of foreignMcpServers) {
+            await tx.agentMcpServer.delete({ where: { agentId_serverId: { agentId: id, serverId: b.serverId } } });
           }
 
           // Only the tool's owner could attach its private tool to a public
@@ -495,6 +507,11 @@ export async function adoptPublic(
                 boundName: b.boundName,
                 resourceId: b.datastoreId,
               })),
+              ...foreignMcpServers.map((b) => ({
+                kind: "mcp_server" as const,
+                boundName: b.server.name,
+                resourceId: b.serverId,
+              })),
             ],
             bindingsKept: [
               ...secrets
@@ -503,6 +520,9 @@ export async function adoptPublic(
               ...datastores
                 .filter((b) => b.datastore.ownerId === owner.id)
                 .map((b) => ({ kind: "datastore" as const, boundName: b.boundName })),
+              ...mcpServers
+                .filter((b) => b.server.ownerId === owner.id)
+                .map((b) => ({ kind: "mcp_server" as const, boundName: b.server.name })),
             ],
             capabilitiesStamped: own.map((at) => at.tool.name),
             foreignTools: attachments
@@ -562,7 +582,7 @@ export function formatAdoptResult(result: AdoptResult): string {
 export interface PruneResult {
   dryRun: boolean;
   removed: {
-    kind: "secret" | "datastore";
+    kind: BindingKind;
     agentId: string;
     agentName: string;
     boundName: string;
@@ -571,7 +591,7 @@ export interface PruneResult {
   }[];
 }
 
-/** Deletes cross-owner secret/datastore bindings on owned agents, in one transaction. */
+/** Deletes cross-owner secret/datastore/MCP server bindings on owned agents, in one transaction. */
 export async function pruneBindings(db: PrismaClient, opts: { dryRun: boolean }): Promise<PruneResult> {
   return db.$transaction(
     async (tx) => {
@@ -585,8 +605,17 @@ export async function pruneBindings(db: PrismaClient, opts: { dryRun: boolean })
         include: { agent: { select: { name: true, ownerId: true } }, datastore: { select: { ownerId: true } } },
         orderBy: [{ agentId: "asc" }, { boundName: "asc" }],
       });
+      const mcpServers = await tx.agentMcpServer.findMany({
+        where: { agent: { ownerId: { not: null } } },
+        include: {
+          agent: { select: { name: true, ownerId: true } },
+          server: { select: { name: true, ownerId: true } },
+        },
+        orderBy: [{ agentId: "asc" }, { serverId: "asc" }],
+      });
       const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== b.agent.ownerId);
       const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== b.agent.ownerId);
+      const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== b.agent.ownerId);
       if (!opts.dryRun) {
         for (const b of foreignSecrets) {
           await tx.agentSecret.delete({ where: { agentId_secretId: { agentId: b.agentId, secretId: b.secretId } } });
@@ -594,6 +623,11 @@ export async function pruneBindings(db: PrismaClient, opts: { dryRun: boolean })
         for (const b of foreignDatastores) {
           await tx.agentDatastore.delete({
             where: { agentId_datastoreId: { agentId: b.agentId, datastoreId: b.datastoreId } },
+          });
+        }
+        for (const b of foreignMcpServers) {
+          await tx.agentMcpServer.delete({
+            where: { agentId_serverId: { agentId: b.agentId, serverId: b.serverId } },
           });
         }
       }
@@ -615,6 +649,14 @@ export async function pruneBindings(db: PrismaClient, opts: { dryRun: boolean })
             boundName: b.boundName,
             resourceId: b.datastoreId,
             resourceOwnerId: b.datastore.ownerId,
+          })),
+          ...foreignMcpServers.map((b) => ({
+            kind: "mcp_server" as const,
+            agentId: b.agentId,
+            agentName: b.agent.name,
+            boundName: b.server.name,
+            resourceId: b.serverId,
+            resourceOwnerId: b.server.ownerId,
           })),
         ],
       };
