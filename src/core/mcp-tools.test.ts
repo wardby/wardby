@@ -130,6 +130,67 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     };
   };
 
+  it("keeps a tool out of a Codex run once a refresh drops its readOnlyHint, and refuses a call already pinned", async () => {
+    const codexId = `mcpt-codex-${suffix}`;
+    const claudeId = `mcpt-claude-${suffix}`;
+    for (const [id, provider] of [
+      [codexId, "codex"],
+      [claudeId, "claude-code"],
+    ] as const) {
+      await db.agent.create({
+        data: {
+          id,
+          name: id,
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner,
+          kind: "coding",
+          codingProfile: { create: { provider, repository: "your-org/your-repo", protectedPaths: [] } },
+        },
+      });
+      await db.agentMcpServer.create({
+        data: { agentId: id, serverId, allowedTools: ["search"], attachedById: owner },
+      });
+    }
+    const setSnapshot = (annotations?: Record<string, boolean>) =>
+      db.mcpServer.update({
+        where: { id: serverId },
+        data: { toolSnapshot: [{ name: "search", description: "x", inputSchema: { type: "object" }, annotations }] },
+      });
+    try {
+      await setSnapshot({ readOnlyHint: true });
+      const codexPins = await loadMcpToolPins(db, codexId);
+      expect(codexPins.map((p) => p.toolName)).toEqual(["search"]);
+
+      await setSnapshot({ readOnlyHint: false });
+      expect(await loadMcpToolPins(db, codexId)).toEqual([]);
+      expect((await loadMcpToolPins(db, claudeId)).map((p) => p.toolName)).toEqual(["search"]);
+
+      // A pin taken before the refresh is refused at call time.
+      const server = fakeServer(() => textResult("ran"));
+      const base = ctx(server.impl).ctx;
+      const refused = JSON.parse(await handleMcpTool(codexPins[0], "{}", { ...base, agentId: codexId }));
+      expect(refused.error).toBe("mcp_tool_not_allowed");
+      expect(refused.message).toContain("read-only");
+      expect(server.seen).toEqual([]);
+      expect(await handleMcpTool(codexPins[0], "{}", { ...base, agentId: claudeId })).toBe("ran");
+    } finally {
+      await db.mcpServer.update({
+        where: { id: serverId },
+        data: {
+          toolSnapshot: [
+            { name: "search", description: "Searches logs.", inputSchema: { type: "object" } },
+            { name: "slow", description: "Takes its time.", inputSchema: { type: "object" } },
+            { name: "unallowed", description: "Not allowed.", inputSchema: { type: "object" } },
+          ],
+        },
+      });
+      await db.agentMcpServer.deleteMany({ where: { agentId: { in: [codexId, claudeId] } } });
+      await db.agent.deleteMany({ where: { id: { in: [codexId, claudeId] } } });
+    }
+  });
+
   it("pins only allowed tools present in the snapshot, without the URL, secret names or owner id", async () => {
     const pins = await loadMcpToolPins(db, agentId);
     expect(pins.map((p) => p.exposedName)).toEqual(["datadog__search", "datadog__slow"]);

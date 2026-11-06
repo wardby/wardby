@@ -1,7 +1,7 @@
 /**
  * Remote MCP servers over Wardby's own MCP (docs/mcp-servers.md): register a server (HTTPS URL plus the
  * owner's brokered secrets), keep its saved tool list fresh, and attach an allowlisted subset of its tools
- * to a native agent. Gated by WARDBY_MCP_SERVERS (off | admins | owners). Results carry secret names, never
+ * to an agent. Gated by WARDBY_MCP_SERVERS (off | admins | owners). Results carry secret names, never
  * values: snapshots and errors arrive from fetchSnapshot already redacted. Audit lines carry the URL's host
  * only, never the full URL (a query string can carry a token).
  */
@@ -23,6 +23,7 @@ import {
   snapshotOf,
   type McpServerRow,
 } from "../../core/mcp-servers.js";
+import { isMarkedReadOnly } from "../../core/mcp-tools.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
@@ -198,7 +199,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
     name: "register_mcp_server",
     scope: "tools:write",
     description:
-      "Register a remote MCP server (Streamable HTTP, https only) so its tools can be attached to your native agents. secretNames are your brokered secrets, each brokered to the URL's host; they are sent on every request and never readable. Wardby calls the server's tools/list and saves the result. With WARDBY_MCP_SERVERS=admins this needs hosts:admin.",
+      "Register a remote MCP server (Streamable HTTP, https only) so its tools can be attached to your agents. secretNames are your brokered secrets, each brokered to the URL's host; they are sent on every request and never readable. Wardby calls the server's tools/list and saves the result. With WARDBY_MCP_SERVERS=admins this needs hosts:admin.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -381,7 +382,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
     name: "attach_mcp_server",
     scope: "tools:write",
     description:
-      "Agent owner only: let a native agent call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit.",
+      "Agent owner only: let an agent (native or coding) call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit. Coding agents get the tools as mcp__wardby_mcp__<name>; Codex agents can use only tools the server marks read-only (readOnlyHint) in the saved tool list.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -422,7 +423,6 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
             );
             // An attachment grants capabilities (the server's secrets act for the agent): strict owner only.
             await requireBindable(ctx, agent, tx);
-            if (agent.kind === "coding") throw new McpError(400, "MCP servers attach to native agents only for now.");
             const server = await requireServerAccess(ctx, input.serverId, "use", tx);
             const known = new Set(snapshotOf(server).map((t) => t.name));
             const unknown = input.allowedTools.filter((t) => !known.has(t));
@@ -431,6 +431,22 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
                 400,
                 `Not in MCP server "${server.name}"'s saved tool list: ${unknown.join(", ")}. Run refresh_mcp_server if the server added them.`,
               );
+            }
+            if (agent.kind === "coding") {
+              const profile = await tx.codingAgentProfile.findUnique({
+                where: { agentId: agent.id },
+                select: { provider: true },
+              });
+              if (profile?.provider === "codex") {
+                const byName = new Map(snapshotOf(server).map((t) => [t.name, t]));
+                const writer = input.allowedTools.find((t) => !isMarkedReadOnly(byName.get(t)));
+                if (writer !== undefined) {
+                  throw new McpError(
+                    400,
+                    `Codex agents can use only tools the server marks read-only (${writer} isn't).`,
+                  );
+                }
+              }
             }
             const exposed = await mapped(async () => input.allowedTools.map((t) => exposedToolName(server.name, t)));
             await assertNoClash(tx, agent.id, server.id, exposed);

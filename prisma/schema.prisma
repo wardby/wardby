@@ -1721,7 +1721,7 @@ model McpServer {
   @@index([ownerId])
 }
 
-/// An MCP server attached to a native agent, with the server tools it may call.
+/// An MCP server attached to an agent, with the server tools it may call.
 model AgentMcpServer {
   agentId       String
   agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)

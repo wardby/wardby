@@ -81,7 +81,7 @@ async function principal(): Promise<Principal> {
   return p;
 }
 
-async function agent(p: Principal, kind: "native" | "coding" = "native") {
+async function agent(p: Principal, kind: "native" | "coding" = "native", provider: "codex" | "claude-code" = "codex") {
   const row = await db.agent.create({
     data: {
       name: `mcp-agent-${randomUUID()}`,
@@ -90,6 +90,9 @@ async function agent(p: Principal, kind: "native" | "coding" = "native") {
       budgetUsd: 1,
       ownerId: p.id,
       kind,
+      ...(kind === "coding"
+        ? { codingProfile: { create: { provider, repository: "your-org/your-repo", protectedPaths: [] } } }
+        : {}),
     },
   });
   agentIds.push(row.id);
@@ -335,19 +338,60 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
     expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(0);
   });
 
+  describe("coding agents", () => {
+    it("attaches to a Claude Code agent, including a 64-character exposed name, with no read-only rule", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      const long = "t".repeat(58); // "acme__" + 58 = 64 characters exposed
+      fake.tools = [{ name: "search" }, { name: long }];
+      const { id } = await register(call);
+      const coding = await agent(p, "coding", "claude-code");
+      ok(await call("attach_mcp_server", { agentId: coding.id, serverId: id, allowedTools: ["search", long] }));
+      const rows = await db.agentMcpServer.findMany({ where: { agentId: coding.id } });
+      expect(rows.map((r) => r.allowedTools)).toEqual([["search", long]]);
+    });
+
+    it("attaches only read-only tools to a Codex agent", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      fake.tools = [
+        { name: "search", annotations: { readOnlyHint: true } },
+        { name: "get_issue", annotations: { readOnlyHint: false } },
+        { name: "plain" },
+      ];
+      const { id } = await register(call);
+      const coding = await agent(p, "coding", "codex");
+      ok(await call("attach_mcp_server", { agentId: coding.id, serverId: id, allowedTools: ["search"] }));
+      for (const name of ["get_issue", "plain"]) {
+        const refused = await call("attach_mcp_server", {
+          agentId: coding.id,
+          serverId: id,
+          allowedTools: ["search", name],
+        });
+        expect(refused.isError).toBe(true);
+        expect(refused.text).toContain(`Codex agents can use only tools the server marks read-only (${name} isn't).`);
+      }
+      // The refused attempts left the earlier allowlist alone.
+      expect((await db.agentMcpServer.findFirstOrThrow({ where: { agentId: coding.id } })).allowedTools).toEqual([
+        "search",
+      ]);
+    });
+
+    it("leaves native agents free to attach tools that are not read-only", async () => {
+      const p = await principal();
+      const call = await connect(p);
+      fake.tools = [{ name: "plain" }];
+      const { id } = await register(call);
+      const a = await agent(p);
+      ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["plain"] }));
+    });
+  });
+
   it("attach checks agent ownership, kind, server ownership, tool names and the time limit", async () => {
     const p = await principal();
     const call = await connect(p);
     const { id } = await register(call);
     const a = await agent(p);
-
-    const coding = await agent(p, "coding");
-    const codingResult = await call("attach_mcp_server", {
-      agentId: coding.id,
-      serverId: id,
-      allowedTools: ["search"],
-    });
-    expect(codingResult.text).toContain("MCP servers attach to native agents only for now.");
 
     const q = await principal();
     const theirs = await agent(q);
