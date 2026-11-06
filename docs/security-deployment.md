@@ -648,7 +648,8 @@ an allowlisted subset of its tools to a native agent, which then calls them
 through Wardby's control plane. `WARDBY_MCP_SERVERS` decides who may register
 servers: `owners` (the default), `admins` (only `hosts:admin` holders), or `off`
 to disable the feature. Secret values for a server are never sent to the model,
-stored in run records, or returned by Wardby's MCP tools.
+stored in run records, or returned by Wardby's MCP tools. See [Remote MCP servers](mcp-servers.md) for the
+full guide.
 
 ## Slack workflow notifications
 

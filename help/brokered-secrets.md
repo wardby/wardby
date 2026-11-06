@@ -69,6 +69,7 @@ alone never removes it. Every change is audited.
 
 - [Host providers](../docs/host-providers.md): a provider's credentials must be brokered
   secrets
+- [Remote MCP servers](../docs/mcp-servers.md) (0.8.0+): a server's credentials are brokered secrets
 - Full guide: [`docs/tool-secrets.md`](../docs/tool-secrets.md)
 - [Use native agents, tools, and data](native-capabilities.md)
 - Errors: [`secret_brokered`](errors/secret-brokered.md),

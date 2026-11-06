@@ -1,6 +1,6 @@
 ---
 id: mcp-access
-title: Connect an MCP client
+title: Connect a client to Wardby
 summary: Use Wardby's local stdio or protected HTTP MCP transport safely.
 audience: developer
 tags: [mcp, oauth, codex, claude-code]
