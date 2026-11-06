@@ -8,7 +8,10 @@
  *   response ("who can reach this?"), and reassign with make_owner.
  * - One grant per resource and grantee, so granting again replaces the
  *   level (also downgrades). Everyone grants are capped below write.
- * - Takes effect on the next check; runs already in flight keep going.
+ * - Takes effect on the next check; runs already in flight keep going. For
+ *   MCP servers the check is every tool call: revoking or lowering a grant
+ *   below use also removes the attachments of agents whose owner can no
+ *   longer use the server, in the same transaction.
  */
 import { z } from "zod";
 import { Prisma, type Principal, type PrismaClient } from "#prisma";
@@ -23,8 +26,10 @@ import {
   isLevel,
   isResourceType,
   principalGranteeKey,
+  pruneUnusableMcpAttachments,
   type ResourceType,
 } from "../../core/grants.js";
+import { withSerializableRetry } from "../../core/serializable-retry.js";
 import { agentNotFound, assertAgentAccess, agentAccess } from "../auth/access.js";
 import { permissionsOf } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
@@ -117,10 +122,13 @@ type GrantTx = Pick<
  * The ownership check and the write in one Serializable transaction (review
  * M3): a concurrent make_owner, which resets grants in its own transaction,
  * conflicts instead of letting the old owner's grant land on the new
- * owner's agent.
+ * owner's agent. A conflict is retried a bounded number of times
+ * (withSerializableRetry); the last one still reaches the caller as a 409.
  */
 function inSerializable<T>(ctx: McpRequestContext, fn: (tx: GrantTx) => Promise<T>): Promise<T> {
-  return ctx.db.$transaction((tx) => fn(tx), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  return withSerializableRetry(() =>
+    ctx.db.$transaction((tx) => fn(tx), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
+  );
 }
 
 function isAdmin(ctx: McpRequestContext): boolean {
@@ -163,7 +171,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       "Owner-only whatever the level: the coding profile (task, base ref, protected paths, task-override opt-in, image, packages, limits), kind, budget group, sub-agents, secret/datastore/repository bindings, tool capabilities, memory and datastore contents, grants, delete. " +
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
-      "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. " +
+      "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. Lowering a grant to read (including everyone from use to read) detaches the server from every agent whose owner can no longer use it, and their runs' next call to it is refused. " +
       "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers or tool capabilities. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
@@ -181,7 +189,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       if (!isLevel(type, args.level)) {
         throw new McpError(400, `Level "${args.level}" is not valid for ${type} (${LEVELS[type].join(" < ")}).`);
       }
-      const { resource, principal, grant } = await inSerializable(ctx, async (tx) => {
+      const { resource, principal, grant, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
         const principal = await resolveGrantee(tx, args.grantee);
         if (principal && (principal.id === resource.ownerId || principal.id === ctx.principal.id)) {
@@ -217,7 +225,12 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           },
           update: { level: args.level, source: "owner", grantedById: ctx.principal.id },
         });
-        return { resource, principal, grant };
+        // Below use, agents whose owner can no longer use the server lose it now (C1).
+        const attachmentsRemoved =
+          type === "mcp_server" && !atLeast(type, args.level, "use")
+            ? await pruneUnusableMcpAttachments(tx, resource.id)
+            : 0;
+        return { resource, principal, grant, attachmentsRemoved };
       });
       return textResult({
         granted: true,
@@ -230,6 +243,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
             ? { principalId: principal.id, subject: principal.subject }
             : { principalId: principal.id },
         level: grant.level,
+        ...(attachmentsRemoved > 0 ? { attachmentsRemoved } : {}),
       });
     },
   });
@@ -238,7 +252,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "revoke_access",
     scope: "agents:write",
     description:
-      "Removes a grant on an agent or MCP server you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. Agents the grantee already attached an MCP server to keep it until they detach it.",
+      "Removes a grant on an agent or MCP server you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. For an MCP server the check is every tool call: the server is detached from every agent whose owner can no longer use it (your own agents are untouched), and a run's next call to it is refused with mcp_tool_not_allowed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -248,15 +262,20 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parse(RevokeSchema, "revoke_access", rawArgs);
       const type = shareableType(args.resourceType);
-      const { count } = await inSerializable(ctx, async (tx) => {
+      const { count, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
         const granteeKey =
           args.grantee === "everyone"
             ? EVERYONE_KEY
             : principalGranteeKey((await resolveGrantee(tx, args.grantee))!.id);
-        return tx.resourceGrant.deleteMany({ where: { resourceType: type, resourceId: resource.id, granteeKey } });
+        const { count } = await tx.resourceGrant.deleteMany({
+          where: { resourceType: type, resourceId: resource.id, granteeKey },
+        });
+        // Agents whose owner can no longer use the server lose it now (C1).
+        const attachmentsRemoved = type === "mcp_server" ? await pruneUnusableMcpAttachments(tx, resource.id) : 0;
+        return { count, attachmentsRemoved };
       });
-      return textResult({ revoked: count > 0 });
+      return textResult({ revoked: count > 0, ...(attachmentsRemoved > 0 ? { attachmentsRemoved } : {}) });
     },
   });
 

@@ -2,13 +2,16 @@
  * A native run's remote MCP tools: the load step pins the agent's attached, allowed tools
  * (loadMcpToolPins), the runner offers them as built-ins (mcpToolDefs), and every call runs on the
  * control plane through handleMcpTool. The pin decides only which tools the model sees for this
- * run; each call re-checks the live attachment and uses the live server row (URL, secrets).
+ * run; each call re-checks the live attachment, that the agent's owner may still use the server (owns
+ * it or holds use on it), and uses the live server row (URL, secrets). A pin carries no URL (a query
+ * string can carry a token), secret names or owner id: pins are saved in the run's step results.
  *
  * Secret values never leave: results and errors are redacted against the server's secrets (every
  * encoded form) plus token shapes, the log line carries no arguments, bodies or URL, and
  * mcpNamedSecretValues feeds the run's own redaction (secret-guard.ts loadAgentSecretValues).
  */
 import type { PrismaClient } from "#prisma";
+import { ownerCanUseMcpServer } from "./grants.js";
 import { loadMcpServersMode, MCP_SERVERS_OFF_MESSAGE } from "../config/mcp-servers.js";
 import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import { McpClientError, McpHttpClient } from "./mcp-client/client.js";
@@ -38,9 +41,6 @@ export interface McpToolPin {
   toolName: string;
   serverId: string;
   serverName: string;
-  serverOwnerId: string;
-  url: string;
-  secretNames: string[];
   /** Only when the attachment sets one. */
   callTimeoutMs?: number;
   definition: { description: string; inputSchema: Record<string, unknown> };
@@ -48,21 +48,30 @@ export interface McpToolPin {
 
 export const DEFAULT_MCP_CALL_TIMEOUT_MS = 30_000;
 
-type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
+/** What a grantee's run sees when the server owner's credentials can't be loaded. */
+export const SHARED_CREDENTIALS_MESSAGE = "The MCP server's credentials can't be used; ask its owner to check it.";
 
-/** Builds pins for an agent's attachments: allowed tools present in the snapshot only; none when the mode is off. */
+type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret" | "resourceGrant">;
+/** Redaction reads attachments and secrets only: it covers every attached server, usable or not. */
+type McpSecretsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
+
+/**
+ * Builds pins for an agent's attachments: allowed tools present in the snapshot only, from servers the
+ * agent's owner may still use (owns, or holds use on); none when the mode is off.
+ */
 export async function loadMcpToolPins(
-  db: Pick<PrismaClient, "agentMcpServer">,
+  db: Pick<PrismaClient, "agentMcpServer" | "resourceGrant">,
   agentId: string,
 ): Promise<McpToolPin[]> {
   if (loadMcpServersMode() === "off") return [];
   const rows = await db.agentMcpServer.findMany({
     where: { agentId },
-    include: { server: true },
+    include: { server: true, agent: { select: { ownerId: true } } },
     orderBy: [{ createdAt: "asc" }, { serverId: "asc" }],
   });
   const pins: McpToolPin[] = [];
   for (const row of rows) {
+    if (!(await ownerCanUseMcpServer(db, row.agent.ownerId, row.server))) continue;
     const byName = new Map(snapshotOf(row.server).map((t) => [t.name, t]));
     for (const toolName of row.allowedTools) {
       const entry = byName.get(toolName);
@@ -78,9 +87,6 @@ export async function loadMcpToolPins(
         toolName,
         serverId: row.server.id,
         serverName: row.server.name,
-        serverOwnerId: row.server.ownerId,
-        url: row.server.url,
-        secretNames: row.server.secretNames,
         ...(row.callTimeoutMs !== null ? { callTimeoutMs: row.callTimeoutMs } : {}),
         definition: { description: entry.description, inputSchema: entry.inputSchema },
       });
@@ -125,6 +131,8 @@ export interface McpToolContext {
   cipher: Pick<SecretCipher, "decrypt">;
   /** The agent whose attachment is re-checked on every call. */
   agentId: string;
+  /** The run, for the per-call log line. */
+  runId: string;
   /** The run's stop signal: aborting it stops a call in flight. */
   signal: AbortSignal;
   /** A sandboxed run's session deadline; the call's time limit never runs past it. */
@@ -158,6 +166,8 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
   const done = (text: string, outcome: string): string => {
     ctx.log.info(
       {
+        runId: ctx.runId,
+        agentId: ctx.agentId,
         serverId: pin.serverId,
         tool: pin.toolName,
         outcome,
@@ -175,12 +185,19 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     if (loadMcpServersMode() === "off") return fail("mcp_servers_off", MCP_SERVERS_OFF_MESSAGE);
     const row = await ctx.db.agentMcpServer.findUnique({
       where: { agentId_serverId: { agentId: ctx.agentId, serverId: pin.serverId } },
-      include: { server: true },
+      include: { server: true, agent: { select: { ownerId: true } } },
     });
     if (!row || !row.allowedTools.includes(pin.toolName)) {
       return fail(
         "mcp_tool_not_allowed",
         `The tool "${pin.exposedName}" is no longer allowed for this agent: its MCP server was detached or the tool was taken off the allowed list.`,
+      );
+    }
+    // A revoked or lowered grant stops the very next call, even before the attachment is pruned.
+    if (!(await ownerCanUseMcpServer(ctx.db, row.agent.ownerId, row.server))) {
+      return fail(
+        "mcp_tool_not_allowed",
+        `The tool "${pin.exposedName}" is no longer allowed for this agent: its owner no longer has use access to MCP server "${row.server.name}".`,
       );
     }
     if (!snapshotOf(row.server).some((t) => t.name === pin.toolName)) {
@@ -209,7 +226,16 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
       url: row.server.url,
       secretNames: row.server.secretNames,
     };
-    const secrets = await loadServerSecrets(ctx.db, ctx.cipher, server);
+    let secrets: Awaited<ReturnType<typeof loadServerSecrets>>;
+    try {
+      secrets = await loadServerSecrets(ctx.db, ctx.cipher, server);
+    } catch (err) {
+      // The detail names the server owner's secrets and speaks to that owner: a grantee's run gets neither.
+      if (err instanceof McpServerInputError && row.agent.ownerId !== server.ownerId) {
+        return fail("mcp_server_error", SHARED_CREDENTIALS_MESSAGE);
+      }
+      throw err;
+    }
     values = secrets.values;
 
     const controller = new AbortController();
@@ -275,7 +301,7 @@ export interface NamedMcpSecretValues {
  * leak and is skipped; a read that fails rejects (callers fail closed).
  */
 export async function mcpNamedSecretValues(
-  db: McpToolsDb,
+  db: McpSecretsDb,
   cipher: Pick<SecretCipher, "decrypt">,
   agentId: string,
 ): Promise<NamedMcpSecretValues[]> {
@@ -314,7 +340,7 @@ function readableBroker(stored: unknown): ReturnType<typeof parseSecretBrokerCon
 
 /** Secret values for every attached server of this agent (for run-text masking and gateway cause checks). */
 export async function mcpSecretValuesForAgent(
-  db: McpToolsDb,
+  db: McpSecretsDb,
   cipher: Pick<SecretCipher, "decrypt">,
   agentId: string,
 ): Promise<string[]> {

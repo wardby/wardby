@@ -174,8 +174,9 @@ export function everyoneGrantData(type: ResourceType, resourceId: string, level:
 
 /**
  * True when `ownerId` owns the MCP server or holds use (or higher) on it through a grant. An agent's MCP
- * attachment is legitimate only while its owner can use the server: the cleanup paths (make_owner,
- * adopt-public, prune-bindings) drop the ones that fail this.
+ * attachment is legitimate only while its owner can use the server: runs check it on load and on every
+ * call, and the cleanup paths (make_owner, adopt-public, prune-bindings, revoke_access and grant_access
+ * lowering a level) drop the attachments that fail it.
  */
 export async function ownerCanUseMcpServer(
   db: GrantDb,
@@ -197,6 +198,27 @@ export async function filterUnusableMcpServers<T extends { server: { id: string;
     if (!(await ownerCanUseMcpServer(db, ownerOf(item), item.server))) unusable.push(item);
   }
   return unusable;
+}
+
+/**
+ * After a grant on an MCP server is revoked or lowered: deletes the server's attachments whose agent owner
+ * can no longer use it (see ownerCanUseMcpServer), in the caller's transaction. The server owner's own
+ * agents are never touched. Returns how many were removed.
+ */
+export async function pruneUnusableMcpAttachments(
+  db: GrantDb & Pick<PrismaClient, "agentMcpServer">,
+  serverId: string,
+): Promise<number> {
+  const rows = await db.agentMcpServer.findMany({
+    where: { serverId },
+    include: { server: { select: { id: true, ownerId: true } }, agent: { select: { ownerId: true } } },
+  });
+  const unusable = await filterUnusableMcpServers(db, (row) => row.agent.ownerId, rows);
+  if (unusable.length === 0) return 0;
+  const { count } = await db.agentMcpServer.deleteMany({
+    where: { serverId, agentId: { in: unusable.map((row) => row.agentId) } },
+  });
+  return count;
 }
 
 /** Every resource delete path calls this in the same transaction (no FK on resourceId). */

@@ -1385,6 +1385,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             db,
             cipher: providers.secrets,
             agentId: loaded.agentId,
+            runId,
             signal: stop.signal,
             deadlineAt: options.deadlineAt,
             fetchImpl: providers.sandboxFetch,

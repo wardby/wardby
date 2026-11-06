@@ -168,11 +168,12 @@ afterAll(async () => {
 fake.tools = [{ name: "search" }, { name: "get_issue" }];
 
 describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () => {
-  it("off mode refuses every MCP server tool, list and get included", async () => {
+  it("off mode refuses every MCP server tool except the cleanup ones (detach, delete)", async () => {
     const p = await principal();
     const call = await connect(p);
     const { id } = await register(call);
     const a = await agent(p);
+    ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
     process.env.WARDBY_MCP_SERVERS = "off";
     for (const [name, args] of [
       ["register_mcp_server", { name: "other", url: URL_, secretNames: [] }],
@@ -180,14 +181,16 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       ["refresh_mcp_server", { id }],
       ["list_mcp_servers", {}],
       ["get_mcp_server", { id }],
-      ["delete_mcp_server", { id }],
       ["attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }],
-      ["detach_mcp_server", { agentId: a.id, serverId: id }],
     ] as const) {
       const result = await call(name, args);
       expect(result.isError, name).toBe(true);
       expect(result.text, name).toContain(OFF);
     }
+    // Cleanup stays possible with the feature off.
+    expect(ok(await call("detach_mcp_server", { agentId: a.id, serverId: id }))).toEqual({ detached: true });
+    expect(ok(await call("delete_mcp_server", { id }))).toEqual({ deleted: id });
+    expect(await db.mcpServer.count({ where: { id } })).toBe(0);
   });
 
   it("admins mode needs hosts:admin (with a role granting it) to register, update or refresh", async () => {
@@ -568,10 +571,39 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       expect(JSON.stringify(list)).not.toContain(SECRET);
     });
 
-    it("revoke_access stops new attaches; an attachment already made stays until detached", async () => {
-      const { guest, guestCall, id, ownerCall } = await shared("use");
+    it("revoke_access stops new attaches and removes the grantee's attachments; the owner's stay", async () => {
+      const { owner, guest, guestCall, id, ownerCall } = await shared("use");
       const a = await agent(guest);
       ok(await guestCall("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      const own = await agent(owner);
+      ok(await ownerCall("attach_mcp_server", { agentId: own.id, serverId: id, allowedTools: ["search"] }));
+      // Someone else still holding use through their own grant keeps theirs.
+      const third = await principal();
+      ok(await grant(ownerCall, id, third, "use"));
+      const thirdAgent = await agent(third);
+      ok(
+        await (
+          await connect(third)
+        )("attach_mcp_server", { agentId: thirdAgent.id, serverId: id, allowedTools: ["search"] }),
+      );
+      const revoked = ok(
+        await ownerCall("revoke_access", {
+          resourceType: "mcp_server",
+          resourceId: id,
+          grantee: { subject: guest.subject },
+        }),
+      );
+      expect(revoked).toEqual({ revoked: true, attachmentsRemoved: 1 });
+      const b = await agent(guest);
+      expect(
+        (await guestCall("attach_mcp_server", { agentId: b.id, serverId: id, allowedTools: ["search"] })).isError,
+      ).toBe(true);
+      expect((await guestCall("get_mcp_server", { id })).isError).toBe(true);
+      expect((ok(await guestCall("list_mcp_servers")).servers as unknown[]).length).toBe(0);
+      expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(0);
+      expect(await db.agentMcpServer.count({ where: { agentId: own.id, serverId: id } })).toBe(1);
+      expect(await db.agentMcpServer.count({ where: { agentId: thirdAgent.id, serverId: id } })).toBe(1);
+      // Revoking again removes nothing more.
       expect(
         ok(
           await ownerCall("revoke_access", {
@@ -579,17 +611,64 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
             resourceId: id,
             grantee: { subject: guest.subject },
           }),
-        ).revoked,
-      ).toBe(true);
-      const b = await agent(guest);
-      expect(
-        (await guestCall("attach_mcp_server", { agentId: b.id, serverId: id, allowedTools: ["search"] })).isError,
-      ).toBe(true);
-      expect((await guestCall("get_mcp_server", { id })).isError).toBe(true);
-      expect((ok(await guestCall("list_mcp_servers")).servers as unknown[]).length).toBe(0);
+        ),
+      ).toEqual({ revoked: false });
+    });
+
+    it("lowering a grant to read removes the grantee's attachments; raising one removes nothing", async () => {
+      const { owner, guest, guestCall, id, ownerCall } = await shared("use");
+      const a = await agent(guest);
+      ok(await guestCall("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      const own = await agent(owner);
+      ok(await ownerCall("attach_mcp_server", { agentId: own.id, serverId: id, allowedTools: ["search"] }));
+      const raised = ok(await grant(ownerCall, id, guest, "write"));
+      expect(raised.attachmentsRemoved).toBeUndefined();
       expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(1);
-      ok(await guestCall("detach_mcp_server", { agentId: a.id, serverId: id }));
+      const lowered = ok(await grant(ownerCall, id, guest, "read"));
+      expect(lowered).toMatchObject({ granted: true, level: "read", attachmentsRemoved: 1 });
       expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(0);
+      expect(await db.agentMcpServer.count({ where: { agentId: own.id, serverId: id } })).toBe(1);
+    });
+
+    it("lowering or revoking an everyone use grant removes attachments that relied on it", async () => {
+      const owner = await principal();
+      const ownerCall = await connect(owner);
+      const { id } = await register(ownerCall);
+      ok(await grant(ownerCall, id, "everyone", "use"));
+      const own = await agent(owner);
+      ok(await ownerCall("attach_mcp_server", { agentId: own.id, serverId: id, allowedTools: ["search"] }));
+      const attachAs = async () => {
+        const guest = await principal();
+        const a = await agent(guest);
+        ok(
+          await (
+            await connect(guest)
+          )("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }),
+        );
+        return a;
+      };
+      // A guest with their own use grant keeps theirs when everyone drops.
+      const named = await principal();
+      ok(await grant(ownerCall, id, named, "use"));
+      const namedAgent = await agent(named);
+      ok(
+        await (
+          await connect(named)
+        )("attach_mcp_server", { agentId: namedAgent.id, serverId: id, allowedTools: ["search"] }),
+      );
+
+      const first = await attachAs();
+      expect(ok(await grant(ownerCall, id, "everyone", "read")).attachmentsRemoved).toBe(1);
+      expect(await db.agentMcpServer.count({ where: { agentId: first.id } })).toBe(0);
+
+      ok(await grant(ownerCall, id, "everyone", "use"));
+      const second = await attachAs();
+      expect(
+        ok(await ownerCall("revoke_access", { resourceType: "mcp_server", resourceId: id, grantee: "everyone" })),
+      ).toEqual({ revoked: true, attachmentsRemoved: 1 });
+      expect(await db.agentMcpServer.count({ where: { agentId: second.id } })).toBe(0);
+      expect(await db.agentMcpServer.count({ where: { agentId: own.id, serverId: id } })).toBe(1);
+      expect(await db.agentMcpServer.count({ where: { agentId: namedAgent.id, serverId: id } })).toBe(1);
     });
 
     it("delete_mcp_server removes the server's grants", async () => {

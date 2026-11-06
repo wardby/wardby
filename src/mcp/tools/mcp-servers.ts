@@ -24,6 +24,7 @@ import {
   type McpServerRow,
 } from "../../core/mcp-servers.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
+import { withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
 import { agentAccessResolver, assertAgentAccess, requireAgentAccess, requireBindable } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -40,10 +41,14 @@ const MIN_CALL_TIMEOUT_MS = 1000;
 
 type ServerRecord = McpServerRow & { toolSnapshot: unknown; serverInfo: unknown; snapshotAt: Date | null };
 
-/** Refuses when the mode is off; in admins mode, register/update/refresh also need hosts:admin. */
-function gate(ctx: McpRequestContext, kind: "configure" | "other"): void {
+/**
+ * Refuses when the mode is off, except for cleanup (delete and detach stay possible so an operator who
+ * turns the feature off can still remove servers and attachments); in admins mode, register/update/refresh
+ * also need hosts:admin.
+ */
+function gate(ctx: McpRequestContext, kind: "configure" | "other" | "cleanup"): void {
   const mode = loadMcpServersMode();
-  if (mode === "off") throw new McpError(403, MCP_SERVERS_OFF_MESSAGE);
+  if (mode === "off" && kind !== "cleanup") throw new McpError(403, MCP_SERVERS_OFF_MESSAGE);
   if (kind === "configure" && mode === "admins") requireScope(ctx, ctx.canonicalUri, "hosts:admin");
 }
 
@@ -355,10 +360,11 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "delete_mcp_server",
     scope: "tools:write",
-    description: "Owner only: delete an MCP server. It is detached from every agent.",
+    description:
+      "Owner only: delete an MCP server. It is detached from every agent, including agents others attached it to through a grant. Allowed even when WARDBY_MCP_SERVERS=off, so cleanup stays possible.",
     inputSchema: ID_ONLY,
     handler: async (rawArgs: unknown, ctx) => {
-      gate(ctx, "other");
+      gate(ctx, "cleanup");
       const { id } = parse(IdSchema, "delete_mcp_server arguments", rawArgs);
       const server = await requireOwnedServer(ctx, id);
       await ctx.db.$transaction(async (tx) => {
@@ -402,37 +408,40 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       }
       const duplicates = input.allowedTools.filter((t, i) => input.allowedTools.indexOf(t) !== i);
       if (duplicates.length > 0) throw new McpError(400, `allowedTools lists "${duplicates[0]}" more than once.`);
-      await ctx.db.$transaction(
-        async (tx) => {
-          const { agent } = await assertAgentAccess(
-            ctx,
-            await tx.agent.findUnique({ where: { id: input.agentId } }),
-            input.agentId,
-            "read",
-            tx,
-          );
-          // An attachment grants capabilities (the server's secrets act for the agent): strict owner only.
-          await requireBindable(ctx, agent, tx);
-          if (agent.kind === "coding") throw new McpError(400, "MCP servers attach to native agents only for now.");
-          const server = await requireServerAccess(ctx, input.serverId, "use", tx);
-          const known = new Set(snapshotOf(server).map((t) => t.name));
-          const unknown = input.allowedTools.filter((t) => !known.has(t));
-          if (unknown.length > 0) {
-            throw new McpError(
-              400,
-              `Not in MCP server "${server.name}"'s saved tool list: ${unknown.join(", ")}. Run refresh_mcp_server if the server added them.`,
+      // Bounded retry: a concurrent grant change or make_owner on the same rows aborts one side.
+      await withSerializableRetry(() =>
+        ctx.db.$transaction(
+          async (tx) => {
+            const { agent } = await assertAgentAccess(
+              ctx,
+              await tx.agent.findUnique({ where: { id: input.agentId } }),
+              input.agentId,
+              "read",
+              tx,
             );
-          }
-          const exposed = await mapped(async () => input.allowedTools.map((t) => exposedToolName(server.name, t)));
-          await assertNoClash(tx, agent.id, server.id, exposed);
-          const fields = { allowedTools: input.allowedTools, callTimeoutMs: input.callTimeoutMs ?? null };
-          await tx.agentMcpServer.upsert({
-            where: { agentId_serverId: { agentId: agent.id, serverId: server.id } },
-            create: { agentId: agent.id, serverId: server.id, attachedById: ctx.principal.id, ...fields },
-            update: { attachedById: ctx.principal.id, ...fields },
-          });
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            // An attachment grants capabilities (the server's secrets act for the agent): strict owner only.
+            await requireBindable(ctx, agent, tx);
+            if (agent.kind === "coding") throw new McpError(400, "MCP servers attach to native agents only for now.");
+            const server = await requireServerAccess(ctx, input.serverId, "use", tx);
+            const known = new Set(snapshotOf(server).map((t) => t.name));
+            const unknown = input.allowedTools.filter((t) => !known.has(t));
+            if (unknown.length > 0) {
+              throw new McpError(
+                400,
+                `Not in MCP server "${server.name}"'s saved tool list: ${unknown.join(", ")}. Run refresh_mcp_server if the server added them.`,
+              );
+            }
+            const exposed = await mapped(async () => input.allowedTools.map((t) => exposedToolName(server.name, t)));
+            await assertNoClash(tx, agent.id, server.id, exposed);
+            const fields = { allowedTools: input.allowedTools, callTimeoutMs: input.callTimeoutMs ?? null };
+            await tx.agentMcpServer.upsert({
+              where: { agentId_serverId: { agentId: agent.id, serverId: server.id } },
+              create: { agentId: agent.id, serverId: server.id, attachedById: ctx.principal.id, ...fields },
+              update: { attachedById: ctx.principal.id, ...fields },
+            });
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        ),
       );
       return textResult({ attached: true });
     },
@@ -441,7 +450,8 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "detach_mcp_server",
     scope: "tools:write",
-    description: "Agent owner only: remove an MCP server's tools from an agent.",
+    description:
+      "Agent owner only: remove an MCP server's tools from an agent. Allowed even when WARDBY_MCP_SERVERS=off, so cleanup stays possible.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -449,7 +459,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       properties: { agentId: { type: "string" }, serverId: { type: "string" } },
     },
     handler: async (rawArgs: unknown, ctx) => {
-      gate(ctx, "other");
+      gate(ctx, "cleanup");
       const input = parse(DetachSchema, "detach_mcp_server arguments", rawArgs);
       await requireAgentAccess(ctx, input.agentId, "owner");
       const { count } = await ctx.db.agentMcpServer.deleteMany({

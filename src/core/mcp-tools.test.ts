@@ -33,9 +33,6 @@ describe("mcpToolDefs", () => {
       toolName: "search",
       serverId: "s1",
       serverName: "datadog",
-      serverOwnerId: "p1",
-      url: URL_,
-      secretNames: [],
       definition: { description: "Searches logs.", inputSchema: { type: "object" } },
     };
     expect(mcpToolDefs([pin])).toEqual([
@@ -120,23 +117,45 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     const { log, info } = fakeLog();
     return {
       info,
-      ctx: { db, cipher, agentId, signal: extra.signal ?? new AbortController().signal, fetchImpl, log, ...extra },
+      ctx: {
+        db,
+        cipher,
+        agentId,
+        runId: `mcpt-run-${suffix}`,
+        signal: extra.signal ?? new AbortController().signal,
+        fetchImpl,
+        log,
+        ...extra,
+      },
     };
   };
 
-  it("pins only allowed tools present in the snapshot, with the server's live details", async () => {
+  it("pins only allowed tools present in the snapshot, without the URL, secret names or owner id", async () => {
     const pins = await loadMcpToolPins(db, agentId);
     expect(pins.map((p) => p.exposedName)).toEqual(["datadog__search", "datadog__slow"]);
-    expect(pins[0]).toMatchObject({
+    expect(pins[0]).toEqual({
+      exposedName: "datadog__search",
       toolName: "search",
       serverId,
       serverName: "datadog",
-      serverOwnerId: owner,
-      url: URL_,
-      secretNames: ["DD_KEY"],
       definition: { description: "Searches logs.", inputSchema: { type: "object" } },
     });
-    expect("callTimeoutMs" in pins[0]).toBe(false);
+    // Pins are saved in step results: a URL query can carry a token.
+    expect(JSON.stringify(pins)).not.toContain("mcp.example.com");
+    expect(JSON.stringify(pins)).not.toContain("DD_KEY");
+  });
+
+  it("still calls through a pin saved before pins dropped url, secretNames and serverOwnerId", async () => {
+    const server = fakeServer(() => textResult("old pin ok"));
+    const legacy = {
+      ...(await pinFor("search")),
+      serverOwnerId: owner,
+      url: "https://stale.example.com/mcp",
+      secretNames: ["STALE"],
+    } as McpToolPin;
+    expect(await handleMcpTool(legacy, "{}", ctx(server.impl).ctx)).toBe("old pin ok");
+    // The live row decides where the call goes and which secret it carries.
+    expect(server.seen[0].authorization).toBe(`Bearer ${SECRET}`);
   });
 
   it("pins nothing when WARDBY_MCP_SERVERS is off", async () => {
@@ -158,7 +177,17 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     expect(server.seen[0].authorization).toBe(`Bearer ${SECRET}`);
     expect(info).toHaveBeenCalledTimes(1);
     const [fields] = info.mock.calls[0] as [Record<string, unknown>];
-    expect(fields).toMatchObject({ serverId, tool: "search", outcome: "ok", resultChars: out.length });
+    expect(fields).toMatchObject({
+      runId: `mcpt-run-${suffix}`,
+      agentId,
+      serverId,
+      tool: "search",
+      outcome: "ok",
+      resultChars: out.length,
+    });
+    expect(Object.keys(fields).sort()).toEqual(
+      ["agentId", "durationMs", "outcome", "resultChars", "runId", "serverId", "tool"].sort(),
+    );
     expect(typeof fields.durationMs).toBe("number");
     expect(JSON.stringify(info.mock.calls)).not.toContain("errors-arg");
     expect(JSON.stringify(info.mock.calls)).not.toContain("mcp.example.com");
@@ -307,5 +336,119 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     const entry = named.find((n) => n.name === "mcp:datadog/DD_KEY");
     expect(entry?.values.includes(SECRET)).toBe(true);
     expect(entry?.values.includes(Buffer.from(SECRET).toString("base64"))).toBe(true);
+  });
+  describe("an agent whose owner uses the server through a grant", () => {
+    const guest = `mcpt-guest-${suffix}`;
+    const guestAgentId = `mcpt-gagent-${suffix}`;
+    const guestCtx = (fetchImpl: typeof safeFetch) => ({ ...ctx(fetchImpl).ctx, agentId: guestAgentId });
+    const guestPin = async () => {
+      const pin = (await loadMcpToolPins(db, guestAgentId)).find((p) => p.toolName === "search");
+      if (!pin) throw new Error("no guest pin");
+      return pin;
+    };
+    const setGrant = (level: string | null) =>
+      level === null
+        ? db.resourceGrant.deleteMany({ where: { resourceType: "mcp_server", resourceId: serverId } })
+        : db.resourceGrant.upsert({
+            where: {
+              resourceType_resourceId_granteeKey: {
+                resourceType: "mcp_server",
+                resourceId: serverId,
+                granteeKey: `principal:${guest}`,
+              },
+            },
+            create: {
+              resourceType: "mcp_server",
+              resourceId: serverId,
+              granteeKind: "principal",
+              granteePrincipalId: guest,
+              granteeKey: `principal:${guest}`,
+              level,
+              source: "owner",
+              grantedById: owner,
+            },
+            update: { level },
+          });
+
+    beforeAll(async () => {
+      await db.principal.create({ data: { id: guest, subject: guest } });
+      await db.agent.create({
+        data: {
+          id: guestAgentId,
+          name: guestAgentId,
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 2,
+          ownerId: guest,
+        },
+      });
+    });
+    beforeEach(async () => {
+      await setGrant("use");
+      await db.agentMcpServer.deleteMany({ where: { agentId: guestAgentId } });
+      await db.agentMcpServer.create({
+        data: { agentId: guestAgentId, serverId, allowedTools: ["search"], attachedById: guest },
+      });
+    });
+    afterAll(async () => {
+      await db.agentMcpServer.deleteMany({ where: { agentId: guestAgentId } });
+      await setGrant(null);
+      await db.agent.deleteMany({ where: { id: guestAgentId } });
+      await db.principal.deleteMany({ where: { id: guest } });
+    });
+
+    it("pins and calls the server while the grant is use", async () => {
+      const server = fakeServer(() => textResult("shared ok"));
+      expect(await handleMcpTool(await guestPin(), "{}", guestCtx(server.impl))).toBe("shared ok");
+    });
+
+    it.each([null, "read"])("after the grant becomes %s, the run's pins leave the server out", async (level) => {
+      await setGrant(level);
+      expect(await loadMcpToolPins(db, guestAgentId)).toEqual([]);
+      // The server owner's own agent is untouched.
+      expect((await loadMcpToolPins(db, agentId)).map((p) => p.exposedName)).toEqual([
+        "datadog__search",
+        "datadog__slow",
+      ]);
+    });
+
+    it.each([null, "read"])(
+      "a run already holding the pin gets mcp_tool_not_allowed on its next call (grant %s)",
+      async (level) => {
+        const server = fakeServer(() => textResult("never"));
+        const pin = await guestPin();
+        await setGrant(level);
+        const out = JSON.parse(await handleMcpTool(pin, "{}", guestCtx(server.impl)));
+        expect(out.error).toBe("mcp_tool_not_allowed");
+        expect(out.message).toContain("no longer has use access");
+        expect(server.seen).toEqual([]);
+        // The owner's own agent keeps calling.
+        expect(
+          await handleMcpTool(await pinFor("search"), "{}", ctx(fakeServer(() => textResult("ok")).impl).ctx),
+        ).toBe("ok");
+      },
+    );
+
+    it("hides the owner's secret names from a grantee's run when the credentials can't be loaded", async () => {
+      const before = await db.mcpServer.findUniqueOrThrow({ where: { id: serverId } });
+      await db.mcpServer.update({ where: { id: serverId }, data: { secretNames: ["DD_KEY", "OWNER_ONLY_NAME"] } });
+      try {
+        const server = fakeServer(() => textResult("never"));
+        const shared = JSON.parse(await handleMcpTool(await guestPin(), "{}", guestCtx(server.impl)));
+        expect(shared).toEqual({
+          error: "mcp_server_error",
+          message: "The MCP server's credentials can't be used; ask its owner to check it.",
+        });
+        // The owner's own run keeps the detail it can act on.
+        const own = JSON.parse(await handleMcpTool(await pinFor("search"), "{}", ctx(server.impl).ctx));
+        expect(own.error).toBe("mcp_server_error");
+        expect(own.message).toContain("OWNER_ONLY_NAME");
+        expect(own.message).toContain("your secrets");
+        expect(server.seen).toEqual([]);
+      } finally {
+        await db.mcpServer.update({ where: { id: serverId }, data: { secretNames: before.secretNames } });
+      }
+    });
   });
 });
