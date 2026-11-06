@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "./db.js";
 import { createSecret } from "./secrets.js";
 import { fetchSnapshot, loadServerSecrets, mcpServersUsingSecret, McpServerInputError } from "./mcp-servers.js";
+import { McpClientError } from "./mcp-client/client.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("mcp server domain (database)", () => {
@@ -93,6 +94,42 @@ describe.skipIf(!process.env.DATABASE_URL)("mcp server domain (database)", () =>
     expect(snapshot.tools).toHaveLength(1);
     expect(JSON.stringify(snapshot)).not.toContain(SECRET);
     expect(snapshot.tools[0].description).toContain("[REDACTED]");
+  });
+
+  it("redacts the secret from errors leaving fetchSnapshot, keeping type and code", async () => {
+    const thrown = (async () => {
+      throw new Error(`connect failed for Bearer ${SECRET}`);
+    }) as unknown as typeof safeFetch;
+    const a = await fetchSnapshot(server(["GOOD"]), { db, cipher, fetchImpl: thrown }).catch((e) => e);
+    expect(a).toBeInstanceOf(McpClientError);
+    expect(a.code).toBe("mcp_server_unreachable");
+    expect(a.message).not.toContain(SECRET);
+
+    const echoed = (async (url: string) => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url,
+      headers: { "content-type": "application/json" },
+      bodyBase64: Buffer.from(
+        JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -1, message: `bad key ${SECRET}` } }),
+      ).toString("base64"),
+    })) as unknown as typeof safeFetch;
+    const b = await fetchSnapshot(server(["GOOD"]), { db, cipher, fetchImpl: echoed }).catch((e) => e);
+    expect(b).toBeInstanceOf(McpClientError);
+    expect(b.code).toBe("mcp_server_error");
+    expect(b.message).toContain("[REDACTED]");
+    expect(JSON.stringify(b.message)).not.toContain(SECRET);
+  });
+
+  it("names only the secret when a stored broker config is malformed", async () => {
+    await db.secret.create({
+      data: { ownerId: owner, name: "BAD", ciphertext: "bad-secret-value-1", keyId: "test", broker: { nope: 1 } },
+    });
+    const error = await loadServerSecrets(db, cipher, server(["BAD"])).catch((e) => e);
+    expect(error).toBeInstanceOf(McpServerInputError);
+    expect(error.message).toContain('Secret "BAD"');
+    expect(error.message).not.toContain("bad-secret-value-1");
   });
 
   it("finds the owner's MCP servers using a secret", async () => {

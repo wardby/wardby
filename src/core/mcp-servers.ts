@@ -6,7 +6,13 @@
  */
 import type { PrismaClient } from "#prisma";
 import { redactTokenShapedValues } from "../coding/protocol.js";
-import { McpHttpClient, type McpFetch, type McpServerInfo, type McpToolEntry } from "./mcp-client/client.js";
+import {
+  McpClientError,
+  McpHttpClient,
+  type McpFetch,
+  type McpServerInfo,
+  type McpToolEntry,
+} from "./mcp-client/client.js";
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 import { redactExactSecretValues, withEscapedForms } from "./secret-spans.js";
 import type { SecretEntry, SecretsAccessor } from "./secrets.js";
@@ -96,6 +102,16 @@ export function redactForServer(text: string, values: string[]): string {
   return redactTokenShapedValues(redactExactSecretValues(text, [...values, ...forms]));
 }
 
+/** The same error with its message redacted; an McpClientError keeps its code, any other keeps its name. */
+export function redactError(error: unknown, values: string[]): Error {
+  const message = redactForServer(error instanceof Error ? error.message : "The MCP server call failed.", values);
+  if (error instanceof McpClientError) return new McpClientError(error.code, message);
+  if (error instanceof McpServerInputError) return new McpServerInputError(message);
+  const out = new Error(message);
+  if (error instanceof Error) out.name = error.name;
+  return out;
+}
+
 type SecretDb = Pick<PrismaClient, "secret">;
 
 /** Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list the URL's host. */
@@ -117,7 +133,12 @@ export async function loadServerSecrets(
       throw new McpServerInputError(
         `Secret "${name}" is not brokered; set its broker config first (set_secret_broker).`,
       );
-    const broker = parseSecretBrokerConfig(stored.broker);
+    let broker;
+    try {
+      broker = parseSecretBrokerConfig(stored.broker);
+    } catch {
+      throw new McpServerInputError(`Secret "${name}" has a broker config that cannot be read; set it again.`);
+    }
     if (!broker.hosts.includes(host))
       throw new McpServerInputError(`Secret "${name}" is not brokered to host ${host}; add it to the secret's hosts.`);
     const entry: SecretEntry = { value: await cipher.decrypt(stored.ciphertext), broker };
@@ -177,6 +198,8 @@ export async function fetchSnapshot(
   try {
     const serverInfo = await client.initialize();
     raw = { serverInfo, tools: await client.listTools() };
+  } catch (error) {
+    throw redactError(error, values);
   } finally {
     await client.close().catch(() => {});
   }
