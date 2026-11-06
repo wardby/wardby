@@ -32,8 +32,8 @@ Share a server you own with `grant_access` (`resourceType: "mcp_server"`, a
 principal or `everyone`, level `read`, `use` or `write`; `everyone` is capped
 at `use`). `read` lets the grantee see the server and its tool list; `use`
 also lets them attach it to their own agents. The server's tools then run with
-your brokered secrets, so grant `use` only to people you trust with them. Only
-the owner updates, refreshes, deletes or re-grants a server; deleting it also
+your brokered secrets, so grant `use` only to people you trust with them.
+`write` allows nothing beyond `use`: only the owner updates, refreshes, deletes or re-grants a server; deleting it also
 removes its grants. Revoking a grant stops new attachments but doesn't remove
 ones already made: the grantee's agents keep the server until it is detached.
 

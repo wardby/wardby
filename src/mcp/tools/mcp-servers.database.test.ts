@@ -152,7 +152,11 @@ afterAll(async () => {
   if (savedMode === undefined) delete process.env.WARDBY_MCP_SERVERS;
   else process.env.WARDBY_MCP_SERVERS = savedMode;
   await db.agent.deleteMany({ where: { id: { in: agentIds } } });
-  await db.resourceGrant.deleteMany({ where: { resourceType: "mcp_server" } });
+  // Only this file's own servers' grants (grants have no FK), collected before the servers go.
+  const ownServers = await db.mcpServer.findMany({ where: { ownerId: { in: principalIds } }, select: { id: true } });
+  await db.resourceGrant.deleteMany({
+    where: { resourceType: "mcp_server", resourceId: { in: ownServers.map((x) => x.id) } },
+  });
   await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
   await db.tool.deleteMany({ where: { ownerId: { in: principalIds } } });
   await db.secretBrokerChange.deleteMany({ where: { ownerId: { in: principalIds } } });
