@@ -3,6 +3,7 @@ import type { PrismaClient } from "#prisma";
 import {
   EVERYONE_MAX,
   LEVELS,
+  SHAREABLE_TYPES,
   accessRank,
   atLeast,
   canDelegate,
@@ -46,7 +47,9 @@ describe("grant levels", () => {
   });
 
   it("caps everyone grants at write for agents and below write for the rest", () => {
-    expect(EVERYONE_MAX).toEqual({ agent: "write", tool: "use", budget_group: "use" });
+    expect(EVERYONE_MAX).toEqual({ agent: "write", tool: "use", budget_group: "use", mcp_server: "use" });
+    expect(SHAREABLE_TYPES).toEqual(["agent", "mcp_server"]);
+    expect(LEVELS.mcp_server).toEqual(["read", "use", "write"]);
   });
 });
 

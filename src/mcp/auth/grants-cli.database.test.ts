@@ -290,33 +290,49 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     expect((await pruneBindings(db, { dryRun: false })).removed).toEqual([]);
   });
 
-  it("adopt-public and prune-bindings detach MCP servers another principal owns", async () => {
+  it("adopt-public and prune-bindings detach MCP servers the owner neither owns nor holds use on", async () => {
     await client.query(`
       INSERT INTO "Agent" ("id", "name", "systemPrompt", "model", "budgetUsd", "updatedAt", "ownerId") VALUES
         ('pub-mcp', 'formerly-public-mcp', 'x', 'm', 1, now(), NULL),
         ('owned-mcp', 'alice-mcp-agent', 'x', 'm', 1, now(), 'alice');
       INSERT INTO "McpServer" ("id", "ownerId", "name", "url", "updatedAt") VALUES
         ('m-alice', 'alice', 'alicesrv', 'https://mcp.example.com/a', now()),
-        ('m-bob', 'bob', 'bobsrv', 'https://mcp.example.com/b', now());
+        ('m-bob', 'bob', 'bobsrv', 'https://mcp.example.com/b', now()),
+        ('m-bob-shared', 'bob', 'bobshared', 'https://mcp.example.com/c', now()),
+        ('m-bob-read', 'bob', 'bobread', 'https://mcp.example.com/d', now());
+      INSERT INTO "ResourceGrant" ("id", "resourceType", "resourceId", "granteeKind", "granteePrincipalId", "granteeKey", "level", "updatedAt") VALUES
+        ('g-use', 'mcp_server', 'm-bob-shared', 'principal', 'alice', 'principal:alice', 'use', now()),
+        ('g-read', 'mcp_server', 'm-bob-read', 'principal', 'alice', 'principal:alice', 'read', now());
       INSERT INTO "AgentMcpServer" ("agentId", "serverId", "allowedTools", "attachedById", "updatedAt") VALUES
         ('pub-mcp', 'm-alice', '{search}', 'alice', now()),
         ('pub-mcp', 'm-bob', '{search}', 'bob', now()),
+        ('pub-mcp', 'm-bob-shared', '{search}', 'alice', now()),
+        ('pub-mcp', 'm-bob-read', '{search}', 'alice', now()),
         ('owned-mcp', 'm-alice', '{search}', 'alice', now()),
-        ('owned-mcp', 'm-bob', '{search}', 'bob', now());
+        ('owned-mcp', 'm-bob', '{search}', 'bob', now()),
+        ('owned-mcp', 'm-bob-shared', '{search}', 'alice', now());
     `);
     const lines: string[] = [];
     const adopted = await adoptPublic(db, { ownerSubject: "sub-alice", dryRun: false });
     const pub = adopted.agents.find((a) => a.agentId === "pub-mcp");
-    expect(pub?.bindingsRemoved).toEqual([{ kind: "mcp_server", boundName: "bobsrv", resourceId: "m-bob" }]);
-    expect(pub?.bindingsKept).toEqual([{ kind: "mcp_server", boundName: "alicesrv" }]);
+    // Kept: alice's own server and bob's, which he shared with her at use; dropped: unshared and read-only.
+    expect(pub?.bindingsRemoved).toEqual([
+      { kind: "mcp_server", boundName: "bobsrv", resourceId: "m-bob" },
+      { kind: "mcp_server", boundName: "bobread", resourceId: "m-bob-read" },
+    ]);
+    expect(pub?.bindingsKept).toEqual([
+      { kind: "mcp_server", boundName: "alicesrv" },
+      { kind: "mcp_server", boundName: "bobshared" },
+    ]);
     expect(formatAdoptResult(adopted)).toContain('removed mcp_server binding "bobsrv" (m-bob)');
     expect((await db.agentMcpServer.findMany({ where: { agentId: "pub-mcp" } })).map((b) => b.serverId)).toEqual([
       "m-alice",
+      "m-bob-shared",
     ]);
 
     await grantsCommand(["prune-bindings", "--dry-run"], db, (line) => lines.push(line));
     expect(lines.join("\n")).toContain('would remove mcp_server binding "bobsrv" on alice-mcp-agent (owned-mcp)');
-    expect(await db.agentMcpServer.count({ where: { agentId: "owned-mcp" } })).toBe(2);
+    expect(await db.agentMcpServer.count({ where: { agentId: "owned-mcp" } })).toBe(3);
     const result = await pruneBindings(db, { dryRun: false });
     expect(result.removed).toEqual([
       {
@@ -330,6 +346,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     ]);
     expect((await db.agentMcpServer.findMany({ where: { agentId: "owned-mcp" } })).map((b) => b.serverId)).toEqual([
       "m-alice",
+      "m-bob-shared",
     ]);
   });
 

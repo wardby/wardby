@@ -23,7 +23,13 @@ function fakeDb(
   grants: FakeGrantSeed[] = [],
   bindings: Partial<
     Record<
-      "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile",
+      | "agentSecret"
+      | "agentDatastore"
+      | "agentRepository"
+      | "agentSubAgent"
+      | "agentTool"
+      | "codingAgentProfile"
+      | "agentMcpServer",
       number
     >
   > = {},
@@ -38,6 +44,7 @@ function fakeDb(
     agentSubAgent: { count: async () => bindings.agentSubAgent ?? 0 },
     agentTool: { count: async () => bindings.agentTool ?? 0 },
     codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
+    agentMcpServer: { count: async () => bindings.agentMcpServer ?? 0 },
     agent: {
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => {
@@ -279,6 +286,7 @@ describe("grant_access / revoke_access / list_access", () => {
     "agentSubAgent",
     "agentTool",
     "codingAgentProfile",
+    "agentMcpServer",
   ] as const)("refuses write for everyone on an agent that holds %s, but still allows execute", async (binding) => {
     const db = fakeDb(agents, people, [], { [binding]: 1 });
     const { client } = await connect(db, ctx(db, "owner"));

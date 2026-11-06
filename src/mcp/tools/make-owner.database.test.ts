@@ -29,6 +29,9 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     await db.agentDatastore.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.resourceGrant.deleteMany({ where: { resourceId: { in: agentIds } } });
     await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
+    await db.resourceGrant.deleteMany({
+      where: { resourceType: "mcp_server", granteePrincipalId: { in: principalIds } },
+    });
     await db.tool.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.secret.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.datastore.deleteMany({ where: { ownerId: { in: principalIds } } });
@@ -244,8 +247,33 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
       db.mcpServer.create({ data: { ownerId, name, url: `https://mcp.example.com/${name}` } });
     const aServer = await server(a.id, "asrv");
     const bServer = await server(b.id, "bsrv");
+    // a shared this one with b at use, and this one at read only: use keeps, read drops.
+    const sharedUse = await server(a.id, "shareduse");
+    const sharedRead = await server(a.id, "sharedread");
+    await db.resourceGrant.createMany({
+      data: [
+        {
+          resourceType: "mcp_server",
+          resourceId: sharedUse.id,
+          granteeKind: "principal",
+          granteePrincipalId: b.id,
+          granteeKey: `principal:${b.id}`,
+          level: "use",
+        },
+        {
+          resourceType: "mcp_server",
+          resourceId: sharedRead.id,
+          granteeKind: "principal",
+          granteePrincipalId: b.id,
+          granteeKey: `principal:${b.id}`,
+          level: "read",
+        },
+      ],
+    });
     await db.agentMcpServer.createMany({
       data: [
+        { agentId: agent.id, serverId: sharedUse.id, allowedTools: ["search"], attachedById: a.id },
+        { agentId: agent.id, serverId: sharedRead.id, allowedTools: ["search"], attachedById: a.id },
         { agentId: agent.id, serverId: aServer.id, allowedTools: ["search"], attachedById: a.id },
         { agentId: agent.id, serverId: bServer.id, allowedTools: ["search"], attachedById: b.id },
       ],
@@ -275,13 +303,18 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     };
     await client.close();
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(result.content[0].text).bindingsRemoved).toEqual([
-      { kind: "mcp_server", boundName: "asrv", resourceId: aServer.id },
-    ]);
-    // The old owner's server is detached; the new owner's own server stays.
-    expect((await db.agentMcpServer.findMany({ where: { agentId: agent.id } })).map((r) => r.serverId)).toEqual([
-      bServer.id,
-    ]);
+    expect(JSON.parse(result.content[0].text).bindingsRemoved).toEqual(
+      expect.arrayContaining([
+        { kind: "mcp_server", boundName: "asrv", resourceId: aServer.id },
+        { kind: "mcp_server", boundName: "sharedread", resourceId: sharedRead.id },
+      ]),
+    );
+    expect(JSON.parse(result.content[0].text).bindingsRemoved).toHaveLength(2);
+    // The old owner's unshared and read-only servers are detached; the new owner's own server and the
+    // one shared at use stay.
+    expect((await db.agentMcpServer.findMany({ where: { agentId: agent.id } })).map((r) => r.serverId).sort()).toEqual(
+      [bServer.id, sharedUse.id].sort(),
+    );
     // The server itself is untouched.
     expect(await db.mcpServer.count({ where: { id: aServer.id } })).toBe(1);
   });

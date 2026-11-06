@@ -56,6 +56,7 @@ import {
   deleteGrantsFor,
   effectiveAccess,
   isPublicWritable,
+  filterUnusableMcpServers,
 } from "../../core/grants.js";
 import { projectTool } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
@@ -1296,13 +1297,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             });
           }
           // MCP server attachments: the server's brokered secrets act for its
-          // owner, so a server the new owner doesn't own is detached.
+          // owner, so a server the new owner neither owns nor holds use on is detached.
           const mcpServers = await tx.agentMcpServer.findMany({
             where: { agentId: agent.id },
-            include: { server: { select: { name: true, ownerId: true } } },
+            include: { server: { select: { id: true, name: true, ownerId: true } } },
             orderBy: { serverId: "asc" },
           });
-          const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== newOwner);
+          const foreignMcpServers = await filterUnusableMcpServers(tx, () => newOwner, mcpServers);
           if (foreignMcpServers.length > 0) {
             await tx.agentMcpServer.deleteMany({
               where: { agentId: agent.id, serverId: { in: foreignMcpServers.map((b) => b.serverId) } },

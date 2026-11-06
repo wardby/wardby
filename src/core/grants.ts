@@ -15,6 +15,7 @@ export const LEVELS = {
   agent: ["read", "execute", "write"],
   tool: ["read", "use", "write"],
   budget_group: ["read", "use", "write"],
+  mcp_server: ["read", "use", "write"],
 } as const;
 
 export type ResourceType = keyof typeof LEVELS;
@@ -28,12 +29,12 @@ export type Access<T extends ResourceType = ResourceType> = "none" | Level<T> | 
  * the binding tools. Otherwise anyone could rewrite the prompt of an agent
  * that holds its owner's secrets.
  */
-export const EVERYONE_MAX = { agent: "write", tool: "use", budget_group: "use" } as const satisfies {
+export const EVERYONE_MAX = { agent: "write", tool: "use", budget_group: "use", mcp_server: "use" } as const satisfies {
   [T in ResourceType]: Level<T>;
 };
 
-/** Types grant_access/revoke_access accept today (Phase 1: agents only). */
-export const SHAREABLE_TYPES: readonly ResourceType[] = ["agent"];
+/** Types grant_access/revoke_access accept today: agents and MCP servers. */
+export const SHAREABLE_TYPES: readonly ResourceType[] = ["agent", "mcp_server"];
 
 export const EVERYONE_KEY = "everyone";
 
@@ -171,6 +172,33 @@ export function everyoneGrantData(type: ResourceType, resourceId: string, level:
   };
 }
 
+/**
+ * True when `ownerId` owns the MCP server or holds use (or higher) on it through a grant. An agent's MCP
+ * attachment is legitimate only while its owner can use the server: the cleanup paths (make_owner,
+ * adopt-public, prune-bindings) drop the ones that fail this.
+ */
+export async function ownerCanUseMcpServer(
+  db: GrantDb,
+  ownerId: string | null,
+  server: { id: string; ownerId: string | null },
+): Promise<boolean> {
+  if (ownerId === null) return false;
+  return atLeast("mcp_server", await effectiveAccess(db, "mcp_server", server, ownerId), "use");
+}
+
+/** Keeps the items whose server the owner cannot use (see ownerCanUseMcpServer). */
+export async function filterUnusableMcpServers<T extends { server: { id: string; ownerId: string | null } }>(
+  db: GrantDb,
+  ownerOf: (item: T) => string | null,
+  items: T[],
+): Promise<T[]> {
+  const unusable: T[] = [];
+  for (const item of items) {
+    if (!(await ownerCanUseMcpServer(db, ownerOf(item), item.server))) unusable.push(item);
+  }
+  return unusable;
+}
+
 /** Every resource delete path calls this in the same transaction (no FK on resourceId). */
 export async function deleteGrantsFor(db: GrantDb, type: ResourceType, resourceId: string): Promise<number> {
   const { count } = await db.resourceGrant.deleteMany({ where: { resourceType: type, resourceId } });
@@ -179,7 +207,13 @@ export async function deleteGrantsFor(db: GrantDb, type: ResourceType, resourceI
 
 type BindingDb = Pick<
   PrismaClient,
-  "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile"
+  | "agentSecret"
+  | "agentDatastore"
+  | "agentRepository"
+  | "agentSubAgent"
+  | "agentTool"
+  | "codingAgentProfile"
+  | "agentMcpServer"
 >;
 
 /**
@@ -191,27 +225,31 @@ type BindingDb = Pick<
  * coding task.
  */
 export async function agentOwnerBindings(db: BindingDb, agentId: string): Promise<string[]> {
-  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles] = await Promise.all([
-    db.agentSecret.count({ where: { agentId } }),
-    db.agentDatastore.count({ where: { agentId } }),
-    db.agentRepository.count({ where: { agentId } }),
-    db.agentSubAgent.count({ where: { parentAgentId: agentId } }),
-    // The owner's attach_tool stamps its consent even when it grants nothing:
-    // only an attachment that carries a capability counts.
-    db.agentTool.count({
-      where: {
-        agentId,
-        capabilitiesGrantedById: { not: null },
-        NOT: {
-          allowedSecrets: { equals: [] },
-          allowedDatastorePrefixes: { equals: [] },
-          allowedHosts: { equals: [] },
-          allowedSharedDatastorePrefixes: { equals: {} },
+  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles, mcpServers] = await Promise.all(
+    [
+      db.agentSecret.count({ where: { agentId } }),
+      db.agentDatastore.count({ where: { agentId } }),
+      db.agentRepository.count({ where: { agentId } }),
+      db.agentSubAgent.count({ where: { parentAgentId: agentId } }),
+      // The owner's attach_tool stamps its consent even when it grants nothing:
+      // only an attachment that carries a capability counts.
+      db.agentTool.count({
+        where: {
+          agentId,
+          capabilitiesGrantedById: { not: null },
+          NOT: {
+            allowedSecrets: { equals: [] },
+            allowedDatastorePrefixes: { equals: [] },
+            allowedHosts: { equals: [] },
+            allowedSharedDatastorePrefixes: { equals: {} },
+          },
         },
-      },
-    }),
-    db.codingAgentProfile.count({ where: { agentId } }),
-  ]);
+      }),
+      db.codingAgentProfile.count({ where: { agentId } }),
+      // A server's brokered secrets act for its owner on every call.
+      db.agentMcpServer.count({ where: { agentId } }),
+    ],
+  );
   return Object.entries({
     secrets,
     datastores,
@@ -219,6 +257,7 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
     "sub-agents": subagents,
     "tool capabilities": capabilityTools,
     "a coding repository": codingProfiles,
+    "MCP servers": mcpServers,
   })
     .filter(([, count]) => count > 0)
     .map(([kind]) => kind);

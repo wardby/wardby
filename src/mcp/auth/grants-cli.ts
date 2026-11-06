@@ -20,7 +20,7 @@
  */
 import { parseArgs } from "node:util";
 import { Prisma, type PrismaClient } from "#prisma";
-import { canDelegate } from "../../core/grants.js";
+import { canDelegate, filterUnusableMcpServers } from "../../core/grants.js";
 import { resolvePrincipal } from "./principal.js";
 
 const USAGE =
@@ -422,12 +422,12 @@ export async function adoptPublic(
           });
           const mcpServers = await tx.agentMcpServer.findMany({
             where: { agentId: id },
-            include: { server: { select: { name: true, ownerId: true } } },
+            include: { server: { select: { id: true, name: true, ownerId: true } } },
             orderBy: { serverId: "asc" },
           });
           const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== owner.id);
           const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== owner.id);
-          const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== owner.id);
+          const foreignMcpServers = await filterUnusableMcpServers(tx, () => owner.id, mcpServers);
           for (const b of foreignSecrets) {
             await tx.agentSecret.delete({ where: { agentId_secretId: { agentId: id, secretId: b.secretId } } });
           }
@@ -521,7 +521,7 @@ export async function adoptPublic(
                 .filter((b) => b.datastore.ownerId === owner.id)
                 .map((b) => ({ kind: "datastore" as const, boundName: b.boundName })),
               ...mcpServers
-                .filter((b) => b.server.ownerId === owner.id)
+                .filter((b) => !foreignMcpServers.includes(b))
                 .map((b) => ({ kind: "mcp_server" as const, boundName: b.server.name })),
             ],
             capabilitiesStamped: own.map((at) => at.tool.name),
@@ -609,13 +609,13 @@ export async function pruneBindings(db: PrismaClient, opts: { dryRun: boolean })
         where: { agent: { ownerId: { not: null } } },
         include: {
           agent: { select: { name: true, ownerId: true } },
-          server: { select: { name: true, ownerId: true } },
+          server: { select: { id: true, name: true, ownerId: true } },
         },
         orderBy: [{ agentId: "asc" }, { serverId: "asc" }],
       });
       const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== b.agent.ownerId);
       const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== b.agent.ownerId);
-      const foreignMcpServers = mcpServers.filter((b) => b.server.ownerId !== b.agent.ownerId);
+      const foreignMcpServers = await filterUnusableMcpServers(tx, (b) => b.agent.ownerId, mcpServers);
       if (!opts.dryRun) {
         for (const b of foreignSecrets) {
           await tx.agentSecret.delete({ where: { agentId_secretId: { agentId: b.agentId, secretId: b.secretId } } });

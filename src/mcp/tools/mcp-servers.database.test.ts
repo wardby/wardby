@@ -10,6 +10,7 @@ import type { safeFetch } from "../../sandbox/safe-fetch.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
+import { registerGrantTools } from "./grants.js";
 import { assertNoClash, registerMcpServerTools } from "./mcp-servers.js";
 import { McpError } from "../errors.js";
 
@@ -102,7 +103,7 @@ async function connect(p: Principal, options: { scopes?: string[]; roles?: strin
   const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL } });
   const ctx: McpRequestContext = {
     principal: p,
-    scopes: new Set(options.scopes ?? ["tools:write", "agents:read", "hosts:admin"]),
+    scopes: new Set(options.scopes ?? ["tools:write", "agents:read", "agents:write", "hosts:admin"]),
     roles: options.roles ?? [],
     canonicalUri: CANONICAL,
     providers,
@@ -113,6 +114,7 @@ async function connect(p: Principal, options: { scopes?: string[]; roles?: strin
   mcp.setFixedContext(ctx);
   registerMcpServerTools(mcp);
   registerAgentTools(mcp);
+  registerGrantTools(mcp);
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
@@ -150,6 +152,7 @@ afterAll(async () => {
   if (savedMode === undefined) delete process.env.WARDBY_MCP_SERVERS;
   else process.env.WARDBY_MCP_SERVERS = savedMode;
   await db.agent.deleteMany({ where: { id: { in: agentIds } } });
+  await db.resourceGrant.deleteMany({ where: { resourceType: "mcp_server" } });
   await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
   await db.tool.deleteMany({ where: { ownerId: { in: principalIds } } });
   await db.secretBrokerChange.deleteMany({ where: { ownerId: { in: principalIds } } });
@@ -474,5 +477,155 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
     const detach = await qCall("detach_mcp_server", { agentId: a.id, serverId: id });
     expect(detach.isError).toBe(true);
     expect(await db.agentMcpServer.count({ where: { agentId: a.id, serverId: id } })).toBe(1);
+  });
+
+  describe("sharing through grants", () => {
+    const grant = (call: Call, resourceId: string, to: Principal | "everyone", level: string) =>
+      call("grant_access", {
+        resourceType: "mcp_server",
+        resourceId,
+        grantee: to === "everyone" ? "everyone" : { subject: to.subject },
+        level,
+      });
+
+    async function shared(level: string) {
+      const owner = await principal();
+      const guest = await principal();
+      const ownerCall = await connect(owner);
+      const guestCall = await connect(guest);
+      const { id } = await register(ownerCall);
+      ok(await grant(ownerCall, id, guest, level));
+      return { owner, guest, ownerCall, guestCall, id };
+    }
+
+    it("only the owner grants; anyone else gets a 404", async () => {
+      const { guestCall, id, ownerCall } = await shared("use");
+      const third = await principal();
+      const stranger = await connect(await principal());
+      expect((await grant(stranger, id, third, "use")).text).toContain("not found");
+      // The grantee can't re-grant either, nor list or revoke.
+      const g = await grant(guestCall, id, third, "read");
+      expect(g.isError).toBe(true);
+      expect(g.text).toContain("not found");
+      expect(
+        (await guestCall("revoke_access", { resourceType: "mcp_server", resourceId: id, grantee: "everyone" })).isError,
+      ).toBe(true);
+      expect((await guestCall("list_access", { resourceType: "mcp_server", resourceId: id })).isError).toBe(true);
+      const listed = ok(await ownerCall("list_access", { resourceType: "mcp_server", resourceId: id }));
+      expect(listed.grants).toHaveLength(1);
+      expect(listed.grants[0].level).toBe("use");
+    });
+
+    it("use lets the grantee attach to their own agent; read gets 403 'needs use access' but can get the server", async () => {
+      const { guest, guestCall, id, ownerCall, owner } = await shared("use");
+      const a = await agent(guest);
+      ok(await guestCall("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(1);
+      // Not their own agent: still refused, by the agent check.
+      const ownersAgent = await agent(owner);
+      expect(
+        (await guestCall("attach_mcp_server", { agentId: ownersAgent.id, serverId: id, allowedTools: ["search"] }))
+          .isError,
+      ).toBe(true);
+      // Downgrade to read: new attaches refused.
+      ok(await grant(ownerCall, id, guest, "read"));
+      const b = await agent(guest);
+      const refused = await guestCall("attach_mcp_server", { agentId: b.id, serverId: id, allowedTools: ["search"] });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("needs use access");
+      const got = ok(await guestCall("get_mcp_server", { id }));
+      expect(got.tools.map((t: Tool) => t.name)).toEqual(["search", "get_issue"]);
+      expect(got.yours).toBe(false);
+      expect(got.secretNames).toBeUndefined();
+      expect(JSON.stringify(got)).not.toContain("team=acme");
+      expect(got.host).toBe("mcp.example.com");
+    });
+
+    it("a grantee can't update, refresh or delete; list shows the shared server with yours false and no secretNames", async () => {
+      const { guestCall, id } = await shared("write");
+      for (const [tool, args] of [
+        ["update_mcp_server", { id, url: "https://mcp.example.com/other" }],
+        ["refresh_mcp_server", { id }],
+        ["delete_mcp_server", { id }],
+      ] as const) {
+        const r = await guestCall(tool, args);
+        expect(r.isError, tool).toBe(true);
+        expect(r.text, tool).toContain("not found");
+      }
+      const own = await register(guestCall, "guestsrv");
+      const list = ok(await guestCall("list_mcp_servers"));
+      const row = list.servers.find((s: { id: string }) => s.id === id);
+      expect(row).toMatchObject({ yours: false, name: "acme", host: "mcp.example.com" });
+      expect(row.secretNames).toBeUndefined();
+      expect(list.servers.find((s: { id: string }) => s.id === own.id)).toMatchObject({
+        yours: true,
+        secretNames: ["MCP_TOKEN"],
+      });
+      expect(JSON.stringify(list)).not.toContain(SECRET);
+    });
+
+    it("revoke_access stops new attaches; an attachment already made stays until detached", async () => {
+      const { guest, guestCall, id, ownerCall } = await shared("use");
+      const a = await agent(guest);
+      ok(await guestCall("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      expect(
+        ok(
+          await ownerCall("revoke_access", {
+            resourceType: "mcp_server",
+            resourceId: id,
+            grantee: { subject: guest.subject },
+          }),
+        ).revoked,
+      ).toBe(true);
+      const b = await agent(guest);
+      expect(
+        (await guestCall("attach_mcp_server", { agentId: b.id, serverId: id, allowedTools: ["search"] })).isError,
+      ).toBe(true);
+      expect((await guestCall("get_mcp_server", { id })).isError).toBe(true);
+      expect((ok(await guestCall("list_mcp_servers")).servers as unknown[]).length).toBe(0);
+      expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(1);
+      ok(await guestCall("detach_mcp_server", { agentId: a.id, serverId: id }));
+      expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(0);
+    });
+
+    it("delete_mcp_server removes the server's grants", async () => {
+      const { guest, ownerCall, id } = await shared("use");
+      expect(await db.resourceGrant.count({ where: { resourceType: "mcp_server", resourceId: id } })).toBe(1);
+      ok(await ownerCall("delete_mcp_server", { id }));
+      expect(await db.resourceGrant.count({ where: { resourceType: "mcp_server", resourceId: id } })).toBe(0);
+      void guest;
+    });
+
+    it("everyone may get at most use, and use works for any signed-in principal", async () => {
+      const owner = await principal();
+      const ownerCall = await connect(owner);
+      const { id } = await register(ownerCall);
+      const tooHigh = await grant(ownerCall, id, "everyone", "write");
+      expect(tooHigh.isError).toBe(true);
+      expect(tooHigh.text).toContain("at most use");
+      ok(await grant(ownerCall, id, "everyone", "use"));
+      const guest = await principal();
+      const guestCall = await connect(guest);
+      const a = await agent(guest);
+      ok(await guestCall("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      // Bad level for the type.
+      expect((await grant(ownerCall, id, guest, "execute")).isError).toBe(true);
+    });
+
+    it("an agent holding an MCP server can't be made public-write", async () => {
+      const owner = await principal();
+      const call = await connect(owner);
+      const { id } = await register(call);
+      const a = await agent(owner);
+      ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      const r = await call("grant_access", {
+        resourceType: "agent",
+        resourceId: a.id,
+        grantee: "everyone",
+        level: "write",
+      });
+      expect(r.isError).toBe(true);
+      expect(r.text).toContain("MCP servers");
+    });
   });
 });

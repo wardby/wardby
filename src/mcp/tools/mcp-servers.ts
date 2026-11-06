@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Prisma, type PrismaClient } from "#prisma";
 import { loadMcpServersMode } from "../../config/mcp-servers.js";
 import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
+import { atLeast, deleteGrantsFor, effectiveAccess, grantedIds } from "../../core/grants.js";
 import { logger } from "../../core/logger.js";
 import { McpClientError, type McpServerInfo, type McpToolEntry } from "../../core/mcp-client/client.js";
 import {
@@ -87,6 +88,26 @@ async function requireOwnedServer(
 ): Promise<ServerRecord> {
   const server = await db.mcpServer.findUnique({ where: { id } });
   if (!server || server.ownerId !== ctx.principal.id) throw serverNotFound(id);
+  return server;
+}
+
+/**
+ * A server the caller owns or holds at least `min` on through a grant. Missing and no-access look the same
+ * (404); a grant that is too low says what it lacks (403).
+ */
+async function requireServerAccess(
+  ctx: McpRequestContext,
+  id: string,
+  min: "read" | "use",
+  db: Pick<PrismaClient, "mcpServer" | "resourceGrant"> = ctx.db,
+): Promise<ServerRecord> {
+  const server = await db.mcpServer.findUnique({ where: { id } });
+  if (!server) throw serverNotFound(id);
+  const access = await effectiveAccess(db, "mcp_server", server, ctx.principal.id);
+  if (access === "none") throw serverNotFound(id);
+  if (!atLeast("mcp_server", access, min)) {
+    throw new McpError(403, `MCP server "${server.name}": attaching it needs use access (you have ${access}).`);
+  }
   return server;
 }
 
@@ -293,11 +314,16 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_mcp_servers",
     scope: "agents:read",
-    description: "Your registered MCP servers: id, name, host, tool count and when the tool list was saved.",
+    description:
+      "Your registered MCP servers and the ones shared with you: id, name, host, tool count, when the tool list was saved and yours (false for shared ones, which show no secret names).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_rawArgs: unknown, ctx) => {
       gate(ctx, "other");
-      const rows = await ctx.db.mcpServer.findMany({ where: { ownerId: ctx.principal.id }, orderBy: { name: "asc" } });
+      const sharedIds = await grantedIds(ctx.db, "mcp_server", ctx.principal.id, "read");
+      const rows = await ctx.db.mcpServer.findMany({
+        where: { OR: [{ ownerId: ctx.principal.id }, { id: { in: sharedIds } }] },
+        orderBy: [{ name: "asc" }, { id: "asc" }],
+      });
       return textResult({
         servers: rows.map((s) => ({
           id: s.id,
@@ -306,8 +332,9 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
           ownerId: s.ownerId,
           toolCount: snapshotOf(s).length,
           snapshotAt: s.snapshotAt,
-          yours: true,
-          secretNames: s.secretNames,
+          yours: s.ownerId === ctx.principal.id,
+          // Secret names stay with the owner.
+          ...(s.ownerId === ctx.principal.id ? { secretNames: s.secretNames } : {}),
         })),
       });
     },
@@ -316,13 +343,25 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "get_mcp_server",
     scope: "agents:read",
-    description: "One of your MCP servers with its full saved tool list (name, description, inputSchema, annotations).",
+    description:
+      "One of your MCP servers, or one shared with you (read or higher), with its full saved tool list (name, description, inputSchema, annotations). Secret names show for the owner only.",
     inputSchema: ID_ONLY,
     handler: async (rawArgs: unknown, ctx) => {
       gate(ctx, "other");
       const { id } = parse(IdSchema, "get_mcp_server arguments", rawArgs);
-      const server = await requireOwnedServer(ctx, id);
-      return textResult({ ...serverView(server), ownerId: server.ownerId, tools: snapshotOf(server) });
+      const server = await requireServerAccess(ctx, id, "read");
+      const view = serverView(server);
+      const yours = server.ownerId === ctx.principal.id;
+      // Secret names and the full URL (a query string can carry a token) stay with the owner.
+      const { secretNames: _secretNames, url: _url, ...shared } = view;
+      void _secretNames;
+      void _url;
+      return textResult({
+        ...(yours ? view : { ...shared, host: new URL(server.url).hostname }),
+        yours,
+        ownerId: server.ownerId,
+        tools: snapshotOf(server),
+      });
     },
   });
 
@@ -335,7 +374,11 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       gate(ctx, "other");
       const { id } = parse(IdSchema, "delete_mcp_server arguments", rawArgs);
       const server = await requireOwnedServer(ctx, id);
-      await ctx.db.mcpServer.delete({ where: { id } });
+      await ctx.db.$transaction(async (tx) => {
+        await tx.mcpServer.delete({ where: { id } });
+        // Grants have no foreign key to the server.
+        await deleteGrantsFor(tx, "mcp_server", id);
+      });
       audit(ctx, "delete", server);
       return textResult({ deleted: id });
     },
@@ -345,7 +388,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
     name: "attach_mcp_server",
     scope: "tools:write",
     description:
-      "Agent owner only: let a native agent call the named tools of one of your MCP servers. allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit.",
+      "Agent owner only: let a native agent call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -384,7 +427,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
           // An attachment grants capabilities (the server's secrets act for the agent): strict owner only.
           await requireBindable(ctx, agent, tx);
           if (agent.kind === "coding") throw new McpError(400, "MCP servers attach to native agents only for now.");
-          const server = await requireOwnedServer(ctx, input.serverId, tx);
+          const server = await requireServerAccess(ctx, input.serverId, "use", tx);
           const known = new Set(snapshotOf(server).map((t) => t.name));
           const unknown = input.allowedTools.filter((t) => !known.has(t));
           if (unknown.length > 0) {

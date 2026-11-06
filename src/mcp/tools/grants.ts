@@ -1,7 +1,7 @@
 /**
  * grant_access / revoke_access / list_access: the owner's sharing controls
- * (resource-sharing grants spec §3.11). Phase 1 shares agents only; other
- * resource types are refused as "not shareable yet".
+ * (resource-sharing grants spec §3.11). Agents and MCP servers are shareable;
+ * other resource types are refused as "not shareable yet".
  *
  * - Only the resource's owner (or the stdio operator) grants and revokes.
  *   Admins get no implicit access: they may only list_access, for incident
@@ -78,10 +78,22 @@ async function resolveGrantee(db: GrantTx, grantee: Grantee): Promise<Principal 
   return principal;
 }
 
-/** Grant management is the owner's (or the stdio operator's). Phase 1: agents. */
-async function requireOwnedResource(ctx: McpRequestContext, db: GrantTx, type: ResourceType, id: string) {
-  // Only "agent" reaches here in Phase 1 (shareableType).
-  void type;
+/** Grant management is the owner's (or the stdio operator's). Agents and MCP servers. */
+async function requireOwnedResource(
+  ctx: McpRequestContext,
+  db: GrantTx,
+  type: ResourceType,
+  id: string,
+): Promise<{ id: string; ownerId: string | null }> {
+  if (type === "mcp_server") {
+    const server = await db.mcpServer.findUnique({ where: { id } });
+    // Missing and someone else's look the same. The stdio operator owns everything.
+    if (!server || (!ctx.operator && server.ownerId !== ctx.principal.id)) {
+      throw new McpError(404, `MCP server "${id}" not found.`);
+    }
+    return server;
+  }
+  // Only "agent" and "mcp_server" reach here (shareableType).
   const row = await db.agent.findUnique({ where: { id } });
   return (await assertAgentAccess(ctx, row, id, "owner", db)).agent;
 }
@@ -89,6 +101,7 @@ async function requireOwnedResource(ctx: McpRequestContext, db: GrantTx, type: R
 type GrantTx = Pick<
   PrismaClient,
   | "agent"
+  | "mcpServer"
   | "principal"
   | "resourceGrant"
   | "agentSecret"
@@ -97,6 +110,7 @@ type GrantTx = Pick<
   | "agentSubAgent"
   | "agentTool"
   | "codingAgentProfile"
+  | "agentMcpServer"
 >;
 
 /**
@@ -115,7 +129,7 @@ function isAdmin(ctx: McpRequestContext): boolean {
 
 const TYPE_PROPERTIES = {
   // No enum: another type gets a clear "not shareable yet" from the handler.
-  resourceType: { type: "string", description: 'Only "agent" is shareable today.' },
+  resourceType: { type: "string", description: 'Agents and MCP servers are shareable: "agent" or "mcp_server".' },
   resourceId: { type: "string" },
 };
 const GRANTEE_PROPERTY = {
@@ -142,21 +156,22 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "grant_access",
     scope: "agents:write",
     description:
-      "Shares an agent you own with one principal or with everyone, at a level: " +
+      "Shares an agent or MCP server you own with one principal or with everyone, at a level: " +
       "read (see its config, never secret values or other owners' tool code); " +
       "execute (also trigger runs and see the runs they triggered); " +
       "write (also change its name, prompt, model, budget amount, max turns, effort, memory on/off and schedule, attach tools they can use and detach tools, and create webhooks). " +
       "Owner-only whatever the level: the coding profile (task, base ref, protected paths, task-override opt-in, image, packages, limits), kind, budget group, sub-agents, secret/datastore/repository bindings, tool capabilities, memory and datastore contents, grants, delete. " +
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
-      "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents or tool capabilities. The grantee must have signed in once.",
+      "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Only the owner updates, refreshes, deletes or re-grants a server. " +
+      "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers or tool capabilities. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         ...TYPE_PROPERTIES,
         grantee: GRANTEE_PROPERTY,
-        level: { type: "string", description: "Agents: read < execute < write." },
+        level: { type: "string", description: "Agents: read < execute < write. MCP servers: read < use < write." },
       },
       required: ["resourceType", "resourceId", "grantee", "level"],
     },
@@ -223,7 +238,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "revoke_access",
     scope: "agents:write",
     description:
-      "Removes a grant on an agent you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going.",
+      "Removes a grant on an agent or MCP server you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. Agents the grantee already attached an MCP server to keep it until they detach it.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -249,7 +264,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "list_access",
     scope: "agents:read",
     description:
-      "Lists who an agent is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
+      "Lists who an agent or MCP server is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -259,17 +274,28 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parse(ListSchema, "list_access", rawArgs);
       const type = shareableType(args.resourceType);
-      const resource = await ctx.db.agent.findUnique({ where: { id: args.resourceId } });
-      if (!resource) throw agentNotFound(args.resourceId);
-      if (!isAdmin(ctx)) {
-        const access = await agentAccess(ctx, resource);
-        if (!atLeast("agent", access, "read")) throw agentNotFound(args.resourceId);
-        if (access !== "owner") {
-          throw new McpError(
-            403,
-            `Agent "${resource.id}": only its owner (or an admin) can list who it is shared with.`,
-          );
+      let resource: { id: string; ownerId: string | null };
+      if (type === "mcp_server") {
+        const server = await ctx.db.mcpServer.findUnique({ where: { id: args.resourceId } });
+        // Owner, stdio operator or admin; anyone else sees a missing server.
+        if (!server || (!ctx.operator && !isAdmin(ctx) && server.ownerId !== ctx.principal.id)) {
+          throw new McpError(404, `MCP server "${args.resourceId}" not found.`);
         }
+        resource = server;
+      } else {
+        const agent = await ctx.db.agent.findUnique({ where: { id: args.resourceId } });
+        if (!agent) throw agentNotFound(args.resourceId);
+        if (!isAdmin(ctx)) {
+          const access = await agentAccess(ctx, agent);
+          if (!atLeast("agent", access, "read")) throw agentNotFound(args.resourceId);
+          if (access !== "owner") {
+            throw new McpError(
+              403,
+              `Agent "${agent.id}": only its owner (or an admin) can list who it is shared with.`,
+            );
+          }
+        }
+        resource = agent;
       }
       const grants = await ctx.db.resourceGrant.findMany({
         where: { resourceType: type, resourceId: resource.id },
