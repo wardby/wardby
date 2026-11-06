@@ -352,6 +352,144 @@ test("Wardby MCP tool loop preserves the pinned second-turn request shape", asyn
   }
 });
 
+const MCP_TOKEN = "rmt_compatibility_only_not_a_real_mcp_token_00";
+
+/**
+ * A stand-in for the coding proxy's /mcp route: JSON answers, one tool `echo`, 401 without a
+ * WWW-Authenticate header unless the bearer is MCP_TOKEN. Records every message it got.
+ */
+async function fakeMcp() {
+  const calls = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const authorized = request.headers.authorization === `Bearer ${MCP_TOKEN}`;
+    if (request.method !== "POST") {
+      response.writeHead(405, { allow: "POST" }).end();
+      return;
+    }
+    const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    calls.push({ method: message.method, authorized, params: message.params });
+    if (!authorized) {
+      response.writeHead(401, { "content-type": "application/json" }).end('{"jsonrpc":"2.0","id":null,"error":{}}');
+      return;
+    }
+    if (message.id === undefined) {
+      response.writeHead(202).end();
+      return;
+    }
+    const results = {
+      initialize: {
+        protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
+        capabilities: { tools: {} },
+        serverInfo: { name: "wardby", version: "1" },
+      },
+      "tools/list": {
+        tools: [
+          {
+            name: "echo",
+            description: "Echo the text back.",
+            inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+          },
+        ],
+      },
+      "tools/call": { content: [{ type: "text", text: `ECHO:${message.params?.arguments?.text ?? ""}` }] },
+    };
+    const result = results[message.method];
+    response
+      .writeHead(200, { "content-type": "application/json" })
+      .end(
+        JSON.stringify(
+          result
+            ? { jsonrpc: "2.0", id: message.id, result }
+            : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } },
+        ),
+      );
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}/mcp`,
+    calls,
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
+
+/** One wardby_mcp tool call next to wardby_tools, with the worker's options (sdk.ts). */
+async function runMcpLoop(allowedTools) {
+  let turn = 0;
+  const fake = await fakeAnthropic((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    if (turn++ === 0) {
+      response.end(toolUseSse("toolu_mcp_compatibility", "mcp__wardby_mcp__echo", { text: "hello-from-fake-model" }));
+      return;
+    }
+    response.end(toolUseSse("toolu_structured_compatibility", "StructuredOutput", { outcome: "no_changes" }));
+  });
+  const mcp = await fakeMcp();
+  const wardbyTools = createSdkMcpServer({
+    name: "wardby_tools",
+    tools: [tool("run_command", "Run one bounded command.", { command: z.string() }, async () => ({ content: [] }))],
+  });
+  try {
+    const messages = await runQuery(fake.baseUrl, new AbortController(), [], {
+      maxTurns: 3,
+      mcpServers: {
+        wardby_tools: wardbyTools,
+        wardby_mcp: {
+          type: "http",
+          url: mcp.url,
+          headers: { Authorization: `Bearer ${MCP_TOKEN}` },
+          alwaysLoad: true,
+          timeout: 300_000,
+        },
+      },
+      allowedTools,
+      outputFormat: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: { outcome: { type: "string" } },
+          required: ["outcome"],
+          additionalProperties: false,
+        },
+      },
+    });
+    return { messages, mcpCalls: mcp.calls, requests: fake.requests };
+  } finally {
+    await mcp.close();
+    await fake.close();
+  }
+}
+
+test("wardby_mcp: an HTTP MCP tool call runs with the bearer header and the server-level rule", async () => {
+  const { messages, mcpCalls, requests } = await runMcpLoop(["mcp__wardby_tools__run_command", "mcp__wardby_mcp"]);
+  const init = messages.find((message) => message.type === "system" && message.subtype === "init");
+  assert.equal(init.mcp_servers.find((server) => server.name === "wardby_mcp")?.status, "connected");
+  assert(init.tools.includes("mcp__wardby_mcp__echo"));
+  assert(mcpCalls.length > 0 && mcpCalls.every((call) => call.authorized));
+  const toolCalls = mcpCalls.filter((call) => call.method === "tools/call");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].params.name, "echo");
+  assert.deepEqual(toolCalls[0].params.arguments, { text: "hello-from-fake-model" });
+  const messageRequests = requests.filter((request) => request.url === "/v1/messages?beta=true");
+  assert(messageRequests.length >= 2);
+  const first = JSON.parse(messageRequests[0].body);
+  assert(first.tools.some((definition) => definition.name === "mcp__wardby_mcp__echo"));
+  assert(messageRequests[1].body.includes("ECHO:hello-from-fake-model"));
+  // The token only ever went to the MCP server, never to the model API.
+  assert(!JSON.stringify(requests).includes(MCP_TOKEN));
+  assert.equal(messages.at(-1).subtype, "success");
+});
+
+test("wardby_mcp: without the server-level rule the call is denied (control for the previous case)", async () => {
+  const { mcpCalls } = await runMcpLoop(["mcp__wardby_tools__run_command"]);
+  assert.equal(mcpCalls.filter((call) => call.method === "tools/call").length, 0);
+});
+
 test("AbortController cancels an in-flight provider stream", async () => {
   const abortController = new AbortController();
   let markStarted;

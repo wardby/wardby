@@ -16,6 +16,7 @@ import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
 import { safeWorkerErrorCode, streamFailureCode } from "./errors.js";
 import { disabledCodexSkills } from "./skills.js";
+import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
 import type { DependencyCacheModule, WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
 export const WORKER_SECURITY_INSTRUCTIONS = `You are running inside an isolated Wardby coding worker.
@@ -268,9 +269,15 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   const client = options.createClient({
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
-    developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
+    developerInstructions: options.mcpToken
+      ? `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`
+      : WORKER_SECURITY_INSTRUCTIONS,
     environment: { ...agentEnvironment },
     disabledSkills: await disabledCodexSkills(options.workspace, options.input.repoSkills !== false),
+    // Only on a run with MCP tools. sdk.ts puts it in the Codex process env, never the shells' env,
+    // but a shell command can still read it from /proc (same uid): treat it as readable by the
+    // repository's code.
+    ...(options.mcpToken ? { mcpToken: options.mcpToken } : {}),
   });
   const thread = client.startThread({
     model: options.input.model,

@@ -37,6 +37,8 @@ COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
 COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug-trace.js
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-note.js
+# The wardby_mcp server settings shared with the Codex worker (remote MCP servers); imports nothing.
+COPY --from=build /build/dist/coding-worker/mcp-config.js ./coding-worker/mcp-config.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 # Session-resume transcript capture (claude-coding-worker/transcript.js); neither imports anything.
 COPY --from=build /build/dist/coding/transcript/claude-code.js ./coding/transcript/claude-code.js
@@ -53,7 +55,7 @@ RUN node --input-type=module -e 'const m = await import("/opt/wardby/claude-codi
 # Fail the build, not every run, when a module the worker imports is missing (a missing COPY
 # otherwise exits every run at startup with ERR_MODULE_NOT_FOUND). main.js runs on import, so this
 # loads everything it imports rather than main.js itself.
-RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors"].map((name) => import(`/opt/wardby/${name}.js`)))'
+RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors", "coding-worker/mcp-config"].map((name) => import(`/opt/wardby/${name}.js`)))'
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

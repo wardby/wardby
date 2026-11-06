@@ -2,6 +2,7 @@
 import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artifact.js";
 import { describeError, workerDebugTracer, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
+import { readMcpToken } from "../coding-worker/mcp-config.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
@@ -31,12 +32,15 @@ try {
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
   const capability = required("WARDBY_RUN_CAPABILITY");
-  trace = workerDebugTracer(task, capability, (line) => process.stdout.write(line));
+  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
+  const mcpToken = readMcpToken();
+  trace = workerDebugTracer(task, capability, (line) => process.stdout.write(line), mcpToken ? [mcpToken] : []);
   await assertToolRunnerReachable();
   const output = await runClaudeCodingWorker({
     input: task,
     proxyBaseUrl,
     capability,
+    ...(mcpToken ? { mcpToken } : {}),
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),

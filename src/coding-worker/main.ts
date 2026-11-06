@@ -3,6 +3,7 @@ import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
 import { describeError, workerDebugTracer, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
+import { readMcpToken } from "./mcp-config.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -26,12 +27,15 @@ try {
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
   const capability = required("WARDBY_RUN_CAPABILITY");
-  trace = workerDebugTracer(input, capability, (line) => process.stdout.write(line));
+  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
+  const mcpToken = readMcpToken();
+  trace = workerDebugTracer(input, capability, (line) => process.stdout.write(line), mcpToken ? [mcpToken] : []);
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
     proxyBaseUrl,
     capability,
+    ...(mcpToken ? { mcpToken } : {}),
     signal: controller.signal,
     createClient: createCodexSdkClient,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),

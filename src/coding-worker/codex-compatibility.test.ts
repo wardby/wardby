@@ -7,15 +7,20 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
+import { createMcpRoute } from "../providers/coding-proxy/mcp-route.js";
 import { MemoryProxyLedger } from "../providers/coding-proxy/memory-ledger.js";
 import { CodingProxy } from "../providers/coding-proxy/proxy.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../providers/coding-proxy/server.js";
 import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
+import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
 import { recordCodexRequests } from "./codex-recorder.test-support.js";
 import { createCodexSdkClient } from "./sdk.js";
 import { CODEX_BUILTIN_SKILLS } from "./skills.js";
@@ -289,3 +294,196 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
     120_000,
   );
 });
+
+/**
+ * A stand-in for the native gateway's /coding-mcp route: one read-only tool, `echo`, JSON answers,
+ * 401 (no WWW-Authenticate) unless the bearer is the run's MCP token. Records every JSON-RPC message.
+ */
+async function fakeGateway(token: string) {
+  const calls: Array<{ method: string; authorized: boolean; params?: unknown }> = [];
+  const handle = async (request: IncomingMessage, response: ServerResponse) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk as Buffer);
+    const authorized = request.headers.authorization === `Bearer ${token}`;
+    const message = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as {
+      id?: number;
+      method: string;
+      params?: { name?: string; arguments?: { text?: string } };
+    };
+    calls.push({ method: message.method, authorized, params: message.params });
+    if (request.url !== "/coding-mcp" || !authorized) {
+      response.writeHead(401, { "content-type": "application/json" }).end('{"jsonrpc":"2.0","id":null,"error":{}}');
+      return;
+    }
+    if (message.id === undefined) {
+      response.writeHead(202).end();
+      return;
+    }
+    const result =
+      message.method === "initialize"
+        ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "wardby", version: "1" } }
+        : message.method === "tools/list"
+          ? {
+              tools: [
+                {
+                  name: "echo",
+                  description: "Echo the text back.",
+                  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+                  annotations: { readOnlyHint: true },
+                },
+              ],
+            }
+          : message.method === "tools/call"
+            ? { content: [{ type: "text", text: `ECHO:${message.params?.arguments?.text ?? ""}` }] }
+            : undefined;
+    response
+      .writeHead(200, { "content-type": "application/json" })
+      .end(
+        JSON.stringify(
+          result
+            ? { jsonrpc: "2.0", id: message.id, result }
+            : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } },
+        ),
+      );
+  };
+  const server = createServer((request, response) => {
+    void handle(request, response);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    calls,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/** Code mode (the Responses-lite models in use): the model calls the MCP tool from Codex's exec runtime. */
+function scriptedMcpTurn(call: number): string {
+  if (call === 1) {
+    const input = [
+      'const r = await tools.mcp__wardby_mcp__echo({ text: "hello-from-fake-model" });',
+      "text(JSON.stringify(r));",
+    ].join("\n");
+    return sse(`resp_${call}`, [{ type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "exec", input }]);
+  }
+  return sse(`resp_${call}`, [finalMessage(`msg_${call}`)]);
+}
+
+describe.skipIf(RECORD || !codexBinaryInstalled())(
+  "pinned Codex CLI calling wardby_mcp through the coding proxy",
+  () => {
+    const cleanup: Array<() => Promise<void>> = [];
+    afterEach(async () => {
+      for (const task of cleanup.splice(0).reverse()) await task();
+    });
+
+    it("runs one MCP tool call with the worker's options, the token only as a bearer", async () => {
+      const model = "gpt-5.6-terra";
+      const token = mintMcpToken();
+      const gateway = await fakeGateway(token);
+      cleanup.push(gateway.close);
+      const forwarded: Record<string, unknown>[] = [];
+      const ledger = new MemoryProxyLedger();
+      const proxy = new CodingProxy({
+        ledger,
+        credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+        pricing: () => ({
+          encoding: "o200k_base",
+          inputPerMTok: 1,
+          cachedInputPerMTok: 0.1,
+          cacheWritePerMTok: 1,
+          outputPerMTok: 1,
+        }),
+        fetch: async (_input, init) => {
+          const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+          forwarded.push(body);
+          return new Response(scriptedMcpTurn(forwarded.length), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const session = await proxy.createSession({
+        runId: "codex-compat-mcp",
+        credentialRef: "openai/compatibility",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 120_000),
+        budgetUsd: 10,
+        mcpTools: [
+          {
+            exposedName: "echo",
+            toolName: "echo",
+            serverId: "srv_compat",
+            serverName: "compat",
+            definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+          },
+        ],
+        mcpTokenHash: mcpTokenHash(token),
+      });
+      const rejected: string[] = [];
+      let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+        host: "127.0.0.1",
+        port: 0,
+        onRequest: (event) => {
+          if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+        },
+        mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
+      });
+      cleanup.push(async () => {
+        await server?.close();
+        server = undefined;
+      });
+      const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      await mkdir(home, { recursive: true });
+      await mkdir(workspace, { recursive: true });
+
+      const blocked = "http://127.0.0.1:9";
+      const client = createCodexSdkClient({
+        proxyBaseUrl: `http://127.0.0.1:${server.port}`,
+        capability: session.capability,
+        developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
+        environment: {
+          HOME: home,
+          LANG: "C.UTF-8",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: root,
+          HTTPS_PROXY: blocked,
+          HTTP_PROXY: blocked,
+          ALL_PROXY: blocked,
+          NO_PROXY: "127.0.0.1,localhost",
+        },
+        disabledSkills: [...CODEX_BUILTIN_SKILLS],
+        mcpToken: token,
+      });
+      const thread = client.startThread({
+        model,
+        sandboxMode: "danger-full-access",
+        workingDirectory: workspace,
+        skipGitRepoCheck: true,
+        networkAccessEnabled: false,
+        webSearchMode: "disabled",
+        approvalPolicy: "never",
+      });
+      const streamed = await thread.runStreamed("Echo hello.", {
+        outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+        signal: AbortSignal.timeout(90_000),
+      });
+      const events: Array<{ type: string }> = [];
+      for await (const event of streamed.events) events.push(event);
+
+      expect(rejected).toEqual([]);
+      expect(events.map((event) => event.type)).toContain("turn.completed");
+      expect(gateway.calls.every((call) => call.authorized)).toBe(true);
+      const toolCalls = gateway.calls.filter((call) => call.method === "tools/call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]?.params).toMatchObject({ name: "echo", arguments: { text: "hello-from-fake-model" } });
+      // The tool's result reached the model; the token never did.
+      expect(JSON.stringify(forwarded)).toContain("ECHO:hello-from-fake-model");
+      expect(JSON.stringify(forwarded)).not.toContain(token);
+    }, 120_000);
+  },
+);
