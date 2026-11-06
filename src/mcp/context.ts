@@ -15,6 +15,7 @@ import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
 import type { Power } from "../core/power.js";
 import type { ChatProviderRegistry } from "../providers/chat/types.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 
 export type McpProviders = Pick<
   ProviderRegistry,
@@ -35,6 +36,8 @@ export type McpProviders = Pick<
   repoAccess?: RepoAccessGate;
   /** Low-power mode (scale idle proxy/gateway to zero); absent = DISABLED_POWER. */
   power?: Power;
+  /** Overrides the outbound call to remote MCP servers (register/update/refresh_mcp_server) — tests only. */
+  sandboxFetch?: typeof safeFetch;
 };
 
 export interface McpRequestContext {

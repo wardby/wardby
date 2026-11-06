@@ -38,6 +38,7 @@ import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { scheduleStartFields } from "../../core/schedule-start.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
+import { agentMcpServerViews } from "./mcp-servers.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import { requireReadableBudgetGroup } from "../auth/ownership.js";
@@ -1134,6 +1135,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       return textResult({
         ...withProfileWarnings(withOperatorMode(agent)),
         access,
+        mcpServers: await agentMcpServerViews(ctx.db, agent.id),
         // Zod 3 window: the caller's own tools carry their warnings (see core/zod3-window.ts).
         tools: await Promise.all(
           agent.tools.map(async (attachment) => ({
