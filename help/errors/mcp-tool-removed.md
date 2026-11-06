@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-tool-removed
-title: A remote tool is no longer on the server
+title: A remote tool is no longer on the server (mcp_tool_removed)
 summary: The server's saved tool list no longer has the tool; check missingTools in get_agent.
 audience: operator
 tags: [mcp, mcp_tool_removed, missingTools, refresh_mcp_server]

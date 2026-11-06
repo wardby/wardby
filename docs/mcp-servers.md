@@ -22,8 +22,8 @@ default, anyone), `admins` (registering, updating and refreshing need
 | `attach_mcp_server`   | agent's owner; `use`+ | Lets a native agent call the named tools (`allowedTools`, exact names) with an optional `callTimeoutMs`.           |
 | `detach_mcp_server`   | the agent's owner     | Removes a server's tools from an agent.                                                                            |
 
-`get_agent` shows each attached server under `mcpServers`: the server's name,
-the allowed tools, the exposed tool names and any allowed tools the server no
+`get_agent` shows each attached server under `mcpServers`: the server's `serverId`
+and name, the allowed tools, `callTimeoutMs`, the exposed tool names and any allowed tools the server no
 longer lists (`missingTools`). Anyone with read access on the agent sees this.
 It never includes URLs, secret names or values, or saved tool lists.
 
@@ -43,7 +43,7 @@ model, can read it back. Create the secret, then set its broker config with
 
 A server that wants two headers needs two secrets, each with its own
 placement (for example `X-Api-Key` with `format: "{value}"`, and
-`X-Workspace` the same way); name both in `secretNames`. The URL itself can't
+`X-Workspace` the same way); name both in `secretNames` (at most 8 names, each up to 1024 characters). The URL itself can't
 carry credentials: a username, password or fragment is refused.
 
 ## Register, read the tool list, attach
@@ -69,7 +69,7 @@ Attaching is refused if the name clashes with another tool on the agent
 ## Time limits
 
 Each call has `callTimeoutMs` (default `30000`, set on `attach_mcp_server`).
-It can't exceed `WARDBY_TOOL_MAX_TIMEOUT_MS`; a call runs with the lower of
+It must be at least `1000` and can't exceed `WARDBY_TOOL_MAX_TIMEOUT_MS`; a call runs with the lower of
 the two, and never past the run's own deadline. `stop_run` aborts a call in
 flight. A call that runs out of time returns `mcp_call_timeout` to the model
 and the run goes on.

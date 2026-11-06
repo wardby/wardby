@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-server-unreachable
-title: A remote tool server could not be reached
+title: A remote tool server could not be reached (mcp_server_unreachable)
 summary: Wardby could not connect to a remote MCP server; check the URL, the server and its network path.
 audience: operator
 tags: [mcp, mcp_server_unreachable, unreachable, register_mcp_server, update_mcp_server]

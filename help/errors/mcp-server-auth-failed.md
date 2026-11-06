@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-server-auth-failed
-title: A remote tool server refused the credentials
+title: A remote tool server refused the credentials (mcp_server_auth_failed)
 summary: The MCP server answered 401 or 403; fix the brokered secret or its placement.
 audience: operator
 tags: [mcp, mcp_server_auth_failed, 401, 403, brokered, set_secret_broker]

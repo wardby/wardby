@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-call-timeout
-title: A remote tool call ran out of time
+title: A remote tool call ran out of time (mcp_call_timeout)
 summary: A remote tool call hit its callTimeoutMs or the run's deadline, or was stopped.
 audience: operator
 tags: [mcp, mcp_call_timeout, callTimeoutMs, timeout, stop_run, WARDBY_TOOL_MAX_TIMEOUT_MS]

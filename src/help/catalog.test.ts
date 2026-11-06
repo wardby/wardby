@@ -144,6 +144,30 @@ describe("buildHelpCatalog", () => {
     },
   );
 
+  it("ranks the MCP client article in the top 3 for 'mcp client'", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, "mcp client")
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("mcp-access");
+  });
+
+  it.each([
+    "mcp_server_unreachable",
+    "mcp_server_auth_failed",
+    "mcp_server_error",
+    "mcp_tool_not_allowed",
+    "mcp_tool_removed",
+    "mcp_call_timeout",
+    "mcp_servers_off",
+    "invalid_arguments",
+  ])("ranks the article for %s first", async (code) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = code === "invalid_arguments" ? "errors/mcp-server-error" : `errors/${code.replaceAll("_", "-")}`;
+    expect(searchHelp(catalog, code)[0]?.page.id).toBe(id);
+  });
+
   it("has a page for each MCP server error code", async () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     for (const code of [

@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-tool-not-allowed
-title: A remote tool is no longer allowed
+title: A remote tool is no longer allowed (mcp_tool_not_allowed)
 summary: The agent's MCP server was detached or the tool was taken off its allowlist while the run was going.
 audience: operator
 tags: [mcp, mcp_tool_not_allowed, attach_mcp_server, detach_mcp_server, allowedTools]
@@ -17,6 +17,6 @@ A call returned `mcp_tool_not_allowed`. Wardby checks the agent's attachment on 
 
 1. Check `get_agent` for `mcpServers`.
 2. Re-attach with `attach_mcp_server` and include the tool in `allowedTools`.
-3. A run that started before the change keeps seeing the old tool until it ends.
+3. A run that started before the change still lists the tool, but every call re-checks the attachment, so the call is refused with this error.
 
 See [Remote MCP servers](../mcp-servers.md).

@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-servers-off
-title: Remote tool servers are turned off
+title: Remote tool servers are turned off (mcp_servers_off)
 summary: WARDBY_MCP_SERVERS=off: MCP server tools are refused and attached servers are left out of runs.
 audience: operator
 tags: [mcp, mcp_servers_off, WARDBY_MCP_SERVERS, off, admins]

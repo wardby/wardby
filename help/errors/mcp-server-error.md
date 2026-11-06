@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-server-error
-title: A remote tool server returned an error
+title: A remote tool server returned an error (mcp_server_error, invalid_arguments)
 summary: The MCP server answered with an HTTP error or a bad reply, or the tool reported an error; also covers invalid_arguments.
 audience: operator
 tags: [mcp, mcp_server_error, invalid_arguments, isError, tools/call]
