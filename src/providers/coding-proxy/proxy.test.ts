@@ -228,6 +228,55 @@ describe("CodingProxy", () => {
     ).rejects.toThrow("unknown");
   });
 
+  describe("MCP tools", () => {
+    const pin = {
+      exposedName: "docs__search",
+      toolName: "search",
+      serverId: "server-1",
+      serverName: "docs",
+      definition: { description: "Search", inputSchema: { type: "object" } },
+    };
+    const create = (ledger: MemoryProxyLedger, extra: object) =>
+      new CodingProxy({ ledger, credentials: { resolve: async () => "secret" }, pricing: () => PRICE }).createSession({
+        runId: `run-${Math.random()}`,
+        credentialRef: "ref",
+        protocol: "openai-responses",
+        allowedModels: ["test-model"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        ...extra,
+      });
+
+    it("stores a run's pins and MCP token hash on its session", async () => {
+      const ledger = new MemoryProxyLedger();
+      const created = await create(ledger, { mcpTools: [pin], mcpTokenHash: "mcp-hash" });
+      expect(await ledger.findSessionByMcpTokenHash("mcp-hash")).toMatchObject({
+        id: created.id,
+        mcpTools: [pin],
+        mcpCallCount: 0,
+      });
+      expect(created).not.toHaveProperty("mcpTokenHash");
+    });
+
+    it("creates a session without MCP fields exactly as before", async () => {
+      const ledger = new MemoryProxyLedger();
+      const created = await create(ledger, {});
+      expect(await ledger.findSessionByCapabilityHash(capabilityHash(created.capability))).toMatchObject({
+        mcpTools: null,
+        mcpTokenHash: null,
+        mcpCallCount: 0,
+      });
+    });
+
+    it.each([
+      ["pins without a token hash", { mcpTools: [pin] }],
+      ["a token hash without pins", { mcpTokenHash: "h" }],
+      ["an empty pin list", { mcpTools: [], mcpTokenHash: "h" }],
+    ])("refuses %s", async (_label, extra) => {
+      await expect(create(new MemoryProxyLedger(), extra)).rejects.toThrow("invalid_proxy_mcp_tools");
+    });
+  });
+
   it("refuses when a reservation lands exactly on the remaining budget", async () => {
     const raw = requestBody();
     const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });

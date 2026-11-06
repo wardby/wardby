@@ -719,4 +719,93 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect(await ledger.previousReply(pSession, "other")).toBeNull();
     });
   });
+  describe("MCP sessions", () => {
+    const mAgent = `mcp-agent-${suffix}`;
+    const mRun = `mcp-run-${suffix}`;
+    const nRun = `mcp-none-run-${suffix}`;
+    const pin = {
+      exposedName: "docs__search",
+      toolName: "search",
+      serverId: "server-1",
+      serverName: "docs",
+      callTimeoutMs: 5_000,
+      definition: { description: "Search docs", inputSchema: { type: "object" } },
+    };
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" IN (${mRun}, ${nRun})`;
+      await db.codingRun.deleteMany({ where: { runId: { in: [mRun, nRun] } } });
+      await db.run.deleteMany({ where: { id: { in: [mRun, nRun] } } });
+      await db.agent.deleteMany({ where: { id: mAgent } });
+    });
+
+    it("stores pins and the MCP token hash, finds the session by that hash, and counts no calls", async () => {
+      await db.agent.create({
+        data: { id: mAgent, name: mAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+      });
+      for (const id of [mRun, nRun]) {
+        await db.run.create({ data: { id, agentId: mAgent, executionManaged: true } });
+        await db.codingRun.create({
+          data: {
+            runId: id,
+            task: "test",
+            repository: "openai/example",
+            baseRef: "main",
+            headRef: `wardby/run-${id}`,
+            provider: "codex",
+            model: "gpt-5.6-luna",
+            timeoutSec: 60,
+            allowedEgress: [],
+            protectedPaths: [],
+            budgetReservedUsd: 1,
+          },
+        });
+      }
+      const ledger = new PrismaProxyLedger(db);
+      const base = {
+        credentialRef: "openai/test",
+        protocol: "openai-responses" as const,
+        allowedModels: ["gpt-5.6-luna"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+      };
+      await ledger.createSession({
+        ...base,
+        id: `mcp-session-${suffix}`,
+        runId: mRun,
+        capabilityHash: `mcp-cap-${suffix}`,
+        registryTokenHash: `mcp-registry-${suffix}`,
+        mcpTools: [pin],
+        mcpTokenHash: `mcp-token-hash-${suffix}`,
+      });
+      await ledger.createSession({
+        ...base,
+        id: `mcp-none-session-${suffix}`,
+        runId: nRun,
+        capabilityHash: `mcp-none-cap-${suffix}`,
+        registryTokenHash: `mcp-none-registry-${suffix}`,
+      });
+
+      const found = await new PrismaProxyLedger(db).findSessionByMcpTokenHash(`mcp-token-hash-${suffix}`);
+      expect(found).toMatchObject({
+        id: `mcp-session-${suffix}`,
+        runId: mRun,
+        status: "active",
+        mcpTools: [pin],
+        mcpTokenHash: `mcp-token-hash-${suffix}`,
+        mcpCallCount: 0,
+      });
+      expect(await ledger.findSessionByMcpTokenHash(`missing-${suffix}`)).toBeUndefined();
+      expect(await ledger.findSessionByCapabilityHash(`mcp-cap-${suffix}`)).toMatchObject({
+        mcpTools: [pin],
+        mcpTokenHash: `mcp-token-hash-${suffix}`,
+        mcpCallCount: 0,
+      });
+      expect(await ledger.findSessionByCapabilityHash(`mcp-none-cap-${suffix}`)).toMatchObject({
+        mcpTools: null,
+        mcpTokenHash: null,
+        mcpCallCount: 0,
+      });
+    });
+  });
 });

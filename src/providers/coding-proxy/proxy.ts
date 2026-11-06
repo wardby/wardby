@@ -1,9 +1,11 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { capabilityHash } from "./capability-hash.js";
+import type { McpToolPin } from "../../core/mcp-tools.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -96,6 +98,10 @@ export interface CreateCodingProxySession {
   budgetUsd: number;
   /** The run's catalog entry recorded at dispatch; the session then prices and shapes requests from it. */
   terms?: ProxyModelTerms;
+  /** The run's pinned MCP tools (no URLs or secrets); only with mcpTokenHash, and only when there is one. */
+  mcpTools?: McpToolPin[];
+  /** SHA-256 (base64url) of the run's MCP token; the control plane mints and delivers the token itself. */
+  mcpTokenHash?: string;
 }
 
 export interface CreatedCodingProxySession {
@@ -156,9 +162,7 @@ interface RelayProgress {
   marked?: boolean;
 }
 
-export function capabilityHash(capability: string): string {
-  return createHash("sha256").update(capability).digest("base64url");
-}
+export { capabilityHash };
 
 // OpenAI Responses allowlist. Everything a request may carry is listed here;
 // anything else is refused before a credential is resolved. It mirrors what the
@@ -999,6 +1003,11 @@ export class CodingProxy {
     if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0) throw new Error("invalid_proxy_budget");
     if (input.deadlineAt.getTime() <= this.now().getTime()) throw new Error("invalid_proxy_deadline");
     if (!input.credentialRef || input.credentialRef.length > 200) throw new Error("invalid_proxy_credential_reference");
+    // Both or neither: pins without a token could never be called, a token without pins lists nothing.
+    const mcp = input.mcpTools !== undefined || input.mcpTokenHash !== undefined;
+    if (mcp && (!input.mcpTools || input.mcpTools.length === 0 || !input.mcpTokenHash)) {
+      throw new Error("invalid_proxy_mcp_tools");
+    }
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
@@ -1013,6 +1022,7 @@ export class CodingProxy {
       budgetUsd: input.budgetUsd,
       registryTokenHash,
       terms: input.terms,
+      ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {

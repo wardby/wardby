@@ -482,6 +482,51 @@ describe("buildRunNetworkPolicy", () => {
   });
 });
 
+describe("MCP token delivery", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const names = kubernetesRunNames(spec.runId);
+  const fromSecret = {
+    name: "WARDBY_MCP_TOKEN",
+    valueFrom: { secretKeyRef: { name: names.secret, key: "mcp-token" } },
+  };
+
+  it("gives a run with MCP tools WARDBY_MCP_TOKEN from the run's Secret, next to the capability", () => {
+    const env = worker(buildRunPod({ ...spec, mcpTools: true }, options)).env!;
+    expect(env.map((e) => e.name)).toEqual(["WARDBY_PROXY_URL", "WARDBY_RUN_CAPABILITY", "WARDBY_MCP_TOKEN"]);
+    expect(env[2]).toEqual(fromSecret);
+  });
+
+  it("gives Claude's agent the token and its tool runner never", () => {
+    const built = buildRunPod({ ...spec, provider: "claude-code", toolImage: TOOL_IMAGE, mcpTools: true }, options);
+    expect(worker(built).env).toContainEqual(fromSecret);
+    for (const container of [...built.spec!.initContainers!, ...built.spec!.containers]) {
+      if (container.name === "worker") continue;
+      expect(JSON.stringify(container)).not.toContain("WARDBY_MCP_TOKEN");
+      expect(JSON.stringify(container)).not.toContain("mcp-token");
+    }
+  });
+
+  it("leaves a run without MCP tools exactly as before", () => {
+    expect(worker(pod()).env!.map((e) => e.name)).toEqual(["WARDBY_PROXY_URL", "WARDBY_RUN_CAPABILITY"]);
+    expect(JSON.stringify(pod())).not.toContain("mcp-token");
+  });
+
+  it("stores the token in the run's Secret only when given", () => {
+    const token = `rmt_${"t".repeat(43)}`;
+    expect(buildCapabilitySecret(spec, "wardby-coding", "rrp_x", undefined, token).stringData).toEqual({
+      capability: "rrp_x",
+      "mcp-token": token,
+    });
+    expect(buildCapabilitySecret(spec, "wardby-coding", "rrp_x").stringData).toEqual({ capability: "rrp_x" });
+  });
+
+  it("refuses an mcpTools flag that is not true", () => {
+    expect(() => validateKubernetesSpec({ ...spec, mcpTools: false as unknown as true })).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
+  });
+});
+
 describe("buildCapabilitySecret", () => {
   it("holds only the capability, labeled for the run", () => {
     const secret = buildCapabilitySecret(spec, "wardby-coding", "rrp_capability_value_123456");

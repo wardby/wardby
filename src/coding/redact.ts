@@ -4,7 +4,12 @@ import { redactTokenShapedValues } from "./protocol.js";
 export const REDACTED = "[REDACTED]";
 
 /** Shapes protocol.ts's list does not cover, or covers only at longer lengths. */
-const EXTRA_TOKEN_PATTERNS = [/rrp_[A-Za-z0-9_-]{8,}/g, /rrg_[A-Za-z0-9_-]{8,}/g, /\bBearer\s+[^\s"',;]+/gi];
+const EXTRA_TOKEN_PATTERNS = [
+  /rrp_[A-Za-z0-9_-]{8,}/g,
+  /rrg_[A-Za-z0-9_-]{8,}/g,
+  /rmt_[A-Za-z0-9_-]{20,}/g,
+  /\bBearer\s+[^\s"',;]+/gi,
+];
 
 /** Redacts the given exact secrets, then every token-shaped value. */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {

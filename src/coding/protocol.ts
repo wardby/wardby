@@ -891,6 +891,8 @@ const TOKEN_PATTERNS = [
   /AKIA[0-9A-Z]{16}/g,
   /(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   /rrp_[A-Za-z0-9_-]{32,}/g,
+  // A coding run's MCP token (src/coding/mcp-token.ts).
+  /rmt_[A-Za-z0-9_-]{20,}/g,
   /rv[a-z]_[0-9a-f-]{36}\.[A-Za-z0-9_-]{20,}/gi,
   // A JWT — an IdP access/ID token in delegating auth mode, and what a JWKS or
   // token-exchange failure is most likely to quote back. The HEADER segment is

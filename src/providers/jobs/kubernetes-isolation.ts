@@ -16,6 +16,7 @@ import type {
   V1Volume,
 } from "@kubernetes/client-node";
 import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -55,6 +56,8 @@ export const WORKER_CONTAINER = "worker";
 export const TOOL_RUNNER_CONTAINER = "tool-runner";
 /** The run Secret's key holding the tool runner's setup (claude-tool-setup.ts). */
 export const TOOL_SETUP_SECRET_KEY = "tool-setup";
+/** The run Secret's key for the MCP token (a run with MCP tools only); the agent container alone reads it. */
+export const MCP_TOKEN_SECRET_KEY = "mcp-token";
 /** Where the tool runner listens and the agent's relay connects (claude-tool-runner/main.mjs). */
 export const TOOL_SOCKET_PATH = "/run/wardby/tool/runner.sock";
 const CODEX_ENTRYPOINT = "/opt/wardby/coding-worker/main.js";
@@ -228,6 +231,7 @@ export function validateKubernetesSpec(spec: JobSpec): void {
   if (spec.sessionResume !== undefined && (spec.sessionResume !== true || spec.provider !== "claude-code")) {
     throw isolationError("session-resume-not-claude");
   }
+  if (spec.mcpTools !== undefined && spec.mcpTools !== true) throw isolationError("mcp-tools-invalid");
   if (!isRegistryDigest(spec.image)) throw isolationError("image-not-registry-digest");
   if (spec.services !== undefined) {
     // Re-validated here, not trusted from dispatch: every image a digest, every path and probe in bounds.
@@ -396,6 +400,10 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
     env: [
       { name: "WARDBY_PROXY_URL", value: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}` },
       { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
+      // A run with MCP tools only: the agent's bearer for the proxy's /mcp route. Never the tool runner's.
+      ...(spec.mcpTools
+        ? [{ name: MCP_TOKEN_ENV, valueFrom: { secretKeyRef: { name: names.secret, key: MCP_TOKEN_SECRET_KEY } } }]
+        : []),
     ],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
@@ -554,6 +562,7 @@ export function buildCapabilitySecret(
   namespace: string,
   capability: string,
   toolSetup?: string,
+  mcpToken?: string,
 ): V1Secret {
   const names = kubernetesRunNames(spec.runId);
   return {
@@ -561,7 +570,11 @@ export function buildCapabilitySecret(
     kind: "Secret",
     type: "Opaque",
     metadata: { name: names.secret, namespace, labels: runLabels(spec.runId) },
-    stringData: { capability, ...(toolSetup !== undefined ? { [TOOL_SETUP_SECRET_KEY]: toolSetup } : {}) },
+    stringData: {
+      capability,
+      ...(toolSetup !== undefined ? { [TOOL_SETUP_SECRET_KEY]: toolSetup } : {}),
+      ...(mcpToken !== undefined ? { [MCP_TOKEN_SECRET_KEY]: mcpToken } : {}),
+    },
   };
 }
 

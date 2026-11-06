@@ -22,6 +22,7 @@ function cloneSession(session: ProxySession): ProxySession {
     terms: session.terms
       ? { version: session.terms.version, entry: { ...session.terms.entry, efforts: [...session.terms.entry.efforts] } }
       : null,
+    mcpTools: session.mcpTools ? structuredClone(session.mcpTools) : null,
   };
 }
 
@@ -37,6 +38,7 @@ function cloneRequest(request: ProxyRequest): ProxyRequest {
 export class MemoryProxyLedger implements ProxyLedger {
   private readonly sessions = new Map<string, ProxySession>();
   private readonly sessionByCapability = new Map<string, string>();
+  private readonly sessionByMcpToken = new Map<string, string>();
   private readonly requests = new Map<string, ProxyRequest>();
   private readonly requestBySessionKey = new Map<string, string>();
   private readonly startedAt = new Map<string, Date>();
@@ -48,14 +50,27 @@ export class MemoryProxyLedger implements ProxyLedger {
       throw new Error("proxy_session_exists");
     }
     if (this.sessionByCapability.has(input.capabilityHash)) throw new Error("proxy_capability_collision");
+    if (input.mcpTokenHash !== undefined && this.sessionByMcpToken.has(input.mcpTokenHash)) {
+      throw new Error("proxy_mcp_token_collision");
+    }
     const session: ProxySession = {
       ...input,
       allowedModels: [...input.allowedModels],
       status: "active",
       terms: input.terms ? normalizeProxyModelTerms(input.terms) : null,
+      mcpTools: input.mcpTools ? structuredClone(input.mcpTools) : null,
+      mcpTokenHash: input.mcpTokenHash ?? null,
+      mcpCallCount: 0,
     };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);
+    if (session.mcpTokenHash !== null) this.sessionByMcpToken.set(session.mcpTokenHash, session.id);
+  }
+
+  async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {
+    const id = this.sessionByMcpToken.get(mcpTokenHash);
+    const session = id ? this.sessions.get(id) : undefined;
+    return session ? cloneSession(session) : undefined;
   }
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {

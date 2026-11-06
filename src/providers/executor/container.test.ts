@@ -12,6 +12,8 @@ import {
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
 import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
+import { mcpTokenHash } from "../../coding/mcp-token.js";
+import type { McpToolPin } from "../../core/mcp-tools.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
@@ -1412,6 +1414,94 @@ describe("ContainerExecutor", () => {
 
   it("accepts a content-addressed local Docker image ID", async () => {
     await expect(harness({}, `sha256:${"a".repeat(64)}`)).resolves.toBeDefined();
+  });
+
+  describe("MCP tools", () => {
+    const pin: McpToolPin = {
+      exposedName: "docs__search",
+      toolName: "search",
+      serverId: "server-1",
+      serverName: "docs",
+      definition: { description: "Search docs", inputSchema: { type: "object" } },
+    };
+    /** Starts run-1 and returns what the vault held for it while the job was launched. */
+    async function launched(pins: McpToolPin[] | undefined, overrides: Partial<ContainerRunSnapshot> = {}) {
+      const agents: string[] = [];
+      const created = await harness(
+        overrides,
+        IMAGE,
+        undefined,
+        undefined,
+        pins === undefined
+          ? {}
+          : {
+              mcpToolPins: async (agentId) => {
+                agents.push(agentId);
+                return pins;
+              },
+            },
+      );
+      let atLaunch: Promise<string | undefined> | undefined;
+      created.jobs.onLaunch = () => {
+        atLaunch = created.capabilities.mcpToken("run-1");
+      };
+      await created.executor.start("run-1");
+      return { created, agents, token: await atLaunch };
+    }
+
+    it("pins the agent's MCP tools on the session, keeps the token in the vault for the launch only, and flags the spec", async () => {
+      const { created, agents, token } = await launched([pin]);
+      expect(agents).toEqual(["agent-1"]);
+      expect(token).toMatch(/^rmt_[A-Za-z0-9_-]{43}$/);
+      expect(created.sessions.lastInput?.mcpTools).toEqual([pin]);
+      expect(created.sessions.lastInput?.mcpTokenHash).toBe(mcpTokenHash(token!));
+      expect(created.jobs.lastSpec?.mcpTools).toBe(true);
+      expect(created.store.run.status).toBe("succeeded");
+      // Gone with the capability once the job is launched.
+      expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
+    });
+
+    it("never puts the token in the job spec, the session input, the input artifact or a log line", async () => {
+      const { created, token } = await launched([pin]);
+      expect(token).toMatch(/^rmt_/);
+      expect(JSON.stringify(created.jobs.lastSpec)).not.toContain(token!);
+      expect(JSON.stringify(created.sessions.lastInput)).not.toContain(token!);
+      expect(JSON.stringify(logged)).not.toContain(token!);
+      expect(JSON.stringify(created.observer.events)).not.toContain(token!);
+    });
+
+    it.each([
+      ["a deployment without the MCP loader", undefined],
+      ["an agent without MCP attachments", []],
+    ])("gives no token, pins or flag for %s", async (_label, pins) => {
+      const { created, token } = await launched(pins);
+      expect(token).toBeUndefined();
+      expect(created.sessions.lastInput).not.toHaveProperty("mcpTools");
+      expect(created.sessions.lastInput).not.toHaveProperty("mcpTokenHash");
+      expect(created.jobs.lastSpec).not.toHaveProperty("mcpTools");
+      expect(created.store.run.status).toBe("succeeded");
+    });
+
+    it("clears the token with the capability when the launch fails", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
+      created.jobs.launchError = new Error("boom");
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
+    });
+  });
+
+  describe("RunCapabilityVault MCP tokens", () => {
+    it("keeps a run's MCP token next to its capability and deletes both together", async () => {
+      const vault = new RunCapabilityVault();
+      vault.set("r", "rrp_capability");
+      vault.setMcpToken("r", "rmt_token");
+      expect(await vault.mcpToken("r")).toBe("rmt_token");
+      expect(() => vault.setMcpToken("r", "rmt_other")).toThrow("coding_mcp_token_exists");
+      vault.delete("r");
+      expect(await vault.mcpToken("r")).toBeUndefined();
+      await expect(vault.get("r")).rejects.toThrow("coding_capability_unavailable");
+    });
   });
 
   describe("model terms handed to the proxy session", () => {
