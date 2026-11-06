@@ -47,9 +47,9 @@ the coding proxy and the native gateway; the worker never sees the server's URL 
   ([`mcp_unavailable`](errors/mcp-unavailable.md)).
 - MCP for coding agents needs this release's Claude worker image and a new Codex driver image.
   Older images get no MCP tools, and runs don't fail.
-- A repository's MCP configuration is still never loaded. Codex models that use tool search
-  aren't supported: the proxy refuses their requests (`openai_tool_not_allowed`), MCP or not, so
-  those runs fail.
+- A repository's MCP configuration is still never loaded.
+- Codex models that use tool search load MCP tools on demand. They need this release's coding
+  proxy; an older one refuses their requests with `openai_tool_not_allowed:tool_search`.
 - Switching an agent to Codex with `update_agent` keeps its attachments, but tools not marked
   read-only won't reach Codex runs; the result's `warnings` names them.
 - The proxy gives up on a coding run's MCP call after 5 minutes, whatever

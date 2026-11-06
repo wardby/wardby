@@ -1506,6 +1506,55 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       "invalid_openai_tool",
     ],
     ["invalid tool name", { tools: [{ type: "function", name: "bad name", parameters: {} }] }, "invalid_openai_tool"],
+    [
+      "server-executed tool_search",
+      { tools: [{ type: "tool_search", execution: "server", description: "", parameters: {} }] },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    ["tool_search without an execution", { tools: [{ type: "tool_search" }] }, "openai_tool_not_allowed:tool_search"],
+    [
+      "tool_search with an unknown key",
+      { tools: [{ type: "tool_search", execution: "client", parameters: {}, vector_store_ids: ["vs_1"] }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "tool_search inside a namespace",
+      {
+        tools: [
+          { type: "namespace", name: "ns", description: "", tools: [{ type: "tool_search", execution: "client" }] },
+        ],
+      },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    [
+      "non-boolean defer_loading",
+      { tools: [{ type: "function", name: "f", parameters: {}, defer_loading: "yes" }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "defer_loading on a custom tool",
+      { tools: [{ type: "custom", name: "f", defer_loading: true }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "defer_loading on a top-level function",
+      { tools: [{ type: "function", name: "f", parameters: {}, defer_loading: true }] },
+      "invalid_openai_tool",
+    ],
+    [
+      "defer_loading on a function in a top-level namespace",
+      {
+        tools: [
+          {
+            type: "namespace",
+            name: "ns",
+            description: "",
+            tools: [{ type: "function", name: "f", parameters: {}, defer_loading: true }],
+          },
+        ],
+      },
+      "invalid_openai_tool",
+    ],
     ["hosted tool choice", { tool_choice: { type: "web_search" } }, "openai_tool_choice_not_allowed"],
     [
       "extra include",
@@ -1625,6 +1674,149 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       "invalid_openai_request",
     ],
     [
+      "a server-executed tool_search_call",
+      { type: "tool_search_call", call_id: "c", status: "completed", execution: "server", arguments: { query: "x" } },
+      "openai_input_not_allowed:tool_search_call",
+    ],
+    [
+      "a tool_search_call with string arguments",
+      { type: "tool_search_call", call_id: "c", status: "completed", execution: "client", arguments: "{}" },
+      "invalid_openai_request",
+    ],
+    [
+      "extra key on a tool_search_call",
+      {
+        type: "tool_search_call",
+        call_id: "c",
+        execution: "client",
+        arguments: { query: "x" },
+        server_url: "https://attacker.example",
+      },
+      "invalid_openai_request",
+    ],
+    [
+      "a server-executed tool_search_output",
+      { type: "tool_search_output", call_id: "c", status: "completed", execution: "server", tools: [] },
+      "openai_input_not_allowed:tool_search_output",
+    ],
+    [
+      "a hosted tool smuggled through tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        status: "completed",
+        execution: "client",
+        tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }],
+      },
+      "openai_tool_not_allowed:mcp",
+    ],
+    [
+      "a hosted tool inside a namespace in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "namespace", name: "ns", description: "", tools: [{ type: "web_search" }] }],
+      },
+      "openai_tool_not_allowed:web_search",
+    ],
+    [
+      "a tool_search tool inside tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "tool_search", execution: "client" }],
+      },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    [
+      "a function with an extra key in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [
+          { type: "function", name: "f", parameters: {}, defer_loading: true, server_url: "https://attacker.example" },
+        ],
+      },
+      "invalid_openai_tool",
+    ],
+    [
+      "a non-boolean defer_loading in tool_search_output",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [{ type: "function", name: "f", parameters: {}, defer_loading: "yes" }],
+      },
+      "invalid_openai_tool",
+    ],
+    [
+      "a tool_search tool inside additional_tools",
+      { type: "additional_tools", role: "developer", tools: [{ type: "tool_search", execution: "client" }] },
+      "openai_tool_not_allowed:tool_search",
+    ],
+    [
+      "defer_loading on a function in additional_tools",
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{ type: "function", name: "f", parameters: {}, defer_loading: true }],
+      },
+      "invalid_openai_tool",
+    ],
+    [
+      "an unknown tool_search_call argument",
+      {
+        type: "tool_search_call",
+        call_id: "c",
+        execution: "client",
+        arguments: { query: "x", server_url: "https://attacker.example" },
+      },
+      "invalid_openai_request",
+    ],
+    [
+      "a tool_search_call without a query",
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { limit: 8 } },
+      "invalid_openai_request",
+    ],
+    [
+      "a non-string tool_search_call query",
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: ["x"] } },
+      "invalid_openai_request",
+    ],
+    [
+      "a tool_search_call limit of 0",
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: "x", limit: 0 } },
+      "invalid_openai_request",
+    ],
+    [
+      "a tool_search_call limit of -1",
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: "x", limit: -1 } },
+      "invalid_openai_request",
+    ],
+    [
+      "a tool_search_call limit of 1.5",
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: "x", limit: 1.5 } },
+      "invalid_openai_request",
+    ],
+    [
+      'a tool_search_call limit of "8"',
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: "x", limit: "8" } },
+      "invalid_openai_request",
+    ],
+    [
+      "a tool_search_output with more than 512 tools",
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: Array.from({ length: 513 }, (_, i) => ({ type: "function", name: `f${i}`, parameters: {} })),
+      },
+      "invalid_openai_tool",
+    ],
+    [
       "output_text annotations",
       {
         type: "message",
@@ -1648,6 +1840,79 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
     expect(resolve).not.toHaveBeenCalled();
     expect(h.fetch).not.toHaveBeenCalled();
   });
+  it("forwards a tool_search_call with a limit and deferred tools in a tool_search_output namespace", async () => {
+    const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }) });
+    const request = withInput(
+      { type: "tool_search_call", call_id: "c", execution: "client", arguments: { query: "x", limit: 8 } },
+      {
+        type: "tool_search_output",
+        call_id: "c",
+        execution: "client",
+        tools: [
+          { type: "function", name: "top", parameters: {}, defer_loading: true },
+          {
+            type: "namespace",
+            name: "ns",
+            description: "",
+            tools: [{ type: "function", name: "f", parameters: {}, defer_loading: true }],
+          },
+        ],
+      },
+    );
+    await execute(h, "openai-tool-search-deferred", new TestSink(), JSON.stringify(request));
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards a long run that replays the same tool_search_output hundreds of times", async () => {
+    const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }) });
+    const output = {
+      type: "tool_search_output",
+      call_id: "c",
+      execution: "client",
+      tools: [
+        {
+          type: "namespace",
+          name: "mcp__server",
+          description: "",
+          tools: [{ type: "function", name: "echo", parameters: {}, defer_loading: true }],
+        },
+      ],
+    };
+    const request = withInput(...Array.from({ length: 600 }, () => output));
+    await execute(h, "openai-tool-search-replayed", new TestSink(), JSON.stringify(request));
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts the distinct tools a tool_search_output loads toward the request's tool cap", async () => {
+    const tools = (from: number, to: number, namespace?: string) =>
+      Array.from({ length: to - from }, (_, i) => ({
+        type: "function",
+        name: `${namespace ?? "f"}${from + i}`,
+        parameters: {},
+        ...(namespace === undefined ? {} : { defer_loading: true }),
+      }));
+    const output = (list: unknown[]) => ({
+      type: "tool_search_output",
+      call_id: "c",
+      execution: "client",
+      tools: list,
+    });
+    const body = (list: unknown[]) => ({ ...withInput(output(list)), tools: tools(0, 500) });
+
+    // 500 top-level tools and 13 more loaded by the search: 513 distinct.
+    const refused = await harness();
+    await expect(
+      execute(refused, "openai-tool-search-cap", new TestSink(), JSON.stringify(body(tools(0, 13, "g")))),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_openai_tool" });
+    expect(refused.fetch).not.toHaveBeenCalled();
+
+    // The same 500 tools loaded again by the search add nothing new.
+    const repeated = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }) });
+    const again = tools(0, 500).map((tool) => ({ ...tool, defer_loading: true }));
+    await execute(repeated, "openai-tool-search-cap-repeat", new TestSink(), JSON.stringify(body(again)));
+    expect(repeated.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("records an allowlist refusal against the run in the audit log", async () => {
     const h = await harness();
     const body = codexBody({ tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }] });
@@ -2356,15 +2621,28 @@ describe("MCP tool names in the model-request allowlist", () => {
       }
     });
 
-    it("still refuses the tool_search layout (gpt-5.5), with or without pins", async () => {
-      const refused = (await recorded()).responses.filter((entry) => entry.outcome === "refused");
-      expect(refused).toHaveLength(1);
+    it("forwards the tool_search layout (gpt-5.5) unchanged, with or without pins", async () => {
+      const toolSearch = (await recorded()).responses.filter((entry) =>
+        entry.scenario.startsWith("gpt-5.5 tool_search"),
+      );
+      expect(toolSearch).toHaveLength(3);
+      const inputTypes = toolSearch.map(({ body }) => (body.input as { type: string }[]).map((item) => item.type));
+      expect(inputTypes[1]).toContain("tool_search_output");
+      expect(inputTypes[2]).toContain("function_call");
       for (const mcpTools of [undefined, [mcpPin("echo")]]) {
-        const h = await harness({ mcpTools });
-        await expect(
-          execute(h, "codex-tool-search", new TestSink(), JSON.stringify({ ...refused[0].body, model: "test-model" })),
-        ).rejects.toMatchObject({ status: 400, code: "openai_tool_not_allowed:tool_search" });
-        expect(h.fetch).not.toHaveBeenCalled();
+        for (const [index, { scenario, body }] of toolSearch.entries()) {
+          const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }), mcpTools });
+          const request = { ...body, model: "test-model" };
+          await execute(h, `codex-tool-search-${index}`, new TestSink(), JSON.stringify(request));
+          expect(h.fetch, scenario).toHaveBeenCalledTimes(1);
+          const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+          expect(forwarded, scenario).toEqual({
+            ...request,
+            max_output_tokens: PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+            store: false,
+            background: false,
+          });
+        }
       }
     });
   });

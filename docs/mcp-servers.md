@@ -118,9 +118,10 @@ deadline, and only its hash is stored.
   fail. Update the images together with the server.
 - **Repository configuration.** A repository's own MCP configuration (such as `.mcp.json`) is still
   never loaded; the attached servers are the only MCP tools a coding run has.
-- **Codex models that use tool search** aren't supported by the coding proxy yet. The proxy refuses
-  those models' requests with `openai_tool_not_allowed`, whether or not the agent has MCP servers,
-  so their runs fail. Use a Codex model that doesn't use tool search.
+- **Codex models that use tool search** load MCP tools on demand: Codex sends a client-side
+  `tool_search` tool and adds the matching MCP tools to the conversation when the model searches.
+  This needs this release's coding proxy; an older proxy refuses those models' requests with
+  `openai_tool_not_allowed:tool_search`, MCP or not.
 
 Time limits and the other rules in this guide apply to coding agents too. See
 [Coding worker isolation](coding-worker-isolation.md#remote-mcp-tools) for the security notes.
