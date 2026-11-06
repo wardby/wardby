@@ -60,6 +60,7 @@ model Agent {
   repositories         AgentRepository[]
   deferredReviews      DeferredReview[]
   issueProjects        AgentIssueProject[]
+  mcpServers           AgentMcpServer[]
   notificationChannels NotificationChannel[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
@@ -1132,6 +1133,7 @@ model Principal {
   webhooks     Webhook[]
   authUser     AuthUser?
   budgetGroups BudgetGroup[]
+  mcpServers   McpServer[]
 
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
@@ -1687,6 +1689,48 @@ model AgentIssueProject {
 
   @@unique([agentId, provider, projectKey])
   @@index([provider, projectKey])
+}
+
+/// A remote MCP server an owner registered (Streamable HTTP, HTTPS only).
+model McpServer {
+  id          String           @id @default(cuid())
+  ownerId     String
+  owner       Principal        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// Unique per owner; the prefix of the tool names the model sees.
+  name        String
+  /// https only; no userinfo, no fragment; the query string is kept.
+  url         String
+  /// The owner's brokered secrets sent on every request (each brokered to the URL's host).
+  secretNames String[]         @default([])
+  /// Last tools/list result, redacted: [{ name, description, inputSchema, annotations? }].
+  toolSnapshot Json            @default("[]")
+  snapshotAt  DateTime?
+  /// From initialize: { name?, version?, protocolVersion }.
+  serverInfo  Json?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  agents      AgentMcpServer[]
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+}
+
+/// An MCP server attached to a native agent, with the server tools it may call.
+model AgentMcpServer {
+  agentId       String
+  agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  serverId      String
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// Exact tool names from the server's saved list. Never empty.
+  allowedTools  String[]
+  /// Per call; null = 30000. Capped by WARDBY_TOOL_MAX_TIMEOUT_MS at call time.
+  callTimeoutMs Int?
+  attachedById  String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@id([agentId, serverId])
+  @@index([serverId])
 }
 
 /// Dedupe record: an issue wardby created for a fingerprint (several over time — regressions).
