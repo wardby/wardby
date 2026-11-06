@@ -1068,6 +1068,118 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     }
   });
 
+  it("skips attaching a tool named like one of an existing agent's MCP tools, with a warning", async () => {
+    const id = randomUUID().slice(0, 8);
+    const agentName7 = `test-agent-mcp-${id}`;
+    const ownerSubject7 = `test-owner-mcp-${id}`;
+    const toolName7 = "datadog__search";
+    const manifest: Manifest = {
+      bundleVersion: 1,
+      source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+      secretMode: "references",
+      transferKeyId: null,
+      contentWindowDays: null,
+      contentSince: null,
+      toolCallDetail: "metadata",
+      runAuditWindowDays: null,
+      runAuditSince: null,
+      capabilities: [],
+      counts: { agents: 1, tools: 1 },
+    };
+    const agent: NeutralAgent = {
+      name: agentName7,
+      systemPrompt: "Test agent",
+      provider: "bedrock",
+      model: "claude-opus-4",
+      region: null,
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      maxTurns: 10,
+      budgetUsd: "5.00",
+      ownerEmail: null,
+      kind: "native",
+      memoryEnabled: false,
+      unmodeled: {},
+    };
+    const tool: NeutralTool = {
+      name: toolName7,
+      description: "imported",
+      paramsZod: "z.object({})",
+      jsonSchema: null,
+      code: "return 1;",
+      secretSchema: "",
+    };
+    const agentTool: NeutralAgentTool = {
+      agentName: agentName7,
+      toolName: toolName7,
+      allowedSecrets: [],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    };
+    const bundle: Bundle = {
+      manifest,
+      readAgents: () => [agent],
+      readTools: () => [tool],
+      readAgentTools: () => [agentTool],
+      readSecrets: () => [],
+      readAgentSecrets: () => [],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+    const owner = await resolvePrincipal(ownerSubject7, db);
+    try {
+      const existing = await db.agent.create({
+        data: { name: agentName7, systemPrompt: "x", model: "claude-opus-4", budgetUsd: 1, ownerId: owner.id },
+      });
+      const server = await db.mcpServer.create({
+        data: {
+          ownerId: owner.id,
+          name: "datadog",
+          url: "https://mcp.example.com/mcp",
+          toolSnapshot: [{ name: "search", description: "", inputSchema: { type: "object" } }],
+        },
+      });
+      await db.agentMcpServer.create({
+        data: { agentId: existing.id, serverId: server.id, allowedTools: ["search"], attachedById: owner.id },
+      });
+      const plan = preflight({
+        bundle,
+        routableModels: new Set(["claude-opus-4"]),
+        supportedGlobals: new Set(),
+        existingAgentNames: new Set(),
+        existingToolNames: new Set(),
+        capabilitiesSupported: new Set([]),
+        onConflict: "fail",
+        prefix: "",
+        allowOpenFetch: false,
+      });
+      const result = await createFromBundle(bundle, plan, {
+        db,
+        cipher: buildSecretCipher(loadProviderConfig()),
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "references" as const,
+        allowOpenFetch: false,
+      });
+      expect(result.warnings.some((w) => w.includes('from MCP server "datadog"'))).toBe(true);
+      expect(await db.agentTool.count({ where: { agentId: existing.id } })).toBe(0);
+    } finally {
+      const agentRow = await db.agent.findUnique({ where: { name: agentName7 } });
+      if (agentRow) {
+        await db.agentTool.deleteMany({ where: { agentId: agentRow.id } });
+        await db.agentMcpServer.deleteMany({ where: { agentId: agentRow.id } });
+        await db.agent.deleteMany({ where: { id: agentRow.id } });
+      }
+      await db.mcpServer.deleteMany({ where: { ownerId: owner.id } });
+      await db.tool.deleteMany({ where: { ownerId: owner.id } });
+      await db.principal.deleteMany({ where: { subject: ownerSubject7 } });
+    }
+  });
+
   describe("nativeExecutionMode", () => {
     const run = async (mode: "control-plane" | "sandbox" | undefined, env: Record<string, string>) => {
       const id = randomUUID().slice(0, 8);

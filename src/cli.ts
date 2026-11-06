@@ -83,7 +83,13 @@ import { logger } from "./core/logger.js";
 import { buildPower } from "./core/power-composition.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { toolSubject, zod3ToolWarnings } from "./core/zod3-window.js";
-import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
+import {
+  findSameNamedAttachedTool,
+  findSameNamedMcpTool,
+  reservedToolNameReason,
+  resolveToolRef,
+  sameNamedMcpToolMessage,
+} from "./core/tool-names.js";
 import {
   ToolAttachedError,
   deleteToolGuarded,
@@ -409,6 +415,8 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       `agent "${agentName}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
     );
   }
+  const mcpClash = await findSameNamedMcpTool(prisma, agent.id, tool.name);
+  if (mcpClash) fail(sameNamedMcpToolMessage(agentName, tool.name, mcpClash.serverName));
 
   const patch = ToolCapabilitiesPatchSchema.safeParse({
     allowedSecrets: values["allow-secret"],

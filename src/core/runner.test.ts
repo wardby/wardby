@@ -157,6 +157,8 @@ function fakeDb(
             tool: toolsById.get(a.toolId),
           }))) as any,
     },
+    // No MCP servers attached (src/core/mcp-tools.ts).
+    agentMcpServer: { findMany: async () => [], findUnique: async () => null },
     agentSecret: {
       findMany: (async ({ where }: any) =>
         secretsData.filter((s) => s.agentId === where.agentId).map((s) => ({ boundName: s.boundName }))) as any,

@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { Prisma, type PrismaClient } from "#prisma";
-import { loadMcpServersMode } from "../../config/mcp-servers.js";
+import { loadMcpServersMode, MCP_SERVERS_OFF_MESSAGE } from "../../config/mcp-servers.js";
 import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { atLeast, deleteGrantsFor, effectiveAccess, grantedIds } from "../../core/grants.js";
 import { logger } from "../../core/logger.js";
@@ -15,10 +15,12 @@ import { McpClientError, type McpServerInfo, type McpToolEntry } from "../../cor
 import {
   assertServerName,
   diffSnapshots,
+  exposedNames,
   exposedToolName,
   fetchSnapshot,
   McpServerInputError,
   normaliseServerUrl,
+  snapshotOf,
   type McpServerRow,
 } from "../../core/mcp-servers.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
@@ -32,7 +34,7 @@ import { textResult } from "./text-result.js";
 
 const serversLog = logger.child({ module: "mcp-servers" });
 
-export const MCP_SERVERS_OFF_MESSAGE = "Remote MCP servers are turned off on this server (WARDBY_MCP_SERVERS=off).";
+export { MCP_SERVERS_OFF_MESSAGE };
 const DESCRIPTION_PREVIEW_CHARS = 300;
 const MIN_CALL_TIMEOUT_MS = 1000;
 
@@ -111,10 +113,6 @@ async function requireServerAccess(
   return server;
 }
 
-function snapshotOf(server: { toolSnapshot: unknown }): McpToolEntry[] {
-  return Array.isArray(server.toolSnapshot) ? (server.toolSnapshot as McpToolEntry[]) : [];
-}
-
 function takeSnapshot(ctx: McpRequestContext, server: McpServerRow) {
   return mapped(() =>
     fetchSnapshot(server, { db: ctx.db, cipher: ctx.providers.secrets, fetchImpl: ctx.providers.sandboxFetch }),
@@ -143,17 +141,6 @@ function serverView(server: ServerRecord) {
       annotations: t.annotations,
     })),
   };
-}
-
-/** Exposed names of allowed tools; a name too long to expose is left out (refused at attach anyway). */
-function exposedNames(serverName: string, allowedTools: readonly string[]): string[] {
-  return allowedTools.flatMap((tool) => {
-    try {
-      return [exposedToolName(serverName, tool)];
-    } catch {
-      return [];
-    }
-  });
 }
 
 /** get_agent's mcpServers field: each attachment with its exposed names and allowed tools gone from the snapshot. */

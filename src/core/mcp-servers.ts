@@ -75,6 +75,22 @@ export function exposedToolName(serverName: string, toolName: string): string {
   return name;
 }
 
+/** A server's saved tool list (toolSnapshot); anything but an array reads as empty. */
+export function snapshotOf(server: { toolSnapshot: unknown }): McpToolEntry[] {
+  return Array.isArray(server.toolSnapshot) ? (server.toolSnapshot as McpToolEntry[]) : [];
+}
+
+/** Exposed names of allowed tools; a name too long to expose is left out (refused at attach anyway). */
+export function exposedNames(serverName: string, allowedTools: readonly string[]): string[] {
+  return allowedTools.flatMap((tool) => {
+    try {
+      return [exposedToolName(serverName, tool)];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /** Added, removed and changed (description or schema) tool names between two snapshots; order-independent. */
 export function diffSnapshots(
   before: McpToolEntry[],

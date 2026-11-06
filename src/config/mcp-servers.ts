@@ -4,6 +4,9 @@
  */
 export type McpServersMode = "off" | "admins" | "owners";
 
+/** What every MCP-server path says when the mode is off (the Wardby MCP tools' 403 and a run's tool call). */
+export const MCP_SERVERS_OFF_MESSAGE = "Remote MCP servers are turned off on this server (WARDBY_MCP_SERVERS=off).";
+
 const MODES: readonly McpServersMode[] = ["off", "admins", "owners"];
 
 export function loadMcpServersMode(env: NodeJS.ProcessEnv = process.env): McpServersMode {

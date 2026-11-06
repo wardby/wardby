@@ -185,6 +185,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     const client = {
       agent: db.agent,
       agentTool: db.agentTool,
+      agentMcpServer: db.agentMcpServer,
       agentSecret: db.agentSecret,
       budgetGroup: db.budgetGroup,
       agentSubAgent: db.agentSubAgent,

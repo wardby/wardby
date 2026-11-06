@@ -2,6 +2,7 @@ import type { PrismaClient } from "#prisma";
 import { MIN_REDACTABLE_SECRET_LENGTH, redactExactSecretValues, withEscapedForms } from "./secret-spans.js";
 import { buildSecretsAccessor } from "./secrets.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
+import { mcpNamedSecretValues } from "./mcp-tools.js";
 
 export interface NamedSecretValues {
   name: string;
@@ -9,23 +10,30 @@ export interface NamedSecretValues {
 }
 
 type SecretGuardCipher = Parameters<typeof buildSecretsAccessor>[1];
-type SecretGuardDb = Parameters<typeof buildSecretsAccessor>[2] & Pick<PrismaClient, "agentSecret">;
+type SecretGuardDb = Parameters<typeof buildSecretsAccessor>[2] &
+  Pick<PrismaClient, "agentSecret" | "agentMcpServer" | "secret">;
 
-/** Every secret attached to the agent (readable and brokered), with every form to look for. Rejects if any read fails. */
+/**
+ * Every secret attached to the agent (readable and brokered), and every secret of an MCP server
+ * attached to it (named `mcp:<server>/<secret>`), with every form to look for. Rejects if any read fails.
+ */
 export async function loadAgentSecretValues(
   db: SecretGuardDb,
   cipher: SecretGuardCipher,
   agentId: string,
 ): Promise<NamedSecretValues[]> {
-  const rows = await db.agentSecret.findMany({ where: { agentId }, select: { boundName: true } });
-  if (rows.length === 0) return [];
+  const [rows, mcp] = await Promise.all([
+    db.agentSecret.findMany({ where: { agentId }, select: { boundName: true } }),
+    mcpNamedSecretValues(db, cipher, agentId),
+  ]);
   const accessor = buildSecretsAccessor(agentId, cipher, db);
-  return Promise.all(
+  const own = await Promise.all(
     rows.map(async ({ boundName }) => {
       const entry = await accessor.resolve!(boundName);
       return { name: boundName, values: entry ? withEscapedForms(consoleRedactionValues(entry)) : [] };
     }),
   );
+  return [...own, ...mcp];
 }
 
 function textOf(value: unknown): string {
