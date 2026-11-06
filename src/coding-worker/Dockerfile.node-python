@@ -1,4 +1,4 @@
-FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:a9af4a2561c1aeb5876159fcbb28a3ae2ce386fe27c161ebb9855bd092ec3fc8 AS runtime
+FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:281a7cabc53d6ff1977d1b68c1420b2ef598f90da3995cb13df27395a58a60ef AS runtime
 # python3-venv (ensurepip plus the bundled pip wheel) stays installed: in
 # registry mode (docs/coding-packages.md) the agent installs packages with
 # `python -m venv --system-site-packages .venv && .venv/bin/python -m pip
