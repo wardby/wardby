@@ -38,7 +38,7 @@
         "accept": "text/event-stream, application/json",
         "content-type": "application/json"
       },
-      "body": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"callId\":\"exec-00000000-0000-7000-8000-000000000001\",\"x-codex-turn-metadata\":{\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"reasoning_effort\":\"low\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"model\":\"gpt-6.1-sol\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"codex_version\":\"0.160.1\"},\"threadId\":\"00000000-0000-7000-8000-000000000002\",\"sessionId\":\"00000000-0000-7000-8000-000000000002\",\"windowId\":\"00000000-0000-7000-8000-000000000002:0\",\"itemId\":\"ctc_spike\",\"progressToken\":1},\"name\":\"echo\",\"arguments\":{\"text\":\"hello-from-fake-model\"}}}"
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"callId\":\"exec-00000000-0000-7000-8000-000000000001\",\"x-codex-turn-metadata\":{\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"reasoning_effort\":\"low\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"model\":\"gpt-6.1-sol\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"codex_version\":\"0.160.1\"},\"threadId\":\"00000000-0000-7000-8000-000000000002\",\"sessionId\":\"00000000-0000-7000-8000-000000000002\",\"windowId\":\"00000000-0000-7000-8000-000000000002:0\",\"itemId\":\"ctc_spike\",\"progressToken\":1},\"name\":\"echo\",\"arguments\":{\"text\":\"hello-from-fake-model\"}}}"
     }
   ],
   "responses": [
@@ -410,7 +410,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -442,7 +442,7 @@
         "client_metadata": {
           "turn_id": "00000000-0000-7000-8000-000000000003",
           "root_turn_id": "00000000-0000-7000-8000-000000000003",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
           "session_id": "00000000-0000-7000-8000-000000000002",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
           "thread_id": "00000000-0000-7000-8000-000000000002",
@@ -818,7 +818,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -880,7 +880,7 @@
           "turn_id": "00000000-0000-7000-8000-000000000003",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
           "root_turn_id": "00000000-0000-7000-8000-000000000003",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993368927,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000002\",\"thread_id\":\"00000000-0000-7000-8000-000000000002\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000003\",\"window_id\":\"00000000-0000-7000-8000-000000000002:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000003\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
           "thread_id": "00000000-0000-7000-8000-000000000002"
         }
       }
@@ -1188,7 +1188,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -1245,7 +1245,7 @@
           "verbosity": "low"
         },
         "client_metadata": {
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_id\":\"00000000-0000-7000-8000-000000000016\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000017\",\"window_id\":\"00000000-0000-7000-8000-000000000016:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000017\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993373647,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_id\":\"00000000-0000-7000-8000-000000000016\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000017\",\"window_id\":\"00000000-0000-7000-8000-000000000016:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000017\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
           "turn_id": "00000000-0000-7000-8000-000000000017",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
           "root_turn_id": "00000000-0000-7000-8000-000000000017",
@@ -1284,7 +1284,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -1792,7 +1792,7 @@
         "client_metadata": {
           "root_turn_id": "00000000-0000-7000-8000-00000000001d",
           "thread_id": "00000000-0000-7000-8000-00000000001c",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-00000000001c\",\"thread_id\":\"00000000-0000-7000-8000-00000000001c\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"window_id\":\"00000000-0000-7000-8000-00000000001c:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000001e\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993298638,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-00000000001c\",\"thread_id\":\"00000000-0000-7000-8000-00000000001c\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"window_id\":\"00000000-0000-7000-8000-00000000001c:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000001e\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000001d\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
           "session_id": "00000000-0000-7000-8000-00000000001c",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
           "turn_id": "00000000-0000-7000-8000-00000000001d",
@@ -1829,7 +1829,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -2166,7 +2166,7 @@
         },
         "client_metadata": {
           "root_turn_id": "00000000-0000-7000-8000-000000000023",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993092271,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
           "session_id": "00000000-0000-7000-8000-000000000022",
           "thread_id": "00000000-0000-7000-8000-000000000022",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
@@ -2204,7 +2204,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -2583,7 +2583,7 @@
         },
         "client_metadata": {
           "root_turn_id": "00000000-0000-7000-8000-000000000023",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993092271,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
           "session_id": "00000000-0000-7000-8000-000000000022",
           "thread_id": "00000000-0000-7000-8000-000000000022",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
@@ -2621,7 +2621,7 @@
             "content": [
               {
                 "type": "input_text",
-                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-06</current_date>\n  <timezone>America/Chicago</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+                "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
               }
             ]
           },
@@ -3023,7 +3023,7 @@
         },
         "client_metadata": {
           "root_turn_id": "00000000-0000-7000-8000-000000000023",
-          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793993092271,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_id\":\"00000000-0000-7000-8000-000000000022\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000023\",\"window_id\":\"00000000-0000-7000-8000-000000000022:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000023\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.5\",\"reasoning_effort\":\"medium\"}",
           "session_id": "00000000-0000-7000-8000-000000000022",
           "thread_id": "00000000-0000-7000-8000-000000000022",
           "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",

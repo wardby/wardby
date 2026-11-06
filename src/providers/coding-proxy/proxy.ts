@@ -171,11 +171,12 @@ export { capabilityHash };
 // fixtures/codex-<version>-responses-requests.json. Only client-side tools
 // (function, custom, namespaces of them, and the client-executed tool_search)
 // are allowed: a hosted tool (web search, remote MCP, code interpreter, image
-// generation, file search, ...), a remote image or file, a stored prompt, or a previous response would make
-// OpenAI fetch or run something outside the worker's egress policy and outside
-// the token-metered budget. Tool names vary by model and Codex version, so they
-// are checked for shape, not against a fixed list: a client-side tool the model
-// calls is executed by the worker itself, which the container boundary governs.
+// generation, file search, ...), a remote image or file, a stored prompt, or a
+// previous response would make OpenAI fetch or run something outside the
+// worker's egress policy and outside the token-metered budget. Tool names vary
+// by model and Codex version, so they are checked for shape, not against a
+// fixed list: a client-side tool the model calls is executed by the worker
+// itself, which the container boundary governs.
 const OPENAI_REQUEST_KEYS = new Set([
   "model",
   "instructions",
@@ -272,15 +273,22 @@ function openAiToolName(value: unknown, code = "invalid_openai_request"): void {
   if (typeof value !== "string" || !OPENAI_TOOL_NAME.test(value)) throw new CodingProxyError(400, code);
 }
 
-function validateOpenAiFunctionTool(tool: Record<string, unknown>): void {
-  openAiOnlyKeys(tool, ["type", "name", "description", "strict", "defer_loading", "parameters"], "invalid_openai_tool");
+function validateOpenAiFunctionTool(tool: Record<string, unknown>, inSearchOutput: boolean): void {
+  openAiOnlyKeys(
+    tool,
+    inSearchOutput
+      ? ["type", "name", "description", "strict", "defer_loading", "parameters"]
+      : ["type", "name", "description", "strict", "parameters"],
+    "invalid_openai_tool",
+  );
   openAiToolName(tool.name, "invalid_openai_tool");
   openAiOptional(tool.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool"));
   if (tool.strict !== undefined && typeof tool.strict !== "boolean") {
     throw new CodingProxyError(400, "invalid_openai_tool");
   }
-  // Codex marks a tool it hides behind tool_search with defer_loading: true; it
-  // only delays when the model sees the definition, which is checked in full.
+  // Codex marks the tools a tool_search_output loads with defer_loading: true,
+  // and sends it nowhere else. It only delays when the model sees the
+  // definition, which is checked in full.
   if (tool.defer_loading !== undefined && tool.defer_loading !== true) {
     throw new CodingProxyError(400, "invalid_openai_tool");
   }
@@ -312,31 +320,58 @@ function validateOpenAiCustomTool(tool: Record<string, unknown>): void {
   openAiString(format.definition, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool");
 }
 
-// `toolSearch` is set only for the request's top-level tools: that is the one
-// place Codex sends the tool_search tool.
+// Every tool list (the request's tools, each additional_tools item, each
+// tool_search_output item) is capped at MAX_OPENAI_TOOLS entries on its own.
+// Across the request, `distinct` holds the `namespace/name` of each callable
+// tool and is capped too. Codex replays every earlier tool_search_output on
+// each turn, so a long run repeats the same definitions many times: each copy
+// is still validated, but only a tool not seen before adds to the shared cap.
 function validateOpenAiTools(
   value: unknown,
-  count: { value: number },
-  { nested = false, toolSearch = false }: { nested?: boolean; toolSearch?: boolean } = {},
+  distinct: Set<string>,
+  {
+    toolSearch = false,
+    inSearchOutput = false,
+    namespace,
+    listed = { value: 0 },
+  }: { toolSearch?: boolean; inSearchOutput?: boolean; namespace?: string; listed?: { value: number } } = {},
 ): void {
   if (!Array.isArray(value)) throw new CodingProxyError(400, "invalid_openai_tool");
+  const callable = (name: string): void => {
+    distinct.add(`${namespace ?? ""}/${name}`);
+    if (distinct.size > MAX_OPENAI_TOOLS) throw new CodingProxyError(400, "invalid_openai_tool");
+  };
   for (const candidate of value) {
-    if (++count.value > MAX_OPENAI_TOOLS) throw new CodingProxyError(400, "invalid_openai_tool");
+    if (++listed.value > MAX_OPENAI_TOOLS) throw new CodingProxyError(400, "invalid_openai_tool");
     const tool = openAiRecord(candidate, "invalid_openai_tool");
     if (tool.type === "function") {
-      validateOpenAiFunctionTool(tool);
+      validateOpenAiFunctionTool(tool, inSearchOutput);
+      callable(tool.name as string);
     } else if (tool.type === "custom") {
       validateOpenAiCustomTool(tool);
-    } else if (tool.type === "namespace" && !nested) {
+      callable(tool.name as string);
+    } else if (tool.type === "namespace" && namespace === undefined) {
       openAiOnlyKeys(tool, ["type", "name", "description", "tools"], "invalid_openai_tool");
       openAiToolName(tool.name, "invalid_openai_tool");
       openAiOptional(tool.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool"));
-      validateOpenAiTools(tool.tools, count, { nested: true });
+      validateOpenAiTools(tool.tools, distinct, { inSearchOutput, namespace: tool.name as string, listed });
     } else if (tool.type === "tool_search" && toolSearch) {
       validateOpenAiToolSearchTool(tool);
+      callable("tool_search");
     } else {
       throw new CodingProxyError(400, openAiCode("openai_tool_not_allowed", tool.type));
     }
+  }
+}
+
+// The arguments the model gave the client-side tool_search, as its parameters
+// in the captures declare them: a query and an optional result limit.
+function validateOpenAiToolSearchArguments(value: unknown): void {
+  const args = openAiRecord(value);
+  openAiOnlyKeys(args, ["query", "limit"]);
+  openAiString(args.query, MAX_TOOL_TEXT_BYTES);
+  if (args.limit !== undefined && !(Number.isSafeInteger(args.limit) && (args.limit as number) > 0)) {
+    throw new CodingProxyError(400, "invalid_openai_request");
   }
 }
 
@@ -380,7 +415,7 @@ function validateOpenAiTextParts(value: unknown, type: string): void {
   }
 }
 
-function validateOpenAiInputItem(value: unknown, toolCount: { value: number }): void {
+function validateOpenAiInputItem(value: unknown, distinctTools: Set<string>): void {
   const item = openAiRecord(value);
   switch (item.type) {
     case undefined:
@@ -448,7 +483,7 @@ function validateOpenAiInputItem(value: unknown, toolCount: { value: number }): 
       openAiOptional(item.status, (value) => openAiString(value, 64));
       if (item.execution !== "client")
         throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", item.type));
-      openAiRecord(item.arguments);
+      validateOpenAiToolSearchArguments(item.arguments);
       return;
     case "tool_search_output":
       // The tools the client-side search loaded: each one passes the same checks
@@ -459,14 +494,14 @@ function validateOpenAiInputItem(value: unknown, toolCount: { value: number }): 
       openAiOptional(item.status, (value) => openAiString(value, 64));
       if (item.execution !== "client")
         throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", item.type));
-      validateOpenAiTools(item.tools, toolCount);
+      validateOpenAiTools(item.tools, distinctTools, { inSearchOutput: true });
       return;
     case "additional_tools":
       openAiOnlyKeys(item, ["type", "id", "role", "tools"]);
       openAiOptional(item.id, openAiId);
       if (item.role !== undefined && item.role !== "developer")
         throw new CodingProxyError(400, "invalid_openai_request");
-      validateOpenAiTools(item.tools, toolCount);
+      validateOpenAiTools(item.tools, distinctTools);
       return;
     default:
       throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", item.type));
@@ -535,8 +570,8 @@ function validateOpenAiBody(body: Record<string, unknown>): void {
     throw new CodingProxyError(400, "invalid_openai_request");
   }
   openAiOptional(body.instructions, (value) => openAiString(value, PROXY_MAX_BODY_BYTES));
-  const toolCount = { value: 0 };
-  if (body.tools !== undefined) validateOpenAiTools(body.tools, toolCount, { toolSearch: true });
+  const distinctTools = new Set<string>();
+  if (body.tools !== undefined) validateOpenAiTools(body.tools, distinctTools, { toolSearch: true });
   if (body.tool_choice !== undefined) {
     if (typeof body.tool_choice !== "string" || !OPENAI_TOOL_CHOICES.has(body.tool_choice)) {
       throw new CodingProxyError(400, "openai_tool_choice_not_allowed");
@@ -563,7 +598,7 @@ function validateOpenAiBody(body: Record<string, unknown>): void {
   if (!Array.isArray(body.input) || body.input.length > MAX_OPENAI_ITEMS) {
     throw new CodingProxyError(400, "invalid_openai_request");
   }
-  for (const item of body.input) validateOpenAiInputItem(item, toolCount);
+  for (const item of body.input) validateOpenAiInputItem(item, distinctTools);
 }
 
 function parseOpenAiRequest(rawBody: string): ParsedRequest {
