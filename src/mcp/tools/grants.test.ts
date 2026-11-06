@@ -23,7 +23,13 @@ function fakeDb(
   grants: FakeGrantSeed[] = [],
   bindings: Partial<
     Record<
-      "agentSecret" | "agentDatastore" | "agentRepository" | "agentSubAgent" | "agentTool" | "codingAgentProfile",
+      | "agentSecret"
+      | "agentDatastore"
+      | "agentRepository"
+      | "agentSubAgent"
+      | "agentTool"
+      | "codingAgentProfile"
+      | "agentMcpServer",
       number
     >
   > = {},
@@ -38,6 +44,7 @@ function fakeDb(
     agentSubAgent: { count: async () => bindings.agentSubAgent ?? 0 },
     agentTool: { count: async () => bindings.agentTool ?? 0 },
     codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
+    agentMcpServer: { count: async () => bindings.agentMcpServer ?? 0 },
     agent: {
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => {
@@ -61,6 +68,11 @@ function fakeDb(
     $queryRaw: async () => [],
   };
   db.isolationLevels = [];
+  db.rawStatements = [];
+  db.$executeRawUnsafe = async (query: string) => {
+    db.rawStatements.push(query);
+    return 0;
+  };
   db.$transaction = async (fn: (tx: unknown) => unknown, options?: { isolationLevel?: string }) => {
     db.isolationLevels.push(options?.isolationLevel);
     return fn(db);
@@ -160,6 +172,8 @@ describe("grant_access / revoke_access / list_access", () => {
       arguments: { resourceType: "agent", resourceId: "a1", grantee: { principalId: "alice" } },
     });
     expect((db as any).isolationLevels).toEqual(["Serializable", "Serializable"]);
+    // Each one steers its reads to index scans first (core/serializable-retry.ts preferIndexScans).
+    expect((db as any).rawStatements).toEqual(["SET LOCAL enable_seqscan = off", "SET LOCAL enable_seqscan = off"]);
     await client.close();
   });
 
@@ -279,6 +293,7 @@ describe("grant_access / revoke_access / list_access", () => {
     "agentSubAgent",
     "agentTool",
     "codingAgentProfile",
+    "agentMcpServer",
   ] as const)("refuses write for everyone on an agent that holds %s, but still allows execute", async (binding) => {
     const db = fakeDb(agents, people, [], { [binding]: 1 });
     const { client } = await connect(db, ctx(db, "owner"));

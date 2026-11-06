@@ -9,11 +9,14 @@
  * the model would see a duplicate tool name and one tool would silently
  * shadow the other; every attach path refuses that instead
  * (findSameNamedAttachedTool), and the runner asserts it at load time.
+ * The same holds against an attached MCP server's exposed tool names
+ * (findSameNamedMcpTool); the runner leaves a clashing MCP tool out.
  */
 import type { Prisma, PrismaClient, Tool } from "#prisma";
 import { MEMORY_TOOL_NAMES } from "./memory-tools.js";
 import { SUBAGENT_MEMORY_TOOL_NAMES } from "./subagent-memory-tools.js";
 import { ISSUE_TRACKER_TOOL_NAMES } from "./issue-tracker-tools.js";
+import { exposedNames } from "./mcp-servers.js";
 
 /** The runner's synthesized sub-agent tools are `delegate_to_<boundName>`. */
 export const DELEGATE_TOOL_PREFIX = "delegate_to_";
@@ -63,6 +66,30 @@ export async function findSameNamedAttachedTool(
     select: { tool: { select: { id: true, name: true, ownerId: true } } },
   });
   return clash?.tool ?? null;
+}
+
+/**
+ * An MCP attachment of `agentId` whose exposed tool name (`<server>__<tool>`) equals `toolName`,
+ * or null: the other direction of attach_mcp_server's clash check, for every path that attaches a
+ * Tool. Every exposed name contains "__", so any other name needs no lookup.
+ */
+export async function findSameNamedMcpTool(
+  db: Pick<PrismaClient | Prisma.TransactionClient, "agentMcpServer">,
+  agentId: string,
+  toolName: string,
+): Promise<{ serverId: string; serverName: string } | null> {
+  if (!toolName.includes("__")) return null;
+  const rows = await db.agentMcpServer.findMany({
+    where: { agentId },
+    select: { allowedTools: true, server: { select: { id: true, name: true } } },
+  });
+  const hit = rows.find((row) => exposedNames(row.server.name, row.allowedTools).includes(toolName));
+  return hit ? { serverId: hit.server.id, serverName: hit.server.name } : null;
+}
+
+/** The refusal for a Tool whose name is an exposed MCP tool name on the agent (findSameNamedMcpTool). */
+export function sameNamedMcpToolMessage(agentRef: string, toolName: string, serverName: string): string {
+  return `Agent "${agentRef}" already has the tool "${toolName}" from MCP server "${serverName}"; detach it or allow a different tool first.`;
 }
 
 /**

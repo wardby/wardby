@@ -254,12 +254,16 @@ describe("serveGatewayRequest unexpected errors", () => {
 // Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
 const FAKE_READABLE = "fake_readable_secret_0003";
 const FAKE_CAPABILITY = "fake_capability_value_0003";
+const FAKE_MCP = "fake_mcp_server_secret_0003";
 const leaks = (value: unknown) => JSON.stringify(value).includes(FAKE_READABLE);
 
 describe("gateway cause codes are checked against the run's secret values", () => {
   const rebuilt = {
     snapshot: { input: { userTools: { lookup: {}, other: {} } } },
-    tools: { readableSecretValues: async (tool: string) => (tool === "lookup" ? [FAKE_READABLE] : ["other_value"]) },
+    tools: {
+      readableSecretValues: async (tool: string) => (tool === "lookup" ? [FAKE_READABLE] : ["other_value"]),
+      mcpSecretValues: async () => [FAKE_MCP],
+    },
   } as unknown as Parameters<typeof runSecretValues>[0];
 
   it("checks against every user tool's readable values and the request's own capability", async () => {
@@ -277,6 +281,12 @@ describe("gateway cause codes are checked against the run's secret values", () =
       generic: true,
     });
     expect(leaks(response)).toBe(false);
+  });
+
+  it("checks against the attached MCP servers' secret values too", async () => {
+    expect((await runSecretValues(rebuilt, FAKE_CAPABILITY)()).includes(FAKE_MCP)).toBe(true);
+    const response = await failureResponse(new Error(FAKE_MCP), runSecretValues(rebuilt, FAKE_CAPABILITY));
+    expect(JSON.stringify(response).includes(FAKE_MCP)).toBe(false);
   });
 
   it("answers no cause code equal to the request's own capability", async () => {
@@ -416,6 +426,8 @@ describe("the worker's finish call", () => {
           return { count: 1 };
         },
       },
+      // No MCP servers attached (src/core/mcp-tools.ts).
+      agentMcpServer: { findMany: async () => [], findUnique: async () => null },
       agentSecret: {
         findMany: async () => [{ boundName: "API_KEY" }],
         findFirst: async () => ({ secret: { ciphertext: FAKE_KEY, ownerId: "p1" }, agent: { ownerId: "p1" } }),

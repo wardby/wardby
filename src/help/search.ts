@@ -118,5 +118,10 @@ export function searchHelp(catalog: HelpCatalog, query: string): HelpSearchResul
     const heading = matchingHeading(queries, page);
     results.push({ page, score, ...(heading ? { matchedHeading: heading } : {}), excerpt: excerpt(queries, page) });
   }
-  return results.sort((left, right) => right.score - left.score || left.page.id.localeCompare(right.page.id));
+  // On a tie, a guide outranks an error article: error codes in titles share words (like "mcp") with their guide.
+  const isError = (result: HelpSearchResult): number => Number(result.page.id.startsWith("errors/"));
+  return results.sort(
+    (left, right) =>
+      right.score - left.score || isError(left) - isError(right) || left.page.id.localeCompare(right.page.id),
+  );
 }

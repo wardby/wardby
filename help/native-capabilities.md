@@ -3,7 +3,7 @@ id: native-capabilities
 title: Use native agents, tools, and data
 summary: Attach scoped tools, secrets, datastores, memory, schedules, and sub-agents to a native Wardby agent.
 audience: developer
-tags: [agents, tools, secrets, datastores, memory, subagents, paramsZod, create_tool, dry_run_tool, timeoutMs]
+tags: [agents, tools, secrets, datastores, memory, schedules, subagents, zod, create_tool, dry_run_tool, timeoutMs, mcp]
 appliesTo: >=0.2.1
 ---
 
@@ -76,6 +76,9 @@ expanding its access. An access grant is intentional delegation: use it only
 when an owner permits one agent to use another resource. Creating or changing
 tools, secrets, datastores, schedules, webhooks, memory, and budget groups
 requires the matching MCP scope.
+
+Native agents can also call tools from remote MCP servers; see
+[Remote MCP servers](../docs/mcp-servers.md) (0.8.0+).
 
 See [Operate agents](operating-agents.md) for run and budget management, and
 [`README.md`](../README.md) for the feature overview and MCP operations.

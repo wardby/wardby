@@ -333,6 +333,32 @@ describe("runSandboxedEngine unexpected errors", () => {
     }).toEqual({ count: 1, msg: "native gateway request failed", redacted: true, leaks: false });
   });
 
+  it("redacts an attached MCP server's secret values from the operator's log line too", async () => {
+    const FAKE_MCP = "fake_mcp_server_secret_0002";
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation(((obj: unknown, msg: string) => {
+      logged.push({ obj, msg });
+    }) as never);
+    let seen: GatewayError | undefined;
+    try {
+      const { result } = await withWorker(
+        async (gateway) => {
+          seen = await errorOf(gateway.call(req("builtin.call", { name: "memory_get", argsJson: "{}" })));
+          await gateway.call(finish());
+        },
+        { ...throwing(`saw ${FAKE_MCP} here`), mcpSecretValues: async () => [FAKE_MCP] },
+      );
+      await result;
+    } finally {
+      spy.mockRestore();
+    }
+    const line = logged[0] as { obj: { err: Error } } | undefined;
+    expect({
+      redacted: line?.obj.err.message === "saw [REDACTED] here",
+      leaks: JSON.stringify({ message: line?.obj.err.message, stack: line?.obj.err.stack, seen }).includes(FAKE_MCP),
+    }).toEqual({ redacted: true, leaks: false });
+  });
+
   it("passes a normal cause code, without the rest of the message", async () => {
     let seen: GatewayError | undefined;
     const { result } = await withWorker(async (gateway) => {

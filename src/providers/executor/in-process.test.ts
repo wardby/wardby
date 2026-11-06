@@ -57,6 +57,8 @@ function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
     agentTool: {
       findMany: (async () => []) as any,
     },
+    // No MCP servers attached (src/core/mcp-tools.ts).
+    agentMcpServer: { findMany: async () => [], findUnique: async () => null },
     agentSecret: {
       findMany: (async () => []) as any,
     },

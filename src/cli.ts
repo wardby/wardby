@@ -83,7 +83,13 @@ import { logger } from "./core/logger.js";
 import { buildPower } from "./core/power-composition.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { toolSubject, zod3ToolWarnings } from "./core/zod3-window.js";
-import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
+import {
+  findSameNamedAttachedTool,
+  findSameNamedMcpTool,
+  reservedToolNameReason,
+  resolveToolRef,
+  sameNamedMcpToolMessage,
+} from "./core/tool-names.js";
 import {
   ToolAttachedError,
   deleteToolGuarded,
@@ -97,6 +103,7 @@ import {
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { toolTimeoutProblem } from "./sandbox/tool-timeout.js";
 import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
+import { loadMcpServersMode } from "./config/mcp-servers.js";
 import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
@@ -408,6 +415,8 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       `agent "${agentName}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
     );
   }
+  const mcpClash = await findSameNamedMcpTool(prisma, agent.id, tool.name);
+  if (mcpClash) fail(sameNamedMcpToolMessage(agentName, tool.name, mcpClash.serverName));
 
   const patch = ToolCapabilitiesPatchSchema.safeParse({
     allowedSecrets: values["allow-secret"],
@@ -910,6 +919,7 @@ async function scheduler(args: string[]): Promise<void> {
   }
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
+  loadMcpServersMode();
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
@@ -981,6 +991,7 @@ async function nativeGateway(): Promise<void> {
   const listen = parseGatewayListen(process.env.NATIVE_GATEWAY_LISTEN) ?? { host: "0.0.0.0", port: 8790 };
   try {
     loadToolMaxTimeoutMs();
+    loadMcpServersMode();
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }

@@ -34,6 +34,7 @@ function fakeDb(
   agents: FakeAgentRow[] = [],
   grants: FakeGrantSeed[] = [],
   agentSecrets: { agentId: string; boundName: string; broker: unknown }[] = [],
+  mcpAttachments: { agentId: string; allowedTools: string[]; server: { id: string; name: string } }[] = [],
 ) {
   const toolRows = new Map(tools.map((t) => [t.id, t]));
   const agentRows = new Map(agents.map((a) => [a.id, a]));
@@ -51,6 +52,10 @@ function fakeDb(
 
   const transactionDb = {
     resourceGrant: fakeResourceGrants(grants),
+    agentMcpServer: {
+      findMany: async ({ where }: { where: { agentId: string } }) =>
+        mcpAttachments.filter((a) => a.agentId === where.agentId),
+    },
     agentSecret: {
       findMany: async ({ where }: { where: { agentId: string; boundName: { in: string[] } } }) =>
         agentSecrets
@@ -690,6 +695,36 @@ describe("tool authoring tools", () => {
       arguments: { agentId: "a1", toolId: "public", allowedHosts: ["api.example.com"] },
     });
     expect(again.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("attach_tool refuses a tool named like one of the agent's MCP tools", async () => {
+    const tool = {
+      id: "t-mcp",
+      name: "datadog__search",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId: "p1",
+    };
+    const db = fakeDb(
+      [tool],
+      [{ id: "a1", ownerId: "p1" }],
+      [],
+      [],
+      [{ agentId: "a1", allowedTools: ["search"], server: { id: "s1", name: "datadog" } }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t-mcp" } });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain('already has the tool "datadog__search" from MCP server "datadog"');
+    expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
     await client.close();
   });
 

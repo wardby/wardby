@@ -135,7 +135,7 @@ export function consoleRedactionValues(entry: { value: string; broker: SecretBro
   }
 }
 
-function encodedForms(value: string): string[] {
+export function encodedForms(value: string): string[] {
   const buf = Buffer.from(value, "utf8");
   // Query placement goes through URLSearchParams, which encodes ~ ! ' ( ) differently and space as "+",
   // so both percent-encodings are scrubbed, each also in lowercase-hex form (a response may echo either).

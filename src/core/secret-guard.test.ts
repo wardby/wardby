@@ -41,6 +41,21 @@ describe("secret guard", () => {
     expect(long.length).toBeLessThanOrEqual(1000);
     expect(long).toMatch(/, and \d+ more attached/);
   });
+  it("the refusal for an MCP server's secret says it can't be stored, without a secrets.get hint", () => {
+    const m = secretInValueMessage(["mcp:docs/API_TOKEN"]);
+    expect(m).toMatch(/^secret_in_value: not stored\./);
+    expect(m).toMatch(/secret "mcp:docs\/API_TOKEN" attached to this agent/);
+    expect(m).toMatch(/MCP server's secret/);
+    expect(m).toMatch(/can't be stored/);
+    expect(m).not.toContain("secrets.get");
+    expect(m).not.toContain("fetch(");
+    const mixed = secretInValueMessage(["API_KEY", "mcp:docs/API_TOKEN"]);
+    expect(mixed).toMatch(/secrets\.get\("API_KEY"\)/);
+    expect(mixed).not.toMatch(/secrets\.get\("mcp:/);
+    expect(mixed).toMatch(/MCP server's secret/);
+    const mcpFirst = secretInValueMessage(["mcp:a/X_TOKEN", "Z_KEY"]);
+    expect(mcpFirst).toMatch(/secrets\.get\("Z_KEY"\)/);
+  });
   it("SecretInValueError carries the code, names and message", () => {
     const e = new SecretInValueError(["API_KEY"]);
     expect(e.code).toBe("secret_in_value");

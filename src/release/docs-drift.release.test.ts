@@ -58,6 +58,17 @@ function errorCodes(): Map<string, string> {
       add(match[1], file);
     }
   }
+  // Remote MCP servers: the codes a call returns (fail(...), error(...), McpClientError(...), error: "...").
+  for (const file of [
+    "src/core/mcp-tools.ts",
+    "src/core/mcp-client/client.ts",
+    "src/core/mcp-client/results.ts",
+    "src/mcp/tools/mcp-servers.ts",
+  ]) {
+    const form =
+      /\b(?:error|fail|McpClientError)\(\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"|\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g;
+    for (const match of read(join(ROOT, file)).matchAll(form)) add(match[1] ?? match[2], file);
+  }
   // The delegate tools' errors (delegate_to_*), as the runner answers them.
   for (const file of ["src/core/runner.ts", "src/core/delegation-slots.ts"]) {
     for (const match of read(join(ROOT, file)).matchAll(/\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g)) {

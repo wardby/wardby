@@ -37,7 +37,9 @@ import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { scheduleStartFields } from "../../core/schedule-start.js";
+import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
+import { agentMcpServerViews } from "./mcp-servers.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import { requireReadableBudgetGroup } from "../auth/ownership.js";
@@ -55,6 +57,7 @@ import {
   deleteGrantsFor,
   effectiveAccess,
   isPublicWritable,
+  filterUnusableMcpServers,
 } from "../../core/grants.js";
 import { projectTool } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
@@ -1167,6 +1170,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       return textResult({
         ...withProfileWarnings(withOperatorMode(agent)),
         access,
+        mcpServers: await agentMcpServerViews(ctx.db, agent.id),
         // Zod 3 window: the caller's own tools carry their warnings (see core/zod3-window.ts).
         tools: await Promise.all(
           agent.tools.map(async (attachment) => ({
@@ -1223,7 +1227,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     name: "make_owner",
     scope: "agents:admin",
     description:
-      "Admins: gives an agent a new owner (an existing principal id). Secret and datastore bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset (adopting an owner-less agent keeps them). Returns what changed.",
+      "Admins: gives an agent a new owner (an existing principal id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset (adopting an owner-less agent keeps them). Returns what changed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1248,149 +1252,178 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const newOwner = args.ownerId;
       const principal = await ctx.db.principal.findUnique({ where: { id: newOwner } });
       if (!principal) throw new McpError(400, `Principal "${newOwner}" not found.`);
-      const result = await ctx.db.$transaction(
-        async (tx) => {
-          const agent = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
-          if (!agent) throw agentNotFound(args.agentId);
-          // Admin and grandfathered repository approvals were granted to the
-          // agent under its current owner. Moving it away from that owner
-          // turns them into ordinary checks of the next owner's own GitHub
-          // access, so an approval never travels with the agent. An
-          // owner-less agent getting its first owner keeps them: that is the
-          // pre-upgrade step for owner-less agents with repositories.
-          const revoked: string[] = [];
-          const transfer = agent.ownerId !== null && agent.ownerId !== newOwner;
-          if (transfer) {
-            const approved = { in: ["admin", "grandfathered"] };
-            const reset = { authorizedVia: "host_permission", authorizedById: null, authorizedAt: new Date() };
-            const links = await tx.agentRepository.findMany({
-              where: { agentId: agent.id, authorizedVia: approved },
-              orderBy: { repository: "asc" },
-            });
-            await tx.agentRepository.updateMany({ where: { agentId: agent.id, authorizedVia: approved }, data: reset });
-            revoked.push(...links.map((l) => l.repository));
-            const profile = await tx.codingAgentProfile.updateMany({
-              where: { agentId: agent.id, repositoryAuthorizedVia: approved },
-              data: {
-                repositoryAuthorizedVia: reset.authorizedVia,
-                repositoryAuthorizedById: null,
-                repositoryAuthorizedAt: reset.authorizedAt,
-              },
-            });
-            if (profile.count > 0 && agent.codingProfile) revoked.push(agent.codingProfile.repository);
-          }
+      // Bounded retry: a concurrent grant or attach on the same rows aborts one side (Serializable).
+      const result = await withSerializableRetry(() =>
+        ctx.db.$transaction(
+          async (tx) => {
+            await preferIndexScans(tx);
+            const agent = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
+            if (!agent) throw agentNotFound(args.agentId);
+            // Admin and grandfathered repository approvals were granted to the
+            // agent under its current owner. Moving it away from that owner
+            // turns them into ordinary checks of the next owner's own GitHub
+            // access, so an approval never travels with the agent. An
+            // owner-less agent getting its first owner keeps them: that is the
+            // pre-upgrade step for owner-less agents with repositories.
+            const revoked: string[] = [];
+            const transfer = agent.ownerId !== null && agent.ownerId !== newOwner;
+            if (transfer) {
+              const approved = { in: ["admin", "grandfathered"] };
+              const reset = { authorizedVia: "host_permission", authorizedById: null, authorizedAt: new Date() };
+              const links = await tx.agentRepository.findMany({
+                where: { agentId: agent.id, authorizedVia: approved },
+                orderBy: { repository: "asc" },
+              });
+              await tx.agentRepository.updateMany({
+                where: { agentId: agent.id, authorizedVia: approved },
+                data: reset,
+              });
+              revoked.push(...links.map((l) => l.repository));
+              const profile = await tx.codingAgentProfile.updateMany({
+                where: { agentId: agent.id, repositoryAuthorizedVia: approved },
+                data: {
+                  repositoryAuthorizedVia: reset.authorizedVia,
+                  repositoryAuthorizedById: null,
+                  repositoryAuthorizedAt: reset.authorizedAt,
+                },
+              });
+              if (profile.count > 0 && agent.codingProfile) revoked.push(agent.codingProfile.repository);
+            }
 
-          // Grants: between two owners every grant is reset (the new owner
-          // decides who shares it); adopting an owner-less agent keeps them,
-          // but lowers an everyone grant to read unless keepEveryoneExecute:
-          // the agent may regain the new owner's secrets and capabilities
-          // (review I3).
-          const grantsReset = transfer ? await deleteGrantsFor(tx, "agent", agent.id) : 0;
-          let everyoneGrant: { before: string; after: string } | null = null;
-          if (agent.ownerId === null) {
-            const everyone = await tx.resourceGrant.findFirst({
-              where: { resourceType: "agent", resourceId: agent.id, granteeKey: EVERYONE_KEY },
-            });
-            if (everyone) {
-              everyoneGrant = { before: everyone.level, after: everyone.level };
-              if (everyone.level !== "read" && args.keepEveryoneExecute !== true) {
-                await tx.resourceGrant.update({
-                  where: { id: everyone.id },
-                  data: { level: "read", source: "operator", grantedById: ctx.principal.id },
-                });
-                everyoneGrant.after = "read";
+            // Grants: between two owners every grant is reset (the new owner
+            // decides who shares it); adopting an owner-less agent keeps them,
+            // but lowers an everyone grant to read unless keepEveryoneExecute:
+            // the agent may regain the new owner's secrets and capabilities
+            // (review I3).
+            const grantsReset = transfer ? await deleteGrantsFor(tx, "agent", agent.id) : 0;
+            let everyoneGrant: { before: string; after: string } | null = null;
+            if (agent.ownerId === null) {
+              const everyone = await tx.resourceGrant.findFirst({
+                where: { resourceType: "agent", resourceId: agent.id, granteeKey: EVERYONE_KEY },
+              });
+              if (everyone) {
+                everyoneGrant = { before: everyone.level, after: everyone.level };
+                if (everyone.level !== "read" && args.keepEveryoneExecute !== true) {
+                  await tx.resourceGrant.update({
+                    where: { id: everyone.id },
+                    data: { level: "read", source: "operator", grantedById: ctx.principal.id },
+                  });
+                  everyoneGrant.after = "read";
+                }
               }
             }
-          }
 
-          const updated = await tx.agent.update({ where: { id: args.agentId }, data: { ownerId: newOwner } });
+            const updated = await tx.agent.update({ where: { id: args.agentId }, data: { ownerId: newOwner } });
 
-          // Secret/datastore bindings the new owner doesn't own: removed.
-          const secrets = await tx.agentSecret.findMany({
-            where: { agentId: agent.id },
-            include: { secret: { select: { ownerId: true } } },
-          });
-          const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== newOwner);
-          if (foreignSecrets.length > 0) {
-            await tx.agentSecret.deleteMany({
-              where: { agentId: agent.id, secretId: { in: foreignSecrets.map((b) => b.secretId) } },
+            // Secret/datastore bindings the new owner doesn't own: removed.
+            const secrets = await tx.agentSecret.findMany({
+              where: { agentId: agent.id },
+              include: { secret: { select: { ownerId: true } } },
             });
-          }
-          const datastores = await tx.agentDatastore.findMany({
-            where: { agentId: agent.id },
-            include: { datastore: { select: { ownerId: true } } },
-          });
-          const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== newOwner);
-          if (foreignDatastores.length > 0) {
-            await tx.agentDatastore.deleteMany({
-              where: { agentId: agent.id, datastoreId: { in: foreignDatastores.map((b) => b.datastoreId) } },
-            });
-          }
-          const bindingsRemoved = [
-            ...foreignSecrets.map((b) => ({ kind: "secret", boundName: b.boundName, resourceId: b.secretId })),
-            ...foreignDatastores.map((b) => ({ kind: "datastore", boundName: b.boundName, resourceId: b.datastoreId })),
-          ];
-
-          // Tool capabilities: rows aren't rewritten; the runner ignores any
-          // the new owner never stamped (capabilitiesGrantedById).
-          const attachments = await tx.agentTool.findMany({
-            where: { agentId: agent.id },
-            include: { tool: { select: { id: true, name: true } } },
-          });
-          const toolCapabilitiesSuspended = attachments
-            .filter((at) => at.capabilitiesGrantedById !== newOwner)
-            .map((at) => ({ toolId: at.tool.id, toolName: at.tool.name }));
-
-          // Sub-agent edges (both directions) the new owner can't delegate.
-          const edges = await tx.agentSubAgent.findMany({
-            where: { OR: [{ parentAgentId: agent.id }, { childAgentId: agent.id }] },
-            include: {
-              parent: { select: { id: true, ownerId: true } },
-              child: { select: { id: true, ownerId: true } },
-            },
-          });
-          const subAgentEdgesRemoved: { parentAgentId: string; childAgentId: string; boundName: string }[] = [];
-          for (const edge of edges) {
-            const parent = edge.parentAgentId === agent.id ? { ownerId: newOwner } : edge.parent;
-            const child = edge.childAgentId === agent.id ? { id: agent.id, ownerId: newOwner } : edge.child;
-            if (!(await canDelegate(tx, parent, child))) {
-              subAgentEdgesRemoved.push({
-                parentAgentId: edge.parentAgentId,
-                childAgentId: edge.childAgentId,
-                boundName: edge.boundName,
+            const foreignSecrets = secrets.filter((b) => b.secret.ownerId !== newOwner);
+            if (foreignSecrets.length > 0) {
+              await tx.agentSecret.deleteMany({
+                where: { agentId: agent.id, secretId: { in: foreignSecrets.map((b) => b.secretId) } },
               });
             }
-          }
-          for (const edge of subAgentEdgesRemoved) {
-            await tx.agentSubAgent.deleteMany({
-              where: { parentAgentId: edge.parentAgentId, childAgentId: edge.childAgentId },
+            const datastores = await tx.agentDatastore.findMany({
+              where: { agentId: agent.id },
+              include: { datastore: { select: { ownerId: true } } },
             });
-          }
-
-          // Webhooks others created stay, but fire only while their creator
-          // may still trigger the agent (core/webhooks.ts).
-          const webhooks = await tx.webhook.findMany({ where: { agentId: agent.id } });
-          const webhooksInactive: { id: string; createdBy: string | null }[] = [];
-          for (const webhook of webhooks) {
-            if (webhook.ownerId === newOwner) continue;
-            const creatorAccess = await effectiveAccess(tx, "agent", updated, webhook.ownerId);
-            if (!atLeast("agent", creatorAccess, "execute")) {
-              webhooksInactive.push({ id: webhook.id, createdBy: webhook.ownerId });
+            const foreignDatastores = datastores.filter((b) => b.datastore.ownerId !== newOwner);
+            if (foreignDatastores.length > 0) {
+              await tx.agentDatastore.deleteMany({
+                where: { agentId: agent.id, datastoreId: { in: foreignDatastores.map((b) => b.datastoreId) } },
+              });
             }
-          }
+            // MCP server attachments: the server's brokered secrets act for its
+            // owner, so a server the new owner neither owns nor holds use on is detached.
+            const mcpServers = await tx.agentMcpServer.findMany({
+              where: { agentId: agent.id },
+              include: { server: { select: { id: true, name: true, ownerId: true } } },
+              orderBy: { serverId: "asc" },
+            });
+            const foreignMcpServers = await filterUnusableMcpServers(tx, () => newOwner, mcpServers);
+            if (foreignMcpServers.length > 0) {
+              await tx.agentMcpServer.deleteMany({
+                where: { agentId: agent.id, serverId: { in: foreignMcpServers.map((b) => b.serverId) } },
+              });
+            }
+            const bindingsRemoved = [
+              ...foreignSecrets.map((b) => ({ kind: "secret", boundName: b.boundName, resourceId: b.secretId })),
+              ...foreignDatastores.map((b) => ({
+                kind: "datastore",
+                boundName: b.boundName,
+                resourceId: b.datastoreId,
+              })),
+              ...foreignMcpServers.map((b) => ({
+                kind: "mcp_server",
+                boundName: b.server.name,
+                resourceId: b.serverId,
+              })),
+            ];
 
-          return {
-            ...withOperatorMode(updated),
-            repositoryApprovalsRevoked: revoked,
-            bindingsRemoved,
-            toolCapabilitiesSuspended,
-            subAgentEdgesRemoved,
-            grantsReset,
-            everyoneGrant,
-            webhooksInactive,
-          };
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            // Tool capabilities: rows aren't rewritten; the runner ignores any
+            // the new owner never stamped (capabilitiesGrantedById).
+            const attachments = await tx.agentTool.findMany({
+              where: { agentId: agent.id },
+              include: { tool: { select: { id: true, name: true } } },
+            });
+            const toolCapabilitiesSuspended = attachments
+              .filter((at) => at.capabilitiesGrantedById !== newOwner)
+              .map((at) => ({ toolId: at.tool.id, toolName: at.tool.name }));
+
+            // Sub-agent edges (both directions) the new owner can't delegate.
+            const edges = await tx.agentSubAgent.findMany({
+              where: { OR: [{ parentAgentId: agent.id }, { childAgentId: agent.id }] },
+              include: {
+                parent: { select: { id: true, ownerId: true } },
+                child: { select: { id: true, ownerId: true } },
+              },
+            });
+            const subAgentEdgesRemoved: { parentAgentId: string; childAgentId: string; boundName: string }[] = [];
+            for (const edge of edges) {
+              const parent = edge.parentAgentId === agent.id ? { ownerId: newOwner } : edge.parent;
+              const child = edge.childAgentId === agent.id ? { id: agent.id, ownerId: newOwner } : edge.child;
+              if (!(await canDelegate(tx, parent, child))) {
+                subAgentEdgesRemoved.push({
+                  parentAgentId: edge.parentAgentId,
+                  childAgentId: edge.childAgentId,
+                  boundName: edge.boundName,
+                });
+              }
+            }
+            for (const edge of subAgentEdgesRemoved) {
+              await tx.agentSubAgent.deleteMany({
+                where: { parentAgentId: edge.parentAgentId, childAgentId: edge.childAgentId },
+              });
+            }
+
+            // Webhooks others created stay, but fire only while their creator
+            // may still trigger the agent (core/webhooks.ts).
+            const webhooks = await tx.webhook.findMany({ where: { agentId: agent.id } });
+            const webhooksInactive: { id: string; createdBy: string | null }[] = [];
+            for (const webhook of webhooks) {
+              if (webhook.ownerId === newOwner) continue;
+              const creatorAccess = await effectiveAccess(tx, "agent", updated, webhook.ownerId);
+              if (!atLeast("agent", creatorAccess, "execute")) {
+                webhooksInactive.push({ id: webhook.id, createdBy: webhook.ownerId });
+              }
+            }
+
+            return {
+              ...withOperatorMode(updated),
+              repositoryApprovalsRevoked: revoked,
+              bindingsRemoved,
+              toolCapabilitiesSuspended,
+              subAgentEdgesRemoved,
+              grantsReset,
+              everyoneGrant,
+              webhooksInactive,
+            };
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        ),
       );
       return textResult(result);
     },

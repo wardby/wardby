@@ -147,6 +147,8 @@ function harness(opts: {
       findMany: async () => [],
     },
     agentTool: { findMany: async () => [] },
+    // No MCP servers attached (src/core/mcp-tools.ts).
+    agentMcpServer: { findMany: async () => [], findUnique: async () => null },
     agentSecret: { findMany: async () => [] },
     budgetGroup: { findUnique: async () => null },
     agentSubAgent: { findMany: async () => [] },

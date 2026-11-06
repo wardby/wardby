@@ -14,6 +14,7 @@
  * never needed to set.
  */
 import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
+import { loadMcpServersMode } from "../config/mcp-servers.js";
 import { startupTestSimulators } from "../config/test-simulators.js";
 import {
   loadProviderConfig,
@@ -77,6 +78,7 @@ import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerGrantTools } from "./tools/grants.js";
 import { registerHostProviderTools } from "./tools/host-providers.js";
+import { registerMcpServerTools } from "./tools/mcp-servers.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerIssueProjectTools } from "./tools/issue-projects.js";
 import { registerNotificationChannelTools } from "./tools/notification-channels.js";
@@ -178,6 +180,7 @@ export function registerAllTools(
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
   registerHostProviderTools(mcp);
+  registerMcpServerTools(mcp);
   registerIssueProjectTools(mcp);
   registerNotificationChannelTools(mcp);
   registerHostAccountTools(mcp);
@@ -241,6 +244,7 @@ export function buildMcpProviders(): McpProviderComposition {
   };
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
+  loadMcpServersMode();
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   // One Power for the process, shared by both executors (wake) and the scheduler leader (sleep).
   const power = buildPower({ env: process.env, db: prisma });

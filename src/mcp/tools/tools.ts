@@ -24,7 +24,12 @@ import { effectiveToolTimeoutMs, toolTimeoutProblem } from "../../sandbox/tool-t
 import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
-import { findSameNamedAttachedTool, reservedToolNameReason } from "../../core/tool-names.js";
+import {
+  findSameNamedAttachedTool,
+  findSameNamedMcpTool,
+  reservedToolNameReason,
+  sameNamedMcpToolMessage,
+} from "../../core/tool-names.js";
 import {
   ToolAttachedError,
   deleteToolGuarded,
@@ -444,6 +449,9 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
               `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached${which}; detach it first.`,
             );
           }
+          // Nor a name one of the agent's MCP servers already gives the model.
+          const mcpClash = await findSameNamedMcpTool(tx, args.agentId, tool.name);
+          if (mcpClash) throw new McpError(409, sameNamedMcpToolMessage(args.agentId, tool.name, mcpClash.serverName));
           // Re-granting an attachment this owner never vouched for: what is
           // not restated is reset, never silently adopted.
           const keepUnstated = existing?.capabilitiesGrantedById === agent.ownerId;
