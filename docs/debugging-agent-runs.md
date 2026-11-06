@@ -39,13 +39,13 @@ access to.
 | `cost_report`                                      | What runs cost, when spend is the question                                                                                       |
 | `get_run_transcript`                               | The run's conversation, for Claude Code runs with `sessionResume` on                                                             |
 | `stop_run`                                         | Stops a run that's stuck                                                                                                         |
+| The PR, issue or Jira ticket                       | The diff, CI, the review, and the comment the run posted                                                                         |
 
 From Wardby 0.8.0, `list_agents` with `summary: true` returns each agent's id,
 name, kind, model, coding provider, budget, owner and your access, without the
 prompt and coding profile. Admins (the `admin` role, `admin:view` scope) can add
 `all: true` to `list_agents` or `list_runs` to see every agent or run in the
 deployment.
-| The PR, issue or Jira ticket | The diff, CI, the review, and the comment the run posted |
 
 Admins can also use the [Wardby Viewer](viewer-api.md), a desktop app showing runs,
 sub-agent trees, triggers and outcomes for every owner.

@@ -98,7 +98,9 @@ async function listRunsAcrossAgents(
   const owned = agents.filter((agent) => opts.all || accessOf(agent) === "owner").map((agent) => agent.id);
   const others = agents.filter((agent) => !opts.all && accessOf(agent) !== "owner").map((agent) => agent.id);
   const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  const take = Math.min(Math.max(1, Math.floor(opts.limit ?? ACROSS_AGENTS_DEFAULT_LIMIT)), ACROSS_AGENTS_MAX_LIMIT);
+  // A limit that isn't a finite number falls back to the default rather than reaching the query as NaN.
+  const requested = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : ACROSS_AGENTS_DEFAULT_LIMIT;
+  const take = Math.min(Math.max(1, requested), ACROSS_AGENTS_MAX_LIMIT);
   const status = opts.status;
   const runs = await ctx.db.run.findMany({
     where: {
