@@ -46,11 +46,17 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
     { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }
   >();
   let counter = 0;
+  const mcpServerRows: { name: string; secretNames: string[] }[] = [];
 
   return {
     resourceGrant: fakeResourceGrants(grants),
     hostProvider: { count: async () => 0, findMany: async () => [] },
     hostProviderCredential: { findMany: async () => [] },
+    mcpServer: {
+      findMany: async ({ where }: { where: { secretNames: { has: string } } }) =>
+        mcpServerRows.filter((r) => r.secretNames.includes(where.secretNames.has)),
+    },
+    mcpServerRows,
     agentSecretRows: agentSecrets,
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
@@ -394,6 +400,37 @@ describe("secrets tools", () => {
 
     const listed = await client.callTool({ name: "list_secrets", arguments: {} });
     expect(parseText(listed as never)).toEqual([]);
+    await client.close();
+  });
+
+  it("delete_secret refuses a secret an MCP server uses", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
+    const client = await connectClient(mcp);
+    const created = await client.callTool({
+      name: "create_secret",
+      arguments: { name: "DD_KEY", value: "sk-live-abc123" },
+    });
+    const { id } = parseText(created as never) as { id: string };
+    (db as unknown as { mcpServerRows: { name: string; secretNames: string[] }[] }).mcpServerRows.push({
+      name: "datadog",
+      secretNames: ["DD_KEY"],
+    });
+    const refused = await client.callTool({ name: "delete_secret", arguments: { id } });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toContain(
+      'Secret \\"DD_KEY\\" is used by MCP server(s) datadog; update or delete them first.',
+    );
     await client.close();
   });
 
