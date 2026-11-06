@@ -77,6 +77,7 @@ export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   "coding_failure_artifact",
   "coding_failure_cancelled",
   "coding_failure_executor",
+  "coding_failure_mcp_pins_unavailable",
   "coding_provider_quota",
   "coding_provider_rate_limited",
   "coding_provider_unavailable",

@@ -1503,6 +1503,26 @@ describe("ContainerExecutor", () => {
       expect(claude.store.run.status).toBe("succeeded");
     });
 
+    it("fails the run with coding_failure_mcp_pins_unavailable when the pins can't be read, and launches nothing", async () => {
+      const dbText = "Invalid `prisma.agentMcpServer.findMany()` invocation: connection to 10.0.0.5 refused";
+      const created = await harness({}, IMAGE, undefined, undefined, {
+        mcpToolPins: async () => {
+          throw new Error(dbText);
+        },
+      });
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(0);
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.terminations).toEqual([
+        expect.objectContaining({
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_mcp_pins_unavailable:coding_diag_[0-9a-f-]+$/),
+        }),
+      ]);
+      expect(JSON.stringify(created.store.terminations)).not.toContain("prisma");
+      expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
+    });
+
     it("clears the token with the capability when the launch fails", async () => {
       const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
       created.jobs.launchError = new Error("boom");

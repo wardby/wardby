@@ -167,6 +167,29 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
     expect(server.seen).toEqual([]);
   });
 
+  it("refuses the token while the session is still active but the run is cancelled or its task is", async () => {
+    const server = fakeMcpServer(() => textResult("unused"));
+    await db.run.update({ where: { id: runId }, data: { status: "cancelled" } });
+    const call = await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl));
+    expect(call.status).toBe(401);
+    expect(call.body).not.toContain(token);
+    const list = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    expect((await handleCodingMcpRequest(`Bearer ${token}`, list, deps(server.impl))).status).toBe(401);
+    await db.run.update({ where: { id: runId }, data: { status: "running" } });
+    const taskId = `cmcp-task-${suffix}`;
+    await db.task.create({
+      data: { id: taskId, kind: "run", runId, status: "cancelled", ttlAt: new Date(Date.now() + 60_000) },
+    });
+    try {
+      expect((await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl))).status).toBe(401);
+    } finally {
+      await db.task.deleteMany({ where: { id: taskId } });
+    }
+    expect(server.seen).toEqual([]);
+    // Nothing was counted against the run's limit.
+    expect((await db.codingProxySession.findUniqueOrThrow({ where: { id: sessionId } })).mcpCallCount).toBe(0);
+  });
+
   it("judges Codex by the run's dispatched provider: a profile switched to claude-code before launch gets no write tool", async () => {
     // Dispatched as Codex; the agent then switched to claude-code. The tool is not marked read-only.
     await db.codingRun.update({ where: { runId }, data: { provider: "codex" } });
@@ -299,6 +322,50 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
         body: "x".repeat(1024 * 1024 + 1),
       });
       expect(res.status).toBe(413);
+    });
+
+    it("aborts the call in flight when the proxy's request closes", async () => {
+      let started!: () => void;
+      const inFlight = new Promise<void>((resolve) => (started = resolve));
+      let serverAborted!: () => void;
+      const aborted = new Promise<void>((resolve) => (serverAborted = resolve));
+      const hanging = fakeMcpServer(
+        (_name, _args, signal) =>
+          new Promise((_resolve, reject) => {
+            started();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                serverAborted();
+                reject(new Error("aborted"));
+              },
+              { once: true },
+            );
+          }),
+      );
+      // A long stop poll: only the closed request can end this call.
+      const own = createGatewayServer({
+        db,
+        providers: {} as never,
+        codingMcp: deps(hanging.impl, { stopPollMs: 60_000 }),
+      });
+      await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+      try {
+        const client = new AbortController();
+        const request = fetch(`http://127.0.0.1:${(own.address() as AddressInfo).port}/coding-mcp`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: callBody(),
+          signal: client.signal,
+        }).catch((err: unknown) => err);
+        await inFlight;
+        client.abort();
+        await aborted;
+        expect(await request).toBeInstanceOf(Error);
+      } finally {
+        own.closeAllConnections();
+        await new Promise<void>((done) => own.close(() => done()));
+      }
     });
 
     it("leaves the worker route untouched by the MCP token", async () => {

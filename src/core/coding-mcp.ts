@@ -3,7 +3,7 @@
  * MCP server that runs a coding run's MCP tool calls. The worker reaches it only through the coding
  * proxy's /mcp route, which forwards the request and the run's MCP token (`rmt_…`) unchanged; the
  * proxy is not trusted, so the token is checked here again: its hash must name a proxy session that
- * is active and before its deadline.
+ * is active and before its deadline, whose run is still drivable (not stopped or cancelled).
  *
  * A Codex run (by the provider it was dispatched with, CodingRun.provider) may call only tools the
  * live tool list marks read-only: its shell commands can read the token.
@@ -24,7 +24,7 @@ import type { SecretCipher } from "../providers/secrets/types.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import type { Logger } from "./logger.js";
 import { handleMcpTool, isCodexCoding, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
-import { TOOL_STOP_POLL_MS, watchRunStop } from "./runner.js";
+import { runDrivability, TOOL_STOP_POLL_MS, watchRunStop } from "./runner.js";
 
 export const CODING_MCP_PATH = "/coding-mcp";
 
@@ -149,16 +149,20 @@ interface Session {
   run: { provider: string };
 }
 
-/** Handles one JSON-RPC request body for /coding-mcp. Never throws. */
+/**
+ * Handles one JSON-RPC request body for /coding-mcp. Never throws. `signal` is the request's own: the
+ * listener aborts it when the proxy's connection closes before the answer, which stops a call in flight.
+ */
 export async function handleCodingMcpRequest(
   authorization: string | undefined,
   body: string,
   deps: CodingMcpDeps,
+  signal?: AbortSignal,
 ): Promise<CodingMcpResponse> {
   const seen: { method?: string; sessionId?: string } = {};
   let response: CodingMcpResponse;
   try {
-    response = await handle(authorization, body, deps, seen);
+    response = await handle(authorization, body, deps, seen, signal);
   } catch {
     // Nothing of the error leaves: its message could carry anything the call touched.
     response = rpcError(500, null, -32603, "Internal error.");
@@ -173,6 +177,7 @@ async function handle(
   body: string,
   deps: CodingMcpDeps,
   seen: { method?: string; sessionId?: string },
+  signal: AbortSignal | undefined,
 ): Promise<CodingMcpResponse> {
   if (Buffer.byteLength(body, "utf8") > HTTP_LIMITS.json) {
     return rpcError(413, null, -32600, "The request body is too large.");
@@ -220,7 +225,7 @@ async function handle(
         })),
       });
     case "tools/call":
-      return rpcResult(id, await callTool(session, m.params, deps));
+      return rpcResult(id, await callTool(session, m.params, deps, signal));
     default:
       return rpcError(200, id, -32601, "Method not found.");
   }
@@ -249,10 +254,13 @@ async function authenticate(authorization: string | undefined, deps: CodingMcpDe
   });
   if (!session || session.status !== "active") return undefined;
   if ((deps.now?.() ?? new Date()).getTime() >= session.deadlineAt.getTime()) return undefined;
+  // A stopped or cancelled run's session can still read active for a moment: its token ends with the
+  // run, as an ended session's does (401, so no call starts and no tool is listed).
+  if ((await runDrivability(deps.db, session.runId)) !== "drivable") return undefined;
   return session;
 }
 
-async function callTool(session: Session, params: unknown, deps: CodingMcpDeps) {
+async function callTool(session: Session, params: unknown, deps: CodingMcpDeps, requestSignal?: AbortSignal) {
   const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
   const name = typeof p.name === "string" ? p.name : "";
   const pin = storedPins(session.mcpTools).find((candidate) => candidate.exposedName === name);
@@ -271,14 +279,16 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps) 
   const run = await deps.db.run.findUnique({ where: { id: session.runId }, select: { agentId: true } });
   if (!run) return toolError("mcp_tool_not_allowed", "This run no longer exists.");
   // As for a native run's call: a stop_run aborts the call in flight.
+  // The proxy closing its request (its forward limit, or the worker gone) aborts it too.
   const stop = watchRunStop(deps.db, session.runId, deps.stopPollMs ?? TOOL_STOP_POLL_MS);
+  const signal = requestSignal ? AbortSignal.any([stop.signal, requestSignal]) : stop.signal;
   try {
     const text = await handleMcpTool(pin, p.arguments === undefined ? "" : JSON.stringify(p.arguments), {
       db: deps.db,
       cipher: deps.cipher,
       agentId: run.agentId,
       runId: session.runId,
-      signal: stop.signal,
+      signal,
       deadlineAt: session.deadlineAt,
       readOnlyOnly: isCodexCoding(session.run.provider),
       fetchImpl: deps.fetchImpl,

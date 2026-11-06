@@ -1336,9 +1336,15 @@ export class ContainerExecutor implements Executor {
         // The agent's MCP tools, pinned for the run; only a run with some gets a token. The token is
         // never logged: only its hash goes to the session, the value only into the vault.
         // A Codex run's shell commands can read the token, so it gets read-only tools only; decided by
-        // the provider the run was dispatched with, which is what jobSpec launches.
-        const mcpTools =
-          (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
+        // the provider the run was dispatched with, which is what jobSpec launches. A failed read fails
+        // the run with a fixed code (the cause goes to the operator log only, redacted).
+        let mcpTools: McpToolPin[];
+        try {
+          mcpTools =
+            (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
+        } catch (error) {
+          throw new Error(MCP_PINS_UNAVAILABLE_ERROR, { cause: error });
+        }
         const mcpToken = mcpTools.length > 0 ? mintMcpToken() : undefined;
         const session = await this.options.sessions.createSession({
           runId,
@@ -3048,6 +3054,11 @@ function safeError(error: unknown): string {
   return `coding_executor:${redactAndTruncate(message, 200).replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
 }
 
+/** The agent's MCP tool pins could not be read at launch (a database error): the run fails, nothing launched. */
+export const MCP_PINS_UNAVAILABLE_ERROR = "coding_mcp_pins_unavailable";
+/** Its category: the run's error is coding_failure_mcp_pins_unavailable:<diagnostic id>. */
+export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
+
 /**
  * Error-code prefixes that name their category outright, checked before the
  * substring heuristics below. Those heuristics filed every `github_*` error
@@ -3084,6 +3095,8 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   // The same for any other host: a repository whose provider this server has not registered.
   ["vcs_host_provider_not_configured", "preflight"],
   ["vcs_", "workspace"],
+  // The agent's MCP tool pins could not be read at launch: nothing was launched.
+  [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
   // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
   ["local_", "workspace"],
   ["git_", "workspace"],

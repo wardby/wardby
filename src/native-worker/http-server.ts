@@ -148,7 +148,14 @@ async function serveCodingMcp(req: IncomingMessage, res: ServerResponse, deps: C
     if (status === 413) req.resume();
     return;
   }
-  const response = await handleCodingMcpRequest(req.headers.authorization, body, deps);
+  // The proxy gives up on a call at its forward limit (or its worker goes away): the closed response
+  // aborts the call in flight rather than leave it running against the MCP server.
+  const closed = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) closed.abort();
+  });
+  const response = await handleCodingMcpRequest(req.headers.authorization, body, deps, closed.signal);
+  if (closed.signal.aborted) return;
   res.setHeader("content-type", response.contentType);
   res.writeHead(response.status);
   res.end(response.body);
