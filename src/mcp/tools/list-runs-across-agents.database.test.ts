@@ -246,4 +246,72 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     expect(both.content[0].text).toMatch(/leave out agentId/);
     await admin.close();
   });
+
+  it("adds triggerInfo, outcomes and serviceReadiness, in the viewer's shapes, without free text", async () => {
+    const reviewer = await agent(me.id, "graph-reviewer");
+    const delivery = await agent(me.id, "graph-delivery");
+    const FAKE = "fake-secret-value-9f3c"; // stands in for anything a review body or service log could quote
+    const review = await db.run.create({ data: { agentId: reviewer.id, status: "succeeded", trigger: "host_event" } });
+    await db.runHostCheck.create({
+      data: {
+        runId: review.id,
+        provider: "github",
+        repository: "your-org/api",
+        checkId: "1",
+        headSha: "a".repeat(40),
+        prNumber: 12,
+        completedAt: new Date(),
+        verdict: "REQUEST_CHANGES",
+        reviewBody: `please rotate ${FAKE}`,
+      },
+    });
+    const fix = await db.run.create({ data: { agentId: delivery.id, status: "running", trigger: "host_event" } });
+    await db.runHostStatus.create({
+      data: {
+        runId: fix.id,
+        provider: "github",
+        repository: "your-org/api",
+        number: 12,
+        commentKind: "status",
+        commentId: "c1",
+      },
+    });
+    await db.codingRunServiceStatus.create({
+      data: {
+        runId: fix.id,
+        name: "postgres",
+        state: "failed",
+        attempts: 2,
+        reason: `exited: ${FAKE}`,
+        failedAt: new Date(),
+      },
+    });
+
+    const mcp = await connect(me);
+    const rows = await mcp.list();
+    const reviewRow = rows.find((r) => r.id === review.id);
+    const fixRow = rows.find((r) => r.id === fix.id);
+    expect(reviewRow).toMatchObject({
+      triggerInfo: { kind: "code_host", repository: "your-org/api", number: 12, event: "review" },
+      outcomes: [{ kind: "check", repository: "your-org/api", number: 12, completed: true }],
+    });
+    expect(fixRow).toMatchObject({
+      triggerInfo: { kind: "code_host", repository: "your-org/api", number: 12, event: "mention" },
+      outcomes: [{ kind: "code_host_comment", repository: "your-org/api", number: 12 }],
+      serviceReadiness: [{ name: "postgres", state: "failed", attempts: 2 }],
+    });
+    expect(rows[0]).not.toHaveProperty("pricingSnapshot");
+
+    const detail = await mcp.raw({ runId: fix.id }, "get_run");
+    expect(JSON.parse(detail.content[0].text)).toMatchObject({
+      triggerInfo: { event: "mention" },
+      serviceReadiness: [{ name: "postgres", state: "failed" }],
+    });
+    // Neither the review body nor the service's failure reason reaches either tool.
+    const reviewDetail = await mcp.raw({ runId: review.id }, "get_run");
+    for (const text of [JSON.stringify(rows), detail.content[0].text, reviewDetail.content[0].text]) {
+      expect(text).not.toContain(FAKE);
+    }
+    await mcp.close();
+  });
 });

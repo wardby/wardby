@@ -3,6 +3,8 @@ import type { WardbyMcpServer } from "../server.js";
 import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
+import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
+import { loadJiraConfig } from "../../config/providers.js";
 import { findReadableRun } from "./run-access.js";
 import {
   publicCodingRunResult,
@@ -54,6 +56,43 @@ async function requestForReader(
     );
     return { requestUnavailable: true };
   }
+}
+
+/** The issue-tracker sites issue links are built from (the admin viewer's own source); none when unset or invalid. */
+function issueSites(): IssueSites {
+  try {
+    const jira = loadJiraConfig();
+    return jira ? { jira: jira.siteUrl } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * What started each run and what it produced, in the admin viewer API's shapes (docs/viewer-api.md):
+ * `triggerInfo` (the pull request, issue, schedule or lead behind it), `outcomes` (pull requests opened,
+ * comments, checks) and `serviceReadiness` (each coding-run service's state). Only ids and links:
+ * repositories, numbers, issue keys, URLs, states and times, never free text. A service's failure
+ * `reason` is left out, since it can quote what the service printed.
+ */
+async function runGraphFields(ctx: Pick<McpRequestContext, "db">, runIds: readonly string[]) {
+  const graph = await loadGraphRuns(ctx.db, runIds, issueSites());
+  return new Map(
+    graph.map((run) => [
+      run.id,
+      {
+        triggerInfo: run.trigger,
+        outcomes: run.outcomes,
+        serviceReadiness: run.services.map(({ name, state, attempts, readyAt, failedAt }) => ({
+          name,
+          state,
+          attempts,
+          readyAt,
+          failedAt,
+        })),
+      },
+    ]),
+  );
 }
 
 /** Statuses `active: true` keeps, and that `since` always keeps. */
@@ -108,13 +147,22 @@ async function listRunsAcrossAgents(
       ...(status ? { status: status as never } : {}),
       ...(filters.length > 0 ? { AND: filters } : {}),
     },
-    omit: { finalText: true },
+    omit: { finalText: true, pricingSnapshot: true },
     take,
     orderBy: { startedAt: "desc" },
   });
+  const graph = await runGraphFields(
+    ctx,
+    runs.map((run) => run.id),
+  );
   return runs.map((run) => {
     const agent = byId.get(run.agentId);
-    return { ...run, agentName: agent?.name ?? null, agentBudgetUsd: agent ? Number(agent.budgetUsd) : null };
+    return {
+      ...run,
+      agentName: agent?.name ?? null,
+      agentBudgetUsd: agent ? Number(agent.budgetUsd) : null,
+      ...(graph.get(run.id) ?? { triggerInfo: null, outcomes: [], serviceReadiness: [] }),
+    };
   });
 }
 
@@ -144,7 +192,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
-      `(each row adds agentName and agentBudgetUsd and leaves out finalText; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
+      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes and serviceReadiness, and leaves out finalText " +
+      `and pricingSnapshot; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
       `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
       "plus any still pending or running. all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
@@ -195,6 +244,10 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "get_run",
     scope: "agents:read",
+    description:
+      "One run in full: status, cost, request, result, errors and budget events, plus triggerInfo (what started it: " +
+      "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
+      "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two.",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       // Its triggerer keeps seeing it even after losing access to the agent;
@@ -267,11 +320,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           : undefined;
       // Well-formed refusals only, with group, lead and agent budget filled as the run error's are.
       const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
+      // What started the run and what it produced, as the admin viewer shows them.
+      const graph = (await runGraphFields(ctx, [run.id])).get(run.id);
       // What the run was asked to do: the trigger's or lead's task, without the agent's standing instructions.
       const request = codingRun?.request ? await requestForReader(ctx, run, codingRun.request) : {};
       return textResult({
         ...withOperatorMode(run),
         ...request,
+        ...(graph ?? {}),
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
         ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),
