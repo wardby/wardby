@@ -116,8 +116,11 @@ export class McpHttpClient {
       }
       throw new McpClientError("mcp_server_unreachable", "The MCP server sent no response to the request.");
     }
-    if (found.error !== undefined) {
-      const text = typeof found.error.message === "string" ? found.error.message : "unknown error";
+    // Any error member, even a malformed one ("error": null, a string), fails the call: never a TypeError.
+    const replyError: unknown = found.error;
+    if (replyError !== undefined) {
+      const text =
+        isRecord(replyError) && typeof replyError.message === "string" ? replyError.message : "unknown error";
       throw new McpClientError(
         "mcp_server_error",
         `The MCP server returned an error: ${text.slice(0, MAX_ERROR_MESSAGE_CHARS)}`,

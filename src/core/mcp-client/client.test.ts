@@ -185,6 +185,21 @@ describe("McpHttpClient errors", () => {
     expect(result.message).not.toContain("e".repeat(501));
   });
 
+  it.each([null, "boom", 42])(
+    "maps a malformed JSON-RPC error member (%j) to mcp_server_error, never a TypeError",
+    async (value) => {
+      const reply: McpHttpResponse = {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, error: value, result: {} }),
+      };
+      const { fetch } = scripted([reply]);
+      const client = new McpHttpClient({ fetch, signal: live() });
+      const result = await code(client.initialize());
+      expect(result).toEqual({ code: "mcp_server_error", message: "The MCP server returned an error: unknown error" });
+    },
+  );
+
   it("maps a throwing fetch to mcp_server_unreachable without echoing the error", async () => {
     const { fetch } = scripted([new Error("ECONNREFUSED with-secret")]);
     const client = new McpHttpClient({ fetch, signal: live() });
