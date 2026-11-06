@@ -53,6 +53,8 @@ export function requestPinned(
 }
 export interface SafeFetchOptions extends FetchPolicyOptions {
   signal?: AbortSignal;
+  /** This fetch's own timeout; FETCH_TIMEOUT_MS when absent. */
+  timeoutMs?: number;
   connect?: typeof requestPinned;
   /** False: a 3xx is returned to the caller as-is (brokered requests re-check every hop themselves). */
   followRedirects?: boolean;
@@ -67,7 +69,7 @@ async function untilAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
 }
 export async function safeFetch(input: string, init: SafeFetchInit = {}, options: SafeFetchOptions = {}) {
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(new Error("fetch_timeout")), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => abort.abort(new Error("fetch_timeout")), options.timeoutMs ?? FETCH_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
   let url = input;
   let method = init.method ?? "GET";

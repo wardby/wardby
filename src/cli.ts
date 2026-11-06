@@ -95,6 +95,8 @@ import {
   type AuthorizeTool,
 } from "./core/tool-admin.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
+import { toolTimeoutProblem } from "./sandbox/tool-timeout.js";
+import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
 import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
@@ -273,6 +275,19 @@ async function agentCreate(args: string[]): Promise<void> {
   console.log(agent.id);
 }
 
+/**
+ * `--timeout-ms <ms>`: the tool's own time limit, up to WARDBY_TOOL_MAX_TIMEOUT_MS. On update,
+ * `--timeout-ms default` clears it (back to the default limit).
+ */
+function cliToolTimeout(raw: string | undefined, allowClear: boolean): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (allowClear && raw === "default") return null;
+  const value = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  const problem = toolTimeoutProblem(value, loadToolMaxTimeoutMs());
+  if (problem) fail(`invalid --timeout-ms: ${problem}`);
+  return value;
+}
+
 async function toolCreate(args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
@@ -281,6 +296,7 @@ async function toolCreate(args: string[]): Promise<void> {
       description: { type: "string" },
       params: { type: "string" },
       code: { type: "string" },
+      "timeout-ms": { type: "string" },
     },
   });
 
@@ -289,6 +305,7 @@ async function toolCreate(args: string[]): Promise<void> {
   }
   const reserved = reservedToolNameReason(values.name);
   if (reserved) fail(reserved);
+  const timeoutMs = cliToolTimeout(values["timeout-ms"], false);
 
   let paramsZod: string;
   let code: string;
@@ -326,6 +343,7 @@ async function toolCreate(args: string[]): Promise<void> {
       paramsZod: paramsZod!,
       jsonSchema: schemaResult.value as object,
       code: code!,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     },
   });
   for (const warning of await zod3ToolWarnings(toolSubject(tool.name), paramsZod!))
@@ -479,6 +497,7 @@ async function toolUpdate(args: string[]): Promise<void> {
       description: { type: "string" },
       params: { type: "string" },
       code: { type: "string" },
+      "timeout-ms": { type: "string" },
     },
   });
   const [ref] = positionals;
@@ -496,9 +515,10 @@ async function toolUpdate(args: string[]): Promise<void> {
     description: values.description,
     paramsZod: readFile("--params", values.params),
     code: readFile("--code", values.code),
+    timeoutMs: cliToolTimeout(values["timeout-ms"], true),
   };
   if (!hasToolChanges(changes)) {
-    fail("tool update requires at least one of --description, --params <file>, --code <file>.");
+    fail("tool update requires at least one of --description, --params <file>, --code <file>, --timeout-ms.");
   }
 
   const resolved = await resolveToolRef(prisma, ref);
@@ -888,6 +908,8 @@ async function scheduler(args: string[]): Promise<void> {
       (err) => cliLog.warn({ err }, "low_power_access_check_failed"),
     );
   }
+  // Read again at each tool call; checked here so a bad value stops start-up, not every run.
+  loadToolMaxTimeoutMs();
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
@@ -957,6 +979,11 @@ async function scheduler(args: string[]): Promise<void> {
  */
 async function nativeGateway(): Promise<void> {
   const listen = parseGatewayListen(process.env.NATIVE_GATEWAY_LISTEN) ?? { host: "0.0.0.0", port: 8790 };
+  try {
+    loadToolMaxTimeoutMs();
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
   let modelCatalog: CatalogStore;
   try {
     modelCatalog = await startModelCatalog(prisma);

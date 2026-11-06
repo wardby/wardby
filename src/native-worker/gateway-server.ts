@@ -32,6 +32,7 @@ import { relayedOutputTokens } from "../providers/coding-proxy/interrupted.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
+import { DEFAULT_TOOL_TIMEOUT_MS } from "../sandbox/tool-timeout.js";
 import { forWorker, gatewayLog } from "./gateway.js";
 import { PrismaGatewayLedger, type GatewaySessionRecord } from "./ledger.js";
 import {
@@ -446,8 +447,15 @@ export async function hostCall(
     }
     redact = values;
   }
-  const host = ctx.tools.privilegedHostFor(params.tool, AbortSignal.timeout(30_000), redact);
-  if (!host) throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
+  // The tool's own limit plus a margin (30 s for a default tool), never past the run's deadline,
+  // and aborted if the run is stopped meanwhile.
+  const stop = ctx.tools.watchStop();
+  const signal = AbortSignal.any([AbortSignal.timeout(hostCallTimeoutMs(ctx, params.tool)), stop.signal]);
+  const host = ctx.tools.privilegedHostFor(params.tool, signal, redact);
+  if (!host) {
+    stop.done();
+    throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
+  }
   const bridge = host[params.bridge];
   const run = async () => {
     try {
@@ -460,10 +468,27 @@ export async function hostCall(
       );
     }
   };
-  // Console lines are not worth a ledger row, and a secret value must never be stored in one
-  // (a secrets.get is a side-effect-free read, so a retried callId simply reads it again).
-  if (params.bridge === "__bridge_console" || params.bridge === "__bridge_secretsGet") return run();
-  return replayable(ledger, ctx.session.id, callId, "host.call", run);
+  try {
+    // Console lines are not worth a ledger row, and a secret value must never be stored in one
+    // (a secrets.get is a side-effect-free read, so a retried callId simply reads it again).
+    if (params.bridge === "__bridge_console" || params.bridge === "__bridge_secretsGet") return await run();
+    return await replayable(ledger, ctx.session.id, callId, "host.call", run);
+  } finally {
+    stop.done();
+  }
+}
+
+/** Added to a tool's limit for one host call: the worker's own wall time ends the call first. */
+export const GATEWAY_HOST_CALL_MARGIN_MS = 20_000;
+
+/** How long one host call of `tool` may take: its limit plus the margin, cut to the run's deadline. */
+export function hostCallTimeoutMs(
+  ctx: { session: { deadlineAt: Date }; tools: { toolTimeoutMs: (name: string) => number | undefined } },
+  tool: string,
+  now = Date.now(),
+): number {
+  const limitMs = (ctx.tools.toolTimeoutMs(tool) ?? DEFAULT_TOOL_TIMEOUT_MS) + GATEWAY_HOST_CALL_MARGIN_MS;
+  return Math.max(0, Math.min(limitMs, ctx.session.deadlineAt.getTime() - now));
 }
 
 /** Runs a one-shot call once per callId; a retry replays its recorded result. */

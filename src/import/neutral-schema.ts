@@ -59,6 +59,8 @@ export const NeutralToolSchema = z.object({
   jsonSchema: z.unknown().nullable().default(null), // ignored; we re-derive (ruling 2)
   code: z.string(),
   secretSchema: z.string().default(""),
+  /** The tool's own time limit (ms); absent or null keeps the default. Checked against WARDBY_TOOL_MAX_TIMEOUT_MS on import. */
+  timeoutMs: z.number().int().nullable().optional(),
 });
 export type NeutralTool = z.infer<typeof NeutralToolSchema>;
 

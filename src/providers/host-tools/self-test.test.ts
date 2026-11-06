@@ -209,6 +209,21 @@ describe("selfTestHostProvider", () => {
 });
 
 describe("callHostOperation", () => {
+  it("gives an approved snapshot the timeoutMs it was approved with", async () => {
+    // 1.5 s is inside the default 10 s, so only the snapshot's own 1 s limit stops it.
+    const code = `await new Promise((resolve) => setTimeout(resolve, 1500)); return { permission: "read" };`;
+    const run = (timeoutMs: number | null) =>
+      callHostOperation(
+        setup({ operations: [{ operation: "getRepositoryPermission", code, paramsZod: ZOD, timeoutMs }] }).provider,
+        cipher,
+        REPOSITORY,
+        "getRepositoryPermission",
+        { accountId: "a" },
+      );
+    expect(await run(1_000)).toEqual({ ok: false, code: "host_tool_timeout" });
+    expect(await run(null)).toEqual({ ok: true, value: { permission: "read" } });
+  });
+
   it("won't send the permission credential to a repository operation", async () => {
     const { provider, options } = setup({
       credentials: [],

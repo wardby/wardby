@@ -186,6 +186,10 @@ model Tool {
   jsonSchema  Json
   /// Tool body source; run inside the sandbox with the validated params.
   code        String
+  /// The tool's own time limit per call (ms). Null = the default (10 s). A
+  /// run uses the lower of this and WARDBY_TOOL_MAX_TIMEOUT_MS, and pins the
+  /// value its load step read, like the code.
+  timeoutMs   Int?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   agents      AgentTool[]
@@ -2005,6 +2009,8 @@ model HostProviderOperation {
   toolId       String?
   code         String
   paramsZod    String
+  /// The tool's timeoutMs when it was approved; null = the default limit.
+  timeoutMs    Int?
   approvedById String
   approvedAt   DateTime @default(now())
 

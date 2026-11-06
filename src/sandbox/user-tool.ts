@@ -7,20 +7,28 @@
  */
 
 import type { PrivilegedHost } from "./host-functions.js";
-import { runToolCode } from "./run-in-sandbox.js";
+import { runToolCode, toolLimits } from "./run-in-sandbox.js";
 import type { SandboxLimits } from "./eval-core.js";
 import { validateParams } from "./zod-params.js";
 
 export interface UserToolDefinition {
   code: string;
   paramsZod: string;
+  /** The time limit this run gives the tool (effectiveToolTimeoutMs); absent = the default. */
+  timeoutMs?: number;
+}
+
+export interface UserToolCallOptions {
+  limits?: Partial<SandboxLimits>;
+  /** Aborts the call when its run is stopped. */
+  signal?: AbortSignal;
 }
 
 export async function runUserToolCall(
   tool: UserToolDefinition,
   argsJson: string,
   privileged: (signal: AbortSignal) => PrivilegedHost,
-  limits?: Partial<SandboxLimits>,
+  options: UserToolCallOptions = {},
 ): Promise<string> {
   let parsedArgs: unknown;
   try {
@@ -39,7 +47,13 @@ export async function runUserToolCall(
     return JSON.stringify({ error: "validation_failed", message: validation.errorMessage });
   }
 
-  const result = await runToolCode({ code: tool.code, params: validation.value, limits, privileged });
+  const result = await runToolCode({
+    code: tool.code,
+    params: validation.value,
+    limits: toolLimits(tool.timeoutMs, options.limits),
+    signal: options.signal,
+    privileged,
+  });
   if (!result.ok) {
     return JSON.stringify({ error: result.errorKind, message: result.errorMessage });
   }

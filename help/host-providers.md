@@ -24,8 +24,8 @@ You need the `hosts:admin` scope and a role that grants it (`admin` or `host-man
 4. Call `test_host_provider` to check each read-only tool. Failures have
    [fixed codes](errors/host-tool-failed.md).
 
-`update_tool` changes nothing until you call `approve_host_provider_tools`. See which tools have
-changes with `get_host_provider`.
+`update_tool` changes nothing until you call `approve_host_provider_tools`, a new `timeoutMs`
+included. See which tools have changes with `get_host_provider`.
 
 A bound tool reaches only the provider's API hosts, inside one repository's path, and Wardby
 follows no redirects; the tool must fetch the `Location` itself. Any host manager can read and re-register any

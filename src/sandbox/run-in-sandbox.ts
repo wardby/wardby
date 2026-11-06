@@ -11,7 +11,14 @@
 import { createPrivilegedHost, installSandboxApi, type PrivilegedHost } from "./host-functions.js";
 import type { ParserWorkerPool } from "./parser-worker/pool.js";
 import { SANDBOX_PRELUDE } from "./prelude.js";
-import { evalToJson, NON_SERIALIZABLE_MARKER, type SandboxLimits, type SandboxResult } from "./eval-core.js";
+import {
+  DEFAULT_SANDBOX_LIMITS,
+  evalToJson,
+  NON_SERIALIZABLE_MARKER,
+  type SandboxLimits,
+  type SandboxResult,
+} from "./eval-core.js";
+import { fetchTimeoutFor, TOOL_RUN_STOPPED_MESSAGE, toolTimeoutMessage } from "./tool-timeout.js";
 import type { Datastore } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
 import type { SharedDatastoreAccessor } from "../core/datastores.js";
@@ -33,6 +40,8 @@ export interface SandboxInvocation {
   toolName: string;
   /** Overrides the default limits (limits.ts) — mainly for fast, deterministic tests. */
   limits?: Partial<SandboxLimits>;
+  /** The tool's time limit (effectiveToolTimeoutMs); its fetches time out just before it. Overrides limits.wallTimeLimitMs. */
+  timeoutMs?: number;
   /** Omitted for a dry run (no real agent) — secrets.get always resolves undefined. */
   secrets?: SecretsAccessor;
   /** Overrides the default shared logger — mainly for tests that need to capture forwarded console output. */
@@ -49,6 +58,8 @@ export interface ToolCodeInvocation {
   code: string;
   params: unknown;
   limits?: Partial<SandboxLimits>;
+  /** Stops the call early (its run was stopped): it fails as `cancelled`, and its host calls are aborted. */
+  signal?: AbortSignal;
   /** Built once per invocation, with that invocation's abort signal (fetch needs it). */
   privileged: (signal: AbortSignal) => PrivilegedHost;
   parserPool?: ParserWorkerPool;
@@ -81,13 +92,29 @@ export async function runToolCode(invocation: ToolCodeInvocation): Promise<Sandb
   }
 })()`;
 
-  return evalToJson(code, invocation.limits, (context, runtime, signal) => {
-    installSandboxApi(context, runtime, {
-      privileged: invocation.privileged(signal),
-      signal,
-      parserPool: invocation.parserPool,
-    });
-  });
+  const wallTimeLimitMs = invocation.limits?.wallTimeLimitMs ?? DEFAULT_SANDBOX_LIMITS.wallTimeLimitMs;
+  return evalToJson(
+    code,
+    invocation.limits,
+    (context, runtime, signal) => {
+      installSandboxApi(context, runtime, {
+        privileged: invocation.privileged(signal),
+        signal,
+        parserPool: invocation.parserPool,
+        wallTimeLimitMs,
+      });
+    },
+    {
+      signal: invocation.signal,
+      aborted: () => ({ ok: false, errorKind: "cancelled", errorMessage: TOOL_RUN_STOPPED_MESSAGE }),
+      timeoutMessage: toolTimeoutMessage,
+    },
+  );
+}
+
+/** The sandbox limits for a tool whose time limit is `timeoutMs` (absent: the defaults). */
+export function toolLimits(timeoutMs: number | undefined, base?: Partial<SandboxLimits>): Partial<SandboxLimits> {
+  return timeoutMs === undefined ? { ...base } : { ...base, wallTimeLimitMs: timeoutMs };
 }
 
 /** The in-process privileged host for a sandbox invocation. */
@@ -102,6 +129,9 @@ export function privilegedHostFor(invocation: SandboxInvocation, signal: AbortSi
     allowedFetchHosts: invocation.allowedFetchHosts,
     fetchImpl: invocation.fetchImpl,
     signal,
+    fetchTimeoutMs: fetchTimeoutFor(
+      invocation.timeoutMs ?? invocation.limits?.wallTimeLimitMs ?? DEFAULT_SANDBOX_LIMITS.wallTimeLimitMs,
+    ),
   });
 }
 
@@ -109,7 +139,7 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
   return runToolCode({
     code: invocation.code,
     params: invocation.params,
-    limits: invocation.limits,
+    limits: toolLimits(invocation.timeoutMs, invocation.limits),
     privileged: (signal) => privilegedHostFor(invocation, signal),
   });
 }

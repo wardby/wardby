@@ -254,6 +254,33 @@ describe("host provider tools", () => {
     expect(updated.code).toBe("return { changed: true };");
   });
 
+  it("treats a tool's timeoutMs as part of what is approved", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    const name = newName();
+    const { call } = await connect(p);
+    await call("register_host_provider", args(name, tools));
+    const operation = REQUIRED_OPERATIONS[0];
+    const view = async () =>
+      JSON.parse((await call("get_host_provider", { provider: name })).text).operations.find(
+        (o: { operation: string }) => o.operation === operation,
+      );
+    expect(await view()).toMatchObject({ status: "approved", approvedTimeoutMs: null, currentTimeoutMs: null });
+
+    await db.tool.update({
+      where: { ownerId_name: { ownerId: p.id, name: tools[operation] } },
+      data: { timeoutMs: 30_000 },
+    });
+    expect(await view()).toMatchObject({ status: "changed", approvedTimeoutMs: null, currentTimeoutMs: 30_000 });
+
+    await call("approve_host_provider_tools", { provider: name, tools: [operation] });
+    expect(await view()).toMatchObject({ status: "approved", approvedTimeoutMs: 30_000, currentTimeoutMs: 30_000 });
+    const row = await db.hostProviderOperation.findUniqueOrThrow({
+      where: { provider_operation: { provider: name, operation } },
+    });
+    expect(row.timeoutMs).toBe(30_000);
+  });
+
   it("shows the approved and current schema, so a schema-only change can be read", async () => {
     const p = await principal();
     const { tools } = await seed(p);

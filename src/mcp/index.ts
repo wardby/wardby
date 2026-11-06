@@ -13,6 +13,7 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
+import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import { startupTestSimulators } from "../config/test-simulators.js";
 import {
   loadProviderConfig,
@@ -238,6 +239,8 @@ export function buildMcpProviders(): McpProviderComposition {
     issueTrackers,
     repoAccess,
   };
+  // Read again at each tool call; checked here so a bad value stops start-up, not every run.
+  loadToolMaxTimeoutMs();
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   // One Power for the process, shared by both executors (wake) and the scheduler leader (sleep).
   const power = buildPower({ env: process.env, db: prisma });

@@ -300,6 +300,39 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
     expect(separateProcess.requests).toEqual(inProcess.requests);
   });
 
+  it("gives a tool its own timeoutMs in every mode, the worker included", async () => {
+    await db.tool.create({
+      data: {
+        id: `${toolId}-slow`,
+        name: "slow",
+        description: "Takes a while.",
+        paramsZod: "z.object({ ms: z.number() })",
+        jsonSchema: { type: "object", properties: { ms: { type: "number" } }, required: ["ms"] },
+        code: "await new Promise((resolve) => setTimeout(resolve, params.ms)); return 'done';",
+        timeoutMs: 1_000,
+        ownerId,
+      },
+    });
+    await db.agentTool.create({ data: { agentId, toolId: `${toolId}-slow`, capabilitiesGrantedById: ownerId } });
+    const results = [];
+    for (const [mode, launcher] of [
+      ["control_plane", loopbackLauncher],
+      ["sandbox", loopbackLauncher],
+      ["sandbox", processLauncher],
+    ] as const) {
+      // 1.5 s is well inside the default 10 s, so only the tool's own 1 s limit can stop it.
+      const result = await runIn(mode, launcher, scriptFor("slow", { ms: 1_500 }, ["Too slow."]));
+      const toolResult = result.requests[1].messages.find((m) => m.role === "tool");
+      expect(toolResult?.content).toContain("Exceeded the 1000ms wall-time limit");
+      results.push(result);
+    }
+    const [inProcess, sandboxed, separateProcess] = results;
+    expect(sandboxed.requests).toEqual(inProcess.requests);
+    expect(separateProcess.requests).toEqual(inProcess.requests);
+    await db.agentTool.deleteMany({ where: { toolId: `${toolId}-slow` } });
+    await db.tool.deleteMany({ where: { id: `${toolId}-slow` } });
+  });
+
   it("stops a sandboxed run that is cancelled mid-run, records it cancelled, and serves nothing after", async () => {
     const result = await runIn("sandbox", loopbackLauncher, script(), async (call, runId) => {
       // An operator cancels while the first model call is in flight.

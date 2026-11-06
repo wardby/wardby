@@ -543,22 +543,22 @@ records. Delete them (see pruning above) if you want the rollback to be final.
 
 ## Resource and networking limits
 
-| Surface                        | Limit                                             |
-| ------------------------------ | ------------------------------------------------- |
-| MCP/webhook bodies             | 1 MiB raw bytes                                   |
-| MCP tool-call arguments        | 100,000 array elements and object members         |
-| Auth bodies                    | 64 KiB raw bytes                                  |
-| Request completion / headers   | 15 seconds / 10 seconds                           |
-| Sandbox invocation             | 32 MiB heap, 1 MiB stack, 10 seconds              |
-| Sandbox fetch                  | 8 MiB encoded and decoded, 5 redirects, 8 seconds |
-| Bridge input / output          | 1 MiB / 12 MiB                                    |
-| Parser input / console payload | 256 KiB / 16 KiB                                  |
-| HTML links extracted           | 1000, with incremental result-byte accounting     |
-| Random bytes                   | 65,536 bytes                                      |
-| Host calls                     | 256 per invocation, at most 8 pending             |
-| Datastore value / keys listed  | 1 MiB / 1000                                      |
-| Datastore key / secret name    | 1024 bytes                                        |
-| New secret plaintext           | 64 KiB                                            |
+| Surface                        | Limit                                            |
+| ------------------------------ | ------------------------------------------------ |
+| MCP/webhook bodies             | 1 MiB raw bytes                                  |
+| MCP tool-call arguments        | 100,000 array elements and object members        |
+| Auth bodies                    | 64 KiB raw bytes                                 |
+| Request completion / headers   | 15 seconds / 10 seconds                          |
+| Sandbox invocation             | 32 MiB heap, 1 MiB stack, 10 seconds (see below) |
+| Sandbox fetch                  | 8 MiB encoded and decoded, 5 redirects           |
+| Bridge input / output          | 1 MiB / 12 MiB                                   |
+| Parser input / console payload | 256 KiB / 16 KiB                                 |
+| HTML links extracted           | 1000, with incremental result-byte accounting    |
+| Random bytes                   | 65,536 bytes                                     |
+| Host calls                     | 256 per invocation, at most 8 pending            |
+| Datastore value / keys listed  | 1 MiB / 1000                                     |
+| Datastore key / secret name    | 1024 bytes                                       |
+| New secret plaintext           | 64 KiB                                           |
 
 Oversized or malformed input fails explicitly. Existing oversized datastore
 values/keys and secret ciphertext fail instead of entering Node allocations.
@@ -572,8 +572,9 @@ call arguments against its `paramsZod`, runs in a fresh QuickJS runtime with the
 heap, stack, and time limits above. One that hits a limit fails that tool call
 only: the model receives a `validation_failed` or sandbox error result and the
 run continues. The invocation runs on the thread of the process that hosts the
-run (the server, or the run's worker with the native sandbox), so a call that
-runs to the time limit holds that thread for up to 10 seconds.
+run (the server, or the run's worker with the native sandbox). Code that keeps
+the thread busy is also stopped by the instruction budget, so a long time limit
+mostly lets a call wait on slow requests.
 
 For this release only, a custom tool's `paramsZod` is compiled with Zod 4's
 built-in Zod 3 API (`zod/v3`) so that existing tools keep working; see
@@ -599,7 +600,7 @@ The network layer cannot back this up for the control plane on GKE, because
 Workload Identity needs the metadata server.
 Sandbox code can explicitly log secrets it has been given; log size limits do
 not provide automatic redaction. Keep tool-authoring privileges restricted.
-Public/non-owner tool listings expose only id/name/description; owners retain
+Public/non-owner tool listings expose only id/name/description/timeoutMs; owners retain
 their source and schema. Private agents are indistinguishable from missing IDs.
 
 Cancellation stops bridge delivery, sleep timers, and in-flight network work.
@@ -611,6 +612,33 @@ Set a short database statement/lock timeout on the dedicated application role,
 bound connection pools and concurrent invocations, and review a cancellable
 database adapter or isolated worker if strict immediate termination is required.
 Do not claim these per-invocation caps establish a whole-process memory ceiling.
+
+### Tool time limits
+
+A tool call has 10 seconds unless the tool sets its own `timeoutMs`
+(`create_tool`, `update_tool`, `dry_run_tool`, `wardby tool create|update
+--timeout-ms`, or `timeoutMs` in a bundle's `config/tools.json`). The limit
+covers the whole call: each `fetch` may run until it, and a timer can't be set
+for longer. A call never outlasts its run: stopping the run aborts it, and a
+sandboxed run's deadline cuts it off.
+
+| Variable                     | Default  | Meaning                                                                                                                                                                                                                                 |
+| ---------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_TOOL_MAX_TIMEOUT_MS` | `300000` | The longest `timeoutMs` a tool may set, in milliseconds (at least `10000`). A larger value is refused when the tool is saved. A run uses the lower of the tool's `timeoutMs` and this value, so lowering it also covers existing tools. |
+
+Set it on every process that runs tools or serves the native sandbox gateway:
+`wardby serve`, `wardby scheduler` and the gateway. An invalid value stops
+start-up. On the native sandbox the gateway gives each of a tool's host calls
+its limit plus 20 seconds, never past the run's deadline. A long limit lets one
+call hold its run (and a sandboxed run's worker) for longer, so raise the
+ceiling only as far as your tools need.
+
+**Upgrading:** the release adds the nullable `Tool.timeoutMs` and
+`HostProviderOperation.timeoutMs` columns; apply the migration with
+`prisma migrate deploy` as with any upgrade. A sandboxed run passes a tool's
+`timeoutMs` to its worker, so update the native worker image together with the
+server: an older image refuses the run of an agent that has a tool with
+`timeoutMs`. Tools without `timeoutMs` run on either image.
 
 ## Slack workflow notifications
 

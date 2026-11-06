@@ -44,6 +44,8 @@ import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-funct
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
+import { effectiveToolTimeoutMs, fetchTimeoutFor } from "../sandbox/tool-timeout.js";
+import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import {
   logUnexpectedError,
   runSandboxedEngine,
@@ -1025,6 +1027,9 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
               allowedDatastorePrefixes: consented ? asStringArray(attachment.allowedDatastorePrefixes) : [],
               allowedHosts: consented ? asStringArray(attachment.allowedHosts) : [],
               allowedSharedDatastorePrefixes: consented ? asPrefixMap(attachment.allowedSharedDatastorePrefixes) : {},
+              // Only when set, so a default tool's pinned step result is unchanged. The ceiling
+              // (WARDBY_TOOL_MAX_TIMEOUT_MS) is applied when the tool runs (toolTimeoutMs below).
+              ...(typeof attachment.tool.timeoutMs === "number" ? { timeoutMs: attachment.tool.timeoutMs } : {}),
             },
           ];
         }),
@@ -1700,6 +1705,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   ): PrivilegedHost =>
     createPrivilegedHost({
       redactSecretValues,
+      fetchTimeoutMs: fetchTimeoutFor(limitOf(tool)),
       agentId: loaded.agentId,
       datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
       sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
@@ -1735,7 +1741,25 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         message: `No tool named "${name}" is attached to this agent.`,
       });
     }
-    return runUserToolCall(tool, argsJson, (signal) => scopedHost(name, tool, signal));
+    // Nothing else interrupts a call in progress (stops are seen at step boundaries), so a long
+    // tool call watches for its run being stopped and is aborted when it is.
+    const stop = watchRunStop(db, runId);
+    try {
+      return await runUserToolCall(
+        { ...tool, timeoutMs: limitOf(tool) },
+        argsJson,
+        (signal) => scopedHost(name, tool, signal),
+        { signal: stop.signal },
+      );
+    } finally {
+      stop.done();
+    }
+  };
+
+  /** The time limit this run gives the user tool `name` now, or undefined for a name that is not one. */
+  const toolTimeoutMs = (name: string): number | undefined => {
+    const tool = toolsByName.get(name);
+    return tool ? limitOf(tool) : undefined;
   };
 
   const runSandboxTool = async (name: string, argsJson: string, callId?: string): Promise<string> => {
@@ -1743,7 +1767,21 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return builtin ? builtin(argsJson, callId) : runUserTool(name, argsJson);
   };
 
-  return { toolsByName, builtinHandler, privilegedHostFor, readableSecretValues, runUserTool, runSandboxTool };
+  return {
+    toolsByName,
+    builtinHandler,
+    privilegedHostFor,
+    readableSecretValues,
+    runUserTool,
+    runSandboxTool,
+    toolTimeoutMs,
+    watchStop: () => watchRunStop(db, runId),
+  };
+}
+
+/** A pinned tool's time limit under the current ceiling (WARDBY_TOOL_MAX_TIMEOUT_MS, read each call). */
+function limitOf(tool: { timeoutMs?: number }): number {
+  return effectiveToolTimeoutMs(tool.timeoutMs, loadToolMaxTimeoutMs());
 }
 
 /**
@@ -1909,6 +1947,41 @@ export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string)
   return settleFinishedNativeRun(ctx, finished, claimed);
 }
 
+/** How often a user tool call in progress checks whether its run was stopped. */
+export const TOOL_STOP_POLL_MS = 2_000;
+
+/**
+ * Aborts `signal` once the run is no longer drivable (stop_run, a cancelled task, a parent's
+ * stop). Polls every `intervalMs`, starting one interval in, so a quick call reads nothing; a
+ * failed read changes nothing and the next tick reads again. `done()` stops the polling.
+ */
+export function watchRunStop(
+  db: RunnerDb,
+  runId: string,
+  intervalMs = TOOL_STOP_POLL_MS,
+): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  let reading = false;
+  const timer = setInterval(() => {
+    if (reading || controller.signal.aborted) return;
+    reading = true;
+    runDrivability(db, runId)
+      .then(
+        (state) => {
+          if (state !== "drivable") controller.abort(new Error(`run_${state}`));
+        },
+        () => {},
+      )
+      .finally(() => {
+        reading = false;
+      });
+  }, intervalMs);
+  timer.unref?.();
+  const done = () => clearInterval(timer);
+  controller.signal.addEventListener("abort", done, { once: true });
+  return { signal: controller.signal, done };
+}
+
 /** Where a run stands for the native gateway: still drivable, cancelled (its task), or otherwise ended. */
 export async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
@@ -1940,8 +2013,17 @@ export function sandboxWorkerInput(
     agent: loaded.agent,
     tools: loaded.tools,
     builtinTools: loaded.tools.map((tool) => tool.name).filter((name) => tools.builtinHandler(name) !== undefined),
+    // timeoutMs only when the tool sets one, already capped by this server's ceiling: a default
+    // tool's entry is unchanged, so an older worker image still accepts it.
     userTools: Object.fromEntries(
-      [...tools.toolsByName].map(([name, tool]) => [name, { code: tool.code, paramsZod: tool.paramsZod }]),
+      [...tools.toolsByName].map(([name, tool]) => [
+        name,
+        {
+          code: tool.code,
+          paramsZod: tool.paramsZod,
+          ...(tool.timeoutMs !== undefined ? { timeoutMs: limitOf(tool) } : {}),
+        },
+      ]),
     ),
     runsConcurrently: loaded.parallelDelegations
       ? loaded.tools.map((tool) => tool.name).filter((name) => name.startsWith(DELEGATE_TOOL_PREFIX))

@@ -7,7 +7,9 @@
  */
 import type { SandboxLimits } from "../../sandbox/eval-core.js";
 import { createPrivilegedHost, type HostBridge, type PrivilegedHost } from "../../sandbox/host-functions.js";
-import { runToolCode } from "../../sandbox/run-in-sandbox.js";
+import { runToolCode, toolLimits } from "../../sandbox/run-in-sandbox.js";
+import { fetchTimeoutFor } from "../../sandbox/tool-timeout.js";
+import { WALL_TIME_LIMIT_MS } from "../../sandbox/limits.js";
 import { safeFetch } from "../../sandbox/safe-fetch.js";
 import { validateParams } from "../../sandbox/zod-params.js";
 import type { Datastore } from "../datastore/types.js";
@@ -49,6 +51,8 @@ export interface HostToolInvocation {
   credential: () => Promise<SecretEntry | undefined>;
   fetchImpl?: typeof safeFetch;
   limits?: Partial<SandboxLimits>;
+  /** The approved snapshot's time limit (effectiveToolTimeoutMs); absent = the default. */
+  timeoutMs?: number;
 }
 
 const absent: HostBridge = async () => {
@@ -73,6 +77,7 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
       // Redirects are never followed here: a later hop would skip the guard, so the tool re-fetches through it.
       fetchImpl: (u, i, o) => (input.fetchImpl ?? safeFetch)(u, i, { ...o, followRedirects: false }),
       signal,
+      fetchTimeoutMs: fetchTimeoutFor(input.timeoutMs ?? input.limits?.wallTimeLimitMs ?? WALL_TIME_LIMIT_MS),
       secrets: {
         get: async () => undefined,
         resolve: async (name) => {
@@ -137,7 +142,7 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
   const result = await runToolCode({
     code: input.snapshot.code,
     params: validated.value,
-    limits: input.limits,
+    limits: toolLimits(input.timeoutMs, input.limits),
     privileged,
   });
 

@@ -13,6 +13,8 @@ import type { SecretCipher } from "../secrets/types.js";
 import { invokeHostTool, type HostToolResult } from "./invoke.js";
 import { HOST_OPERATIONS, isHostOperation, type HostOperation } from "./operations.js";
 import { findCredential } from "./registry.js";
+import { effectiveToolTimeoutMs } from "../../sandbox/tool-timeout.js";
+import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 
 type StoredSecret = Pick<Secret, "ciphertext" | "broker">;
 
@@ -23,7 +25,7 @@ export interface LoadedProvider {
   permissionApiPath: string | null;
   permissionSecret: StoredSecret | null;
   credentials: { repositoryPattern: string; secret: StoredSecret }[];
-  operations: { operation: string; code: string; paramsZod: string }[];
+  operations: { operation: string; code: string; paramsZod: string; timeoutMs?: number | null }[];
 }
 
 /**
@@ -99,6 +101,7 @@ export async function callHostOperation(
     pathPrefix: encodePath(template, { repository: path, workspace, repo }),
     credential,
     fetchImpl: options.fetchImpl,
+    timeoutMs: effectiveToolTimeoutMs(snapshot.timeoutMs, loadToolMaxTimeoutMs()),
   });
 }
 

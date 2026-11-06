@@ -4,6 +4,8 @@
  * from a validated bundle + reconciliation.
  */
 
+import { toolTimeoutProblem } from "../sandbox/tool-timeout.js";
+import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import type { PrismaClient } from "#prisma";
 import { Prisma } from "#prisma";
 import type { KeyObject } from "node:crypto";
@@ -121,6 +123,14 @@ export async function createFromBundle(
       warnings.push(`tool ${t.name}: failed to derive JSON schema, skipping`);
       continue;
     }
+    const timeoutProblem =
+      t.timeoutMs === undefined || t.timeoutMs === null
+        ? undefined
+        : toolTimeoutProblem(t.timeoutMs, loadToolMaxTimeoutMs());
+    if (timeoutProblem) {
+      warnings.push(`tool ${t.name}: ${timeoutProblem} Skipping`);
+      continue;
+    }
 
     // Names are unique per owner: reuse the target owner's own same-named
     // tool (what upsert-by-name used to do), never another owner's. A
@@ -136,6 +146,7 @@ export async function createFromBundle(
           code: t.code,
           jsonSchema: schema.value as object,
           ownerId,
+          ...(t.timeoutMs !== undefined && t.timeoutMs !== null ? { timeoutMs: t.timeoutMs } : {}),
         },
       }));
     toolIdMap.set(t.name, tool.id);

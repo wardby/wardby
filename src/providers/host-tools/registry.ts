@@ -159,7 +159,9 @@ export function findCredential<T extends { repositoryPattern: string }>(
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-const snapshotHash = (s: { code: string; paramsZod: string }) => sha256(`${s.paramsZod}\u0000${s.code}`);
+// A tool's timeoutMs is part of what is approved; a snapshot without one hashes as before.
+const snapshotHash = (s: { code: string; paramsZod: string; timeoutMs: number | null }) =>
+  sha256(`${s.paramsZod}\u0000${s.code}${s.timeoutMs === null ? "" : `\u0000${s.timeoutMs}`}`);
 
 export interface OperationView {
   operation: string;
@@ -169,6 +171,9 @@ export interface OperationView {
   approvedById: string;
   approvedSha256: string;
   currentSha256: string | null;
+  /** The approved snapshot's time limit (null: the default), and the tool's now; a change waits for approval. */
+  approvedTimeoutMs: number | null;
+  currentTimeoutMs: number | null;
   approvedCode?: string;
   approvedParamsZod?: string;
   currentCode?: string;
@@ -324,6 +329,7 @@ export async function registerHostProvider(
           toolId: tool.id,
           code: tool.code,
           paramsZod: tool.paramsZod,
+          timeoutMs: tool.timeoutMs,
           approvedById: principalId,
         });
       }
@@ -389,6 +395,7 @@ export async function approveHostProviderTools(
           data: {
             code: row.tool.code,
             paramsZod: row.tool.paramsZod,
+            timeoutMs: row.tool.timeoutMs,
             approvedById: principalId,
             approvedAt: new Date(),
           },
@@ -446,6 +453,8 @@ export async function getHostProviderView(
         approvedById: o.approvedById,
         approvedSha256,
         currentSha256,
+        approvedTimeoutMs: o.timeoutMs,
+        currentTimeoutMs: o.tool?.timeoutMs ?? null,
         ...(options.includeCode
           ? {
               approvedCode: o.code,
