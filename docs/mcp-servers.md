@@ -1,9 +1,10 @@
-# Remote MCP servers for native agents
+# Remote MCP servers for native and coding agents
 
-A native agent can call the tools of a remote MCP server. You register the
+A native, Claude Code or Codex agent can call the tools of a remote MCP server. You register the
 server once (its HTTPS URL plus your brokered secrets), Wardby saves the
 server's tool list, and you attach an allowlisted subset of those tools to
-an agent. The agent sees each tool as `<server name>__<tool name>`.
+an agent. A native agent sees each tool as `<server name>__<tool name>`; coding agents see
+them as described in [Coding agents](#coding-agents).
 
 `WARDBY_MCP_SERVERS` decides who may register servers: `owners` (the
 default, anyone), `admins` (registering, updating and refreshing need
@@ -24,7 +25,7 @@ attachments and `agents:read` to list and get them.
 | `list_mcp_servers`    | anyone                | Your servers and those shared with you: id, name, host, tool count, saved-at, `yours`.                             |
 | `get_mcp_server`      | owner, or `read`+     | One server with its full saved tool list (secret names and URL only for the owner).                                |
 | `delete_mcp_server`   | the server's owner    | Deletes a server and detaches it from every agent. Works when the mode is `off`.                                   |
-| `attach_mcp_server`   | agent's owner; `use`+ | Lets a native agent call the named tools (`allowedTools`, exact names) with an optional `callTimeoutMs`.           |
+| `attach_mcp_server`   | agent's owner; `use`+ | Lets a native or coding agent call the named tools (`allowedTools`, exact names) with an optional `callTimeoutMs`. |
 | `detach_mcp_server`   | the agent's owner     | Removes a server's tools from an agent. Works when the mode is `off`.                                              |
 
 `get_agent` shows each attached server under `mcpServers`: the server's `serverId`
@@ -63,13 +64,55 @@ carry credentials: a username, password or fragment is refused.
 3. `attach_mcp_server` with the agent, the server and `allowedTools`: exact
    tool names from the saved list, at least one, no wildcards. Attaching
    replaces the agent's earlier allowlist and time limit for that server.
-   Only native agents can attach a server.
+   Native, Claude Code and Codex agents can attach a server (see [Coding agents](#coding-agents)).
 
 The agent sees each tool as `<server name>__<tool name>`, with any character
 outside letters, digits, `_` and `-` changed to `_`; the result must be at
 most 64 characters. The description starts with `From MCP server <server name>: `.
 Attaching is refused if the name clashes with another tool on the agent
 (attached, another MCP tool, or a built-in name).
+
+## Coding agents
+
+A Claude Code or Codex agent can use attached servers too. Attach them the same way, with
+`attach_mcp_server`. The tools reach the run like this:
+
+1. The worker calls the coding proxy's `/mcp` route with a per-run MCP token (`rmt_…`, in the
+   worker's `WARDBY_MCP_TOKEN`). Workers still reach only the proxy.
+2. The proxy forwards the request to the native gateway's `/coding-mcp` route. The proxy never sees
+   a server's URL or secrets. The gateway checks the token again, checks the live attachment and
+   runs the call, and removes secret values from the result before it leaves.
+
+The token belongs to one run: it works only on `/mcp`, only while the run is active and before its
+deadline, and only its hash is stored.
+
+- **Claude Code agents** see each tool as `mcp__wardby_mcp__<server name>__<tool name>` and may use
+  any allowed tool. The 64-character limit on `<server name>__<tool name>` is the same as for
+  native agents; the prefix adds no other limit.
+- **Codex agents may use only tools the server marks `readOnlyHint: true`.** Wardby enforces this
+  when you attach (an allowlist with another tool is refused), when a run loads its tools (a tool
+  whose saved annotations no longer say read-only, for example after `refresh_mcp_server`, is left
+  out) and on every call. The reason is that repository code running in a Codex run can read the
+  run's MCP token, so only tools that don't change anything are safe to give it. `readOnlyHint` is
+  the server's own claim, which Wardby can't verify. The allowlist stays your control: allow only
+  tools you trust to be read-only.
+- **Call limit.** A run may make `WARDBY_MCP_MAX_CALLS_PER_RUN` calls (default `100`). Every call
+  counts, whatever its outcome. Past the limit a call returns
+  [`mcp_call_limit`](../help/errors/mcp-call-limit.md); the run goes on.
+- **Proxy setting.** The coding proxy needs `WARDBY_MCP_GATEWAY_URL`, the native gateway's base URL
+  (the kind and GKE manifests set it). Without it `/mcp` answers `503` with
+  [`mcp_unavailable`](../help/errors/mcp-unavailable.md) and coding agents get no MCP tools. See
+  [Remote MCP servers](security-deployment.md#remote-mcp-servers) for the variables.
+- **Worker images.** MCP for coding agents needs this release's Claude worker image and a new Codex
+  driver image. An older image ignores the token and the agent gets no MCP tools; the run does not
+  fail. Update the images together with the server.
+- **Repository configuration.** A repository's own MCP configuration (such as `.mcp.json`) is still
+  never loaded; the attached servers are the only MCP tools a coding run has.
+- **Codex models that use tool search** to find MCP tools aren't supported yet; Codex then gets no
+  MCP tools from Wardby. Other models work.
+
+Time limits and the other rules in this guide apply to coding agents too. See
+[Coding worker isolation](coding-worker-isolation.md#remote-mcp-tools) for the security notes.
 
 ## Time limits
 
@@ -112,15 +155,16 @@ URL. Secret values are removed from results, errors and logs.
 ## Not supported
 
 stdio servers, OAuth to a server (use a header secret), MCP resources,
-prompts and sampling, and coding agents (a coding run doesn't load attached
-servers or any MCP configuration yet).
+prompts and sampling.
 
 ## Trust
 
 A server's results are untrusted input to the model, like any tool result. The
 allowlist is the control: attach only the tools an agent needs. A server's
 annotations (read-only, destructive and so on) are hints from the server, not
-something Wardby enforces.
+something Wardby can verify. The one place Wardby acts on a hint is Codex coding
+agents, which may use only tools marked `readOnlyHint: true` (see
+[Coding agents](#coding-agents)).
 
 ## Sharing a server
 
@@ -174,6 +218,8 @@ the run goes on.
 | [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md)     | Detached, off the allowlist, or the owner lost `use` on the server.   |
 | [`mcp_tool_removed`](../help/errors/mcp-tool-removed.md)             | The server no longer lists the tool.                                  |
 | [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md)             | The call hit its time limit or the run was stopped.                   |
+| [`mcp_call_limit`](../help/errors/mcp-call-limit.md)                 | A coding run made more calls than `WARDBY_MCP_MAX_CALLS_PER_RUN`.     |
+| [`mcp_unavailable`](../help/errors/mcp-unavailable.md)               | The coding proxy has no gateway to forward MCP calls to.              |
 
 See also [Secrets and tools](tool-secrets.md) and
 [Remote MCP servers](security-deployment.md#remote-mcp-servers).

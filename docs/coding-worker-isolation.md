@@ -143,7 +143,8 @@ deeply to process is refused with `request_nesting_too_deep`.
 
 - **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
   text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool
-  names, the reviewed beta values, the thinking mode the run's model catalog
+  names plus the run's own MCP tool names (see
+  [Remote MCP tools](#remote-mcp-tools)), the reviewed beta values, the thinking mode the run's model catalog
   entry names, and only effort levels that entry lists in `efforts` (top-level,
   or on an effort-only system message for models that change effort per turn).
 - **OpenAI Responses** (`parseOpenAiRequest`), built from what the pinned
@@ -217,6 +218,55 @@ rather than silently widening what reaches OpenAI. Upgrading the pinned
    reach anything outside the worker or bill outside the metered tokens,
    then widen `parseOpenAiRequest` only for what that review accepts, and
    document it in the list above.
+
+### Remote MCP tools
+
+A coding agent can have [remote MCP server](mcp-servers.md#coding-agents) tools
+attached. The worker still reaches only the proxy:
+
+1. When a run has MCP tools, the control plane mints a per-run MCP token
+   (`rmt_` plus 32 random bytes, base64url). Only its SHA-256 hash is stored
+   with the run's proxy session; the token reaches the worker only as
+   `WARDBY_MCP_TOKEN`, and is never logged. It is valid only on the proxy's
+   `/mcp` route, and only while the session is active and before its deadline.
+   It is not the run capability, and it is not accepted by the model routes.
+2. The worker (Claude Code or Codex, over HTTP) calls `POST /mcp` on the proxy
+   with `Authorization: Bearer <token>`. The proxy checks the token and
+   forwards the request to the native gateway's `/coding-mcp` route
+   (`WARDBY_MCP_GATEWAY_URL`). The proxy never sees an MCP server's URL or
+   secrets. Without `WARDBY_MCP_GATEWAY_URL`, `/mcp` answers `503`
+   `mcp_unavailable`. A bad or expired token gets a `401` without a
+   `WWW-Authenticate` header, so a client doesn't start OAuth discovery.
+3. The gateway checks the token again (the proxy is not trusted), checks the
+   live attachment on every call, counts the call against the run's limit
+   (`WARDBY_MCP_MAX_CALLS_PER_RUN`, default 100; failed calls count), runs it,
+   and removes the server's secret values from the result before it leaves.
+   Logs for the route carry the method, status and session id, never bodies,
+   arguments, results or the token.
+
+The proxy can reach the gateway's HTTP port. It holds no gateway credentials,
+and each route authenticates separately. The Anthropic allowlist accepts the
+run's own MCP tools as plain client tools named
+`mcp__wardby_mcp__<server>__<tool>`, and only those the run pinned.
+
+Where the token is exposed:
+
+- **Claude Code.** The agent container receives the MCP configuration, its
+  bearer header included, on Claude Code's command line. That container runs no
+  model commands and shares no PID namespace with the tool runner, so commands
+  the model runs can't read it.
+- **Codex.** Shell commands run in the same container as Codex, and can read
+  the token through `/proc`. For that reason a Codex agent may use only tools
+  the server marks `readOnlyHint: true`: Wardby refuses any other tool when you
+  attach, when a run loads its tools, and on every call. `readOnlyHint` is the
+  server's own claim, which Wardby can't verify, so the allowlist remains the
+  owner's control. A leaked token is limited to this run's allowed tools, the
+  call limit and the run's deadline.
+
+A repository's own MCP configuration is never loaded. MCP tools need this
+release's Claude worker image and a new Codex driver image; an older image
+ignores the token and gets no MCP tools, and the run does not fail. Codex
+models that use tool search to find MCP tools aren't supported yet.
 
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,

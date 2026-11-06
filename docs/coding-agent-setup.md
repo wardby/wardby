@@ -388,8 +388,8 @@ agents.
 - **`false`.** Bare mode is off. Claude Code loads `CLAUDE.md` and skills
   itself, through its native Skill tool, instead of reading them from the
   system prompt. Repository settings, hooks, MCP configuration, agents, and
-  commands are still never loaded in either mode (coding agents can't use
-  [attached MCP servers](mcp-servers.md) yet); native loading also locks
+  commands are still never loaded in either mode (the only MCP tools a coding
+  run has are those of [attached MCP servers](mcp-servers.md#coding-agents)); native loading also locks
   Claude Code's own hooks to wardby's managed set.
 
 If the worker can't write the native-mode context to disk for a run, that
