@@ -3,7 +3,7 @@ id: native-capabilities
 title: Use native agents, tools, and data
 summary: Attach scoped tools, secrets, datastores, memory, schedules, and sub-agents to a native Wardby agent.
 audience: developer
-tags: [agents, tools, secrets, datastores, memory, schedules, subagents, zod, paramsZod, create_tool, dry_run_tool, timeoutMs, timeout]
+tags: [agents, tools, secrets, datastores, memory, subagents, paramsZod, create_tool, dry_run_tool, timeoutMs]
 appliesTo: >=0.2.1
 ---
 
