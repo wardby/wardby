@@ -48,6 +48,10 @@ async function main(): Promise<void> {
     // Hidden: the stand-in tool server `wardby resume` configures Claude Code to start.
     const { resumeToolsCommand } = await import("./coding/transcript/resume/stand-in.js");
     await resumeToolsCommand(process.argv.slice(3));
+  } else if (command === "claude-plugin") {
+    // Sets up the Claude Code plugin on this machine: no environment, database, or server runtime.
+    const { claudePluginCommand } = await import("./claude-plugin/command.js");
+    process.exitCode = await claudePluginCommand(process.argv.slice(3));
   } else if (command === "knowledge") {
     // Offline bundle validation: no environment, database, or HTTP runtime.
     const { knowledgeCommand } = await import("./knowledge/cli.js");

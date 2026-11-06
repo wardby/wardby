@@ -6,6 +6,7 @@ export const CLI_USAGE = `usage:
   wardby down [--volumes]
   wardby knowledge check [dir] [--root <dir>] [--strict] [--json]   Validate a knowledge bundle (offline)
   wardby resume - [--dir <path> | --here] [--force] [--print]   Continue a coding run's Claude Code session locally (paste the get_run_transcript link)
+  wardby claude-plugin install|uninstall|status [options]   Set up the wardby-runs Claude Code pane (plugin, MCP server, allow rules)
   wardby help [list]
   wardby help search <terms>
   wardby help open <article-id>

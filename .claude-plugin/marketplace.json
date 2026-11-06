@@ -1,0 +1,12 @@
+{
+  "name": "wardby",
+  "description": "Claude Code plugins for wardby",
+  "owner": { "name": "wardby", "url": "https://github.com/wardby/wardby" },
+  "plugins": [
+    {
+      "name": "wardby-runs",
+      "source": "./plugins/claude-code",
+      "description": "A pane listing your wardby agent runs, with pull-request chains, run details and Continue locally"
+    }
+  ]
+}
