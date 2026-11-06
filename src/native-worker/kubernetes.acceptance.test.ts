@@ -52,7 +52,12 @@ const kubectlOk = (args: string[]) => {
 describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
   const tag = randomUUID().slice(0, 8);
   const ownerId = `nka-owner-${tag}`;
-  const agents = { quick: `nka-quick-${tag}`, slow: `nka-slow-${tag}` };
+  const agents = {
+    quick: `nka-quick-${tag}`,
+    slow: `nka-slow-${tag}`,
+    patient: `nka-patient-${tag}`,
+    impatient: `nka-impatient-${tag}`,
+  };
   let providers: NativeRunProviders;
   let launcher: KubernetesNativeWorkerLauncher;
   let executor: NativeSandboxExecutor;
@@ -93,10 +98,19 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
     const code = {
       quick: "return { note: await datastore.get(params.key) };",
       slow: "await new Promise((r) => setTimeout(r, 7000));\nreturn { note: await datastore.get(params.key) };",
+      // Past the default 10 s limit: only a tool with a longer timeoutMs finishes.
+      patient: "await new Promise((r) => setTimeout(r, 14000));\nreturn { note: await datastore.get(params.key) };",
+      impatient: "await new Promise((r) => setTimeout(r, 14000));\nreturn { note: await datastore.get(params.key) };",
     };
-    for (const kind of ["quick", "slow"] as const) {
+    const toolNames = {
+      quick: "lookup",
+      slow: "slow_lookup",
+      patient: "patient_lookup",
+      impatient: "impatient_lookup",
+    };
+    for (const kind of ["quick", "slow", "patient", "impatient"] as const) {
       const agentId = agents[kind];
-      const toolName = kind === "quick" ? "lookup" : "slow_lookup";
+      const toolName = toolNames[kind];
       await prisma.agent.create({
         data: {
           id: agentId,
@@ -106,7 +120,7 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
           maxTurns: 4,
           ownerId,
           nativeExecutionMode: "sandbox",
-          systemPrompt: `Call the ${toolName} tool once with key "notes/a". Then answer in one short sentence with what the note says.`,
+          systemPrompt: `Call the ${toolName} tool once with key "notes/a". Then answer in one short sentence with what the note says. If the tool returns an error, do not retry: answer with exactly TOOL_FAILED.`,
         },
       });
       await prisma.tool.create({
@@ -118,6 +132,7 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
           code: code[kind],
           paramsZod: "z.object({ key: z.string() })",
           jsonSchema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+          ...(kind === "patient" ? { timeoutMs: 20_000 } : {}),
         },
       });
       await prisma.agentTool.create({
@@ -147,7 +162,7 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
     await prisma.principal.deleteMany({ where: { id: ownerId } });
   });
 
-  const newRun = (kind: "quick" | "slow") =>
+  const newRun = (kind: keyof typeof agents) =>
     prisma.run.create({ data: { agentId: agents[kind], nativeExecutionMode: "sandbox", executionManaged: true } });
   const waitFor = async (runId: string, timeoutMs = 150_000) => {
     const until = Date.now() + timeoutMs;
@@ -212,6 +227,17 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
     const done = await waitFor(run.id);
     expect(done.status).toBe("succeeded");
     kubectl(["rollout", "status", "deploy/wardby-native-gateway", "--timeout=120s"]);
+  }, 300_000);
+
+  it("gives a tool its own timeoutMs in the pod: 14 s finishes with 20 s, fails with the default 10 s", async () => {
+    const patient = await newRun("patient");
+    const impatient = await newRun("impatient");
+    await Promise.all([executor.start(patient.id), executor.start(impatient.id)]);
+    const [patientDone, impatientDone] = await Promise.all([waitFor(patient.id), waitFor(impatient.id)]);
+    expect(patientDone.status).toBe("succeeded");
+    expect(patientDone.finalText).toMatch(/Friday/);
+    expect(impatientDone.finalText).toMatch(/TOOL_FAILED/);
+    expect(impatientDone.finalText).not.toMatch(/Friday/);
   }, 300_000);
 
   it("stops a run mid tool call: cancelled, pod gone", async () => {
