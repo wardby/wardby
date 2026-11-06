@@ -87,7 +87,7 @@ function errorCodes(): Map<string, string> {
 /** Error codes with no help/errors article when this suite was written: finding D1. */
 const KNOWN_UNDOCUMENTED_CODES = new Set<string>([
   // Review tool errors (repo_*).
-  ...["invalid_arguments_json", "repository_not_linked", "write_access_required"],
+  ...["invalid_arguments_json", "invalid_arguments", "repository_not_linked", "write_access_required"],
   ...["host_not_configured", "issues_unavailable", "is_pull_request", "issue_not_found", "ci_failing"],
   ...["ci_pending", "unknown_tool", "host_api_error"],
   // Issue-tracker tool errors (jira_*).

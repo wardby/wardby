@@ -7,7 +7,12 @@ an agent. The agent sees each tool as `<server name>__<tool name>`.
 
 `WARDBY_MCP_SERVERS` decides who may register servers: `owners` (the
 default, anyone), `admins` (registering, updating and refreshing need
-`hosts:admin`) or `off` (every tool below is refused).
+`hosts:admin`) or `off` (every tool below is refused except
+`detach_mcp_server` and `delete_mcp_server`, so cleanup stays possible, and
+attached servers' tools are left out of runs).
+
+The tools below need the `tools:write` scope to change servers and
+attachments and `agents:read` to list and get them.
 
 ## Tools
 
@@ -18,9 +23,9 @@ default, anyone), `admins` (registering, updating and refreshing need
 | `refresh_mcp_server`  | the server's owner    | Saves a fresh tool list straight away; returns added, removed and changed tools and the agents left missing tools. |
 | `list_mcp_servers`    | anyone                | Your servers and those shared with you: id, name, host, tool count, saved-at, `yours`.                             |
 | `get_mcp_server`      | owner, or `read`+     | One server with its full saved tool list (secret names and URL only for the owner).                                |
-| `delete_mcp_server`   | the server's owner    | Deletes a server and detaches it from every agent.                                                                 |
+| `delete_mcp_server`   | the server's owner    | Deletes a server and detaches it from every agent. Works when the mode is `off`.                                   |
 | `attach_mcp_server`   | agent's owner; `use`+ | Lets a native agent call the named tools (`allowedTools`, exact names) with an optional `callTimeoutMs`.           |
-| `detach_mcp_server`   | the agent's owner     | Removes a server's tools from an agent.                                                                            |
+| `detach_mcp_server`   | the agent's owner     | Removes a server's tools from an agent. Works when the mode is `off`.                                              |
 
 `get_agent` shows each attached server under `mcpServers`: the server's `serverId`
 and name, the allowed tools, `callTimeoutMs`, the exposed tool names and any allowed tools the server no
@@ -86,14 +91,23 @@ tool the server newly adds is not available to any agent until you attach it.
 ## What a call does
 
 Each call opens its own session: `initialize`, `notifications/initialized`,
-`tools/call`, then a `DELETE` to end it. Wardby checks on every call that
-the tool is still attached and still in the saved list. Text returned to the
-model is cut at 100,000 characters, with a note. Anything the server sends
-that isn't an answer to Wardby's request (sampling, elicitation, roots,
-notifications) is ignored or answered "not supported". One log line per call
-records the server id, tool, outcome, duration and result size, never the
-arguments or the response. Secret values are removed from results, errors and
-logs.
+`tools/call`, then a `DELETE` to end it. Because every call gets a fresh
+session, a server that keeps state between calls in one session won't see
+that state on the next call. Wardby checks on every call that the tool is
+still attached and still in the saved list, and that the agent's owner still
+owns the server or holds `use` on it; the call uses the server's current URL
+and secrets. Arguments that aren't a JSON object return `invalid_arguments`
+without calling the server. Text returned to the model is cut at 100,000
+characters, with a note.
+
+Wardby answers none of a server's own requests (sampling, elicitation,
+roots). Notifications in a reply are ignored. A reply that carries only a
+request from the server, and no answer to Wardby's request, fails the call
+with `mcp_server_error`.
+
+One log line per call records the run id, agent id, server id, tool,
+outcome, duration and result size, never the arguments, the response or the
+URL. Secret values are removed from results, errors and logs.
 
 ## Not supported
 
@@ -118,10 +132,26 @@ your brokered secrets, so grant `use` only to people you trust with them.
 `write` allows nothing beyond `use`: only the owner updates, refreshes,
 deletes or re-grants a server.
 
+Sharing uses `grant_access` and `revoke_access`, which need the
+`agents:write` scope; registering and attaching need `tools:write`.
+
+An agent may use a server only while its owner owns the server or holds `use`
+(or `write`) on it. `revoke_access`, and `grant_access` lowering a grant to
+`read` (for a principal, or `everyone` from `use` to `read`), detach the
+server at once from every agent whose owner can no longer use it; the reply
+counts them under `attachmentsRemoved`. Your own agents, and agents whose
+owner still holds `use` through another grant, keep it. Runs already going
+lose the tools on their next call, which returns `mcp_tool_not_allowed`.
+
 `delete_mcp_server` removes the server's tools from every agent attached to
 it, including other owners' agents that use it through a grant, and removes
-its grants. Revoking a grant stops new attachments but doesn't remove ones
-already made: the grantee's agents keep the server until it is detached.
+its grants.
+
+When the server's secrets can't be loaded (a secret was deleted, or its
+broker config no longer lists the server's host), the owner's own agents get
+an `mcp_server_error` that names the secret. An agent using the server through
+a grant gets only "The MCP server's credentials can't be used; ask its owner
+to check it.", never the owner's secret names.
 
 An attachment acts with the server owner's secrets. When `make_owner` gives an
 agent a new owner, servers the new owner neither owns nor holds `use` on are
@@ -141,7 +171,7 @@ the run goes on.
 | [`mcp_server_unreachable`](../help/errors/mcp-server-unreachable.md) | Wardby couldn't connect to the server.                                |
 | [`mcp_server_auth_failed`](../help/errors/mcp-server-auth-failed.md) | The server answered 401 or 403.                                       |
 | [`mcp_server_error`](../help/errors/mcp-server-error.md)             | Another HTTP error, a malformed reply, or the tool reported an error. |
-| [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md)     | The server was detached or the tool left the allowlist.               |
+| [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md)     | Detached, off the allowlist, or the owner lost `use` on the server.   |
 | [`mcp_tool_removed`](../help/errors/mcp-tool-removed.md)             | The server no longer lists the tool.                                  |
 | [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md)             | The call hit its time limit or the run was stopped.                   |
 

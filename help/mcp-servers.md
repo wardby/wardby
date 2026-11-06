@@ -24,10 +24,16 @@ Each call has `callTimeoutMs` (default `30000`, at most `WARDBY_TOOL_MAX_TIMEOUT
 past the run's deadline). Results are untrusted input; the allowlist is the control. Coding agents,
 stdio servers and OAuth are not supported.
 
-`WARDBY_MCP_SERVERS` is `owners` (default), `admins` (registering needs `hosts:admin`) or `off`.
+`WARDBY_MCP_SERVERS` is `owners` (default), `admins` (registering needs `hosts:admin`) or `off`
+(only `detach_mcp_server` and `delete_mcp_server` still work, for cleanup).
 
-Share a server with `grant_access` (`resourceType: "mcp_server"`). `use` lets the grantee attach
-it, and its tools then run with your secrets.
+Each call opens a fresh MCP session, so a server that keeps state between calls in one session
+won't see it. Arguments that aren't a JSON object return `invalid_arguments`.
+
+Share a server with `grant_access` (`resourceType: "mcp_server"`; needs the `agents:write` scope,
+registering needs `tools:write`). `use` lets the grantee attach it, and its tools then run with your
+secrets. Revoking the grant, or lowering it to `read`, detaches the server from the grantee's agents
+at once, and their runs' next call is refused with `mcp_tool_not_allowed`.
 
 Errors a call can return: [`mcp_server_unreachable`](errors/mcp-server-unreachable.md),
 [`mcp_server_auth_failed`](errors/mcp-server-auth-failed.md),

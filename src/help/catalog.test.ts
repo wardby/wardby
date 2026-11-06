@@ -161,11 +161,16 @@ describe("buildHelpCatalog", () => {
     "mcp_tool_removed",
     "mcp_call_timeout",
     "mcp_servers_off",
-    "invalid_arguments",
   ])("ranks the article for %s first", async (code) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
-    const id = code === "invalid_arguments" ? "errors/mcp-server-error" : `errors/${code.replaceAll("_", "-")}`;
-    expect(searchHelp(catalog, code)[0]?.page.id).toBe(id);
+    expect(searchHelp(catalog, code)[0]?.page.id).toBe(`errors/${code.replaceAll("_", "-")}`);
+  });
+
+  it("leaves invalid_arguments (shared by many built-in tools) out of the MCP error articles", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const page of catalog.pages.filter((entry) => entry.id.startsWith("errors/mcp-"))) {
+      expect(page.markdown, page.id).not.toMatch(/invalid_arguments\b/);
+    }
   });
 
   it("has a page for each MCP server error code", async () => {

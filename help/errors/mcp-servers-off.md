@@ -11,7 +11,7 @@ appliesTo: ">=0.8.0"
 
 ## What happened
 
-The Wardby MCP-server tools answered `mcp_servers_off` (403), or a run's MCP call did. The server has `WARDBY_MCP_SERVERS=off`. Attached servers' tools are left out of new runs.
+The Wardby MCP-server tools answered `mcp_servers_off` (403), or a run's MCP call did. The server has `WARDBY_MCP_SERVERS=off`. Attached servers' tools are left out of new runs. `detach_mcp_server` and `delete_mcp_server` still work, so you can clean up while the feature is off.
 
 ## What to do
 
