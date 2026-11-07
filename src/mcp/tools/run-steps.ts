@@ -11,7 +11,8 @@ import { textResult } from "./text-result.js";
 export const RUN_STEPS_DEFAULT_LIMIT = 50;
 export const RUN_STEPS_MAX_LIMIT = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const EXPIRED_MEANING = "This run's steps were deleted RUN_STEP_RETENTION_DAYS after they were recorded.";
+const EXPIRED_MEANING =
+  "No steps are kept for this run: steps are deleted RUN_STEP_RETENTION_DAYS after they are recorded.";
 
 export interface RunStepsToolOptions {
   level: RunStepsLevel;
@@ -58,7 +59,7 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
         page.length === 0 &&
         after === 0 &&
         run.finishedAt != null &&
-        run.finishedAt.getTime() + opts.retentionDays * DAY_MS <= now.getTime();
+        run.finishedAt.getTime() + opts.retentionDays * DAY_MS < now.getTime();
       return textResult({
         runId: run.id,
         level: effectiveRunStepsLevel(opts.level),

@@ -1,4 +1,3 @@
-import { loadLastSteps } from "../../core/run-steps/last-step.js";
 import type { NativeExecutionMode, Prisma, RunStatus } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
@@ -19,6 +18,7 @@ import { textResult } from "./text-result.js";
 import { loadBudgetEvents } from "../../core/budget-events.js";
 import { loadAgentSecretValues, maskNamedSecrets } from "../../core/secret-guard.js";
 import { logger } from "../../core/logger.js";
+import { loadLastSteps } from "../../core/run-steps/last-step.js";
 import type { McpRequestContext } from "../context.js";
 
 const runsLog = logger.child({ module: "mcp-runs" });
@@ -199,7 +199,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
-      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes and serviceReadiness, lastStep (the run's newest step as one line, when it has steps), and leaves out finalText " +
+      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes, serviceReadiness and lastStep (the run's newest step as one line, when it has steps; the agentId listing has no lastStep), and leaves out finalText " +
       `and pricingSnapshot; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
       `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +

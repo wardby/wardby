@@ -141,10 +141,16 @@ describe("get_run_steps", () => {
       run({ id: "r1", stepsDropped: 7 }),
       run({ id: "old", steps: [], finishedAt: new Date(now.getTime() - 40 * DAY) }),
       run({ id: "recent", steps: [], finishedAt: new Date(now.getTime() - 10 * DAY) }),
+      run({ id: "edge", steps: [], finishedAt: new Date(now.getTime() - 30 * DAY) }),
     ]);
     const call = await setup(db, "trig", { now });
     expect(JSON.parse((await call({ runId: "r1" })).text)).toMatchObject({ dropped: 7 });
-    expect(JSON.parse((await call({ runId: "old" })).text)).toMatchObject({ steps: [], expired: true });
+    expect(JSON.parse((await call({ runId: "old" })).text)).toMatchObject({
+      steps: [],
+      expired: true,
+      meaning: "No steps are kept for this run: steps are deleted RUN_STEP_RETENTION_DAYS after they are recorded.",
+    });
+    expect(JSON.parse((await call({ runId: "edge" })).text)).not.toHaveProperty("expired");
     expect(JSON.parse((await call({ runId: "recent" })).text)).not.toHaveProperty("expired");
   });
 
