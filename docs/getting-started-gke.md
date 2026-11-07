@@ -455,6 +455,14 @@ Desktop includes it). The images build concurrently, and the stages that only
 compile JavaScript run on your machine's own architecture, so building the
 `linux/amd64` images from an arm64 machine emulates only what actually ships.
 
+`up.sh` adds the cluster to your kubeconfig and makes it the current context, as
+`gcloud container clusters get-credentials` does. From then on it works from its
+own one-cluster copy of that context, so switching contexts in another terminal
+while a deploy runs doesn't send its later steps to a different cluster. The
+copy is readable only by you and is removed when `up.sh` exits. Don't run two
+deploys of the same cluster at once: the second stops at its first Helm step
+with `another operation (install/upgrade/rollback) is in progress`.
+
 A control-plane restart is designed not to drop requests, at the cost of a
 slower rollout. A new pod must stay Ready for three minutes before the old one
 is retired, because the load balancer can take well over a minute to start

@@ -49,6 +49,11 @@ grants fail, `up.sh` stops before the rollout with a non-zero exit;
 without changing anything. See
 [Upgrading an existing deployment](../docs/getting-started-gke.md#upgrading-an-existing-deployment).
 
+`up.sh` works from its own one-cluster copy of the cluster's
+kubeconfig context, so switching contexts in another terminal mid-deploy can't
+send a step to another cluster. Run one deploy of a cluster at a time: a second
+stops with `another operation (install/upgrade/rollback) is in progress`.
+
 The Kubernetes launcher runs Codex and Claude Code coding workers; a Claude
 Code pod adds a tool-runner sidecar with its own image. Configure an identity
 provider and GitHub App before allowing people to use the public endpoint.
