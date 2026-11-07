@@ -30,6 +30,11 @@ read-only tools for auto mode (see [Permissions](#permissions)). Options:
 | `--fullscreen`        | Also switches Claude Code's terminal to its fullscreen view (see [Terminal](#in-the-terminal)); it applies to every session                 |
 | `--yes`               | Answers yes to every question                                                                                                               |
 
+`wardby quickstart` offers the same install once it has connected Claude Code
+(`--claude-plugin` installs it without asking, `--no-claude-plugin` skips it),
+and `wardby doctor` lists the plugin, the MCP server and the allow rules
+alongside its other checks, without failing when the optional pane is missing.
+
 `wardby claude-plugin status` reports whether the plugin, the MCP server and
 the allow rules are in place. `wardby claude-plugin uninstall` removes the
 plugin and only the settings install added: the rules it added and the

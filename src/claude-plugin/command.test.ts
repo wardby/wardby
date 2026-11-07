@@ -191,3 +191,31 @@ describe("wardby claude-plugin uninstall and status", () => {
     ]);
   });
 });
+
+describe("wardby doctor's Claude Code pane lines", () => {
+  it("says nothing without Claude Code, and suggests the pane when it isn't installed", async () => {
+    const { claudePluginDoctorLines } = await import("./command.js");
+    expect(claudePluginDoctorLines(fakeDeps({ hasClaude: false }).deps)).toEqual([]);
+    expect(claudePluginDoctorLines(fakeDeps({ hasServer: true }).deps)).toEqual([
+      "○ Claude Code runs pane not installed (optional: npx @wardby/cli@latest claude-plugin install)",
+    ]);
+  });
+
+  it("reports the plugin, the server and the rules, warning but never failing", async () => {
+    const { claudePluginDoctorLines } = await import("./command.js");
+    const ready = fakeDeps({ hasServer: true });
+    await claudePluginCommand(["install", "--allow-tools"], ready.deps);
+    expect(claudePluginDoctorLines(ready.deps)).toEqual([
+      "✓ wardby-runs Claude Code plugin installed",
+      "✓ wardby MCP server configured in Claude Code",
+      "✓ the pane's tools are allowed for auto mode",
+    ]);
+    const bare = fakeDeps({ hasServer: false });
+    await claudePluginCommand(["install", "--no-allow-tools"], bare.deps);
+    const lines = claudePluginDoctorLines(bare.deps);
+    expect(lines[0]).toBe("✓ wardby-runs Claude Code plugin installed");
+    expect(lines[1]).toMatch(/^! Claude Code has no MCP server named wardby/);
+    expect(lines[2]).toMatch(/^! not allowed for auto mode/);
+    expect(lines.some((line) => line.startsWith("✗"))).toBe(false);
+  });
+});

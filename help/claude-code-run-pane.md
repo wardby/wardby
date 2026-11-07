@@ -32,7 +32,8 @@ In the terminal, the pane takes clicks and sits beside the chat only in Claude
 Code's fullscreen view (`"tui": "fullscreen"`); otherwise use ctrl+x tab and the
 keys it shows. The desktop app needs no setting.
 
-`wardby claude-plugin status` checks the setup; `wardby claude-plugin
+`wardby quickstart` offers the pane when it connects Claude Code, and
+`wardby doctor` and `wardby claude-plugin status` check the setup; `wardby claude-plugin
 uninstall` removes the plugin and the rules install added. To continue a run
 from the pane, see `resume-runs-locally`.
 

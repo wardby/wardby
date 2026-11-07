@@ -1,5 +1,5 @@
 export const CLI_USAGE = `usage:
-  wardby quickstart [--provider openai|anthropic] [--model <m>] [--budget <usd>] [--client none|codex|claude|both] [--skip-demo] [--non-interactive --yes]
+  wardby quickstart [--provider openai|anthropic] [--model <m>] [--budget <usd>] [--client none|codex|claude|both] [--claude-plugin | --no-claude-plugin] [--skip-demo] [--non-interactive --yes]
   wardby doctor
   wardby status
   wardby logs [--tail N] [--follow]

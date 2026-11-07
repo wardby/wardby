@@ -406,6 +406,7 @@ export async function quickstartCommand(args: string[]): Promise<void> {
       client: { type: "string" },
       "non-interactive": { type: "boolean" },
       "skip-demo": { type: "boolean" },
+      "claude-plugin": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
   });
@@ -500,6 +501,23 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   const client = parseClient(values.client) ?? (await chooseClient(nonInteractive));
   const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
 
+  // With Claude Code connected, offer the runs pane (the wardby-runs plugin): off unless asked for.
+  if (mcpConfigured && (client === "claude" || client === "both")) {
+    const wanted =
+      values["claude-plugin"] ??
+      (!nonInteractive &&
+        (await promptYesNo("Add the wardby runs pane to Claude Code (the wardby-runs plugin)?", false)));
+    if (wanted) {
+      const { claudePluginDeps, installPlugin, DEFAULT_MARKETPLACE } = await import("../claude-plugin/command.js");
+      const status = await installPlugin(
+        { marketplace: DEFAULT_MARKETPLACE, fullscreen: false, yes: values.yes ?? false },
+        claudePluginDeps(),
+      );
+      if (status !== 0)
+        console.warn("! The runs pane wasn't installed; try again with: npx @wardby/cli@latest claude-plugin install");
+    }
+  }
+
   console.log("\nWardby is ready.");
   console.log("  npx @wardby/cli@latest status");
   console.log("  npx @wardby/cli@latest doctor");
@@ -570,6 +588,9 @@ export async function doctorCommand(args: string[]): Promise<void> {
     failed ||= line.startsWith("✗");
     console.log(line);
   }
+  // The Claude Code runs pane is optional: its lines never fail doctor.
+  const { claudePluginDeps, claudePluginDoctorLines } = await import("../claude-plugin/command.js");
+  for (const line of claudePluginDoctorLines(claudePluginDeps())) console.log(line);
   const base = baseImageLine(resolveQuickstartImages({ env: runtimeEnv(paths), packageRoot }));
   if (base) console.log(base);
   if (failed) process.exitCode = 1;

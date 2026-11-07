@@ -61,7 +61,8 @@ export type ClaudePluginDeps = {
   out: (line: string) => void;
 };
 
-function defaultDeps(): ClaudePluginDeps {
+/** The real machine: spawns `claude`, asks on the terminal, uses CLAUDE_CONFIG_DIR or ~/.claude. */
+export function claudePluginDeps(): ClaudePluginDeps {
   return {
     run: (command, args) => {
       const result = spawnSync(command, args, { encoding: "utf8" });
@@ -300,7 +301,41 @@ export function pluginStatus(deps: ClaudePluginDeps): number {
   return plugin && server ? 0 : 1;
 }
 
-export async function claudePluginCommand(args: string[], deps: ClaudePluginDeps = defaultDeps()): Promise<number> {
+/**
+ * `wardby doctor`'s lines for the pane: none without Claude Code. The pane is optional, so nothing
+ * here is a failure (✗): a missing plugin is "○", a missing server or rule a warning ("!").
+ */
+export function claudePluginDoctorLines(deps: ClaudePluginDeps): string[] {
+  if (!claudeAvailable(deps)) return [];
+  if (!pluginInstalled(deps)) {
+    return [`○ Claude Code runs pane not installed (optional: npx @wardby/cli@latest claude-plugin install)`];
+  }
+  const lines = [`✓ ${PLUGIN} Claude Code plugin installed`];
+  lines.push(
+    hasMcpServer(deps)
+      ? `✓ ${MCP_SERVER} MCP server configured in Claude Code`
+      : `! Claude Code has no MCP server named ${MCP_SERVER}: the pane has nothing to show (claude-plugin install --server-url <url>)`,
+  );
+  const settingsPath = join(deps.claudeConfigDir, "settings.json");
+  let missing: string[] = [...PANE_TOOLS];
+  try {
+    const allowed = allowList(readSettings(settingsPath));
+    missing = PANE_TOOLS.filter((rule) => !allowed.includes(rule));
+  } catch {
+    // An unreadable settings file reads as no rules: the warning below says what to allow.
+  }
+  lines.push(
+    missing.length === 0
+      ? "✓ the pane's tools are allowed for auto mode"
+      : `! not allowed for auto mode in ${settingsPath}: ${missing.join(", ")} (needed only in auto mode)`,
+  );
+  return lines;
+}
+
+export async function claudePluginCommand(
+  args: string[],
+  deps: ClaudePluginDeps = claudePluginDeps(),
+): Promise<number> {
   const [sub, ...rest] = args;
   if (sub === undefined || sub === "--help" || sub === "-h") {
     deps.out(CLAUDE_PLUGIN_USAGE);
