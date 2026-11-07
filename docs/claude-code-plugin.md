@@ -22,13 +22,14 @@ npx @wardby/cli@latest claude-plugin install
 This installs the plugin from `wardby/wardby` and offers to allow the pane's
 read-only tools for auto mode (see [Permissions](#permissions)). Options:
 
-| Option                | What it does                                                                                                                                |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--server-url <url>`  | Registers the wardby MCP server at this `https` URL (for example `https://wardby.example.com/mcp`) when Claude Code has none named `wardby` |
-| `--marketplace <src>` | Installs from another marketplace: an operator's own repository (`your-org/claude-plugins`) or a local folder                               |
-| `--allow-tools`       | Allows the pane's read-only tools without asking; `--no-allow-tools` leaves permission rules alone                                          |
-| `--fullscreen`        | Also switches Claude Code's terminal to its fullscreen view (see [Terminal](#in-the-terminal)); it applies to every session                 |
-| `--yes`               | Answers yes to every question                                                                                                               |
+| Option                 | What it does                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--server-url <url>`   | Registers the wardby MCP server at this `https` URL (for example `https://wardby.example.com/mcp`) when Claude Code has none named `wardby`             |
+| `--server-name <name>` | The MCP server the pane uses, as `/mcp` lists it (default `wardby`); the allow rules it adds follow the name, for example `mcp__wardby-prod__list_runs` |
+| `--marketplace <src>`  | Installs from another marketplace: an operator's own repository (`your-org/claude-plugins`) or a local folder                                           |
+| `--allow-tools`        | Allows the pane's read-only tools without asking; `--no-allow-tools` leaves permission rules alone                                                      |
+| `--fullscreen`         | Also switches Claude Code's terminal to its fullscreen view (see [Terminal](#in-the-terminal)); it applies to every session                             |
+| `--yes`                | Answers yes to every question                                                                                                                           |
 
 `wardby quickstart` offers the same install once it has connected Claude Code
 (`--claude-plugin` installs it without asking, `--no-claude-plugin` skips it),
@@ -71,7 +72,9 @@ claude mcp add --transport http --scope user wardby https://wardby.example.com/m
 
 then sign in with `/mcp`. Another name works too: set the plugin's **wardby MCP
 server** option to it. A server added through the Claude apps' **Connectors**
-settings is not a Claude Code MCP server and the pane doesn't use it.
+settings is not a Claude Code MCP server and the pane doesn't use it. With another
+name, install with `--server-name <name>` so the allow rules match it, and the
+pane's own hints name it too.
 
 ## Permissions
 

@@ -502,20 +502,16 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
 
   // With Claude Code connected, offer the runs pane (the wardby-runs plugin): off unless asked for.
-  if (mcpConfigured && (client === "claude" || client === "both")) {
-    const wanted =
-      values["claude-plugin"] ??
-      (!nonInteractive &&
-        (await promptYesNo("Add the wardby runs pane to Claude Code (the wardby-runs plugin)?", false)));
-    if (wanted) {
-      const { claudePluginDeps, installPlugin, DEFAULT_MARKETPLACE } = await import("../claude-plugin/command.js");
-      const status = await installPlugin(
-        { marketplace: DEFAULT_MARKETPLACE, fullscreen: false, yes: values.yes ?? false },
-        claudePluginDeps(),
-      );
-      if (status !== 0)
-        console.warn("! The runs pane wasn't installed; try again with: npx @wardby/cli@latest claude-plugin install");
-    }
+  {
+    const { claudePluginDeps, installPlugin, quickstartPaneStep } = await import("../claude-plugin/command.js");
+    await quickstartPaneStep(
+      { client, mcpConfigured, flag: values["claude-plugin"], nonInteractive, yes: values.yes ?? false },
+      {
+        ask: (question) => promptYesNo(question, false),
+        install: (options) => installPlugin(options, claudePluginDeps()),
+        warn: (line) => console.warn(line),
+      },
+    );
   }
 
   console.log("\nWardby is ready.");
@@ -538,6 +534,14 @@ async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
   } finally {
     await db.$disconnect();
   }
+}
+
+/**
+ * Doctor's Claude Code pane section. The pane is optional, so its lines are information: a "✗"
+ * from them would be read as a failure, so none reaches the output.
+ */
+export function claudePaneDoctorLines<D>(lines: (deps: D) => string[], deps: D): string[] {
+  return lines(deps).map((line) => (line.startsWith("✗") ? `!${line.slice(1)}` : line));
 }
 
 export async function doctorCommand(args: string[]): Promise<void> {
@@ -590,7 +594,7 @@ export async function doctorCommand(args: string[]): Promise<void> {
   }
   // The Claude Code runs pane is optional: its lines never fail doctor.
   const { claudePluginDeps, claudePluginDoctorLines } = await import("../claude-plugin/command.js");
-  for (const line of claudePluginDoctorLines(claudePluginDeps())) console.log(line);
+  for (const line of claudePaneDoctorLines(claudePluginDoctorLines, claudePluginDeps())) console.log(line);
   const base = baseImageLine(resolveQuickstartImages({ env: runtimeEnv(paths), packageRoot }));
   if (base) console.log(base);
   if (failed) process.exitCode = 1;

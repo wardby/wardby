@@ -107,12 +107,6 @@ describe("wardby claude-plugin install", () => {
     expect(no.settings()).toEqual({ model: "opus" });
   });
 
-  it("refuses to touch a settings file that isn't valid JSON", async () => {
-    const { deps, configDir } = fakeDeps({ hasServer: true, settings: "{ not json" });
-    await expect(claudePluginCommand(["install", "--allow-tools"], deps)).rejects.toThrow(/isn't valid JSON/);
-    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe("{ not json");
-  });
-
   it("registers the MCP server from --server-url only when there is none, and only over https", async () => {
     const missing = fakeDeps({ hasServer: false });
     await claudePluginCommand(
@@ -217,5 +211,94 @@ describe("wardby doctor's Claude Code pane lines", () => {
     expect(lines[1]).toMatch(/^! Claude Code has no MCP server named wardby/);
     expect(lines[2]).toMatch(/^! not allowed for auto mode/);
     expect(lines.some((line) => line.startsWith("✗"))).toBe(false);
+  });
+});
+
+describe("review fixes: broken settings, server names, quickstart's offer", () => {
+  it("a settings file that isn't JSON stops install before anything is installed, with exit 1", async () => {
+    const { deps, calls, lines, configDir } = fakeDeps({ hasServer: true, settings: "{ not json" });
+    expect(await claudePluginCommand(["install", "--allow-tools"], deps)).toBe(1);
+    expect(calls.some((c) => c[1] === "plugin" && c[2] === "install")).toBe(false);
+    expect(lines.join("\n")).toMatch(/isn't valid JSON/);
+    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe("{ not json");
+  });
+
+  it("uninstall reports a broken settings file instead of throwing, and leaves it alone", async () => {
+    const { deps, configDir, lines } = fakeDeps({ hasServer: true });
+    await claudePluginCommand(["install", "--allow-tools"], deps);
+    writeFileSync(join(configDir, "settings.json"), "{ broken");
+    expect(await claudePluginCommand(["uninstall"], deps)).toBe(1);
+    expect(lines.join("\n")).toMatch(/isn't valid JSON.*Remove mcp__wardby__list_runs/);
+    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe("{ broken");
+  });
+
+  it("uninstall leaves the settings file untouched when nothing install added is still there", async () => {
+    const { deps, configDir } = fakeDeps({ hasServer: true, settings: { model: "opus" } });
+    await claudePluginCommand(["install", "--no-allow-tools"], deps);
+    const before = readFileSync(join(configDir, "settings.json"), "utf8");
+    await claudePluginCommand(["uninstall"], deps);
+    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe(before);
+  });
+
+  it("--server-name names the server the pane uses, and its rules follow the name", async () => {
+    const { deps, calls, settings } = fakeDeps({ hasServer: false });
+    await claudePluginCommand(
+      ["install", "--server-name", "wardby-prod", "--server-url", "https://wardby.example.com/mcp", "--allow-tools"],
+      deps,
+    );
+    expect(calls).toContainEqual(["claude", "mcp", "get", "wardby-prod"]);
+    expect(calls.find((c) => c[2] === "add")).toContain("wardby-prod");
+    expect((settings().permissions as { allow: string[] }).allow).toEqual([
+      "mcp__wardby-prod__list_runs",
+      "mcp__wardby-prod__list_agents",
+      "mcp__wardby-prod__get_run",
+      "mcp__wardby-prod__get_run_transcript",
+    ]);
+    const bad = fakeDeps({ hasServer: true });
+    expect(await claudePluginCommand(["install", "--server-name", "x y"], bad.deps)).toBe(1);
+  });
+
+  it("quickstart offers the pane only once Claude Code is connected, and honours its flags", async () => {
+    const { quickstartPaneStep } = await import("./command.js");
+    const run = async (options: Partial<Parameters<typeof quickstartPaneStep>[0]>, answer = true, status = 0) => {
+      const asked: string[] = [];
+      const installs: unknown[] = [];
+      const warnings: string[] = [];
+      const result = await quickstartPaneStep(
+        { client: "claude", mcpConfigured: true, nonInteractive: false, yes: false, ...options },
+        {
+          ask: async (question) => {
+            asked.push(question);
+            return answer;
+          },
+          install: async (opts) => {
+            installs.push(opts);
+            return status;
+          },
+          warn: (line) => warnings.push(line),
+        },
+      );
+      return { result, asked, installs, warnings };
+    };
+    // Asked, and installed on yes from the default marketplace.
+    const yes = await run({});
+    expect(yes).toMatchObject({ result: "installed", asked: [expect.stringMatching(/runs pane/)] });
+    expect(yes.installs).toEqual([{ marketplace: "wardby/wardby", fullscreen: false, yes: false }]);
+    expect((await run({}, false)).result).toBe("skipped");
+    // Only for Claude Code, and only once it was connected.
+    for (const options of [{ client: "codex" }, { client: "none" }, { mcpConfigured: false }]) {
+      const skipped = await run(options);
+      expect(skipped).toMatchObject({ result: "skipped", asked: [], installs: [] });
+    }
+    expect((await run({ client: "both" })).result).toBe("installed");
+    // The flags answer without asking; a non-interactive run never asks.
+    expect(await run({ flag: true })).toMatchObject({ result: "installed", asked: [] });
+    expect(await run({ flag: false })).toMatchObject({ result: "skipped", asked: [], installs: [] });
+    expect(await run({ nonInteractive: true })).toMatchObject({ result: "skipped", asked: [] });
+    expect(await run({ nonInteractive: true, flag: true, yes: true })).toMatchObject({ result: "installed" });
+    // A failed install warns and carries on.
+    const failed = await run({}, true, 1);
+    expect(failed.result).toBe("failed");
+    expect(failed.warnings[0]).toMatch(/claude-plugin install/);
   });
 });

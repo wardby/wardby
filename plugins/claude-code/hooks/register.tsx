@@ -645,7 +645,7 @@ export const register: Register = (on, options) => {
         const raw = err instanceof Error ? err.message : "could not reach the wardby server";
         // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools.
         const message = /auto mode/i.test(raw)
-          ? "auto mode refused the call. Allow mcp__wardby__list_runs, mcp__wardby__list_agents and mcp__wardby__get_run in /permissions, then press r."
+          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents and mcp__${server}__get_run in /permissions, then press r.`
           : raw;
         await update($, poll, (): Poll => ({ at: now, error: message }));
         failures += 1;
@@ -737,7 +737,7 @@ export const register: Register = (on, options) => {
           dir,
           phase: "error",
           output: /auto mode/i.test(message)
-            ? "auto mode refused the call. Allow mcp__wardby__get_run_transcript in /permissions, then try again."
+            ? `auto mode refused the call. Allow mcp__${server}__get_run_transcript in /permissions, then try again.`
             : message.slice(0, 600),
           command: null,
         }));
