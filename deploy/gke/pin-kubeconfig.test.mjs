@@ -45,7 +45,8 @@ function run() {
     `printf 'current-context: wrong-cluster\\n' >'${shared}'`,
     "kubectl -n wardby-coding get deploy",
     'printf "%s\\n" "$PINNED_KUBECONFIG"',
-    'stat -f %Lp "$PINNED_KUBECONFIG" 2>/dev/null || stat -c %a "$PINNED_KUBECONFIG"',
+    // ls -l prints the mode the same way on Linux and macOS (stat's flags differ).
+    'ls -l "$PINNED_KUBECONFIG" | cut -c1-10',
     'cat "$PINNED_KUBECONFIG"',
   ].join("\n");
   const result = spawnSync("bash", ["-c", body], {
@@ -77,7 +78,7 @@ describe("deploy/gke/up.sh pin_kubeconfig", () => {
     // The later call reads the copy, not the shared config whose context changed.
     expect(calls[1]).toBe(`${pinned} -n wardby-coding get deploy`);
     expect(pinned).not.toBe(shared);
-    expect(mode).toBe("600");
+    expect(mode).toBe("-rw-------");
     expect(config).toEqual([`current-context: ${CONTEXT}`]);
     // Removed on exit; the shared config is left as the other terminal set it.
     expect(existsSync(pinned)).toBe(false);
