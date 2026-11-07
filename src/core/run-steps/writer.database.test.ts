@@ -137,6 +137,41 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     expect(JSON.stringify(rows)).not.toContain(ROTATED);
   });
 
+  it("counts a step past the cap once, however often the history is resent", async () => {
+    const run = await newRun();
+    const w = writer({ maxSteps: 3 });
+    const batch = { steps: ["a", "b", "c", "d", "e"].map((id) => tool(id, id)), results: [] };
+    await w.record(run.id, batch);
+    await w.record(run.id, batch);
+    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).stepsDropped).toBe(2);
+    await w.record(run.id, { steps: [...batch.steps, tool("f", "f")], results: [] });
+    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).stepsDropped).toBe(3);
+  });
+
+  it("does not store a step whose callId holds a secret value, nor count it as dropped", async () => {
+    const run = await newRun();
+    await writer().record(run.id, {
+      steps: [tool(`call-${FAKE_SECRET}`, "ls"), tool("ok1", "pwd")],
+      results: [{ callId: `call-${FAKE_SECRET}`, status: "ok" }],
+    });
+    const rows = await rowsOf(run.id);
+    expect(rows.map((r) => r.callId)).toEqual(["ok1"]);
+    expect(JSON.stringify(rows)).not.toContain(FAKE_SECRET);
+    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).stepsDropped).toBe(0);
+  });
+
+  it("writes only tool and said steps", async () => {
+    const run = await newRun();
+    await writer().record(run.id, {
+      steps: [
+        { kind: "other", callId: "x1", text: "t", truncated: false } as unknown as ExtractedStep,
+        tool("c1", "ls"),
+      ],
+      results: [],
+    });
+    expect((await rowsOf(run.id)).map((r) => r.callId)).toEqual(["c1"]);
+  });
+
   it("records nothing when the ceiling is off", async () => {
     const run = await newRun();
     await writer({ level: "off" }).record(run.id, { steps: [tool("c1", "ls")], results: [] });

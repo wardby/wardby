@@ -1,10 +1,15 @@
 /**
  * The one writer of RunStep rows. Every source hands it batches (RunStepSink). Before anything is
- * stored, each step's text is redacted by exact value against the run's agent secret values (every
- * attached secret, readable or brokered, and every attached MCP server's secrets: the same source the
- * transcript recorder uses), then by token shape, then cut (stepSummary). A batch whose run's secret
- * values can't be read writes nothing (fail closed). One run's batches are written in arrival order,
- * under a row lock on the run, so seq has no gaps or duplicates whichever process writes. Log lines
+ * stored, each step's text is redacted by exact value against the secret values the loader covers:
+ * the agent's secrets (readable and brokered) and its attached MCP servers' secrets, the same source
+ * the transcript recorder uses; run capabilities are masked by token shape. The native-sandbox
+ * gateway capability is added by the gateway caller (not here). A batch whose run's secret values
+ * can't be read writes nothing (fail closed). A step whose kind is unknown, whose callId is invalid or
+ * would change under redaction is dropped and not counted in stepsDropped; only steps past the cap are
+ * counted, once per callId. One run's batches are written in arrival order, within one process only
+ * (step/result ordering across processes is not guaranteed), under a row lock on the run, so seq has
+ * no gaps or duplicates whichever process writes. A result is matched only to a stored callId, which
+ * is already clean, so a result's callId is never persisted. Log lines
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
 import type { PrismaClient } from "#prisma";
@@ -26,6 +31,9 @@ import {
 const stepsLog = logger.child({ module: "run-steps" });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TX = { maxWait: 5_000, timeout: 10_000 } as const;
+/** Runs whose over-cap callIds are remembered (per process), and how many callIds per run. */
+const DROPPED_RUNS = 256;
+const DROPPED_PER_RUN = 10_000;
 
 export type RunStepWriterDb = Pick<PrismaClient, "run" | "runStep" | "$transaction">;
 
@@ -57,6 +65,8 @@ function safeToolName(tool: string, secretValues: readonly string[]): string {
 
 export class RunStepWriter implements RunStepSink {
   private readonly queues = new Map<string, Promise<void>>();
+  /** callIds already counted in stepsDropped, so history resent past the cap is not counted again. */
+  private readonly droppedIds = new Map<string, Set<string>>();
 
   constructor(private readonly deps: RunStepWriterDeps) {}
 
@@ -87,13 +97,15 @@ export class RunStepWriter implements RunStepSink {
     const { db } = this.deps;
     const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
     if (!run) return;
-    const steps = uniqueByCallId(batch.steps);
+    const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
     // Read fresh for every batch (never cached: a rotated or newly attached secret must be covered).
     // Rejects (and the batch is dropped) when the values can't be read: never an unredacted write.
     const values = steps.length > 0 ? await this.deps.secretValues(run.agentId) : [];
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
-    const rows = steps.map((step) => ({
+    // callId is stored as text: a step whose callId holds a secret value is not stored at all.
+    const clean = steps.filter((step) => redactSecrets(step.callId, values) === step.callId);
+    const rows = clean.map((step) => ({
       kind: step.kind,
       tool: step.kind === "tool" ? safeToolName(step.tool, values) : null,
       callId: step.callId,
@@ -103,6 +115,8 @@ export class RunStepWriter implements RunStepSink {
     }));
     const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const maxSteps = this.deps.maxSteps ?? MAX_RUN_STEPS;
+    const counted = this.droppedIds.get(runId) ?? new Set<string>();
+    const newlyDropped: string[] = [];
     await db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT 1 FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
       if (rows.length > 0) {
@@ -118,7 +132,9 @@ export class RunStepWriter implements RunStepSink {
         if (kept.length > 0) {
           await tx.runStep.createMany({ data: kept.map((row, index) => ({ ...row, runId, seq: start + index + 1 })) });
         }
-        const dropped = fresh.length - kept.length;
+        const over = fresh.slice(kept.length).filter((row) => !counted.has(row.callId));
+        newlyDropped.push(...over.map((row) => row.callId));
+        const dropped = over.length;
         if (dropped > 0) await tx.run.update({ where: { id: runId }, data: { stepsDropped: { increment: dropped } } });
       }
       for (const result of results) {
@@ -129,6 +145,14 @@ export class RunStepWriter implements RunStepSink {
         });
       }
     }, TX);
+    if (newlyDropped.length > 0) this.rememberDropped(runId, counted, newlyDropped);
+  }
+
+  private rememberDropped(runId: string, counted: Set<string>, ids: readonly string[]): void {
+    for (const id of ids) if (counted.size < DROPPED_PER_RUN) counted.add(id);
+    this.droppedIds.delete(runId);
+    if (this.droppedIds.size >= DROPPED_RUNS) this.droppedIds.delete(this.droppedIds.keys().next().value as string);
+    this.droppedIds.set(runId, counted);
   }
 }
 
