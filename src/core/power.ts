@@ -14,6 +14,11 @@ export type PowerTarget = "proxy" | "gateway";
 export const LOW_POWER_WAKE_TIMEOUT = "low_power_wake_timeout";
 export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
 export const LOW_POWER_DISABLED = "low_power_disabled";
+/**
+ * A coding run with MCP tools could not wake the native gateway that serves them: the run fails
+ * before its worker launches (category mcp_gateway_unavailable).
+ */
+export const CODING_MCP_GATEWAY_UNAVAILABLE = "coding_mcp_gateway_unavailable";
 /** ISO-8601 time the control plane last scaled the Deployment up from zero. */
 export const POWER_WOKE_AT = "wardby.io/power-woke-at";
 /**
