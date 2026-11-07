@@ -91,6 +91,8 @@ import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
+import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
+import { registerRunStepsTool } from "./tools/run-steps.js";
 import { registerRunTranscriptTool } from "./tools/run-transcript.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";
 import { createBlobStore } from "../providers/storage/index.js";
@@ -175,6 +177,7 @@ export function registerAllTools(
     blobStoreConfigured: runTranscriptUrl !== undefined && opts.blobStoreConfigured === true,
     audience: opts.runTranscriptAudience ?? "http",
   });
+  registerRunStepsTool(mcp, { level: loadRunStepsLevel(), retentionDays: loadRunStepRetentionDays() });
   registerStopRunTool(mcp);
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
