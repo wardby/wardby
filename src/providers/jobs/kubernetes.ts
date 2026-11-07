@@ -31,7 +31,7 @@ import { isIP } from "node:net";
 import type { V1ConfigMap, V1ContainerStatus, V1Pod, V1ResourceQuota } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
-import { DISABLED_POWER, wakeTimeoutMs, type Power } from "../../core/power.js";
+import { CODING_MCP_GATEWAY_UNAVAILABLE, DISABLED_POWER, wakeTimeoutMs, type Power } from "../../core/power.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -671,6 +671,28 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     this.warn(message);
   }
 
+  /**
+   * Wakes what the run needs before anything is created: the coding proxy always, and the native
+   * gateway too for a run with MCP tools (its MCP calls go proxy -> gateway; without a gateway the
+   * worker would start with its MCP tools missing). Both wake at once, so a cold start waits for
+   * the slower of the two, not their sum. A gateway that does not wake fails the launch with
+   * coding_mcp_gateway_unavailable; the proxy's own wake error is reported first.
+   */
+  private async wakeForRun(spec: JobSpec): Promise<void> {
+    const opts = { timeoutMs: wakeTimeoutMs(this.readyTimeoutMs), runId: spec.runId };
+    const [proxy, gateway] = await Promise.allSettled([
+      this.power.ensureAwake("proxy", opts),
+      spec.mcpTools ? this.power.ensureAwake("gateway", opts) : Promise.resolve(),
+    ]);
+    if (proxy.status === "rejected") throw proxy.reason;
+    if (gateway.status === "rejected") {
+      throw new Error(
+        `${CODING_MCP_GATEWAY_UNAVAILABLE}: the native gateway, which serves this run's MCP tools, did not wake.`,
+        { cause: gateway.reason },
+      );
+    }
+  }
+
   async launch(spec: JobSpec): Promise<JobHandle> {
     try {
       validateKubernetesSpec(spec);
@@ -685,9 +707,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
     // Low-power mode: the proxy may be scaled to zero; wake it before the preflight reads it. Guarded
     // (not just a no-op await) so mode off keeps launch() joining an in-flight warm-up synchronously.
-    if (this.power.enabled) {
-      await this.power.ensureAwake("proxy", { timeoutMs: wakeTimeoutMs(this.readyTimeoutMs), runId: spec.runId });
-    }
+    if (this.power.enabled) await this.wakeForRun(spec);
     await this.runPreflight();
     const names = kubernetesRunNames(spec.runId);
     const handle: JobHandle = { backend: BACKEND, id: `${this.namespace}/${names.token}` };
