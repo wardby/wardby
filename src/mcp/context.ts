@@ -7,6 +7,7 @@
  * registry also carries jobs/email/auth/storage seams no Phase 4 tool
  * needs and this plan never builds real adapters for.
  */
+import type { RunStepSink } from "../core/run-steps/types.js";
 import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
@@ -38,6 +39,8 @@ export type McpProviders = Pick<
   power?: Power;
   /** Overrides the outbound call to remote MCP servers (register/update/refresh_mcp_server) — tests only. */
   sandboxFetch?: typeof safeFetch;
+  /** Records runs' steps; also what the run-steps listener writes through. */
+  runSteps?: RunStepSink;
 };
 
 export interface McpRequestContext {

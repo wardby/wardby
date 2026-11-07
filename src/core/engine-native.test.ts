@@ -7,6 +7,7 @@ import {
   type StepRunner,
 } from "../providers/engine/types.js";
 import { NativeEngine } from "./engine-native.js";
+import type { RunStepBatch } from "./run-steps/types.js";
 
 /** Records each step's JSON result; on a later run replays it without calling fn. */
 function recordingStepRunner(record: Map<string, unknown>, calls: string[]): StepRunner {
@@ -811,5 +812,59 @@ describe("NativeEngine concurrent tool calls (runsConcurrently)", () => {
       }),
     );
     expect(replay.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("NativeEngine run steps", () => {
+  const usage = { inputTokens: 10, outputTokens: 5, costUsd: 0.001 };
+  const twoTurns = () =>
+    scriptedLlm(
+      [
+        [
+          { type: "text", delta: "Looking up." },
+          { type: "tool_call", id: "c1", name: "lookup", argsJson: '{"query":"weather"}' },
+          { type: "done", stopReason: "tool_calls", usage },
+        ],
+        [
+          { type: "text", delta: "Sunny." },
+          { type: "done", stopReason: "stop", usage },
+        ],
+      ],
+      () => 0.001,
+      () => 10,
+    );
+
+  it("hands each turn's steps, then its results, to onSteps with ids a replay repeats", async () => {
+    const batches: RunStepBatch[] = [];
+    await new NativeEngine().run(
+      makeContext({
+        llm: twoTurns(),
+        onSteps: (batch) => batches.push(batch),
+        runSandboxTool: vi.fn(async () => '{"error":"not_found","message":"no such city"}'),
+      }),
+    );
+    expect(batches).toEqual([
+      {
+        steps: [
+          { kind: "said", callId: "said:turn:1", text: "Looking up.", truncated: false },
+          { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+        ],
+        results: [],
+      },
+      { steps: [], results: [{ callId: "c1", status: "error" }] },
+      { steps: [{ kind: "said", callId: "said:turn:2", text: "Sunny.", truncated: false }], results: [] },
+    ]);
+  });
+
+  it("finishes the run when onSteps throws", async () => {
+    const result = await new NativeEngine().run(
+      makeContext({
+        llm: twoTurns(),
+        onSteps: () => {
+          throw new Error("hook failed");
+        },
+      }),
+    );
+    expect(result).toMatchObject({ status: "succeeded", finalText: "Sunny.", turns: 2 });
   });
 });

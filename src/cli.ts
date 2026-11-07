@@ -77,6 +77,7 @@ import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
 import { RunStepSweeper } from "./core/run-steps/sweep.js";
+import { buildRunStepWriter } from "./core/run-steps/writer.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
@@ -163,6 +164,15 @@ function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["
 
 function buildMemory(cipher: ProviderRegistry["secrets"]): ProviderRegistry["memory"] {
   return guardAgentMemory(new PostgresAgentMemory(prisma), createDbSecretWriteGuard(prisma, cipher));
+}
+
+/** The process's run-steps writer; an invalid WARDBY_RUN_STEPS or RUN_STEP_RETENTION_DAYS stops the command with the loader's message. */
+function buildRunSteps(cipher: ProviderRegistry["secrets"]): ReturnType<typeof buildRunStepWriter> {
+  try {
+    return buildRunStepWriter(prisma, cipher);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 function buildSecrets(): ProviderRegistry["secrets"] {
@@ -716,6 +726,7 @@ async function run(name: string | undefined): Promise<void> {
         memory,
         reviewHosts: buildReviewHosts(process.env, prisma),
         issueTrackers: buildIssueTrackers(),
+        runSteps: buildRunSteps(secrets),
       },
       prisma,
       (delta) => {
@@ -891,6 +902,7 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory(secrets);
+  const runSteps = buildRunSteps(secrets);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const chat = buildChatProviders();
@@ -908,6 +920,7 @@ async function scheduler(args: string[]): Promise<void> {
     reviewHosts,
     issueTrackers,
     repoAccess,
+    runSteps,
   };
   const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
   const power = buildPower({ env: process.env, db: prisma });
@@ -1019,6 +1032,7 @@ async function nativeGateway(): Promise<void> {
     issueTrackers: buildIssueTrackers(),
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
     executor: new DeferredExecutor(prisma),
+    runSteps: buildRunSteps(secrets),
   };
   const server = await startGatewayServer(listen, {
     db: prisma,

@@ -17,6 +17,8 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
+import { runStepsHook } from "./run-steps/native.js";
+import type { RunStepSink } from "./run-steps/types.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
@@ -481,6 +483,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
   nativeSandbox?: WorkerLauncher;
   /** Overrides the sandbox's outbound network call — tests only. */
   sandboxFetch?: typeof safeFetch;
+  /** Records runs' steps (src/core/run-steps/writer.ts); absent = no steps are recorded. */
+  runSteps?: RunStepSink;
 };
 
 /**
@@ -2621,6 +2625,7 @@ async function executeTrackedRun(
     const { runSandboxTool } = tools;
 
     const onProgress = (progress: EngineProgress) => recordNativeRunProgress(db, runId, progress);
+    const onSteps = runStepsHook(providers.runSteps, runId);
     const llm =
       loaded.pricing && providers.llm instanceof RoutingLlmProvider
         ? providers.llm.forRun(loaded.pricing.entry)
@@ -2651,6 +2656,7 @@ async function executeTrackedRun(
         : {}),
       onText,
       onProgress,
+      ...(onSteps ? { onSteps } : {}),
       step,
     });
 

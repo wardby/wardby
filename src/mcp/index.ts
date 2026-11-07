@@ -13,6 +13,7 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
+import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import { loadMcpServersMode } from "../config/mcp-servers.js";
 import { loadMcpMaxCallsPerRun } from "../config/mcp-call-limit.js";
@@ -214,6 +215,8 @@ export function buildMcpProviders(): McpProviderComposition {
   const secretGuard = createDbSecretWriteGuard(prisma, secrets);
   const datastore = guardDatastore(new PostgresDatastore(prisma, secrets), secretGuard);
   const memory = guardAgentMemory(new PostgresAgentMemory(prisma), secretGuard);
+  // The one run-steps writer of this process (WARDBY_RUN_STEPS, RUN_STEP_RETENTION_DAYS; invalid stops start-up).
+  const runSteps = buildRunStepWriter(prisma, secrets);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
@@ -242,6 +245,7 @@ export function buildMcpProviders(): McpProviderComposition {
     reviewHosts,
     issueTrackers,
     repoAccess,
+    runSteps,
   };
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
@@ -276,6 +280,7 @@ export function buildMcpProviders(): McpProviderComposition {
       repoAccess,
       chat,
       power,
+      runSteps,
     },
   };
 }
