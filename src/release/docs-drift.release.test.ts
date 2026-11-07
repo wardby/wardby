@@ -27,6 +27,8 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
+    // A nested package's installed dependencies (src/claude-coding-worker) are not wardby's source or docs.
+    if (name === "node_modules") return [];
     const path = join(dir, name);
     return statSync(path).isDirectory() ? walk(path) : [path];
   });
@@ -58,8 +60,10 @@ function errorCodes(): Map<string, string> {
       add(match[1], file);
     }
   }
-  // Remote MCP servers: the codes a call returns (fail(...), error(...), McpClientError(...), toolError(...), error: "...").
+  // Remote MCP servers: the codes a call returns (fail(...), error(...), McpClientError(...), toolError(...),
+  // error: "...", and an error class's readonly code = "...").
   for (const file of [
+    "src/core/mcp-servers.ts",
     "src/core/mcp-tools.ts",
     "src/core/mcp-client/client.ts",
     "src/core/mcp-client/results.ts",
@@ -68,8 +72,8 @@ function errorCodes(): Map<string, string> {
     "src/providers/coding-proxy/mcp-route.ts",
   ]) {
     const form =
-      /\b(?:error|fail|McpClientError|toolError)\(\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"|\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g;
-    for (const match of read(join(ROOT, file)).matchAll(form)) add(match[1] ?? match[2], file);
+      /\b(?:error|fail|McpClientError|toolError)\(\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"|\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"|\breadonly code = "([a-z][a-z0-9_]*_[a-z0-9_]*)"/g;
+    for (const match of read(join(ROOT, file)).matchAll(form)) add(match[1] ?? match[2] ?? match[3], file);
   }
   // The delegate tools' errors (delegate_to_*), as the runner answers them.
   for (const file of ["src/core/runner.ts", "src/core/delegation-slots.ts"]) {

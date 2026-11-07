@@ -16,6 +16,7 @@ import {
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 import { redactExactSecretValues, withEscapedForms } from "./secret-spans.js";
 import type { SecretEntry, SecretsAccessor } from "./secrets.js";
+import type { Logger } from "./logger.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { brokeredFetch } from "../sandbox/brokered-fetch.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
@@ -26,6 +27,41 @@ export class McpServerInputError extends Error {
     super(message);
     this.name = "McpServerInputError";
   }
+}
+
+/** What the server's owner (or an admin) sees when a stored secret of the server can't be decrypted. */
+export const CREDENTIALS_UNAVAILABLE_MESSAGE =
+  "The MCP server's credentials can't be decrypted on this server. Check that every Wardby process (control plane, scheduler, native gateway) uses the same SECRET_APP_KEY, or set the secret again.";
+
+/**
+ * A server's brokered secret exists but its stored value can't be decrypted (another
+ * SECRET_APP_KEY, a key-id mismatch, a corrupt ciphertext). Not an input problem: the message is
+ * fixed and never carries the cipher's error, the ciphertext or a value.
+ */
+export class McpCredentialsUnavailableError extends Error {
+  readonly code = "mcp_server_credentials_unavailable";
+  constructor(
+    /** Empty while a server is being registered (it has no id yet). */
+    readonly serverId: string,
+    readonly serverName: string,
+    readonly secretName: string,
+  ) {
+    super(CREDENTIALS_UNAVAILABLE_MESSAGE);
+    this.name = "McpCredentialsUnavailableError";
+  }
+}
+
+/** The one operator line for an undecryptable server secret: ids and names only, never the cipher's error text. */
+export function logCredentialsUnavailable(log: Pick<Logger, "warn">, error: McpCredentialsUnavailableError): void {
+  log.warn(
+    {
+      reason: "mcp_secret_decrypt_failed",
+      ...(error.serverId !== "" ? { serverId: error.serverId } : {}),
+      serverName: error.serverName,
+      secretName: error.secretName,
+    },
+    "MCP server secret could not be decrypted",
+  );
 }
 
 export interface McpServerRow {
@@ -123,6 +159,8 @@ export function redactError(error: unknown, values: string[]): Error {
   const message = redactForServer(error instanceof Error ? error.message : "The MCP server call failed.", values);
   if (error instanceof McpClientError) return new McpClientError(error.code, message);
   if (error instanceof McpServerInputError) return new McpServerInputError(message);
+  // Its message is fixed and carries no value: keep it (and its ids) as it is.
+  if (error instanceof McpCredentialsUnavailableError) return error;
   const out = new Error(message);
   if (error instanceof Error) out.name = error.name;
   return out;
@@ -130,7 +168,11 @@ export function redactError(error: unknown, values: string[]): Error {
 
 type SecretDb = Pick<PrismaClient, "secret">;
 
-/** Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list the URL's host. */
+/**
+ * Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list
+ * the URL's host (McpServerInputError otherwise). A stored value that can't be decrypted throws
+ * McpCredentialsUnavailableError.
+ */
 export async function loadServerSecrets(
   db: SecretDb,
   cipher: Pick<SecretCipher, "decrypt">,
@@ -157,7 +199,14 @@ export async function loadServerSecrets(
     }
     if (!broker.hosts.includes(host))
       throw new McpServerInputError(`Secret "${name}" is not brokered to host ${host}; add it to the secret's hosts.`);
-    const entry: SecretEntry = { value: await cipher.decrypt(stored.ciphertext), broker };
+    let value: string;
+    try {
+      value = await cipher.decrypt(stored.ciphertext);
+    } catch {
+      // The cipher's error is dropped: it is not an input problem, and its text is not ours to pass on.
+      throw new McpCredentialsUnavailableError(server.id, server.name, name);
+    }
+    const entry: SecretEntry = { value, broker };
     entries.set(name, entry);
     for (const v of withEscapedForms(consoleRedactionValues(entry))) values.add(v);
   }

@@ -215,6 +215,16 @@ an `mcp_server_error` that names the secret. An agent using the server through
 a grant gets only "The MCP server's credentials can't be used; ask its owner
 to check it.", never the owner's secret names.
 
+When a secret exists but the Wardby process making the call can't decrypt its
+stored value, the call returns `mcp_server_credentials_unavailable`, and
+`register_mcp_server`, `update_mcp_server` and `refresh_mcp_server` fail with
+it as an HTTP 500 error. Every process that decrypts secrets (control plane,
+scheduler, native gateway) must use the same `SECRET_APP_KEY`; if the key
+changed, set the secret again. The owner's agents get that advice; an agent
+using the server through a grant gets the generic message above. Each failure
+also writes one operator `warn` log line with
+`reason: "mcp_secret_decrypt_failed"`, the server and the secret name.
+
 An attachment acts with the server owner's secrets. When `make_owner` gives an
 agent a new owner, servers the new owner neither owns nor holds `use` on are
 detached and listed under `bindingsRemoved` with `kind: "mcp_server"`.
@@ -227,17 +237,18 @@ everyone.
 A failed call returns `{"error": "<code>", "message": "..."}` to the model;
 the run goes on.
 
-| Code                                                                 | Meaning                                                               |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| [`mcp_servers_off`](../help/errors/mcp-servers-off.md)               | `WARDBY_MCP_SERVERS=off`.                                             |
-| [`mcp_server_unreachable`](../help/errors/mcp-server-unreachable.md) | Wardby couldn't connect to the server.                                |
-| [`mcp_server_auth_failed`](../help/errors/mcp-server-auth-failed.md) | The server answered 401 or 403.                                       |
-| [`mcp_server_error`](../help/errors/mcp-server-error.md)             | Another HTTP error, a malformed reply, or the tool reported an error. |
-| [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md)     | Detached, off the allowlist, or the owner lost `use` on the server.   |
-| [`mcp_tool_removed`](../help/errors/mcp-tool-removed.md)             | The server no longer lists the tool.                                  |
-| [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md)             | The call hit its time limit or the run was stopped.                   |
-| [`mcp_call_limit`](../help/errors/mcp-call-limit.md)                 | A coding run made more calls than `WARDBY_MCP_MAX_CALLS_PER_RUN`.     |
-| [`mcp_unavailable`](../help/errors/mcp-unavailable.md)               | The coding proxy has no gateway to forward MCP calls to.              |
+| Code                                                                                         | Meaning                                                               |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [`mcp_servers_off`](../help/errors/mcp-servers-off.md)                                       | `WARDBY_MCP_SERVERS=off`.                                             |
+| [`mcp_server_unreachable`](../help/errors/mcp-server-unreachable.md)                         | Wardby couldn't connect to the server.                                |
+| [`mcp_server_auth_failed`](../help/errors/mcp-server-auth-failed.md)                         | The server answered 401 or 403.                                       |
+| [`mcp_server_credentials_unavailable`](../help/errors/mcp-server-credentials-unavailable.md) | A secret can't be decrypted: check every process's `SECRET_APP_KEY`.  |
+| [`mcp_server_error`](../help/errors/mcp-server-error.md)                                     | Another HTTP error, a malformed reply, or the tool reported an error. |
+| [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md)                             | Detached, off the allowlist, or the owner lost `use` on the server.   |
+| [`mcp_tool_removed`](../help/errors/mcp-tool-removed.md)                                     | The server no longer lists the tool.                                  |
+| [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md)                                     | The call hit its time limit or the run was stopped.                   |
+| [`mcp_call_limit`](../help/errors/mcp-call-limit.md)                                         | A coding run made more calls than `WARDBY_MCP_MAX_CALLS_PER_RUN`.     |
+| [`mcp_unavailable`](../help/errors/mcp-unavailable.md)                                       | The coding proxy has no gateway to forward MCP calls to.              |
 
 See also [Secrets and tools](tool-secrets.md) and
 [Remote MCP servers](security-deployment.md#remote-mcp-servers).

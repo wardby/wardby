@@ -11,6 +11,7 @@ import { isCodexCoding, loadMcpToolPins } from "./mcp-tools.js";
 import { fakeMcpServer, textResult } from "./mcp-tools.test-support.js";
 import { createSecret } from "./secrets.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
+import { AppKeySecretCipher } from "../providers/secrets/app-key.js";
 
 // Fake values only.
 const SECRET = "sk-fake-coding-mcp-ZYXW98765432";
@@ -153,6 +154,53 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
     expect(logged).not.toContain(SECRET);
     expect(logged).not.toContain(token);
     expect(logged).not.toContain("errors");
+  });
+
+  it("reports mcp_server_credentials_unavailable when the server's secret can't be decrypted", async () => {
+    // Fake keys: the secret is stored under one key and read with another.
+    const keyA = new AppKeySecretCipher("a".repeat(64));
+    const keyB = new AppKeySecretCipher("b".repeat(64));
+    const where = { ownerId_name: { ownerId: owner, name: "DD_KEY" } };
+    const before = await db.secret.findUniqueOrThrow({ where });
+    const ciphertext = await keyA.encrypt(SECRET);
+    await db.secret.update({ where, data: { ciphertext } });
+    const warn = vi.fn();
+    const ownLog = { info, warn, error: vi.fn() } as unknown as Logger;
+    try {
+      const server = fakeMcpServer(() => textResult("never"));
+      const res = await handleCodingMcpRequest(
+        `Bearer ${token}`,
+        callBody(),
+        deps(server.impl, { cipher: keyB, log: ownLog }),
+      );
+      expect(res.status).toBe(200);
+      const result = resultOf(res.body);
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        error: "mcp_server_credentials_unavailable",
+        message: expect.stringContaining("same SECRET_APP_KEY"),
+      });
+      expect(info.mock.calls[0][0]).toMatchObject({ outcome: "mcp_server_credentials_unavailable" });
+      expect(warn.mock.calls).toEqual([
+        [
+          {
+            reason: "mcp_secret_decrypt_failed",
+            serverId: expect.any(String),
+            serverName: "datadog",
+            secretName: "DD_KEY",
+          },
+          "MCP server secret could not be decrypted",
+        ],
+      ]);
+      for (const text of [res.body, JSON.stringify(info.mock.calls), JSON.stringify(warn.mock.calls)]) {
+        expect(text).not.toContain(SECRET);
+        expect(text).not.toContain(ciphertext);
+        expect(text).not.toContain(token);
+      }
+      expect(server.seen).toEqual([]);
+    } finally {
+      await db.secret.update({ where, data: { ciphertext: before.ciphertext } });
+    }
   });
 
   it("refuses the token once the session is cancelled or past its deadline", async () => {

@@ -106,15 +106,23 @@ function excerpt(queries: string[], page: HelpPage): string {
   return truncate(best?.candidate ?? page.summary);
 }
 
+/** Added when the whole query equals one of a page's tags; above the 12 a single title word can add. */
+const EXACT_TAG_BONUS = 15;
+
 /** Finds pages with deterministic, offline fuzzy matching over their catalog metadata and body. */
 export function searchHelp(catalog: HelpCatalog, query: string): HelpSearchResult[] {
   const queries = words(query);
   if (!queries.length) return [];
 
+  // A query that is exactly one of a page's tags (such as an error code) names that page. Word scoring
+  // alone ties when one code's words are a subset of another's (mcp_unavailable inside
+  // mcp_server_credentials_unavailable), so the exact tag adds more than any single word can.
+  const wholeQuery = query.trim().toLowerCase();
   const results: HelpSearchResult[] = [];
   for (const page of catalog.pages) {
-    const score = pageScore(queries, page);
-    if (score === undefined) continue;
+    const matchScore = pageScore(queries, page);
+    if (matchScore === undefined) continue;
+    const score = matchScore + (page.tags.some((tag) => tag.toLowerCase() === wholeQuery) ? EXACT_TAG_BONUS : 0);
     const heading = matchingHeading(queries, page);
     results.push({ page, score, ...(heading ? { matchedHeading: heading } : {}), excerpt: excerpt(queries, page) });
   }
