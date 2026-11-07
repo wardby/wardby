@@ -402,6 +402,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       close: async () => {
         await closeQuietly(stdio.close(), "stdio transport close");
         await closeQuietly(providers.executor.close?.(), "executor close");
+        await providers.runSteps?.flush?.();
         modelCatalog.close();
       },
     };
@@ -564,6 +565,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
       await closeQuietly(providers.executor.close?.(), "executor close");
+      await providers.runSteps?.flush?.();
       modelCatalog.close();
     },
   };

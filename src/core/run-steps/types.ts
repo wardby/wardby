@@ -29,6 +29,8 @@ export interface RunStepBatch {
  */
 export interface RunStepSink {
   record(runId: string, batch: RunStepBatch, extraSecretValues?: readonly string[]): Promise<void>;
+  /** Resolves when the writes queued so far settle (bounded; never rejects): before a shutdown disconnects. */
+  flush?(): Promise<void>;
 }
 
 /**

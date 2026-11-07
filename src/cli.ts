@@ -166,10 +166,15 @@ function buildMemory(cipher: ProviderRegistry["secrets"]): ProviderRegistry["mem
   return guardAgentMemory(new PostgresAgentMemory(prisma), createDbSecretWriteGuard(prisma, cipher));
 }
 
+/** The run-steps writers this process built; each is flushed before the database disconnects. */
+const runStepWriters: ReturnType<typeof buildRunStepWriter>[] = [];
+
 /** The process's run-steps writer; an invalid WARDBY_RUN_STEPS or RUN_STEP_RETENTION_DAYS stops the command with the loader's message. */
 function buildRunSteps(cipher: ProviderRegistry["secrets"]): ReturnType<typeof buildRunStepWriter> {
   try {
-    return buildRunStepWriter(prisma, cipher);
+    const writer = buildRunStepWriter(prisma, cipher);
+    runStepWriters.push(writer);
+    return writer;
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
@@ -1180,6 +1185,8 @@ async function main(): Promise<void> {
       fail(CLI_USAGE);
     }
   } finally {
+    // A run's last steps are written before the connection goes (bounded: flush never rejects).
+    await Promise.all(runStepWriters.map((writer) => writer.flush()));
     await prisma.$disconnect();
   }
 }

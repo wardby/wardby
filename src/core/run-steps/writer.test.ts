@@ -15,6 +15,44 @@ function fakeDb() {
 }
 
 describe("RunStepWriter", () => {
+  describe("flush", () => {
+    it("waits for a pending write to settle", async () => {
+      const db = fakeDb();
+      let release!: () => void;
+      db.$transaction.mockImplementation(
+        () => new Promise<undefined>((resolve) => (release = () => resolve(undefined))),
+      );
+      const writer = new RunStepWriter({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => [],
+        level: "summary",
+        retentionDays: 30,
+      });
+      void writer.record("r1", { steps: [step], results: [] });
+      let flushed = false;
+      const flushing = writer.flush().then(() => (flushed = true));
+      await vi.waitFor(() => expect(db.$transaction).toHaveBeenCalled());
+      expect(flushed).toBe(false);
+      release();
+      await flushing;
+      expect(flushed).toBe(true);
+    });
+
+    it("resolves at its bound when a write never settles, and at once with nothing queued", async () => {
+      const db = fakeDb();
+      db.$transaction.mockImplementation(() => new Promise<undefined>(() => undefined));
+      const writer = new RunStepWriter({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => [],
+        level: "summary",
+        retentionDays: 30,
+      });
+      await expect(writer.flush(10)).resolves.toBeUndefined();
+      void writer.record("r1", { steps: [step], results: [] });
+      await expect(writer.flush(20)).resolves.toBeUndefined();
+    });
+  });
+
   it("writes nothing when the run's secret values can't be read, and logs only the error's name", async () => {
     const db = fakeDb();
     const warn = vi.fn();

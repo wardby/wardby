@@ -34,6 +34,8 @@ import {
 const stepsLog = logger.child({ module: "run-steps" });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TX = { maxWait: 5_000, timeout: 10_000 } as const;
+/** How long flush() waits for queued writes at shutdown. */
+export const FLUSH_TIMEOUT_MS = 5_000;
 /** Over-cap callIds remembered (as 32-character hashes): at most this many per run and in all. */
 const DROPPED_PER_RUN = 10_000;
 const DROPPED_TOTAL = 200_000;
@@ -96,6 +98,24 @@ export class RunStepWriter implements RunStepSink {
       if (this.queues.get(runId) === next) this.queues.delete(runId);
     });
     return next;
+  }
+
+  /**
+   * Resolves when every write queued so far has settled, or after `timeoutMs`: called before the
+   * process disconnects from the database, so a run's last steps are not cut off. Never rejects.
+   */
+  async flush(timeoutMs = FLUSH_TIMEOUT_MS): Promise<void> {
+    const pending = [...this.queues.values()];
+    if (pending.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    try {
+      await Promise.race([Promise.allSettled(pending), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private now(): Date {
