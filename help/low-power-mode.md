@@ -47,10 +47,11 @@ only when `WARDBY_LOW_POWER=1`.
   a sandbox run does the same for the gateway. A coding run with MCP tools
   wakes both at once, because its MCP calls go through the gateway; if the
   gateway does not wake it fails before launch with
-  [`coding_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md).
+  [`coding_failure_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md).
   The wait is at least 5 minutes.
-  A `KUBERNETES_READY_TIMEOUT_MS` (proxy) or `NATIVE_SANDBOX_READY_TIMEOUT_MS`
-  (gateway) above that, set on the control-plane Deployment, raises it. Expect
+  A `KUBERNETES_READY_TIMEOUT_MS` (the proxy, and the gateway wake of a coding
+  run) or `NATIVE_SANDBOX_READY_TIMEOUT_MS` (the gateway wake of a sandbox run)
+  above that, set on the control-plane Deployment, raises it. Expect
   about 1 to 2 minutes extra on a cold node. Log: `power: proxy woke`. A
   sandbox run woken this way may then wait for a gVisor node for its worker
   pod, so its first model call can come several minutes after it started. From
@@ -118,7 +119,7 @@ full table.
 
 - [`low_power_wake_timeout`](errors/low-power-wake-timeout.md): the target did
   not become ready in time, or its Deployment does not exist.
-- [`coding_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md):
+- [`coding_failure_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md):
   a coding run with MCP tools failed before launch because the gateway did not
   wake.
 - `native_sandbox_launch_abandoned` (0.7.0 and later): a sandbox run was

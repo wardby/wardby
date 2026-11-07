@@ -667,13 +667,13 @@ logs `power: proxy slept (idle 30m)`.
 
 **Waking.** Starting a coding run scales the proxy to 1 and waits for a ready
 endpoint. Starting a sandbox run does the same for the gateway, and so does starting a
-coding run with MCP tools, whose MCP calls go through the gateway: it wakes the
+coding run with MCP tools, whose MCP calls go through the gateway (0.8.1 and later): it wakes the
 proxy and gateway at once and fails before launch with
 [`coding_failure_mcp_gateway_unavailable`](../help/errors/coding-mcp-gateway-unavailable.md)
 if the gateway does not wake. The wait is at
 least 5 minutes, because a cold Autopilot node can add 1 to 2 minutes of
-start-up; a `KUBERNETES_READY_TIMEOUT_MS` (proxy) or
-`NATIVE_SANDBOX_READY_TIMEOUT_MS` (gateway) above 5 minutes, set on the
+start-up; a `KUBERNETES_READY_TIMEOUT_MS` (the proxy, and the gateway wake of a coding run) or
+`NATIVE_SANDBOX_READY_TIMEOUT_MS` (the gateway wake of a sandbox run) above 5 minutes, set on the
 control-plane Deployment, raises it to that value. The first coding run after a
 control-plane restart also runs the cluster preflight canary, because start-up
 preflight is deferred while the proxy sleeps (`kubernetes_preflight_deferred`).

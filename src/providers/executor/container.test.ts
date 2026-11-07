@@ -17,6 +17,8 @@ import type { McpToolPin } from "../../core/mcp-tools.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import { CHILD_RUN_FAILURE_CODES } from "../../core/error-code.js";
+import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
@@ -45,6 +47,7 @@ import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry
 import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
   CAPACITY_RETRY_BACKOFF_MS,
+  CATEGORY_BY_PREFIX,
   ContainerExecutor,
   type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
@@ -1526,7 +1529,7 @@ describe("ContainerExecutor", () => {
     it("fails the run with coding_failure_mcp_gateway_unavailable when the launcher can't wake the gateway", async () => {
       const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
       created.jobs.launchError = new Error(
-        "coding_mcp_gateway_unavailable: the native gateway, which serves this run's MCP tools, did not wake.",
+        `${CODING_MCP_GATEWAY_UNAVAILABLE}: the native gateway, which serves this run's MCP tools, did not wake.`,
         { cause: new Error('low_power_wake_timeout: gateway "wardby-native-gateway" had no ready endpoint') },
       );
       await created.executor.start("run-1");
@@ -4957,5 +4960,13 @@ describe("overrun from available room", () => {
     created.jobs.status = async () => (++polls < 4 ? { state: "running" } : { state: "succeeded" });
     await created.executor.start("run-1");
     expect(asked).toBe(0);
+  });
+});
+
+describe("CATEGORY_BY_PREFIX", () => {
+  it("files every category under a coding_failure_<category> code a parent run can be told", () => {
+    for (const [, category] of CATEGORY_BY_PREFIX) {
+      expect(CHILD_RUN_FAILURE_CODES.has(`coding_failure_${category}`), category).toBe(true);
+    }
   });
 });

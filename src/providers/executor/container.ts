@@ -3069,7 +3069,7 @@ export const MCP_GATEWAY_UNAVAILABLE_CATEGORY = "mcp_gateway_unavailable";
  * (a failed PR lookup or create after the push, a token mint) under
  * "workspace" because "github" contains "git".
  */
-const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
   // Claude Code reached the agent's turn limit (codingProfile.maxTurns) before finishing.
   ["job_coding_turn_limit", "turn_limit"],
   // A service sidecar never became ready (src/providers/jobs/kubernetes.ts).
