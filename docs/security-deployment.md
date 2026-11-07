@@ -640,6 +640,16 @@ ceiling only as far as your tools need.
 server: an older image refuses the run of an agent that has a tool with
 `timeoutMs`. Tools without `timeoutMs` run on either image.
 
+### Run steps
+
+Runs record their steps (tool calls with a status, and what the model said, each
+cut to one short line) for `get_run_steps`; see
+[Run steps](debugging-agent-runs.md#run-steps). Only the control plane and the
+native gateway write them, and only after removing every secret value of the
+run's agent and every token-shaped value; a step whose agent secrets can't be
+read is not stored. Tool output is never recorded. Set `WARDBY_RUN_STEPS=off` to
+record nothing.
+
 ### Remote MCP servers
 
 Owners can register a remote MCP server (Streamable HTTP, HTTPS only) and attach

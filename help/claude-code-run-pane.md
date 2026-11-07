@@ -37,4 +37,7 @@ keys it shows. The desktop app needs no setting.
 uninstall` removes the plugin and the rules install added. To continue a run
 from the pane, see `resume-runs-locally`.
 
+To read a run's steps (each tool call and what the model said, one line each),
+use `get_run_steps`; see `run-steps`.
+
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

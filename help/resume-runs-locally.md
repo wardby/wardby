@@ -49,6 +49,9 @@ blob store nothing is stored, and `update_agent` warns you.
   (default 10 MiB, at most 64 MiB). Each run records a status (`stored`,
   `too_large`, `not_captured` or `failed`) with a reason code.
 
+For a short line-per-step record of any run, without a blob store and without
+continuing it, see `run-steps`.
+
 ## Who can read it
 
 Transcripts are stored from the first run with `sessionResume` on. Anyone
