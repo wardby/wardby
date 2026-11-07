@@ -44,11 +44,19 @@ export function nativeToolResults(toolCalls: readonly { id: string }[], results:
 
 /** The results a model request carries for the previous turn: the `tool` messages after the last assistant one. */
 export function nativeRequestResults(messages: readonly LlmMessage[]): ExtractedResult[] {
-  const results: ExtractedResult[] = [];
+  let lastAssistant = -1;
   for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== "tool") break;
-    if (message.toolCallId) results.unshift({ callId: message.toolCallId, status: nativeToolStatus(message.content) });
+    if (messages[index].role === "assistant") {
+      lastAssistant = index;
+      break;
+    }
+  }
+  const results: ExtractedResult[] = [];
+  // A trailing non-tool message (the engine's wind-down `user` message) does not hide the results.
+  for (const message of messages.slice(lastAssistant + 1)) {
+    if (message.role === "tool" && message.toolCallId) {
+      results.push({ callId: message.toolCallId, status: nativeToolStatus(message.content) });
+    }
   }
   return results;
 }

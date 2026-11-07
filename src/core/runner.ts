@@ -2642,6 +2642,7 @@ async function executeTrackedRun(
         mcpSecretValues: tools.mcpSecretValues,
         drivability: () => runDrivability(db, runId),
         launcher: providers.nativeSandbox,
+        ...(providers.runSteps ? { runSteps: providers.runSteps } : {}),
       });
       return await finishNativeRun(finishContext, loaded.agent.model, engineResult);
     }

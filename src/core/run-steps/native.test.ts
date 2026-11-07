@@ -56,6 +56,17 @@ describe("nativeRequestResults", () => {
     ]);
     expect(nativeRequestResults([{ role: "user", content: "Begin." }])).toEqual([]);
   });
+
+  it("still finds the results when a user message (the wind-down note) follows them", () => {
+    expect(
+      nativeRequestResults([
+        { role: "user", content: "Begin." },
+        { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "lookup", argsJson: "{}" }] },
+        { role: "tool", toolCallId: "c1", content: wrapped('{"error":"x"}') },
+        { role: "user", content: "Wrap up now." },
+      ]),
+    ).toEqual([{ callId: "c1", status: "error" }]);
+  });
 });
 
 describe("NativeStreamSteps", () => {

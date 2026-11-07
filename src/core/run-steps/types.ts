@@ -22,9 +22,13 @@ export interface RunStepBatch {
   results: ExtractedResult[];
 }
 
-/** Where trusted code hands a run's steps: redacts by exact value, then writes. Never rejects. */
+/**
+ * Where trusted code hands a run's steps: redacts by exact value, then writes. Never rejects.
+ * `extraSecretValues` are values the caller knows that the agent's own secrets do not cover (the
+ * native-sandbox gateway's run capability); they are redacted like the agent's.
+ */
 export interface RunStepSink {
-  record(runId: string, batch: RunStepBatch): Promise<void>;
+  record(runId: string, batch: RunStepBatch, extraSecretValues?: readonly string[]): Promise<void>;
 }
 
 /**

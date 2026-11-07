@@ -74,6 +74,46 @@ describe("RunStepWriter", () => {
     expect(db.run.findUnique).not.toHaveBeenCalled();
   });
 
+  it("redacts the caller's extra secret values (the gateway capability) from text and callIds", async () => {
+    const CAPABILITY = "wbFake-Capability-Value-c0ffee12";
+    const created: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: vi.fn(async () => []),
+      runStep: {
+        findMany: vi.fn(async () => []),
+        findFirst: vi.fn(async () => null),
+        createMany: vi.fn(async ({ data }: { data: Array<Record<string, unknown>> }) => void created.push(...data)),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
+      run: { update: vi.fn(async () => undefined) },
+    };
+    const db = {
+      run: { findUnique: vi.fn(async () => ({ agentId: "a1" })) },
+      runStep: {},
+      $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<void>) => fn(tx)),
+    };
+    const writer = new RunStepWriter({
+      db: db as unknown as RunStepWriterDb,
+      secretValues: async () => [],
+      level: "summary",
+      retentionDays: 30,
+    });
+    await writer.record(
+      "r1",
+      {
+        steps: [
+          { kind: "said", callId: "said:ok", text: `token ${CAPABILITY} here`, truncated: false },
+          { kind: "tool", callId: `call-${CAPABILITY}`, tool: "Bash", text: "ls", truncated: false },
+        ],
+        results: [],
+      },
+      [CAPABILITY],
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0].callId).toBe("said:ok");
+    expect(JSON.stringify(created)).not.toContain(CAPABILITY);
+  });
+
   it("never rejects, even when the database does", async () => {
     const db = fakeDb();
     db.$transaction.mockRejectedValueOnce(new Error("connection reset"));

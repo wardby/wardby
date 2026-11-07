@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
+import type { RunStepBatch, RunStepSink } from "../core/run-steps/types.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
@@ -592,5 +593,97 @@ describe("gateway refuses to store an attached secret's value", () => {
     );
     await result;
     expect(written).toEqual([]);
+  });
+});
+
+describe("runSandboxedEngine run steps", () => {
+  const steppingLlm = () =>
+    llmStreaming([
+      { type: "text", delta: "Looking it up." },
+      { type: "tool_call", id: "c1", name: "lookup", argsJson: '{"query":"weather"}' },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.01 } },
+    ]);
+  const messages = [
+    { role: "assistant" as const, content: "", toolCalls: [{ id: "c0", name: "lookup", argsJson: "{}" }] },
+    {
+      role: "tool" as const,
+      toolCallId: "c0",
+      name: "lookup",
+      content: '<untrusted_tool_output>\n{"error":"x"}\n</untrusted_tool_output>',
+    },
+  ];
+
+  it("records a call's steps and the results its request carries before the stream ends", async () => {
+    const recorded: Array<[string, RunStepBatch]> = [];
+    const runSteps: RunStepSink = {
+      record: async (runId, batch) => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        recorded.push([runId, batch]);
+      },
+    };
+    let recordedBeforeEnd = -1;
+    const { result } = await withWorker(
+      async (gateway) => {
+        await drain(gateway.stream(req("llm.stream", { request: { model: "m", messages } }, "stream-1")));
+        recordedBeforeEnd = recorded.length;
+        await gateway.call(finish());
+      },
+      { runSteps, ctx: { providers: { llm: steppingLlm() } } },
+    );
+    await result;
+    expect(recordedBeforeEnd).toBe(1);
+    expect(recorded).toEqual([
+      [
+        "run_1",
+        {
+          steps: [
+            { kind: "said", callId: "said:stream-1", text: "Looking it up.", truncated: false },
+            { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+          ],
+          results: [{ callId: "c0", status: "error" }],
+        },
+      ],
+    ]);
+  });
+
+  it("passes the worker's gateway capability to the sink to redact", async () => {
+    const capability = "wbFake-Capability-Value-c0ffee12-0123456789";
+    const extras: Array<readonly string[] | undefined> = [];
+    const runSteps: RunStepSink = {
+      record: async (_runId, _batch, extra) => {
+        extras.push(extra);
+      },
+    };
+    const { result } = await withWorker(
+      async (gateway) => {
+        await drain(gateway.stream(req("llm.stream", { request: { model: "m", messages } })));
+        await gateway.call(finish());
+      },
+      {
+        runSteps,
+        input: { ...input, gateway: { url: "http://gateway.invalid", capability } },
+        ctx: { providers: { llm: steppingLlm() } },
+      },
+    );
+    await result;
+    expect(extras).toEqual([[capability]]);
+  });
+
+  it("keeps streaming when recording fails", async () => {
+    const runSteps: RunStepSink = {
+      record: async () => {
+        throw new Error("db down");
+      },
+    };
+    let events: LlmStreamEvent[] = [];
+    const { result } = await withWorker(
+      async (gateway) => {
+        events = await drain(gateway.stream(req("llm.stream", { request: { model: "m", messages } })));
+        await gateway.call(finish());
+      },
+      { runSteps, ctx: { providers: { llm: steppingLlm() } } },
+    );
+    await expect(result).resolves.toMatchObject({ status: "succeeded" });
+    expect(events.map((event) => event.type)).toEqual(["text", "tool_call", "done"]);
   });
 });

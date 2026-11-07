@@ -3,7 +3,7 @@
  * stored, each step's text is redacted by exact value against the secret values the loader covers:
  * the agent's secrets (readable and brokered) and its attached MCP servers' secrets, the same source
  * the transcript recorder uses; run capabilities are masked by token shape. The native-sandbox
- * gateway capability is added by the gateway caller (not here). A batch whose run's secret values
+ * gateway capability is passed by the gateway as `extraSecretValues` and redacted the same way. A batch whose run's secret values
  * can't be read writes nothing (fail closed). A step whose kind is unknown, whose callId is invalid or
  * would change under redaction is dropped and not counted in stepsDropped; only steps past the cap are
  * counted, once per callId. One run's batches are written in arrival order, within one process only
@@ -79,12 +79,12 @@ export class RunStepWriter implements RunStepSink {
 
   constructor(private readonly deps: RunStepWriterDeps) {}
 
-  record(runId: string, batch: RunStepBatch): Promise<void> {
+  record(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[] = []): Promise<void> {
     if (effectiveRunStepsLevel(this.deps.level) === "off") return Promise.resolve();
     if (batch.steps.length === 0 && batch.results.length === 0) return Promise.resolve();
     const previous = this.queues.get(runId) ?? Promise.resolve();
     const next = previous
-      .then(() => this.write(runId, batch))
+      .then(() => this.write(runId, batch, extraSecretValues))
       .catch((err: unknown) => {
         (this.deps.log ?? stepsLog).warn(
           { runId, event: "run_steps_write_failed", errorName: err instanceof Error ? err.name : typeof err },
@@ -102,14 +102,15 @@ export class RunStepWriter implements RunStepSink {
     return (this.deps.now ?? (() => new Date()))();
   }
 
-  private async write(runId: string, batch: RunStepBatch): Promise<void> {
+  private async write(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[]): Promise<void> {
     const { db } = this.deps;
     const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
     if (!run) return;
     const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
     // Read fresh for every batch (never cached: a rotated or newly attached secret must be covered).
     // Rejects (and the batch is dropped) when the values can't be read: never an unredacted write.
-    const values = steps.length > 0 ? await this.deps.secretValues(run.agentId) : [];
+    const values =
+      steps.length > 0 ? [...(await this.deps.secretValues(run.agentId)), ...extraSecretValues.filter(Boolean)] : [];
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
