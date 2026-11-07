@@ -400,6 +400,9 @@ model Run {
   /// run through the server's executor and clears this.
   stopRequestedAt      DateTime?
   stopRequestReason    String?
+  /// Run steps (RunStep) not recorded because the run already had MAX_RUN_STEPS (2,000).
+  stepsDropped         Int                      @default(0)
+  steps                RunStep[]
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -649,6 +652,36 @@ model RunTranscript {
   createdAt DateTime @default(now())
   expiresAt DateTime
 
+  @@index([expiresAt])
+}
+
+/// One line of what a run did: a tool call (with its status once the result is back) or what the
+/// model said. Derived by trusted code from model traffic and written only by the control plane's
+/// RunStepWriter, after exact-value redaction against the run's secret values
+/// (docs/debugging-agent-runs.md#run-steps). Never tool output at the summary level.
+model RunStep {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// Order within the run, from 1.
+  seq       Int
+  at        DateTime @default(now())
+  /// "tool" | "said"
+  kind      String
+  /// The tool's display name (Bash, mcp:<name>, exec_command, ...); null for "said".
+  tool      String?
+  /// The provider's call id (to attach the result), or a said:<key> id; never returned by MCP.
+  callId    String?
+  /// Redacted, at most 300 characters.
+  summary   String
+  /// ok | error | exit N, set when the result arrives.
+  status    String?
+  /// The detail level's text (PR 3); always null in this release.
+  detail    String?
+  expiresAt DateTime
+
+  @@unique([runId, seq])
+  @@index([runId, callId])
   @@index([expiresAt])
 }
 
