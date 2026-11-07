@@ -1,6 +1,6 @@
 # Native sandbox
 
-> **Requires Wardby 0.5.4 or later.**
+> **Requires Wardby 0.6.0 or later.**
 
 By default a native agent runs inside the Wardby server process: its turn loop
 and any user tool code you attach execute next to the database connection, the

@@ -340,7 +340,7 @@ production alerts, and SLOs remain operator responsibilities. See the
 
 Read the [runtime architecture](https://github.com/wardby/wardby/blob/main/docs/architecture-runtime.md),
 [coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md),
-[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md) (0.5.4+), and
+[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md) (0.6.0+), and
 [security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before enabling a
 production repository.
 

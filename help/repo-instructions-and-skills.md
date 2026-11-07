@@ -4,7 +4,7 @@ title: Repository instructions and skills in coding runs
 summary: What AGENTS.md, CLAUDE.md, and repo skills a coding run loads, and how to turn repo skills off per agent with codingProfile.repoSkills.
 audience: all
 tags: [coding, skills, repoSkills, claudeBareMode, CLAUDE.md, AGENTS.md, SKILL.md, codex, claude-code]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Repository instructions and skills in coding runs

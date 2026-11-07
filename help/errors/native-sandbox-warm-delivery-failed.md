@@ -4,7 +4,7 @@ title: Native sandbox warm worker could not take the run
 summary: A run claimed an idle warm-pool worker, delivering its input failed, and the worker could not be confirmed stopped within 30 seconds, so the run failed instead of cold-launching.
 audience: operator
 tags: [error, native-agents, sandbox, warm-pool, kubernetes, docker, native_sandbox_warm_delivery_failed]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native sandbox warm worker could not take the run

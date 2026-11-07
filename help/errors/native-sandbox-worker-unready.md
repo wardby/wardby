@@ -4,7 +4,7 @@ title: Native worker pod did not start
 summary: On Kubernetes, the sandbox worker pod did not reach the Running state in time, so the run failed before starting.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, native_sandbox_worker_unready]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker pod did not start

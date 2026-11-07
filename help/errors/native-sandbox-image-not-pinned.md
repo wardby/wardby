@@ -4,7 +4,7 @@ title: Native worker image not pinned
 summary: NATIVE_SANDBOX_WORKER_IMAGE is a mutable tag, so Wardby refused to launch a sandbox worker.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_image_not_pinned]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker image not pinned

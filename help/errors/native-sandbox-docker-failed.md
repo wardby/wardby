@@ -4,7 +4,7 @@ title: Native worker Docker command failed
 summary: A Docker command Wardby ran to start or clean up a sandbox worker failed.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_docker_failed]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker Docker command failed

@@ -23,7 +23,7 @@
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
   concept format, how coding runs and reviewers use it, `wardby knowledge check`,
   and the scheduled architecture agent.
-- [Native sandbox](native-sandbox.md) (0.5.4+) runs a native agent's turn loop and user
+- [Native sandbox](native-sandbox.md) (0.6.0+) runs a native agent's turn loop and user
   tools in a single-use, credential-free container behind a native gateway.
 - [Secrets and tools](tool-secrets.md) covers readable and brokered secrets
   (brokered secrets require 0.6.0+):
