@@ -4,7 +4,7 @@ title: See what a run is doing (run steps)
 summary: Wardby records each run's steps, one line per tool call or model message, so you can follow a running run and read what a finished one did with get_run_steps.
 audience: operator
 tags: [run steps, get_run_steps, lastStep, steps, progress, what is my run doing, stuck run, WARDBY_RUN_STEPS, RUN_STEP_RETENTION_DAYS]
-appliesTo: >=0.8.0
+appliesTo: >=0.9.0
 ---
 
 # See what a run is doing
@@ -17,7 +17,7 @@ Wardby records the steps of a run while it runs:
 - one line for what the **model said**, cut to about 120 characters.
 
 Tool output is never recorded, and neither is the full text of a command or
-message. Claude Code's `run_command` tool shows as `Bash`.
+message. A tool named `run_command` shows as `Bash`.
 
 Steps are recorded for native runs, in the control plane and on the native
 sandbox. Claude Code and Codex runs don't record steps.
@@ -46,8 +46,8 @@ anything shaped like a token or key. A command that echoes a secret shows
 ## Retention
 
 Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are recorded (default
-30). A change applies to steps recorded after it. Once a finished run's steps
-are deleted, `get_run_steps` says `expired`.
+30). A change applies to steps recorded after it. `get_run_steps` reports `expired` when a run finished more than
+`RUN_STEP_RETENTION_DAYS` ago and has no steps left.
 
 ## Settings
 
@@ -57,7 +57,7 @@ are deleted, `get_run_steps` says `expired`.
 | `RUN_STEP_RETENTION_DAYS` | `30`      | Days to keep a step, a whole number from 1 to 3650. Any other value stops start-up.                                                                    |
 
 Set both on every process that runs native agents or serves the native sandbox
-gateway: `wardby serve`, `wardby scheduler`, `wardby run` and
+gateway: `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp` and
 `wardby native-gateway`.
 
 The full guide is
