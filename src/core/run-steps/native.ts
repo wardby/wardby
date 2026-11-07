@@ -4,6 +4,7 @@
  * result's content is never kept: its status is whether it starts as the runner's JSON error.
  */
 import { createHash } from "node:crypto";
+import type { EngineTurnEvent } from "../../providers/engine/types.js";
 import type { LlmMessage, LlmStreamEvent } from "../../providers/llm/types.js";
 import { logger } from "../logger.js";
 import { UNTRUSTED_TOOL_OUTPUT_TAG } from "../untrusted-content.js";
@@ -140,10 +141,25 @@ export async function recordStreamSteps(
   }
 }
 
-/** The engine's `onSteps` for a run: hands each batch to the writer and does not wait for it. */
+/** One engine turn event's batch: a turn's said and tool steps, or its tool calls' results. */
+export function nativeTurnBatch(event: EngineTurnEvent): RunStepBatch {
+  return event.kind === "turn"
+    ? { steps: nativeTurnSteps(`turn:${event.turn}`, event.text, event.toolCalls), results: [] }
+    : { steps: [], results: nativeToolResults(event.toolCalls, event.results) };
+}
+
+/**
+ * The engine's `onTurn` for a run: hands each non-empty batch to the writer and does not wait for
+ * it. A throw here reaches the engine, which logs it by name and goes on.
+ */
 export function runStepsHook(
   sink: RunStepSink | undefined,
   runId: string,
-): ((batch: RunStepBatch) => void) | undefined {
-  return sink ? (batch) => void sink.record(runId, batch) : undefined;
+): ((event: EngineTurnEvent) => void) | undefined {
+  if (!sink) return undefined;
+  return (event) => {
+    const batch = nativeTurnBatch(event);
+    if (batch.steps.length === 0 && batch.results.length === 0) return;
+    void sink.record(runId, batch);
+  };
 }

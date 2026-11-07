@@ -13,7 +13,6 @@
  * blinds the pre-flight refuse and mid-stream cutoff, and is not allowed.
  */
 
-import type { RunStepBatch } from "../../core/run-steps/types.js";
 import type { ProviderRegistry } from "../index.js";
 import type { LlmEffort } from "../llm/types.js";
 
@@ -135,14 +134,26 @@ export interface EngineRunContext {
   /** Called after each model turn that completed without error; the engine awaits it. */
   onProgress?: (progress: EngineProgress) => Promise<void>;
   /**
-   * Receives the run's steps after each model turn and again after its tool calls
-   * (src/core/run-steps). Synchronous and not awaited. A replay delivers the same call ids again;
-   * the writer drops the repeats.
+   * Receives each model turn's text and tool calls, then the turn's tool results, as the engine saw
+   * them. The runner turns them into the run's steps (src/core/run-steps); the engine never imports
+   * that code, so the sandbox worker image does not ship it. Synchronous and not awaited. A replay
+   * delivers the same call ids again; the writer drops the repeats.
    */
-  onSteps?: (batch: RunStepBatch) => void;
+  onTurn?: (event: EngineTurnEvent) => void;
   /** See StepRunner. Optional; the in-process executor leaves it unset. */
   step?: StepRunner;
 }
+
+/** What EngineRunContext.onTurn receives: a turn's output, then (if it called tools) their results in call order. */
+export type EngineTurnEvent =
+  | {
+      kind: "turn";
+      /** 1-based turn number. */
+      turn: number;
+      text: string;
+      toolCalls: readonly { id: string; name: string; argsJson: string }[];
+    }
+  | { kind: "results"; turn: number; toolCalls: readonly { id: string }[]; results: readonly string[] };
 
 export type EngineStatus = "succeeded" | "budget_exhausted" | "refused" | "failed";
 

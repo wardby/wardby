@@ -13,7 +13,6 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
-import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import { loadMcpServersMode } from "../config/mcp-servers.js";
 import { loadMcpMaxCallsPerRun } from "../config/mcp-call-limit.js";
@@ -92,6 +91,7 @@ import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
+import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { registerRunStepsTool } from "./tools/run-steps.js";
 import { registerRunTranscriptTool } from "./tools/run-transcript.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";

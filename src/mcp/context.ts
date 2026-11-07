@@ -7,11 +7,11 @@
  * registry also carries jobs/email/auth/storage seams no Phase 4 tool
  * needs and this plan never builds real adapters for.
  */
-import type { RunStepSink } from "../core/run-steps/types.js";
 import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { RepoAccessGate } from "../core/repo-access.js";
+import type { RunStepSink } from "../core/run-steps/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
 import type { Power } from "../core/power.js";

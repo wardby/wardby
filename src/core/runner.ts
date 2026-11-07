@@ -17,8 +17,6 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
-import { runStepsHook } from "./run-steps/native.js";
-import type { RunStepSink } from "./run-steps/types.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
@@ -41,6 +39,8 @@ import {
   resolveCodingRepository,
 } from "./coding-repository.js";
 import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
+import { runStepsHook } from "./run-steps/native.js";
+import type { RunStepSink } from "./run-steps/types.js";
 
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
@@ -2625,7 +2625,7 @@ async function executeTrackedRun(
     const { runSandboxTool } = tools;
 
     const onProgress = (progress: EngineProgress) => recordNativeRunProgress(db, runId, progress);
-    const onSteps = runStepsHook(providers.runSteps, runId);
+    const onTurn = runStepsHook(providers.runSteps, runId);
     const llm =
       loaded.pricing && providers.llm instanceof RoutingLlmProvider
         ? providers.llm.forRun(loaded.pricing.entry)
@@ -2657,7 +2657,7 @@ async function executeTrackedRun(
         : {}),
       onText,
       onProgress,
-      ...(onSteps ? { onSteps } : {}),
+      ...(onTurn ? { onTurn } : {}),
       step,
     });
 

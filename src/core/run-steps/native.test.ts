@@ -155,11 +155,28 @@ describe("recordStreamSteps", () => {
 });
 
 describe("runStepsHook", () => {
-  it("hands each batch to the sink for the run, and is absent without a sink", () => {
+  it("is absent without a sink", () => {
     expect(runStepsHook(undefined, "r1")).toBeUndefined();
+  });
+
+  it("hands each engine event's batch to the sink for the run", () => {
     const sink: RunStepSink = { record: vi.fn(async () => undefined) };
-    const batch = { steps: [], results: [{ callId: "c1", status: "ok" as const }] };
-    runStepsHook(sink, "r1")!(batch);
-    expect(sink.record).toHaveBeenCalledWith("r1", batch);
+    const hook = runStepsHook(sink, "r1")!;
+    hook({ kind: "turn", turn: 3, text: "Hi.", toolCalls: [{ id: "c1", name: "lookup", argsJson: "{}" }] });
+    hook({ kind: "results", turn: 3, toolCalls: [{ id: "c1" }], results: ['{"error":"x"}'] });
+    expect(sink.record).toHaveBeenNthCalledWith(1, "r1", {
+      steps: [
+        { kind: "said", callId: "said:turn:3", text: "Hi.", truncated: false },
+        expect.objectContaining({ kind: "tool", callId: "c1", tool: "lookup" }),
+      ],
+      results: [],
+    });
+    expect(sink.record).toHaveBeenNthCalledWith(2, "r1", { steps: [], results: [{ callId: "c1", status: "error" }] });
+  });
+
+  it("records nothing for a turn with no text and no tool calls", () => {
+    const sink: RunStepSink = { record: vi.fn(async () => undefined) };
+    runStepsHook(sink, "r1")!({ kind: "turn", turn: 1, text: "  ", toolCalls: [] });
+    expect(sink.record).not.toHaveBeenCalled();
   });
 });

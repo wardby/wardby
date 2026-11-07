@@ -94,4 +94,27 @@ describe.skipIf(!process.env.DATABASE_URL)("run steps through MCP (PostgreSQL)",
     const row = (JSON.parse(listed) as { id: string; lastStep?: { line: string } }[]).find((r) => r.id === run.id);
     expect(row?.lastStep?.line).toBe("Bash: echo [REDACTED] (exit 1)");
   });
+
+  it("leaves lastStep out of the agentId listing of list_runs", async () => {
+    const me = await db.principal.create({ data: { subject: `run-steps-${randomUUID()}` } });
+    principalIds.push(me.id);
+    const agent = await db.agent.create({
+      data: { name: `steps-${randomUUID()}`, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1, ownerId: me.id },
+    });
+    agentIds.push(agent.id);
+    const run = await db.run.create({ data: { agentId: agent.id, status: "running" } });
+    const writer = new RunStepWriter({ db, secretValues: async () => [], level: "summary", retentionDays: 30 });
+    await writer.record(run.id, {
+      steps: [{ kind: "said", callId: "said:turn:1", text: "Working.", truncated: false }],
+      results: [],
+    });
+
+    const mcp = await connect(me);
+    const listed = await mcp.call("list_runs", { agentId: agent.id });
+    await mcp.close();
+
+    const rows = JSON.parse(listed) as { id: string; lastStep?: unknown }[];
+    expect(rows.map((r) => r.id)).toEqual([run.id]);
+    expect(rows[0]).not.toHaveProperty("lastStep");
+  });
 });

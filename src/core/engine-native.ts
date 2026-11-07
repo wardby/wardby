@@ -7,13 +7,18 @@
  * the budget guardrail must stay above whichever engine is running.
  */
 
-import type { Engine, EngineResult, EngineRunContext, EngineStatus, StepRunner } from "../providers/engine/types.js";
+import type {
+  Engine,
+  EngineResult,
+  EngineRunContext,
+  EngineStatus,
+  EngineTurnEvent,
+  StepRunner,
+} from "../providers/engine/types.js";
 import { RunOwnershipLostError, runStepInline } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
 import { logger } from "./logger.js";
-import { nativeToolResults, nativeTurnSteps } from "./run-steps/native.js";
-import type { RunStepBatch } from "./run-steps/types.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "./untrusted-content.js";
 
 const engineLog = logger.child({ module: "engine-native" });
@@ -172,14 +177,11 @@ export class NativeEngine implements Engine {
       const assistantMessage: LlmMessage = { role: "assistant", content: turn.text };
       if (turn.toolCalls.length > 0) assistantMessage.toolCalls = turn.toolCalls;
       messages.push(assistantMessage);
-      this.emitSteps(ctx, () => ({
-        steps: nativeTurnSteps(`turn:${turns}`, turn.text, turn.toolCalls),
-        results: [],
-      }));
+      this.emitTurn(ctx, () => ({ kind: "turn", turn: turns, text: turn.text, toolCalls: turn.toolCalls }));
 
       if (turn.toolCalls.length > 0) {
         const results = await this.runToolCalls(ctx, step, turns, turn.toolCalls);
-        this.emitSteps(ctx, () => ({ steps: [], results: nativeToolResults(turn.toolCalls, results) }));
+        this.emitTurn(ctx, () => ({ kind: "results", turn: turns, toolCalls: turn.toolCalls, results }));
         for (const [index, toolCall] of turn.toolCalls.entries()) {
           messages.push({
             role: "tool",
@@ -249,13 +251,11 @@ export class NativeEngine implements Engine {
     return this.finish("budget_exhausted", turn.text || lastText, turns + 1, finalUsage);
   }
 
-  /** Builds a batch (only when ctx.onSteps is set) and hands it to ctx.onSteps. A failing hook is logged by name and never affects the run. */
-  private emitSteps(ctx: EngineRunContext, build: () => RunStepBatch): void {
-    if (!ctx.onSteps) return;
+  /** Builds an event (only when ctx.onTurn is set) and hands it to ctx.onTurn. A failing hook is logged by name and never affects the run. */
+  private emitTurn(ctx: EngineRunContext, build: () => EngineTurnEvent): void {
+    if (!ctx.onTurn) return;
     try {
-      const batch = build();
-      if (batch.steps.length === 0 && batch.results.length === 0) return;
-      ctx.onSteps(batch);
+      ctx.onTurn(build());
     } catch (err) {
       engineLog.warn(
         { event: "run_steps_hook_failed", errorName: err instanceof Error ? err.name : typeof err },
