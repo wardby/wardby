@@ -407,6 +407,17 @@ echo "==> 2/${TOTAL_STEPS} kubectl context for ${CLUSTER}"
 gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1
 export KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
 kubectl config use-context "$KUBE_CONTEXT" >/dev/null
+# --- pin_kubeconfig ---
+# From here on every kubectl and helm call reads a one-cluster copy of this
+# context, so switching contexts in another terminal (or another deploy from the
+# same machine) while this runs can't send a later step to a different cluster.
+# The copy is readable only by you and removed when up.sh exits.
+PINNED_KUBECONFIG="$(mktemp)"
+trap 'rm -f "$PINNED_KUBECONFIG"' EXIT
+chmod 600 "$PINNED_KUBECONFIG"
+kubectl config view --minify --flatten --context "$KUBE_CONTEXT" >"$PINNED_KUBECONFIG"
+export KUBECONFIG="$PINNED_KUBECONFIG"
+# --- end pin_kubeconfig ---
 
 # The API server by its ENDPOINT, not the kubernetes.default ClusterIP.
 #
