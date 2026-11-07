@@ -3,7 +3,9 @@
  * the model's events and, in the next request, the trailing `role: "tool"` messages. A tool
  * result's content is never kept: its status is whether it starts as the runner's JSON error.
  */
+import { createHash } from "node:crypto";
 import type { LlmMessage, LlmStreamEvent } from "../../providers/llm/types.js";
+import { logger } from "../logger.js";
 import { UNTRUSTED_TOOL_OUTPUT_TAG } from "../untrusted-content.js";
 import { bounded, displayToolName, toolStepText } from "./summarize.js";
 import {
@@ -15,6 +17,7 @@ import {
   type StepStatus,
 } from "./types.js";
 
+const stepsLog = logger.child({ module: "run-steps" });
 const UNTRUSTED_OPEN = `<${UNTRUSTED_TOOL_OUTPUT_TAG}>\n`;
 /** runSandboxTool's failure shape: `{"error": ...}` (src/providers/engine/types.ts). */
 const ERROR_RESULT = /^\s*\{\s*"error"\s*:/;
@@ -61,13 +64,22 @@ export function nativeRequestResults(messages: readonly LlmMessage[]): Extracted
   return results;
 }
 
-/** Collects one model call's steps from its events; `key` makes the said step's id (the call's own id). */
+/** How long a gateway's stream end waits for its steps to be written; past it the write goes on alone. */
+export const STREAM_STEPS_BOUND_MS = 2_000;
+
+/**
+ * Collects one model call's steps from its events. The said step's id is a hash of `callId` (the
+ * worker-chosen request id), so no worker text is stored as an id.
+ */
 export class NativeStreamSteps {
   private text = "";
   private truncated = false;
   private readonly calls: { id: string; name: string; argsJson: string }[] = [];
+  private readonly key: string;
 
-  constructor(private readonly key: string) {}
+  constructor(callId: string) {
+    this.key = createHash("sha256").update(callId).digest("hex").slice(0, 32);
+  }
 
   observe(event: LlmStreamEvent): void {
     try {
@@ -88,6 +100,43 @@ export class NativeStreamSteps {
     const steps = nativeTurnSteps(this.key, this.text, this.calls);
     if (this.truncated && steps[0]?.kind === "said") steps[0] = { ...steps[0], truncated: true };
     return steps;
+  }
+}
+
+/**
+ * A native gateway's stream end: records the call's steps and the results its request carries for
+ * the previous turn, so the next call's results find these steps. Never throws, and waits at most
+ * `boundMs`: past it the stream ends and the write finishes in the background (the writer logs its
+ * own failures, name only).
+ */
+export async function recordStreamSteps(
+  sink: RunStepSink | undefined,
+  runId: string,
+  tap: Pick<NativeStreamSteps, "steps"> | undefined,
+  messages: readonly LlmMessage[],
+  extraSecretValues: readonly string[] = [],
+  boundMs = STREAM_STEPS_BOUND_MS,
+): Promise<void> {
+  if (!sink || !tap) return;
+  let write: Promise<void>;
+  try {
+    const batch = { steps: tap.steps(), results: nativeRequestResults(messages) };
+    write = Promise.resolve(sink.record(runId, batch, extraSecretValues)).catch(() => undefined);
+  } catch (err) {
+    stepsLog.warn(
+      { runId, event: "run_steps_write_failed", errorName: err instanceof Error ? err.name : typeof err },
+      "could not record a run's steps; they were dropped",
+    );
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, boundMs);
+  });
+  try {
+    await Promise.race([write, bound]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { STREAM_STEPS_BOUND_MS } from "../core/run-steps/native.js";
 import type { RunStepBatch, RunStepSink } from "../core/run-steps/types.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import {
@@ -494,7 +495,7 @@ describe("streamModel run steps", () => {
   } as Parameters<typeof streamModel>[3];
   const expectedBatch = {
     steps: [
-      { kind: "said", callId: "said:call_9", text: "Checking.", truncated: false },
+      { kind: "said", callId: "said:5e447f59d541311dada70f8d9d26d0e3", text: "Checking.", truncated: false },
       { kind: "tool", callId: "t1", tool: "lookup", text: "x", truncated: false },
     ],
     results: [{ callId: "t0", status: "ok" }],
@@ -514,5 +515,33 @@ describe("streamModel run steps", () => {
     const record = vi.fn(async (_runId: string, _batch: RunStepBatch, _extra?: readonly string[]) => undefined);
     await drain(streamModel(ctx, fakeLedger() as unknown as Ledger, "call_9", withResult, { record }, capability));
     expect(record).toHaveBeenCalledWith("run_1", expectedBatch, [capability]);
+  });
+
+  it("ends the stream at the bound when the write never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const steps: RunStepSink = { record: () => new Promise<void>(() => undefined) };
+      let ended = false;
+      void drain(streamModel(ctx, fakeLedger() as unknown as Ledger, "call_9", withResult, steps)).then(
+        () => (ended = true),
+      );
+      await vi.advanceTimersByTimeAsync(STREAM_STEPS_BOUND_MS - 1);
+      expect(ended).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the stream normally when the sink throws", async () => {
+    const steps: RunStepSink = {
+      record: () => {
+        throw new Error("sync");
+      },
+    };
+    await expect(
+      drain(streamModel(ctx, fakeLedger() as unknown as Ledger, "call_9", withResult, steps)),
+    ).resolves.toBeUndefined();
   });
 });

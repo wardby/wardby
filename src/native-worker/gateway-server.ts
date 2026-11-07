@@ -11,7 +11,7 @@
  * reported usage; the worker's own usage numbers are never read.
  */
 
-import { NativeStreamSteps, nativeRequestResults } from "../core/run-steps/native.js";
+import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
 import type { RunStepSink } from "../core/run-steps/types.js";
 import {
   createNativeRunTools,
@@ -391,16 +391,8 @@ export async function* streamModel(
         costUsd: ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }),
       });
     }
-    // Recorded before the stream ends, so the next call's results find these steps.
-    if (steps && tap) {
-      await steps
-        .record(
-          ctx.session.runId,
-          { steps: tap.steps(), results: nativeRequestResults(req.messages) },
-          capability ? [capability] : [],
-        )
-        .catch(() => undefined);
-    }
+    // Recorded before the stream ends (bounded), so the next call's results find these steps.
+    await recordStreamSteps(steps, ctx.session.runId, tap, req.messages, capability ? [capability] : []);
   }
 }
 

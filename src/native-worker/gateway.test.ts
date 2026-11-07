@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
+import { STREAM_STEPS_BOUND_MS } from "../core/run-steps/native.js";
 import type { RunStepBatch, RunStepSink } from "../core/run-steps/types.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
@@ -637,7 +638,7 @@ describe("runSandboxedEngine run steps", () => {
         "run_1",
         {
           steps: [
-            { kind: "said", callId: "said:stream-1", text: "Looking it up.", truncated: false },
+            { kind: "said", callId: "said:29b48932e3b4af06690778f20598ed04", text: "Looking it up.", truncated: false },
             { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
           ],
           results: [{ callId: "c0", status: "error" }],
@@ -668,6 +669,22 @@ describe("runSandboxedEngine run steps", () => {
     await result;
     expect(extras).toEqual([[capability]]);
   });
+
+  it("ends the stream within the bound when the write never settles", async () => {
+    const runSteps: RunStepSink = { record: () => new Promise<void>(() => undefined) };
+    let events: LlmStreamEvent[] = [];
+    const started = Date.now();
+    const { result } = await withWorker(
+      async (gateway) => {
+        events = await drain(gateway.stream(req("llm.stream", { request: { model: "m", messages } })));
+        await gateway.call(finish());
+      },
+      { runSteps, ctx: { providers: { llm: steppingLlm() } } },
+    );
+    await expect(result).resolves.toMatchObject({ status: "succeeded" });
+    expect(events.map((event) => event.type)).toEqual(["text", "tool_call", "done"]);
+    expect(Date.now() - started).toBeLessThan(STREAM_STEPS_BOUND_MS + 3_000);
+  }, 15_000);
 
   it("keeps streaming when recording fails", async () => {
     const runSteps: RunStepSink = {

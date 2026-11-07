@@ -14,7 +14,7 @@
 import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import pino from "pino";
-import { NativeStreamSteps, nativeRequestResults } from "../core/run-steps/native.js";
+import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
 import type { RunStepSink } from "../core/run-steps/types.js";
 import {
   isPrivilegedBridgeName,
@@ -241,17 +241,9 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
             : 0;
           meter({ inputTokens, outputTokens, costUsd: llm.priceUsd(req.model, { inputTokens, outputTokens }) });
         }
-        // Recorded before the stream ends, so the next call's results find these steps. The run's
-        // capability (when the worker has one) is redacted like a secret value.
-        if (sink && steps) {
-          await sink
-            .record(
-              runId,
-              { steps: steps.steps(), results: nativeRequestResults(req.messages) },
-              input.gateway ? [input.gateway.capability] : [],
-            )
-            .catch(() => undefined);
-        }
+        // Recorded before the stream ends (bounded), so the next call's results find these steps.
+        // The run's capability (when the worker has one) is redacted like a secret value.
+        await recordStreamSteps(sink, runId, steps, req.messages, input.gateway ? [input.gateway.capability] : []);
       }
     },
 
