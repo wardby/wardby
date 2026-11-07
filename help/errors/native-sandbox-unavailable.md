@@ -4,7 +4,7 @@ title: Native execution mode unavailable
 summary: A run failed with native_sandbox_unavailable because its agent is in sandbox mode but the server has no native sandbox configured.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_unavailable]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native execution mode unavailable

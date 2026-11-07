@@ -4,7 +4,7 @@ title: Native run deadline exceeded
 summary: A sandbox run passed its 60-minute maximum lifetime and its worker was stopped.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_deadline_exceeded]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native run deadline exceeded

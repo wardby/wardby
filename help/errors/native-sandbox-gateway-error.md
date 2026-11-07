@@ -4,7 +4,7 @@ title: Native worker's gateway call failed
 summary: The sandbox worker's call to the gateway failed with an error the run could not continue from.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_gateway_error]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker's gateway call failed

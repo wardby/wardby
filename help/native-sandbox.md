@@ -4,7 +4,7 @@ title: Run native agents in a sandbox
 summary: Turn on sandbox mode so a native agent's turn loop and tools run in a single-use, credential-free Docker container or Kubernetes pod behind a native gateway.
 audience: operator
 tags: [native-agents, sandbox, isolation, docker, kubernetes, native-gateway, security, warm-pool]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Run native agents in a sandbox

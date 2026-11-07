@@ -4,7 +4,7 @@ title: Build a tool runner image for a Claude Code agent
 summary: A procedure an MCP assistant follows to build a custom image for a Claude Code coding agent (Ruby, Go, Java or another language) FROM the release's tool runner image, check it, and set it with workerImageRef.
 audience: operator
 tags: [claude-code, custom-image, workerImageRef, tool-runner, worker-image, other-language, ruby, toolchain]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Build a tool runner image for a Claude Code agent

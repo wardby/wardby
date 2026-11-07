@@ -4,7 +4,7 @@ title: Native worker lost
 summary: The sandbox worker container disappeared and was not relaunched.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_worker_lost]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker lost

@@ -4,7 +4,7 @@ title: Native worker exited without a result
 summary: The sandbox worker container ended without producing a result.
 audience: operator
 tags: [error, native-agents, sandbox, native_sandbox_worker_exited]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker exited without a result

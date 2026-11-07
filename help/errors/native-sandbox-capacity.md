@@ -4,7 +4,7 @@ title: Native sandbox is at capacity
 summary: A sandbox run could not start because the concurrent sandbox run limit or the namespace ResourceQuota has no room; the run failed at start and was not queued.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, capacity, quota, native_sandbox_capacity]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native sandbox is at capacity
