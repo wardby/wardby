@@ -37,7 +37,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
     name: "power_status",
     scope: "power:manage",
     description:
-      "Admins (power:manage): low-power mode state. For the coding proxy and the native gateway: replicas, whether a ready endpoint exists, when it last woke (wokeAt), and blockers (run ids keeping it busy). Returns { enabled: false } when low-power mode is off.",
+      "Admins (power:manage): low-power mode state. For the coding proxy and the native gateway: replicas, whether a ready endpoint exists, when it last woke (wokeAt), and blockers (run ids keeping it busy; for the gateway: sandbox runs, coding runs with MCP tools and runs with an active gateway session). Returns { enabled: false } when low-power mode is off.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (rawArgs: unknown, ctx) => {
       parse(StatusSchema, "power_status arguments", rawArgs);
@@ -49,7 +49,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
     name: "power_sleep",
     scope: "power:manage",
     description:
-      "Admins (power:manage): scale the coding proxy and/or native gateway to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway, also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
+      "Admins (power:manage): scale the coding proxy and/or native gateway to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

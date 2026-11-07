@@ -9,7 +9,7 @@ import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Power } from "../../core/power.js";
+import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import { KubernetesConflictError, KubernetesQuotaExceededError } from "./kubernetes-api.js";
@@ -734,6 +734,80 @@ describe("KubernetesJobLauncher low-power mode", () => {
     const h = await harness(undefined, {}, { power, preflight });
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("low_power_wake_timeout");
     expect(preflight).not.toHaveBeenCalled();
+  });
+
+  it("wakes the gateway too, at once with the proxy, for a run with MCP tools; before anything is created", async () => {
+    const { power, calls } = recordingPower(false);
+    const created: string[] = [];
+    const wake = power.ensureAwake;
+    const settled: Array<() => void> = [];
+    power.ensureAwake = async (target, opts) => {
+      await wake(target, opts);
+      // Neither wake finishes until both have started: they run at the same time.
+      await new Promise<void>((resolve) => {
+        settled.push(resolve);
+        if (settled.length === 2) settled.forEach((r) => r());
+      });
+      created.push(`awake:${target}`);
+    };
+    const h = await harness(
+      "run-k8s-test",
+      {},
+      {
+        power,
+        resolveMcpToken: async () => `rmt_${"m".repeat(43)}`,
+        preflight: async () => ({ proxyIp: "10.96.0.50" }),
+      },
+    );
+    const createConfigMap = h.api.createConfigMap.bind(h.api);
+    h.api.createConfigMap = async (ns, body) => {
+      created.push("record");
+      return createConfigMap(ns, body);
+    };
+    await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:300000", "wake:gateway:run-k8s-test:300000"]);
+    expect(created.slice(0, 3)).toEqual(["awake:proxy", "awake:gateway", "record"]);
+  });
+
+  it("does not wake the gateway for a run without MCP tools", async () => {
+    const { power, calls } = recordingPower(false);
+    const h = await harness(undefined, {}, { power, preflight: async () => ({ proxyIp: "10.96.0.50" }) });
+    await h.launcher.launch(h.spec);
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:300000"]);
+  });
+
+  it("with power disabled, a run with MCP tools wakes nothing", async () => {
+    const ensureAwake = vi.spyOn(DISABLED_POWER, "ensureAwake");
+    const h = await harness(undefined, {}, { resolveMcpToken: async () => `rmt_${"m".repeat(43)}` });
+    await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(ensureAwake).not.toHaveBeenCalled();
+    ensureAwake.mockRestore();
+  });
+
+  it("a gateway that does not wake fails the launch with coding_mcp_gateway_unavailable; nothing is created", async () => {
+    const { power } = recordingPower(false);
+    power.ensureAwake = async (target) => {
+      if (target === "gateway") throw new Error('low_power_wake_timeout: gateway "wardby-native-gateway" not ready');
+    };
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight, resolveMcpToken: async () => `rmt_${"m".repeat(43)}` });
+    const error = await h.launcher.launch({ ...h.spec, mcpTools: true }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/^coding_mcp_gateway_unavailable: /);
+    expect(((error as Error).cause as Error).message).toMatch(/^low_power_wake_timeout: /);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(h.api.objects.has(`configmap/wardby-coding/${h.names.record}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
+  it("a proxy that does not wake is reported as itself, even when the gateway fails too", async () => {
+    const { power } = recordingPower(false);
+    power.ensureAwake = async (target) => {
+      throw new Error(`low_power_wake_timeout: ${target} not ready`);
+    };
+    const h = await harness(undefined, {}, { power, resolveMcpToken: async () => `rmt_${"m".repeat(43)}` });
+    await expect(h.launcher.launch({ ...h.spec, mcpTools: true })).rejects.toThrow("low_power_wake_timeout: proxy");
   });
 
   it("defers the start-up preflight while the proxy is asleep; the first launch still runs it", async () => {

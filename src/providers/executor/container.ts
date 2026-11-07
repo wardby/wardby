@@ -13,6 +13,7 @@ import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js"
 import { withBaseCommit } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
+import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
@@ -3059,6 +3060,9 @@ export const MCP_PINS_UNAVAILABLE_ERROR = "coding_mcp_pins_unavailable";
 /** Its category: the run's error is coding_failure_mcp_pins_unavailable:<diagnostic id>. */
 export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
 
+/** Low-power mode: the native gateway serving a run's MCP tools did not wake; nothing launched. */
+export const MCP_GATEWAY_UNAVAILABLE_CATEGORY = "mcp_gateway_unavailable";
+
 /**
  * Error-code prefixes that name their category outright, checked before the
  * substring heuristics below. Those heuristics filed every `github_*` error
@@ -3097,6 +3101,8 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["vcs_", "workspace"],
   // The agent's MCP tool pins could not be read at launch: nothing was launched.
   [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
+  // Low-power mode: the native gateway serving the run's MCP tools did not wake (jobs/kubernetes.ts).
+  [CODING_MCP_GATEWAY_UNAVAILABLE, MCP_GATEWAY_UNAVAILABLE_CATEGORY],
   // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
   ["local_", "workspace"],
   ["git_", "workspace"],

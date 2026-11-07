@@ -683,6 +683,91 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
       await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
     });
 
+    /** A coding run's proxy session; `mcp` gives it an MCP token hash, as a run with MCP tools has. */
+    async function proxySession(runId: string, mcp: boolean): Promise<void> {
+      await db.codingProxySession.create({
+        data: {
+          id: `session-${runId}`,
+          runId,
+          capabilityHash: `cap-${runId}`,
+          credentialRef: "env:OPENAI_API_KEY",
+          allowedModels: ["gpt-5.6-luna"],
+          deadlineAt: new Date(Date.now() + 3600_000),
+          budgetUsd: 1,
+          ...(mcp ? { mcpTools: [], mcpTokenHash: `mcp-${runId}` } : {}),
+        },
+      });
+    }
+
+    /** A view whose run, coding-run and gateway-session reads see only `runIds`. */
+    function onlyGatewayRuns(runIds: string[]): PrismaClient {
+      const scoped = <W>(where: W | undefined, key: "runId" | "id") => ({
+        AND: [where ?? {}, { [key]: { in: runIds } }],
+      });
+      return {
+        codingRun: {
+          count: (args: Prisma.CodingRunCountArgs) =>
+            db.codingRun.count({ ...args, where: scoped(args.where, "runId") }),
+          findMany: (args: Prisma.CodingRunFindManyArgs) =>
+            db.codingRun.findMany({ ...args, where: scoped(args.where, "runId") }),
+        },
+        run: {
+          count: (args: Prisma.RunCountArgs) => db.run.count({ ...args, where: scoped(args.where, "id") }),
+          findMany: (args: Prisma.RunFindManyArgs) => db.run.findMany({ ...args, where: scoped(args.where, "id") }),
+        },
+        nativeGatewaySession: {
+          count: (args: Prisma.NativeGatewaySessionCountArgs) =>
+            db.nativeGatewaySession.count({ ...args, where: scoped(args.where, "runId") }),
+          findMany: (args: Prisma.NativeGatewaySessionFindManyArgs) =>
+            db.nativeGatewaySession.findMany({ ...args, where: scoped(args.where, "runId") }),
+        },
+      } as unknown as PrismaClient;
+    }
+
+    it("powerBlockers(gateway) lists active coding runs with MCP tools, not finished ones or runs without", async () => {
+      const mcpRunning = id("lp-mcp-running");
+      const mcpQueued = id("lp-mcp-queued");
+      const mcpFinished = id("lp-mcp-finished");
+      const plainRunning = id("lp-mcp-plain");
+      const runIds = [mcpRunning, mcpQueued, mcpFinished, plainRunning];
+      await seed(mcpRunning, { status: "running" });
+      await seed(mcpQueued, { status: "pending", queuedAt: new Date() });
+      await seed(mcpFinished, { status: "succeeded", finishedAt: ago(1) });
+      await seed(plainRunning, { status: "running" });
+      await proxySession(mcpRunning, true);
+      await proxySession(mcpQueued, true);
+      await proxySession(mcpFinished, true);
+      await proxySession(plainRunning, false);
+      expect(await powerBlockers(db, "gateway")).toEqual(expect.arrayContaining([mcpRunning, mcpQueued]));
+      expect(await powerBlockers(onlyGatewayRuns(runIds), "gateway")).toEqual([mcpRunning, mcpQueued].sort());
+      // The proxy still counts every active coding run, with MCP tools or without.
+      expect(await powerBlockers(onlyRuns(runIds), "proxy")).toEqual([mcpRunning, mcpQueued, plainRunning].sort());
+      await retire(runIds);
+      expect(await powerBlockers(onlyGatewayRuns(runIds), "gateway")).toEqual([]);
+    });
+
+    it("a coding run with MCP tools keeps the gateway busy; one without does not", async () => {
+      const mcpRun = id("lp-mcp-busy");
+      const plainRun = id("lp-mcp-busy-plain");
+      const oldMcpRun = id("lp-mcp-busy-old");
+      await seed(plainRun, { status: "running" });
+      await proxySession(plainRun, false);
+      await seed(oldMcpRun, { status: "succeeded", finishedAt: ago(40) });
+      await proxySession(oldMcpRun, true);
+      const view = onlyGatewayRuns([mcpRun, plainRun, oldMcpRun]);
+      expect(await gatewayBusy(view, since())).toBe(false);
+      await seed(mcpRun, { status: "running" });
+      await proxySession(mcpRun, true);
+      expect(await gatewayBusy(view, since())).toBe(true);
+      expect(await gatewayBusy(db, since())).toBe(true);
+      // Finished inside the idle window: still busy, as the proxy's rule is.
+      await db.run.update({ where: { id: mcpRun }, data: { status: "succeeded", finishedAt: ago(10) } });
+      expect(await gatewayBusy(view, since())).toBe(true);
+      await db.run.update({ where: { id: mcpRun }, data: { finishedAt: ago(40) } });
+      expect(await gatewayBusy(view, since())).toBe(false);
+      await retire([plainRun]);
+    });
+
     it("the proxy is idle with no active coding run and nothing in the window", async () => {
       const runIds = [id("lp-done-ok"), id("lp-done-failed"), id("lp-done-cancelled")];
       await seed(runIds[0], { status: "succeeded", finishedAt: ago(40) });

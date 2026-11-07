@@ -1523,6 +1523,23 @@ describe("ContainerExecutor", () => {
       expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
     });
 
+    it("fails the run with coding_failure_mcp_gateway_unavailable when the launcher can't wake the gateway", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
+      created.jobs.launchError = new Error(
+        "coding_mcp_gateway_unavailable: the native gateway, which serves this run's MCP tools, did not wake.",
+        { cause: new Error('low_power_wake_timeout: gateway "wardby-native-gateway" had no ready endpoint') },
+      );
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.terminations).toEqual([
+        expect.objectContaining({
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_mcp_gateway_unavailable:coding_diag_[0-9a-f-]+$/),
+        }),
+      ]);
+      expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
+    });
+
     it("clears the token with the capability when the launch fails", async () => {
       const created = await harness({}, IMAGE, undefined, undefined, { mcpToolPins: async () => [pin] });
       created.jobs.launchError = new Error("boom");

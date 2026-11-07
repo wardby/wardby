@@ -183,6 +183,13 @@ describe("buildHelpCatalog", () => {
     }
   });
 
+  it("ranks the gateway-wake failure article first for its run error code", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["coding_failure_mcp_gateway_unavailable", "coding_mcp_gateway_unavailable"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("errors/coding-mcp-gateway-unavailable");
+    }
+  });
+
   it("leaves invalid_arguments (shared by many built-in tools) out of the MCP error articles", async () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     for (const page of catalog.pages.filter((entry) => entry.id.startsWith("errors/mcp-"))) {

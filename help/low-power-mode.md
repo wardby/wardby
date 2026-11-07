@@ -3,7 +3,7 @@ id: low-power-mode
 title: Low power mode on GKE
 summary: Low power mode: scale the coding proxy and native gateway to zero when idle to cut the cost of a lightly used GKE deployment, and what changes when they wake.
 audience: operator
-tags: [gke, cost, low-power, scale-to-zero, kubernetes, autoscaling, idle, power_sleep, power_status, sleep now, power:manage]
+tags: [gke, cost, low-power, scale-to-zero, kubernetes, autoscaling, idle, power_sleep, power_status, sleep now, power:manage, mcp, coding-agents]
 appliesTo: ">=0.6.0"
 ---
 
@@ -38,12 +38,17 @@ only when `WARDBY_LOW_POWER=1`.
 - **Sleep.** Every minute the scheduler leader scales the coding proxy
   (`wardby-coding-proxy`) or native gateway (`wardby-native-gateway`) to 0 when
   nothing is pending or running for it and nothing finished within the idle
-  window. The gateway also needs no active session. Either target sleeps only
+  window. For the gateway that means sandbox runs and coding runs with MCP
+  tools, and it also needs no active session. Either target sleeps only
   once at least one idle window has passed since it was last woken (annotation
   `wardby.io/power-woke-at`) and since the control plane started, whichever is
   later. The check repeats just before scaling. Log: `power: proxy slept (idle 30m)`.
 - **Wake.** A coding run scales the proxy to 1 and waits for a ready endpoint;
-  a sandbox run does the same for the gateway. The wait is at least 5 minutes.
+  a sandbox run does the same for the gateway. A coding run with MCP tools
+  wakes both at once, because its MCP calls go through the gateway; if the
+  gateway does not wake it fails before launch with
+  [`coding_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md).
+  The wait is at least 5 minutes.
   A `KUBERNETES_READY_TIMEOUT_MS` (proxy) or `NATIVE_SANDBOX_READY_TIMEOUT_MS`
   (gateway) above that, set on the control-plane Deployment, raises it. Expect
   about 1 to 2 minutes extra on a cold node. Log: `power: proxy woke`. A
@@ -71,15 +76,17 @@ Pass `target: "proxy"` or `target: "gateway"` to sleep one; omit it for both.
 
 - It scales the target to 0 at once, ignoring the idle window and the woke-at
   grace.
-- It never stops a run. A target with a pending or running run, or for the
-  gateway an active gateway session, stays up, and its run ids are returned:
+- It never stops a run. A target with a pending or running run (for the
+  gateway, a sandbox run or a coding run with MCP tools), or for the gateway an
+  active gateway session, stays up, and its run ids are returned:
   `{ "slept": ["proxy"], "blocked": [{ "target": "gateway", "runIds": ["..."] }] }`.
   Recently finished runs do not block it.
 - The next run wakes the target as usual.
 - Each call is logged with `event: "power.sleep"` and the caller's principal.
 
 `power_status` returns, for each target, `replicas`, `ready`, `wokeAt` and
-`blockers` (the run ids keeping it busy).
+`blockers` (the run ids keeping it busy; for the gateway these include
+pending or running coding runs with MCP tools).
 
 Both tools need the `power:manage` scope, which only the `admin` role grants
 (see [Identity and access](identity-and-access.md)). With the mode off,
@@ -111,6 +118,9 @@ full table.
 
 - [`low_power_wake_timeout`](errors/low-power-wake-timeout.md): the target did
   not become ready in time, or its Deployment does not exist.
+- [`coding_mcp_gateway_unavailable`](errors/coding-mcp-gateway-unavailable.md):
+  a coding run with MCP tools failed before launch because the gateway did not
+  wake.
 - `native_sandbox_launch_abandoned` (0.7.0 and later): a sandbox run was
   stopped while the gateway woke, so no worker pod was made.
 - [`low_power_disabled`](errors/low-power-disabled.md): `power_sleep` was

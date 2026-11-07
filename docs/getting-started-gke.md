@@ -656,8 +656,9 @@ control plane 1.
 **Sleeping.** Every minute the scheduler leader scales the coding proxy
 (`wardby-coding-proxy`) to 0 when no coding run is pending or running and none
 finished within the idle window. It scales the native gateway
-(`wardby-native-gateway`) to 0 when no sandbox native run is pending, running or
-recently finished and the gateway has no active session. Either target sleeps
+(`wardby-native-gateway`) to 0 when no sandbox native run and no coding run with
+MCP tools is pending, running or recently finished, and the gateway has no
+active session. Either target sleeps
 only once at least one idle window has passed since it was last woken (recorded
 in its `wardby.io/power-woke-at` annotation) and since the control plane
 started, whichever is later. The condition is checked again immediately before
@@ -665,7 +666,11 @@ scaling. The control plane
 logs `power: proxy slept (idle 30m)`.
 
 **Waking.** Starting a coding run scales the proxy to 1 and waits for a ready
-endpoint. Starting a sandbox run does the same for the gateway. The wait is at
+endpoint. Starting a sandbox run does the same for the gateway, and so does starting a
+coding run with MCP tools, whose MCP calls go through the gateway: it wakes the
+proxy and gateway at once and fails before launch with
+[`coding_failure_mcp_gateway_unavailable`](../help/errors/coding-mcp-gateway-unavailable.md)
+if the gateway does not wake. The wait is at
 least 5 minutes, because a cold Autopilot node can add 1 to 2 minutes of
 start-up; a `KUBERNETES_READY_TIMEOUT_MS` (proxy) or
 `NATIVE_SANDBOX_READY_TIMEOUT_MS` (gateway) above 5 minutes, set on the
@@ -690,8 +695,9 @@ the Viewer shows any such leftover as an old replica rather than a failure.
 **Sleeping now.** To skip the idle window (for example right after a test), an
 admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`
 or `gateway` (default both). It scales the target to 0 at once, but never stops
-a run: a target with a pending or running run, or for the gateway an active
-gateway session, is left up and its run ids are returned under `blocked`.
+a run: a target with a pending or running run (for the gateway, a sandbox run
+or a coding run with MCP tools), or for the gateway an active gateway session,
+is left up and its run ids are returned under `blocked`.
 Recently finished runs do not block it. The next run wakes the target as usual.
 `power_status` shows each target's replicas, readiness, last wake time and
 blocking run ids. Both tools need the `power:manage` scope, which only the
