@@ -76,6 +76,7 @@ import { scheduleStartFields } from "./core/schedule-start.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
+import { RunStepSweeper } from "./core/run-steps/sweep.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
@@ -944,6 +945,7 @@ async function scheduler(args: string[]): Promise<void> {
   });
   const notifications = await startNotifications({ db: prisma, chat });
   const selfDefects = { db: prisma, issueTrackers };
+  const runStepSweeper = new RunStepSweeper(prisma);
   const sched = startScheduler({
     executor,
     db: prisma,
@@ -959,6 +961,7 @@ async function scheduler(args: string[]): Promise<void> {
         onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
+      await runStepSweeper.maybeSweep();
     },
   });
 
