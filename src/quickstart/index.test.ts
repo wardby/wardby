@@ -20,3 +20,12 @@ describe("MCP registration arguments", () => {
     );
   });
 });
+
+describe("doctor's Claude Code pane section", () => {
+  it("never shows a failure mark for the optional pane", async () => {
+    const { claudePaneDoctorLines } = await import("./index.js");
+    const lines = claudePaneDoctorLines(() => ["✓ installed", "✗ wardby MCP server not configured", "○ optional"], {});
+    expect(lines).toEqual(["✓ installed", "! wardby MCP server not configured", "○ optional"]);
+    expect(lines.some((line) => line.startsWith("✗"))).toBe(false);
+  });
+});

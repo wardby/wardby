@@ -129,3 +129,6 @@ or its runs fail at input with `worker_input_failed`.
 
 Full setup: [Resume a run locally](../docs/coding-agent-setup.md#resume-a-run-locally).
 See also [Choose a native or coding agent](help://creating-agents).
+
+The `wardby-runs` Claude Code plugin can start the import from a run's detail
+(**Continue locally**); see `claude-code-run-pane` (Wardby 0.8.0 and later).

@@ -1,0 +1,33 @@
+{
+  "name": "wardby-runs",
+  "version": "0.1.0",
+  "description": "A pane listing your wardby agent runs, with pull-request chains, run details and Continue locally",
+  "author": {
+    "name": "wardby",
+    "url": "https://github.com/wardby/wardby"
+  },
+  "homepage": "https://github.com/wardby/wardby/blob/main/docs/claude-code-plugin.md",
+  "repository": "https://github.com/wardby/wardby",
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "server": {
+      "type": "string",
+      "title": "wardby MCP server",
+      "description": "The name of the wardby MCP server, as /mcp lists it",
+      "default": "wardby"
+    },
+    "pollSeconds": {
+      "type": "number",
+      "title": "Refresh while a run is active (seconds)",
+      "description": "How often the pane asks the server for runs while one is pending or running",
+      "default": 10
+    },
+    "idleSeconds": {
+      "type": "number",
+      "title": "Refresh when nothing is active (seconds)",
+      "description": "How often the pane asks the server for runs while none is pending or running",
+      "default": 60
+    }
+  }
+}

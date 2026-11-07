@@ -17,6 +17,9 @@
   opened no pull request, or missed what you expected.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy
   and isolated Codex or Claude Code workers.
+- [Claude Code plugin](claude-code-plugin.md) (0.8.0+) installs the `wardby-runs`
+  pane: your runs beside the chat, grouped by pull request, with run details and
+  Continue locally.
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
   concept format, how coding runs and reviewers use it, `wardby knowledge check`,
   and the scheduled architecture agent.

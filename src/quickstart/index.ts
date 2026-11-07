@@ -406,6 +406,7 @@ export async function quickstartCommand(args: string[]): Promise<void> {
       client: { type: "string" },
       "non-interactive": { type: "boolean" },
       "skip-demo": { type: "boolean" },
+      "claude-plugin": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
   });
@@ -500,6 +501,19 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   const client = parseClient(values.client) ?? (await chooseClient(nonInteractive));
   const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
 
+  // With Claude Code connected, offer the runs pane (the wardby-runs plugin): off unless asked for.
+  {
+    const { claudePluginDeps, installPlugin, quickstartPaneStep } = await import("../claude-plugin/command.js");
+    await quickstartPaneStep(
+      { client, mcpConfigured, flag: values["claude-plugin"], nonInteractive, yes: values.yes ?? false },
+      {
+        ask: (question) => promptYesNo(question, false),
+        install: (options) => installPlugin(options, claudePluginDeps()),
+        warn: (line) => console.warn(line),
+      },
+    );
+  }
+
   console.log("\nWardby is ready.");
   console.log("  npx @wardby/cli@latest status");
   console.log("  npx @wardby/cli@latest doctor");
@@ -520,6 +534,14 @@ async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
   } finally {
     await db.$disconnect();
   }
+}
+
+/**
+ * Doctor's Claude Code pane section. The pane is optional, so its lines are information: a "✗"
+ * from them would be read as a failure, so none reaches the output.
+ */
+export function claudePaneDoctorLines<D>(lines: (deps: D) => string[], deps: D): string[] {
+  return lines(deps).map((line) => (line.startsWith("✗") ? `!${line.slice(1)}` : line));
 }
 
 export async function doctorCommand(args: string[]): Promise<void> {
@@ -570,6 +592,9 @@ export async function doctorCommand(args: string[]): Promise<void> {
     failed ||= line.startsWith("✗");
     console.log(line);
   }
+  // The Claude Code runs pane is optional: its lines never fail doctor.
+  const { claudePluginDeps, claudePluginDoctorLines } = await import("../claude-plugin/command.js");
+  for (const line of claudePaneDoctorLines(claudePluginDoctorLines, claudePluginDeps())) console.log(line);
   const base = baseImageLine(resolveQuickstartImages({ env: runtimeEnv(paths), packageRoot }));
   if (base) console.log(base);
   if (failed) process.exitCode = 1;

@@ -28,3 +28,8 @@ offline catalog as `wardby help`; they expose no instance data or credentials.
 
 See [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)
 for the supported self-hosted and delegated identity-provider setup.
+
+From Wardby 0.8.0, Claude Code can show your runs in a pane beside the chat
+through the `wardby-runs` plugin: run `wardby claude-plugin install`, then
+`/wardby-runs`. Search help for "claude code plugin" (article
+`claude-code-run-pane`, Wardby 0.8.0 and later).
