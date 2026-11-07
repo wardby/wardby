@@ -1212,6 +1212,9 @@ model Task {
   ttlAt          DateTime
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
+
+  /// The run-drivability and cancelled-task lookups: findFirst({ runId, status: "cancelled" }).
+  @@index([runId, status])
 }
 
 /// Phase 4: a secret value, encrypted at rest via the SecretCipher seam.

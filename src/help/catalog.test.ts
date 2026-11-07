@@ -156,6 +156,7 @@ describe("buildHelpCatalog", () => {
   it.each([
     "mcp_server_unreachable",
     "mcp_server_auth_failed",
+    "mcp_server_credentials_unavailable",
     "mcp_server_error",
     "mcp_tool_not_allowed",
     "mcp_tool_removed",
@@ -194,6 +195,7 @@ describe("buildHelpCatalog", () => {
     for (const code of [
       "mcp_server_unreachable",
       "mcp_server_auth_failed",
+      "mcp_server_credentials_unavailable",
       "mcp_server_error",
       "mcp_tool_not_allowed",
       "mcp_tool_removed",

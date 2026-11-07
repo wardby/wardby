@@ -433,3 +433,29 @@ describe("host provider errors help", () => {
     }
   });
 });
+
+describe("MCP error code help", () => {
+  it("ranks the article whose tag is the whole query first, even when one code's words are inside another's", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    expect(searchHelp(catalog, "mcp_unavailable")[0]?.page.id).toBe("errors/mcp-unavailable");
+    expect(searchHelp(catalog, "mcp_server_credentials_unavailable")[0]?.page.id).toBe(
+      "errors/mcp-server-credentials-unavailable",
+    );
+    expect(searchHelp(catalog, "  MCP_UNAVAILABLE ")[0]?.page.id).toBe("errors/mcp-unavailable");
+  });
+
+  it("adds the exact-tag bonus only for the whole query", () => {
+    const pages: HelpCatalog = {
+      ...catalog,
+      pages: [
+        page({ id: "errors/a-b-c", title: "a_b_c (a_b_c)", tags: ["a_b_c"] }),
+        page({ id: "errors/b-c", title: "b_c (b_c)", tags: ["b_c"] }),
+      ],
+    };
+    expect(searchHelp(pages, "b_c")[0]?.page.id).toBe("errors/b-c");
+    expect(searchHelp(pages, "a_b_c")[0]?.page.id).toBe("errors/a-b-c");
+  });
+});

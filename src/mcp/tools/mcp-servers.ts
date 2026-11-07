@@ -18,6 +18,8 @@ import {
   exposedNames,
   exposedToolName,
   fetchSnapshot,
+  logCredentialsUnavailable,
+  McpCredentialsUnavailableError,
   McpServerInputError,
   normaliseServerUrl,
   snapshotOf,
@@ -73,12 +75,20 @@ function parse<Output>(schema: z.ZodType<Output, unknown>, label: string, value:
   throw new McpError(400, `Invalid ${label}: ${details}`);
 }
 
-/** Input errors → 400; MCP client errors (already redacted) → 502 with their code. */
+/**
+ * Input errors → 400; MCP client errors (already redacted) → 502 with their code. Undecryptable
+ * credentials → 500 with their code: the fault is this Wardby server's key setup, not the remote
+ * server (502 would point at it) or the caller's input (400).
+ */
 async function mapped<T>(work: () => Promise<T>): Promise<T> {
   try {
     return await work();
   } catch (err) {
     if (err instanceof McpServerInputError) throw new McpError(400, err.message);
+    if (err instanceof McpCredentialsUnavailableError) {
+      logCredentialsUnavailable(serversLog, err);
+      throw new McpError(500, `${err.code}: ${err.message}`);
+    }
     if (err instanceof McpClientError) throw new McpError(502, `${err.code}: ${err.message}`);
     throw err;
   }

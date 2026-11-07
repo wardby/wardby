@@ -19,6 +19,8 @@ import { toolResultText } from "./mcp-client/results.js";
 import {
   exposedToolName,
   loadServerSecrets,
+  logCredentialsUnavailable,
+  McpCredentialsUnavailableError,
   McpServerInputError,
   redactForServer,
   serverFetch,
@@ -172,7 +174,7 @@ export interface McpToolContext {
    */
   readOnlyOnly?: boolean;
   fetchImpl?: typeof safeFetch;
-  log: Pick<Logger, "info">;
+  log: Pick<Logger, "info" | "warn">;
 }
 
 function error(code: string, message: string): string {
@@ -271,8 +273,13 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     try {
       secrets = await loadServerSecrets(ctx.db, ctx.cipher, server);
     } catch (err) {
+      const shared = row.agent.ownerId !== server.ownerId;
+      if (err instanceof McpCredentialsUnavailableError) {
+        logCredentialsUnavailable(ctx.log, err);
+        return fail(err.code, shared ? SHARED_CREDENTIALS_MESSAGE : err.message);
+      }
       // The detail names the server owner's secrets and speaks to that owner: a grantee's run gets neither.
-      if (err instanceof McpServerInputError && row.agent.ownerId !== server.ownerId) {
+      if (err instanceof McpServerInputError && shared) {
         return fail("mcp_server_error", SHARED_CREDENTIALS_MESSAGE);
       }
       throw err;

@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/client";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import { createSecret } from "../../core/secrets.js";
+import { AppKeySecretCipher } from "../../providers/secrets/app-key.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 import type { safeFetch } from "../../sandbox/safe-fetch.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
@@ -101,8 +102,11 @@ async function agent(p: Principal, kind: "native" | "coding" = "native", provide
 
 type Call = (name: string, a?: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>;
 
-async function connect(p: Principal, options: { scopes?: string[]; roles?: string[] } = {}): Promise<Call> {
-  const providers = { secrets: cipher, sandboxFetch: fake.impl } as unknown as McpProviders;
+async function connect(
+  p: Principal,
+  options: { scopes?: string[]; roles?: string[]; cipher?: SecretCipher } = {},
+): Promise<Call> {
+  const providers = { secrets: options.cipher ?? cipher, sandboxFetch: fake.impl } as unknown as McpProviders;
   const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL } });
   const ctx: McpRequestContext = {
     principal: p,
@@ -247,6 +251,49 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
     expect(result.isError).toBe(true);
     expect(result.text).toContain("mcp_server_error");
     expect(await db.mcpServer.count({ where: { ownerId: p.id } })).toBe(0);
+  });
+
+  it("reports mcp_server_credentials_unavailable (500) on register, update and refresh when a secret can't be decrypted", async () => {
+    // Fake keys: the secret is stored under one key and read with another.
+    const keyA = new AppKeySecretCipher("a".repeat(64));
+    const keyB = new AppKeySecretCipher("b".repeat(64));
+    const p = await principal();
+    const { id } = await register(await connect(p));
+    const ciphertext = await keyA.encrypt(SECRET);
+    await db.secret.update({ where: { ownerId_name: { ownerId: p.id, name: "MCP_TOKEN" } }, data: { ciphertext } });
+    const call = await connect(p, { cipher: keyB });
+    logged.length = 0;
+    for (const [tool, args] of [
+      ["refresh_mcp_server", { id }],
+      ["update_mcp_server", { id, secretNames: ["MCP_TOKEN"] }],
+      ["register_mcp_server", { name: "acme2", url: URL_, secretNames: ["MCP_TOKEN"] }],
+    ] as const) {
+      const result = await call(tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect(result.text).toContain("mcp_server_credentials_unavailable");
+      expect(result.text).toContain("same SECRET_APP_KEY");
+      expect(result.text).not.toContain(SECRET);
+      expect(result.text).not.toContain(ciphertext);
+    }
+    expect(await db.mcpServer.count({ where: { ownerId: p.id } })).toBe(1);
+    const warns = logged.filter((line) => JSON.stringify(line).includes("mcp_secret_decrypt_failed"));
+    expect(warns).toHaveLength(3);
+    // A server being registered has no id yet.
+    expect(warns[2]).toEqual([
+      { reason: "mcp_secret_decrypt_failed", serverName: "acme2", secretName: "MCP_TOKEN" },
+      "MCP server secret could not be decrypted",
+    ]);
+    expect(warns[0]).toEqual([
+      { reason: "mcp_secret_decrypt_failed", serverId: id, serverName: "acme", secretName: "MCP_TOKEN" },
+      "MCP server secret could not be decrypted",
+    ]);
+    expect(JSON.stringify(logged)).not.toContain(SECRET);
+    expect(JSON.stringify(logged)).not.toContain(ciphertext);
+    // A missing secret is still an input problem.
+    const missing = await call("register_mcp_server", { name: "acme3", url: URL_, secretNames: ["NOPE"] });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toContain('Secret "NOPE" was not found among your secrets.');
+    expect(missing.text).not.toContain("mcp_server_credentials_unavailable");
   });
 
   it("never shows a secret value in register or get output, the stored snapshot, errors or logs", async () => {
