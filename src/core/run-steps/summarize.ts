@@ -154,9 +154,13 @@ export function maskTruncatedTail(text: string, secretValues: readonly string[])
   return best > 0 ? `${text.slice(0, text.length - best)}${REDACTED}` : text;
 }
 
+const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
+
 /**
  * The stored summary: redacted (exact values, then token shapes), a cut-off text's tail checked,
- * whitespace collapsed, then cut to 100 characters (tool) or 120 (said).
+ * whitespace collapsed, then redacted and tail-checked again against the values and their
+ * whitespace-collapsed forms (collapsing can rebuild a value the model wrote with other
+ * whitespace), then cut to 100 characters (tool) or 120 (said).
  */
 export function stepSummary(
   step: Pick<ExtractedStep, "kind" | "text" | "truncated">,
@@ -165,7 +169,11 @@ export function stepSummary(
   const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
   let text = redactSecrets(step.text.slice(0, MAX_STEP_TEXT_CHARS), secretValues);
   if (cut) text = maskTruncatedTail(text, secretValues);
-  text = text.replace(/\s+/g, " ").trim();
+  text = collapseWhitespace(text);
+  const collapsed = secretValues.map(collapseWhitespace).filter((value) => value && !secretValues.includes(value));
+  const values = [...secretValues, ...new Set(collapsed)];
+  text = redactSecrets(text, values);
+  if (cut) text = maskTruncatedTail(text, values);
   const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }

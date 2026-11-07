@@ -116,6 +116,36 @@ describe("stepSummary", () => {
     expect(fragmentOf(out)).toBe(false);
   });
 
+  describe("a passphrase written with other whitespace", () => {
+    const PASSPHRASE = "correct horse battery staple";
+    const words = /correct|horse|battery|staple/;
+
+    it("is redacted in a said step after whitespace collapses", () => {
+      const out = stepSummary(said("the passphrase is correct  horse\nbattery staple ok"), [PASSPHRASE]);
+      expect(out).toBe("the passphrase is [REDACTED] ok");
+      expect(out).not.toMatch(words);
+    });
+
+    it("is redacted in a tool step, and a value with its own odd whitespace is matched collapsed", () => {
+      expect(stepSummary(tool("echo correct\thorse  battery\n staple | gpg"), [PASSPHRASE])).toBe(
+        "echo [REDACTED] | gpg",
+      );
+      expect(stepSummary(tool("echo correct horse battery staple"), ["correct  horse\nbattery staple"])).toBe(
+        "echo [REDACTED]",
+      );
+    });
+
+    it("leaves no word of it when the summary cut falls inside it", () => {
+      const out = stepSummary(tool(`${"a".repeat(95)} correct  horse\nbattery   staple`), [PASSPHRASE]);
+      expect(out).toHaveLength(TOOL_SUMMARY_CHARS);
+      expect(out).not.toMatch(words);
+    });
+
+    it("masks its start at the end of a cut-off text after whitespace collapses", () => {
+      expect(stepSummary(tool("unlock correct  horse\nbatt", true), [PASSPHRASE])).toBe("unlock [REDACTED]");
+    });
+  });
+
   it("masks the longest secret prefix at the end across all secret values", () => {
     const a = "abcdefgh";
     const b = "LONGPREFIX12345abcdefgh";
