@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+
+const hookLog = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
+vi.mock("./logger.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./logger.js")>()),
+  logger: { child: () => hookLog },
+}));
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/index.js";
 import {
   RunOwnershipLostError,
@@ -856,15 +862,27 @@ describe("NativeEngine run steps", () => {
     ]);
   });
 
-  it("finishes the run when onSteps throws", async () => {
+  it("finishes the run when onSteps throws, logging its name and never its message", async () => {
+    hookLog.warn.mockClear();
     const result = await new NativeEngine().run(
       makeContext({
         llm: twoTurns(),
         onSteps: () => {
-          throw new Error("hook failed");
+          throw new Error("sk-fake-secret-in-error");
         },
       }),
     );
     expect(result).toMatchObject({ status: "succeeded", finalText: "Sunny.", turns: 2 });
+    expect(hookLog.warn).toHaveBeenCalledTimes(3); // one per batch
+    expect(hookLog.warn).toHaveBeenCalledWith(
+      { event: "run_steps_hook_failed", errorName: "Error" },
+      expect.any(String),
+    );
+    expect(JSON.stringify(hookLog.warn.mock.calls)).not.toContain("sk-fake-secret-in-error");
+  });
+
+  it("completes a run with no onSteps hook", async () => {
+    const result = await new NativeEngine().run(makeContext({ llm: twoTurns() }));
+    expect(result).toMatchObject({ status: "succeeded", turns: 2 });
   });
 });

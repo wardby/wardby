@@ -172,11 +172,14 @@ export class NativeEngine implements Engine {
       const assistantMessage: LlmMessage = { role: "assistant", content: turn.text };
       if (turn.toolCalls.length > 0) assistantMessage.toolCalls = turn.toolCalls;
       messages.push(assistantMessage);
-      this.emitSteps(ctx, { steps: nativeTurnSteps(`turn:${turns}`, turn.text, turn.toolCalls), results: [] });
+      this.emitSteps(ctx, () => ({
+        steps: nativeTurnSteps(`turn:${turns}`, turn.text, turn.toolCalls),
+        results: [],
+      }));
 
       if (turn.toolCalls.length > 0) {
         const results = await this.runToolCalls(ctx, step, turns, turn.toolCalls);
-        this.emitSteps(ctx, { steps: [], results: nativeToolResults(turn.toolCalls, results) });
+        this.emitSteps(ctx, () => ({ steps: [], results: nativeToolResults(turn.toolCalls, results) }));
         for (const [index, toolCall] of turn.toolCalls.entries()) {
           messages.push({
             role: "tool",
@@ -246,10 +249,12 @@ export class NativeEngine implements Engine {
     return this.finish("budget_exhausted", turn.text || lastText, turns + 1, finalUsage);
   }
 
-  /** Hands a batch to ctx.onSteps. A failing hook is logged by name and never affects the run. */
-  private emitSteps(ctx: EngineRunContext, batch: RunStepBatch): void {
-    if (!ctx.onSteps || (batch.steps.length === 0 && batch.results.length === 0)) return;
+  /** Builds a batch (only when ctx.onSteps is set) and hands it to ctx.onSteps. A failing hook is logged by name and never affects the run. */
+  private emitSteps(ctx: EngineRunContext, build: () => RunStepBatch): void {
+    if (!ctx.onSteps) return;
     try {
+      const batch = build();
+      if (batch.steps.length === 0 && batch.results.length === 0) return;
       ctx.onSteps(batch);
     } catch (err) {
       engineLog.warn(

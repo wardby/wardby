@@ -710,6 +710,7 @@ async function run(name: string | undefined): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory(secrets);
+  const runSteps = buildRunSteps(secrets);
 
   let run;
   // Ctrl-C (or a SIGTERM) records the run as cancelled rather than leaving a
@@ -726,7 +727,7 @@ async function run(name: string | undefined): Promise<void> {
         memory,
         reviewHosts: buildReviewHosts(process.env, prisma),
         issueTrackers: buildIssueTrackers(),
-        runSteps: buildRunSteps(secrets),
+        runSteps,
       },
       prisma,
       (delta) => {
