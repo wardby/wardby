@@ -4,7 +4,7 @@ title: Sandbox run has no model catalog entry
 summary: A sandbox-mode run could not start because no model catalog entry was recorded for it.
 audience: operator
 tags: [error, native-agents, sandbox, model-catalog, native_sandbox_requires_catalog]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Sandbox run has no model catalog entry

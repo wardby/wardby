@@ -4,7 +4,7 @@ title: Database authentication is misconfigured
 summary: DATABASE_AUTH or the database URL does not meet the rules for the chosen authentication mode, so the process refused to start.
 audience: operator
 tags: [error, database, rds, iam, deploy, database_auth_invalid, rds-iam]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Database authentication is misconfigured

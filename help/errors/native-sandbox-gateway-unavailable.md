@@ -4,7 +4,7 @@ title: Native gateway Service unavailable
 summary: On Kubernetes, Wardby could not find a usable native gateway Service, so a sandbox run could not start.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, native_sandbox_gateway_unavailable]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native gateway Service unavailable

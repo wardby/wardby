@@ -586,7 +586,7 @@ delete the class and re-run `up.sh` to change them.
 
 ### Native sandbox
 
-Native sandbox requires Wardby 0.5.4 or later.
+Native sandbox requires Wardby 0.6.0 or later.
 
 `up.sh` deploys everything the [native sandbox](native-sandbox.md) needs on
 this cluster. It builds and pushes the `native-worker` image, checks it (Node is

@@ -4,7 +4,7 @@ title: Native worker network isolation not proven
 summary: On Kubernetes, Wardby could not prove a sandbox pod's network isolation in time, so it removed the pod and failed the run.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, native_sandbox_network_unenforced]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker network isolation not proven

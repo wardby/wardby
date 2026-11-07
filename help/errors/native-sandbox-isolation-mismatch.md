@@ -4,7 +4,7 @@ title: Native worker pod differs from what Wardby built
 summary: On Kubernetes, the sandbox pod or its NetworkPolicy as stored by the cluster differs from what Wardby created, so the run failed before starting.
 audience: operator
 tags: [error, native-agents, sandbox, kubernetes, native_sandbox_isolation_mismatch]
-appliesTo: ">=0.5.4"
+appliesTo: ">=0.6.0"
 ---
 
 # Native worker pod differs from what Wardby built

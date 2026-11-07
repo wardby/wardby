@@ -95,7 +95,7 @@ and GKE Autopilot overlays.
 
 ### Native agents in a sandbox
 
-Native sandbox requires Wardby 0.5.4 or later.
+Native sandbox requires Wardby 0.6.0 or later.
 
 Native agents run in the server process by default. A native agent set to
 `nativeExecutionMode=sandbox` instead runs its turn loop and user tools in a
