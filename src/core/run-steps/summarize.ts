@@ -117,37 +117,41 @@ export function toolInputText(tool: string, input: unknown): string {
   return "";
 }
 
-function leadingStringField(json: string): string | undefined {
+/** The leading string field of cut-off JSON; `open` when the string never closed (it ran to the end of the input). */
+function leadingStringField(json: string): { text: string; open: boolean } | undefined {
   const match = LEADING_FIELD.exec(json);
   if (!match) return undefined;
+  const open = json[match.index + match[0].length] !== '"';
   const raw = match[1].replace(/\\$/, "");
   const decoded = parseJson(`"${raw}"`);
-  return typeof decoded === "string" ? decoded : raw;
+  return { text: typeof decoded === "string" ? decoded : raw, open };
 }
 
 /** A tool step's text from its JSON arguments (complete or cut off). */
 export function toolStepText(tool: string, argsJson: string): { text: string; truncated: boolean } {
   const parsed = argsJson.length <= MAX_PARSE_CHARS ? parseJson(argsJson) : undefined;
-  const text =
-    parsed !== undefined
-      ? toolInputText(tool, parsed)
-      : (leadingStringField(argsJson.slice(0, MAX_STEP_TEXT_CHARS)) ?? "");
-  const out = bounded(text);
+  const leading = parsed === undefined ? leadingStringField(argsJson.slice(0, MAX_STEP_TEXT_CHARS)) : undefined;
+  const out = bounded(parsed !== undefined ? toolInputText(tool, parsed) : (leading?.text ?? ""));
   return {
     text: out.text,
-    truncated: out.truncated || (parsed === undefined && argsJson.length > MAX_STEP_TEXT_CHARS),
+    // An unclosed string was cut off by the provider or by us: it may end in the start of a secret.
+    truncated: out.truncated || (parsed === undefined && (argsJson.length > MAX_STEP_TEXT_CHARS || !!leading?.open)),
   };
 }
 
 /** `text` with a trailing start of any secret value (at least the minimum length) masked. */
 export function maskTruncatedTail(text: string, secretValues: readonly string[]): string {
+  let best = 0;
   for (const value of secretValues) {
     const longest = Math.min(value.length - 1, text.length, MAX_TAIL_CHECK);
-    for (let k = longest; k >= MIN_REDACTABLE_SECRET_LENGTH; k--) {
-      if (text.endsWith(value.slice(0, k))) return `${text.slice(0, text.length - k)}${REDACTED}`;
+    for (let k = longest; k > best && k >= MIN_REDACTABLE_SECRET_LENGTH; k--) {
+      if (text.endsWith(value.slice(0, k))) {
+        best = k;
+        break;
+      }
     }
   }
-  return text;
+  return best > 0 ? `${text.slice(0, text.length - best)}${REDACTED}` : text;
 }
 
 /**
@@ -172,7 +176,11 @@ export function stepSummary(
  */
 export function maskForTransport(batch: RunStepBatch): RunStepBatch {
   return {
-    steps: batch.steps.map((step) => ({ ...step, text: redactSecrets(step.text).slice(0, MAX_STEP_TEXT_CHARS) })),
+    steps: batch.steps.map((step) => ({
+      ...step,
+      text: redactSecrets(step.text).slice(0, MAX_STEP_TEXT_CHARS),
+      truncated: step.truncated || step.text.length > MAX_STEP_TEXT_CHARS,
+    })),
     results: batch.results,
   };
 }

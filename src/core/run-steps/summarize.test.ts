@@ -54,7 +54,11 @@ describe("toolInputText", () => {
 describe("toolStepText", () => {
   it("parses whole arguments, and falls back to the leading field of cut-off JSON", () => {
     expect(toolStepText("exec_command", '{"cmd":"npm test"}')).toEqual({ text: "npm test", truncated: false });
-    expect(toolStepText("Bash", '{"command": "npm te')).toEqual({ text: "npm te", truncated: false });
+    expect(toolStepText("Bash", '{"command": "npm te')).toEqual({ text: "npm te", truncated: true });
+    expect(toolStepText("Bash", '{"command": "npm test", "timeout_ms": 5')).toEqual({
+      text: "npm test",
+      truncated: false,
+    });
     const long = toolStepText("Bash", JSON.stringify({ command: `echo ${"x".repeat(20_000)}` }));
     expect(long.truncated).toBe(true);
     expect(long.text).toHaveLength(MAX_STEP_TEXT_CHARS);
@@ -89,6 +93,36 @@ describe("stepSummary", () => {
     expect(maskTruncatedTail(`x ${FAKE_SECRET.slice(0, 5)}`, [FAKE_SECRET])).toBe(`x ${FAKE_SECRET.slice(0, 5)}`);
   });
 
+  const fragmentOf = (out: string) => {
+    for (let i = 0; i + 6 <= FAKE_SECRET.length; i++) {
+      for (let j = i + 6; j <= FAKE_SECRET.length; j++) if (out.includes(FAKE_SECRET.slice(i, j))) return true;
+    }
+    return false;
+  };
+
+  it("leaves no secret fragment when the summary cut falls inside a secret", () => {
+    const toolOut = stepSummary(tool(`${"a".repeat(90)} ${FAKE_SECRET}`), [FAKE_SECRET]);
+    expect(toolOut).toContain("[REDACTED]".slice(0, 5));
+    expect(fragmentOf(toolOut)).toBe(false);
+    const saidOut = stepSummary(said(`${"b".repeat(110)} ${FAKE_SECRET}`), [FAKE_SECRET]);
+    expect(fragmentOf(saidOut)).toBe(false);
+  });
+
+  it("leaves no secret fragment when the 16 KiB cut falls inside a secret and whitespace collapses", () => {
+    const text = `${" ".repeat(MAX_STEP_TEXT_CHARS - 12)}${FAKE_SECRET}`;
+    expect(text.length).toBeGreaterThan(MAX_STEP_TEXT_CHARS);
+    const out = stepSummary(tool(text), [FAKE_SECRET]);
+    expect(out).toBe("[REDACTED]");
+    expect(fragmentOf(out)).toBe(false);
+  });
+
+  it("masks the longest secret prefix at the end across all secret values", () => {
+    const a = "abcdefgh";
+    const b = "LONGPREFIX12345abcdefgh";
+    expect(maskTruncatedTail("x LONGPREFIX12345abcdefg", [a, b])).toBe("x [REDACTED]");
+    expect(maskTruncatedTail("x LONGPREFIX12345abcdefg", [b, a])).toBe("x [REDACTED]");
+  });
+
   it("bounds text at 16 KiB", () => {
     expect(bounded("z".repeat(MAX_STEP_TEXT_CHARS + 1))).toEqual({
       text: "z".repeat(MAX_STEP_TEXT_CHARS),
@@ -106,5 +140,14 @@ describe("maskForTransport", () => {
     expect(masked.steps[0].text).not.toContain(FAKE_TOKEN);
     expect(masked.steps[0].text).toContain(FAKE_SECRET);
     expect(masked.results).toEqual([{ callId: "c0", status: "ok" }]);
+  });
+
+  it("marks a step it cut at 16 KiB as truncated", () => {
+    const masked = maskForTransport({
+      steps: [{ kind: "said", callId: "c1", text: "z".repeat(MAX_STEP_TEXT_CHARS + 5), truncated: false }],
+      results: [],
+    });
+    expect(masked.steps[0].text).toHaveLength(MAX_STEP_TEXT_CHARS);
+    expect(masked.steps[0].truncated).toBe(true);
   });
 });
