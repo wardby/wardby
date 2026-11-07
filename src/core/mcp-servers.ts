@@ -29,12 +29,12 @@ export class McpServerInputError extends Error {
   }
 }
 
-/** What the server's owner (or an admin) sees when a stored secret of the server can't be decrypted or read. */
+/** What the server's owner (or an admin) sees when a stored secret of the server can't be decrypted. */
 export const CREDENTIALS_UNAVAILABLE_MESSAGE =
   "The MCP server's credentials can't be decrypted on this server. Check that every Wardby process (control plane, scheduler, native gateway) uses the same SECRET_APP_KEY, or set the secret again.";
 
 /**
- * A server's brokered secret exists but its stored value can't be decrypted or read (another
+ * A server's brokered secret exists but its stored value can't be decrypted (another
  * SECRET_APP_KEY, a key-id mismatch, a corrupt ciphertext). Not an input problem: the message is
  * fixed and never carries the cipher's error, the ciphertext or a value.
  */

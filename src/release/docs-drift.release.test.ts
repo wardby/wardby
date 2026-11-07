@@ -27,6 +27,8 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
+    // A nested package's installed dependencies (src/claude-coding-worker) are not wardby's source or docs.
+    if (name === "node_modules") return [];
     const path = join(dir, name);
     return statSync(path).isDirectory() ? walk(path) : [path];
   });

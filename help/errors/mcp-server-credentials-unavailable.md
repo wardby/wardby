@@ -1,6 +1,6 @@
 ---
 id: errors/mcp-server-credentials-unavailable
-title: A remote tool server's credentials can't be decrypted
+title: A remote tool server's credentials can't be decrypted (mcp_server_credentials_unavailable)
 summary: A brokered secret of an MCP server exists but this Wardby server can't decrypt it; check SECRET_APP_KEY.
 audience: operator
 tags: [mcp, mcp_server_credentials_unavailable, credentials, decrypt, SECRET_APP_KEY, register_mcp_server]
@@ -14,7 +14,9 @@ appliesTo: ">=0.8.0"
 An agent's MCP tool call returned `mcp_server_credentials_unavailable`, or `register_mcp_server`,
 `update_mcp_server` or `refresh_mcp_server` failed with it (as an HTTP 500 error). The server's
 brokered secret exists, but the Wardby process that made the call could not decrypt its stored value.
-Wardby did not contact the MCP server.
+Wardby did not contact the MCP server. The same cause has knock-on effects elsewhere in the run:
+posting and `delegate_to_*` tools return `secret_check_unavailable`, the run's final text and error
+are withheld, and `get_run` withholds the request (see [Secrets and tools](../../docs/tool-secrets.md)).
 
 The usual causes:
 

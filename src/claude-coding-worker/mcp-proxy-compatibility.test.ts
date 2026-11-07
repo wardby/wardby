@@ -2,8 +2,12 @@
 // the options sdk.ts builds) against the real coding proxy: its model requests go through the
 // proxy's Anthropic allowlist with the session's pinned MCP tool names, and its wardby_mcp HTTP MCP
 // requests go through the proxy's /mcp route to a fake native gateway. The upstream model is a
-// scripted in-process fake: nothing leaves the machine. Skipped when the worker's SDK (or its
-// platform binary) is not installed: run `npm ci` in src/claude-coding-worker to install it.
+// scripted in-process fake: nothing leaves the machine.
+//
+// Runs only when src/claude-coding-worker/node_modules is installed (the worker's SDK and its
+// platform binary); otherwise the suite is skipped. To run it, from the repository root:
+//   npm ci --prefix src/claude-coding-worker
+//   npx vitest run src/claude-coding-worker/mcp-proxy-compatibility.test.ts
 import { createRequire } from "node:module";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -357,6 +361,9 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
     expect(refused.status).toBe(400);
     expect(await refused.text()).toContain("tools_not_allowed");
     expect(forwarded).toHaveLength(2);
+    expect(audit.filter((event) => event.type === "request.rejected")).toEqual([
+      expect.objectContaining({ type: "request.rejected", reason: "tools_not_allowed" }),
+    ]);
 
     // Neither the MCP token nor the run capability shows up in any proxy log line.
     expect(logged.length).toBeGreaterThan(0);
