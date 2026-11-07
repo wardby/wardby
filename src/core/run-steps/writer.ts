@@ -8,10 +8,13 @@
  * would change under redaction is dropped and not counted in stepsDropped; only steps past the cap are
  * counted, once per callId. One run's batches are written in arrival order, within one process only
  * (step/result ordering across processes is not guaranteed), under a row lock on the run, so seq has
- * no gaps or duplicates whichever process writes. A result is matched only to a stored callId, which
+ * no gaps or duplicates whichever process writes. Known limits: a dropped step may be counted again
+ * after a process restart, after its run is evicted from the remembered set, past the per-run id
+ * limit, or when two processes write the same run. A result is matched only to a stored callId, which
  * is already clean, so a result's callId is never persisted. Log lines
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import { redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
@@ -31,9 +34,10 @@ import {
 const stepsLog = logger.child({ module: "run-steps" });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TX = { maxWait: 5_000, timeout: 10_000 } as const;
-/** Runs whose over-cap callIds are remembered (per process), and how many callIds per run. */
-const DROPPED_RUNS = 256;
+/** Over-cap callIds remembered (as 32-character hashes): at most this many per run and in all. */
 const DROPPED_PER_RUN = 10_000;
+const DROPPED_TOTAL = 200_000;
+const callKey = (callId: string): string => createHash("sha256").update(callId).digest("hex").slice(0, 32);
 
 export type RunStepWriterDb = Pick<PrismaClient, "run" | "runStep" | "$transaction">;
 
@@ -45,6 +49,8 @@ export interface RunStepWriterDeps {
   retentionDays: number;
   /** Tests only; MAX_RUN_STEPS otherwise. */
   maxSteps?: number;
+  /** Tests only; the remembered-callId limits (per run, in all). */
+  droppedLimits?: { perRun: number; total: number };
   now?: () => Date;
   log?: { warn(fields: Record<string, unknown>, message: string): void };
 }
@@ -65,7 +71,10 @@ function safeToolName(tool: string, secretValues: readonly string[]): string {
 
 export class RunStepWriter implements RunStepSink {
   private readonly queues = new Map<string, Promise<void>>();
-  /** callIds already counted in stepsDropped, so history resent past the cap is not counted again. */
+  /**
+   * Hashes of the callIds already counted in stepsDropped, so history resent past the cap is not
+   * counted again. Least recently used run first; bounded in total, whatever the ids' length.
+   */
   private readonly droppedIds = new Map<string, Set<string>>();
 
   constructor(private readonly deps: RunStepWriterDeps) {}
@@ -116,6 +125,10 @@ export class RunStepWriter implements RunStepSink {
     const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const maxSteps = this.deps.maxSteps ?? MAX_RUN_STEPS;
     const counted = this.droppedIds.get(runId) ?? new Set<string>();
+    if (this.droppedIds.has(runId)) {
+      this.droppedIds.delete(runId);
+      this.droppedIds.set(runId, counted);
+    }
     const newlyDropped: string[] = [];
     await db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT 1 FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
@@ -132,7 +145,7 @@ export class RunStepWriter implements RunStepSink {
         if (kept.length > 0) {
           await tx.runStep.createMany({ data: kept.map((row, index) => ({ ...row, runId, seq: start + index + 1 })) });
         }
-        const over = fresh.slice(kept.length).filter((row) => !counted.has(row.callId));
+        const over = fresh.slice(kept.length).filter((row) => !counted.has(callKey(row.callId)));
         newlyDropped.push(...over.map((row) => row.callId));
         const dropped = over.length;
         if (dropped > 0) await tx.run.update({ where: { id: runId }, data: { stepsDropped: { increment: dropped } } });
@@ -149,10 +162,20 @@ export class RunStepWriter implements RunStepSink {
   }
 
   private rememberDropped(runId: string, counted: Set<string>, ids: readonly string[]): void {
-    for (const id of ids) if (counted.size < DROPPED_PER_RUN) counted.add(id);
+    const limits = this.deps.droppedLimits ?? { perRun: DROPPED_PER_RUN, total: DROPPED_TOTAL };
+    for (const id of ids) if (counted.size < limits.perRun) counted.add(callKey(id));
     this.droppedIds.delete(runId);
-    if (this.droppedIds.size >= DROPPED_RUNS) this.droppedIds.delete(this.droppedIds.keys().next().value as string);
     this.droppedIds.set(runId, counted);
+    while (this.rememberedDroppedCount() > limits.total && this.droppedIds.size > 1) {
+      this.droppedIds.delete(this.droppedIds.keys().next().value as string);
+    }
+  }
+
+  /** How many dropped callIds are remembered in all (tests). */
+  rememberedDroppedCount(): number {
+    let total = 0;
+    for (const set of this.droppedIds.values()) total += set.size;
+    return total;
   }
 }
 

@@ -172,6 +172,32 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     expect((await rowsOf(run.id)).map((r) => r.callId)).toEqual(["c1"]);
   });
 
+  it("bounds the remembered over-cap callIds in all, least recently used run first", async () => {
+    const w = new RunStepWriter({
+      db,
+      secretValues: async () => [FAKE_SECRET],
+      level: "summary",
+      retentionDays: 30,
+      maxSteps: 1,
+      droppedLimits: { perRun: 2, total: 3 },
+      now: () => NOW,
+    });
+    const over = (prefix: string) => ({
+      steps: ["keep", `${prefix}1`, `${prefix}2`, `${prefix}3`].map((id) => tool(id, id)),
+      results: [],
+    });
+    const [r1, r2, r3] = [await newRun(), await newRun(), await newRun()];
+    await w.record(r1.id, over("a"));
+    await w.record(r2.id, over("b"));
+    // Two per run (the per-run limit); the oldest run was evicted to keep the total at 3 or fewer.
+    expect(w.rememberedDroppedCount()).toBe(2);
+    await w.record(r3.id, over("c"));
+    expect(w.rememberedDroppedCount()).toBeLessThanOrEqual(3);
+    // The evicted run's resent history may be counted again; the bound holds regardless.
+    await w.record(r1.id, over("a"));
+    expect(w.rememberedDroppedCount()).toBeLessThanOrEqual(3);
+  });
+
   it("records nothing when the ceiling is off", async () => {
     const run = await newRun();
     await writer({ level: "off" }).record(run.id, { steps: [tool("c1", "ls")], results: [] });
