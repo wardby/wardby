@@ -304,6 +304,22 @@ port-level policy — that is harmless, because the listener accepts the
 connection, sends nothing and closes it. It is not a leak; it is a fact about
 reachability that the Kubernetes launcher turns into evidence.
 
+### Run steps
+
+The worker is not involved: after relaying each model reply unchanged, the proxy
+reads it (and the newest tool results of the request) and makes one short line
+per tool call or model message. It posts the lines to the control plane's
+run-steps listener (`WARDBY_RUN_STEPS_URL`), authenticated by the run capability;
+the control plane removes the agent's secret values before storing them. Reading
+a reply for steps never delays or fails the relay: a frame the proxy can't read
+gives no step, and a full queue or an unreachable server drops steps.
+
+The worker holds the same capability, so the network keeps it off the listener:
+on Kubernetes, ingress to port 8792 only from proxy pods; on Docker, the run's
+isolated network. The worker's own egress is unchanged: it reaches only the
+proxy. See [Run steps](security-deployment.md#run-steps) and
+[Run steps](debugging-agent-runs.md#run-steps).
+
 ## Debug trace
 
 When a fixed code is not enough to tell why a coding agent's runs fail, an

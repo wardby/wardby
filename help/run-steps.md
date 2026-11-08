@@ -3,7 +3,7 @@ id: run-steps
 title: See what a run is doing (run steps)
 summary: Wardby records each run's steps, one line per tool call or model message, so you can follow a running run and read what a finished one did with get_run_steps.
 audience: operator
-tags: [run steps, get_run_steps, lastStep, what is my run doing, stuck run, WARDBY_RUN_STEPS, RUN_STEP_RETENTION_DAYS]
+tags: [run steps, coding run steps, claude code run steps, codex run steps, get_run_steps, lastStep, what is my run doing, stuck run, WARDBY_RUN_STEPS, WARDBY_RUN_STEPS_LISTEN, WARDBY_RUN_STEPS_URL, RUN_STEP_RETENTION_DAYS]
 appliesTo: >=0.9.0
 ---
 
@@ -19,8 +19,17 @@ Wardby records the steps of a run while it runs:
 Tool output is never recorded, and neither is the full text of a command or
 message. A tool named `run_command` shows as `Bash`.
 
-Steps are recorded for native runs, in the control plane and on the native
-sandbox. Claude Code and Codex runs don't record steps.
+Steps are recorded for native runs (in the control plane and on the native
+sandbox) and for Claude Code and Codex runs. A Claude Code or Codex command
+shows as `Bash` or the tool's own name (for example `exec_command`), and a
+remote MCP tool as `mcp:<tool>`.
+
+For Claude Code and Codex runs, the coding proxy reads the steps from the
+model's replies after relaying them and posts them to the server, which needs a
+listener for them: `WARDBY_RUN_STEPS_LISTEN` on `wardby serve` and
+`WARDBY_RUN_STEPS_URL` on the proxy. The reference GKE and kind manifests set
+both. Without either, coding runs record no steps; native runs are not
+affected. A slow or unreachable listener loses steps; it never slows the run.
 
 ## Read the steps
 
@@ -56,9 +65,20 @@ Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are recorded (default
 | `WARDBY_RUN_STEPS`        | `summary` | `off` records no steps; `summary` records the lines above. `detail` is accepted and records `summary` in this release. Any other value stops start-up. |
 | `RUN_STEP_RETENTION_DAYS` | `30`      | Days to keep a step, a whole number from 1 to 3650. Any other value stops start-up.                                                                    |
 
-Set both on every process that runs native agents or serves the native sandbox
-gateway: `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp` and
-`wardby native-gateway`.
+| `WARDBY_RUN_STEPS_LISTEN` | unset | On `wardby serve` only: `host:port` (or `:port`) of the listener the coding proxy posts coding runs' steps to. Unset: no listener. |
+| `WARDBY_RUN_STEPS_URL` | unset | On the coding proxy: the listener's origin, for example `http://<server host>:8792`, with no credentials or path. Unset: coding runs record no steps. |
+
+Set `WARDBY_RUN_STEPS` and `RUN_STEP_RETENTION_DAYS` on every process that runs
+native agents or serves the native sandbox gateway: `wardby serve`,
+`wardby scheduler`, `wardby run`, `wardby mcp` and `wardby native-gateway`. The
+coding proxy reads `WARDBY_RUN_STEPS` too: with `off`, or with
+`WARDBY_RUN_STEPS_URL` unset, no step text leaves the proxy. For a coding
+run's steps use `wardby serve` (the only process that runs the listener), not
+the stdio `wardby mcp`.
+
+The listener is a second network path into the server, from the coding proxy
+only; keep it off any load balancer. See
+[Run steps](../docs/security-deployment.md#run-steps) for how to restrict it.
 
 The full guide is
 [Debugging agent runs](../docs/debugging-agent-runs.md#run-steps).

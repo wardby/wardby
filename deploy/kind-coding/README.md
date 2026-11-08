@@ -406,6 +406,19 @@ set `BLOB_STORE=local` and `BLOB_STORE_LOCAL_DIR` (a directory on your host) in
 the environment you start the control plane with. This is separate from the
 coding proxy's dependency cache store below.
 
+## Run steps on the kind harness
+
+The proxy posts coding runs' steps to the control plane on your machine at
+`http://host.docker.internal:8792` (`overlays/kind` sets `WARDBY_RUN_STEPS_URL`
+and allows egress on that port). Start the control plane with
+`wardby serve` and `WARDBY_RUN_STEPS_LISTEN` set to an address the kind node
+reaches as `host.docker.internal` on port 8792, the same way it reaches your
+database. Use `wardby serve`, not the stdio `wardby mcp`: only `serve` runs the
+listener. Without it, coding runs record no steps. A `127.0.0.1` bind works on
+Docker Desktop but not on Linux; a `0.0.0.0` bind exposes the listener to your
+LAN, so bind to the Docker bridge address or firewall the port. See
+[Run steps](../../docs/security-deployment.md#run-steps).
+
 ## Run dependency cache on the kind harness
 
 See [Dependency cache](../../docs/coding-packages.md#dependency-cache) for what it does.
