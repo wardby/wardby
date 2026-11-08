@@ -15,6 +15,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { CODING_MCP_PATH, handleCodingMcpRequest, type CodingMcpDeps } from "../core/coding-mcp.js";
+import { parseListenAddress, type ListenAddress } from "../core/listen-address.js";
 import { logger } from "../core/logger.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody as readLimitedBody } from "../mcp/transport/http-limits.js";
 import { logUnexpectedError } from "./gateway.js";
@@ -26,20 +27,11 @@ export const httpLog = logger.child({ module: "native-gateway-http" });
 
 export const NATIVE_GATEWAY_PATH = "/native-gateway/v1/call";
 
-export interface NativeGatewayListen {
-  host: string;
-  port: number;
-}
+export type NativeGatewayListen = ListenAddress;
 
 /** Parses NATIVE_GATEWAY_LISTEN ("host:port" or ":port"); undefined when unset. */
 export function parseGatewayListen(value: string | undefined): NativeGatewayListen | undefined {
-  if (!value) return undefined;
-  const match = /^(.*):(\d{1,5})$/.exec(value.trim());
-  const port = match ? Number(match[2]) : NaN;
-  if (!match || !Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`NATIVE_GATEWAY_LISTEN must be host:port or :port (got "${value}").`);
-  }
-  return { host: match[1] || "0.0.0.0", port };
+  return parseListenAddress("NATIVE_GATEWAY_LISTEN", value);
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
