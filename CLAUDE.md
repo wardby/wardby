@@ -229,4 +229,11 @@ values, and run capabilities. Outputs include:
   process's output may go to operator logs (never to MCP, the viewer, run
   records, or anything published) when it is redacted by exact value against
   every secret value delivered to that process.
+- **Exception — run-steps relay:** the coding proxy may send a run's step text
+  unredacted to the control plane's run-steps listener, because both already
+  hold that content and the secret values. The relay is in-cluster or on the
+  run's isolated network only, authenticated by the run's capability, reachable
+  only from the proxy, and neither side logs, stores or echoes the text; the
+  control plane redacts it by exact value before anything is written. Tests
+  with fake values prove the no-logging part.
 - **Plans and reviews check every new output path against this rule.**
