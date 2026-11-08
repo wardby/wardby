@@ -3,6 +3,7 @@ import {
   bounded,
   displayToolName,
   maskForTransport,
+  MAX_MARKERS_CHECKED,
   maskTruncatedTail,
   secretForms,
   stepSummary,
@@ -14,6 +15,7 @@ import { MAX_STEP_TEXT_CHARS, MAX_SUMMARY_CHARS, SAID_SUMMARY_CHARS, TOOL_SUMMAR
 // Fake values only: never a real credential.
 const FAKE_SECRET = "wbFake-Secret-Value-7f3a91";
 const FAKE_TOKEN = "ghp_FAKEfakeFAKEfake0123456789abcd";
+const REDACTED_TEXT = "[REDACTED]";
 
 describe("displayToolName", () => {
   it("names the proxy's tools the way a reader knows them: Claude Code's run_command is Bash", () => {
@@ -308,6 +310,46 @@ describe("a secret a token shape only partly covers", () => {
     expect(secretForms(values)).toBe(secretForms(values));
     values.push("other-Fake-value-2");
     expect(native("x other-Fake-value-2 y", values)).toBe("x [REDACTED] y");
+  });
+
+  it("hands out frozen forms, so a caller can't change the cached list", () => {
+    const values = [FAKE_SECRET];
+    const forms = secretForms(values) as string[];
+    expect(() => forms.push("x")).toThrow(TypeError);
+    expect(secretForms(values)).toContain(FAKE_SECRET);
+  });
+
+  describe("bounded cost", () => {
+    // Deterministic pseudo-random hex, so the test never depends on Math.random.
+    let seed = 7;
+    const hex = (n: number): string =>
+      Array.from({ length: n }, () => {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return "0123456789abcdef"[seed >>> 28];
+      }).join("");
+    const secrets = Array.from({ length: 200 }, () => hex(4096));
+    const markers = (count: number): string =>
+      Array.from({ length: count }, () => `${REDACTED_TEXT}${hex(1)}`).join("");
+
+    it("masks the whole summary when the text holds more than 64 markers", () => {
+      const out = native(`x ${markers(MAX_MARKERS_CHECKED + 1)}`, [FAKE_SECRET]);
+      expect(out).toBe(REDACTED_TEXT);
+    });
+
+    it("checks 64 markers against 200 secrets of 4 KiB quickly", () => {
+      native("warm", secrets); // builds the forms once, as the first step of a batch does
+      native(`warm ${REDACTED_TEXT} x`, secrets); // and the piece index
+      const started = performance.now();
+      native(markers(MAX_MARKERS_CHECKED), secrets);
+      expect(performance.now() - started).toBeLessThan(500);
+    });
+
+    it("handles a text of literal markers quickly", () => {
+      const text = markers(1500).slice(0, MAX_STEP_TEXT_CHARS);
+      const started = performance.now();
+      expect(stepSummary({ kind: "tool", text, truncated: false }, secrets)).toBe(REDACTED_TEXT);
+      expect(performance.now() - started).toBeLessThan(500);
+    });
   });
 
   it("redacts a secret written JSON-escaped", () => {

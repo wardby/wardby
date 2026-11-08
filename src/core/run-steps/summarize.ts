@@ -164,13 +164,32 @@ const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").t
  * whitespace-collapsed (the model wrote it with other whitespace), token-masked (the coding proxy
  * masked a token-shaped word inside it before sending, maskForTransport), and token-masked and
  * collapsed. Matching them all in one pass means a shorter secret, or a token-shaped word, inside a
- * longer one can't break the longer match. One batch's steps share one values array, so the forms
- * are computed once per array.
+ * longer one can't break the longer match. The forms (and their piece index) are kept for the last
+ * few values lists by content, so they are built once, not once per step or batch; the list handed
+ * out is frozen.
  */
-export function secretForms(secretValues: readonly string[]): string[] {
-  const cached = formsCache.get(secretValues);
-  // The copy guards against an array changed after it was cached.
-  if (cached && sameValues(cached.values, secretValues)) return cached.forms;
+export function secretForms(secretValues: readonly string[]): readonly string[] {
+  return formsEntry(secretValues).forms;
+}
+
+interface FormsEntry {
+  values: readonly string[];
+  forms: readonly string[];
+  index?: PieceIndex;
+}
+/** The last few values lists seen, by content: one agent's batches read equal values, as new arrays. */
+const recentForms: FormsEntry[] = [];
+const RECENT_FORMS = 8;
+const sameValues = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((value, i) => value === b[i]);
+
+function formsEntry(secretValues: readonly string[]): FormsEntry {
+  const hit = recentForms.findIndex((entry) => sameValues(entry.values, secretValues));
+  if (hit >= 0) {
+    const [entry] = recentForms.splice(hit, 1);
+    recentForms.unshift(entry);
+    return entry;
+  }
   const forms = new Set<string>();
   for (const escaped of withEscapedForms(secretValues.flatMap((value) => [value, collapseWhitespace(value)]))) {
     const masked = redactSecrets(escaped);
@@ -178,57 +197,127 @@ export function secretForms(secretValues: readonly string[]): string[] {
       if (form && form !== REDACTED) forms.add(form);
     }
   }
-  const out = [...forms].sort((a, b) => b.length - a.length);
-  formsCache.set(secretValues, { values: [...secretValues], forms: out });
-  return out;
+  // Frozen: the arrays are shared through the cache, so no caller may change them.
+  const entry: FormsEntry = {
+    values: Object.freeze([...secretValues]),
+    forms: Object.freeze([...forms].sort((a, b) => b.length - a.length)),
+  };
+  recentForms.unshift(entry);
+  recentForms.length = Math.min(recentForms.length, RECENT_FORMS);
+  return entry;
 }
-const formsCache = new WeakMap<readonly string[], { values: string[]; forms: string[] }>();
-const sameValues = (a: readonly string[], b: readonly string[]): boolean =>
-  a.length === b.length && a.every((value, i) => value === b[i]);
 
-/** Whether `text` holds `form.slice(from, to)` at `at`. */
-function holdsAt(text: string, at: number, form: string, from: number, to: number): boolean {
+/** More markers than this in one text and the whole summary is masked (maskAroundMarkers). */
+export const MAX_MARKERS_CHECKED = 64;
+/** Characters compared around markers in one text before the whole summary is masked. */
+const MAX_COMPARED_CHARS = 4_000_000;
+/** Candidate pieces are looked up by their first (suffixes) or last (prefixes) this many characters. */
+const GRAM = MIN_REDACTABLE_SECRET_LENGTH;
+
+/** A hash of the GRAM characters of `text` from `at` (collisions are resolved by comparing). */
+function gramHash(text: string, at: number): number {
+  let hash = 0;
+  for (let i = at; i < at + GRAM; i++) hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
+  return hash;
+}
+
+/**
+ * Pieces of the forms by the hash of a GRAM-character window: a chained hash table in typed arrays,
+ * so building it allocates nothing per piece. Entry n is (form[n], at[n]).
+ */
+class PieceTable {
+  private readonly head: Int32Array;
+  private readonly next: Int32Array;
+  readonly form: Int32Array;
+  readonly at: Int32Array;
+  private size = 0;
+  constructor(capacity: number) {
+    let buckets = 16;
+    while (buckets < capacity * 2) buckets *= 2;
+    this.head = new Int32Array(buckets).fill(-1);
+    this.next = new Int32Array(capacity);
+    this.form = new Int32Array(capacity);
+    this.at = new Int32Array(capacity);
+  }
+  add(hash: number, form: number, at: number): void {
+    const n = this.size++;
+    const bucket = hash & (this.head.length - 1);
+    this.form[n] = form;
+    this.at[n] = at;
+    this.next[n] = this.head[bucket];
+    this.head[bucket] = n;
+  }
+  /** The first entry for `hash`'s bucket, then follow `link`; -1 ends. */
+  first(hash: number): number {
+    return this.head[hash & (this.head.length - 1)];
+  }
+  link(n: number): number {
+    return this.next[n];
+  }
+}
+
+/**
+ * Every proper suffix and proper prefix (GRAM to MAX_TAIL_CHECK characters) of every form: suffixes
+ * by their first GRAM characters (at = the suffix's start), prefixes by their last GRAM (at = the
+ * prefix's length). Built once per forms list, and only when a text has a marker to check.
+ */
+interface PieceIndex {
+  suffixes: PieceTable;
+  prefixes: PieceTable;
+}
+
+function pieceIndex(entry: FormsEntry): PieceIndex {
+  if (entry.index) return entry.index;
+  const { forms } = entry;
+  let pieces = 0;
+  for (const form of forms) pieces += Math.max(0, Math.min(form.length - 1, MAX_TAIL_CHECK) - GRAM + 1);
+  const suffixes = new PieceTable(pieces);
+  const prefixes = new PieceTable(pieces);
+  forms.forEach((form, f) => {
+    const longest = Math.min(form.length - 1, MAX_TAIL_CHECK);
+    for (let k = GRAM; k <= longest; k++) {
+      const start = form.length - k;
+      suffixes.add(gramHash(form, start), f, start);
+      prefixes.add(gramHash(form, k - GRAM), f, k);
+    }
+  });
+  entry.index = { suffixes, prefixes };
+  return entry.index;
+}
+
+/** Whether `text` holds `form.slice(from, to)` at `at`, counting the characters compared. */
+interface Work {
+  chars: number;
+}
+
+function holdsAt(text: string, at: number, form: string, from: number, to: number, work: Work): boolean {
   if (at < 0 || at + (to - from) > text.length) return false;
-  for (let i = from; i < to; i++) if (text.charCodeAt(at + i - from) !== form.charCodeAt(i)) return false;
+  for (let i = from; i < to; i++) {
+    work.chars++;
+    if (text.charCodeAt(at + i - from) !== form.charCodeAt(i)) return false;
+  }
   return true;
 }
 
-/** The longest proper suffix (at least the minimum length) of any form that `text` holds at `at`. */
-function suffixAt(text: string, at: number, forms: readonly string[]): number {
+/** The longest proper suffix of any form that `text` holds at `at` (0 if none). */
+function suffixAt(text: string, at: number, forms: readonly string[], table: PieceTable, work: Work): number {
+  if (at + GRAM > text.length) return 0;
   let best = 0;
-  if (at >= text.length) return 0;
-  const first = text[at];
-  for (const form of forms) {
-    // A suffix starting at form[i]: the first i is the longest.
-    for (let i = form.indexOf(first, 1); i >= 0; i = form.indexOf(first, i + 1)) {
-      const k = form.length - i;
-      if (k <= best || k < MIN_REDACTABLE_SECRET_LENGTH) break;
-      if (k > MAX_TAIL_CHECK) continue;
-      if (holdsAt(text, at, form, i, form.length)) {
-        best = k;
-        break;
-      }
-    }
+  for (let n = table.first(gramHash(text, at)); n >= 0; n = table.link(n)) {
+    const form = forms[table.form[n]];
+    const start = table.at[n];
+    if (form.length - start > best && holdsAt(text, at, form, start, form.length, work)) best = form.length - start;
   }
   return best;
 }
 
-/** The longest proper prefix (at least the minimum length) of any form that `text` holds ending at `end`. */
-function prefixBefore(text: string, end: number, forms: readonly string[]): number {
+/** The longest proper prefix of any form that `text` holds ending at `end` (0 if none). */
+function prefixBefore(text: string, end: number, forms: readonly string[], table: PieceTable, work: Work): number {
+  if (end < GRAM) return 0;
   let best = 0;
-  if (end <= 0) return 0;
-  const last = text[end - 1];
-  for (const form of forms) {
-    // A prefix ending at form[j]: the last j is the longest.
-    for (let j = form.lastIndexOf(last, form.length - 2); j >= 0; j = j > 0 ? form.lastIndexOf(last, j - 1) : -1) {
-      const k = j + 1;
-      if (k <= best || k < MIN_REDACTABLE_SECRET_LENGTH) break;
-      if (k > MAX_TAIL_CHECK) continue;
-      if (holdsAt(text, end - k, form, 0, k)) {
-        best = k;
-        break;
-      }
-    }
+  for (let n = table.first(gramHash(text, end - GRAM)); n >= 0; n = table.link(n)) {
+    const k = table.at[n];
+    if (k > best && holdsAt(text, end - k, forms[table.form[n]], 0, k, work)) best = k;
   }
   return best;
 }
@@ -237,18 +326,41 @@ function prefixBefore(text: string, end: number, forms: readonly string[]): numb
  * `text` with the rest of a secret next to each marker removed: a context-dependent token shape
  * (URL credentials, `Bearer`, an AWS key name, a token prefix glued to a secret) can mask only part
  * of a secret, so no whole form matches what is left. A run right after a marker that is a proper
- * suffix of a form, or right before one that is a proper prefix, is dropped (the marker stays).
+ * suffix of a form, or right before one that is a proper prefix (at least 6 characters, at most
+ * 4096), is dropped (the marker stays). It fails safe: ordinary context next to a marker that
+ * happens to equal such a piece of a secret is dropped too. Each marker is looked up in an index of
+ * the forms' pieces, so the cost does not grow with the forms' total length; a text with more than
+ * MAX_MARKERS_CHECKED markers, or one that needs more than MAX_COMPARED_CHARS compared, becomes
+ * just the marker.
  */
 export function maskAroundMarkers(text: string, forms: readonly string[]): string {
+  return maskAround(text, { values: [], forms });
+}
+
+function maskAround(text: string, entry: FormsEntry): string {
+  if (!text.includes(REDACTED) || !entry.forms.some((form) => form.length > GRAM)) return text;
+  let markers = 0;
+  for (let at = text.indexOf(REDACTED); at >= 0; at = text.indexOf(REDACTED, at + REDACTED.length)) {
+    if (++markers > MAX_MARKERS_CHECKED) return REDACTED;
+  }
+  const { forms } = entry;
+  const { suffixes, prefixes } = pieceIndex(entry);
+  const work: Work = { chars: 0 };
   let out = text;
   for (let at = out.indexOf(REDACTED); at >= 0; at = out.indexOf(REDACTED, at + REDACTED.length)) {
-    for (let k = suffixAt(out, at + REDACTED.length, forms); k > 0; k = suffixAt(out, at + REDACTED.length, forms)) {
-      out = out.slice(0, at + REDACTED.length) + out.slice(at + REDACTED.length + k);
+    const after = at + REDACTED.length;
+    for (let k = suffixAt(out, after, forms, suffixes, work); k > 0; k = suffixAt(out, after, forms, suffixes, work)) {
+      out = out.slice(0, after) + out.slice(after + k);
     }
-    for (let k = prefixBefore(out, at, forms); k > 0; k = prefixBefore(out, at, forms)) {
+    for (
+      let k = prefixBefore(out, at, forms, prefixes, work);
+      k > 0;
+      k = prefixBefore(out, at, forms, prefixes, work)
+    ) {
       out = out.slice(0, at - k) + out.slice(at);
       at -= k;
     }
+    if (work.chars > MAX_COMPARED_CHARS) return REDACTED;
   }
   return out;
 }
@@ -264,10 +376,11 @@ export function stepSummary(
   secretValues: readonly string[],
 ): string {
   const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
-  const values = secretForms(secretValues);
+  const entry = formsEntry(secretValues);
+  const values = entry.forms;
   let text = redactSecrets(collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS)), values);
   if (cut) text = maskTruncatedTail(text, values);
-  text = maskAroundMarkers(text, values);
+  text = maskAround(text, entry);
   const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
