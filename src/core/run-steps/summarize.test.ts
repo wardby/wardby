@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   bounded,
   displayToolName,
+  maskAroundMarkers,
   maskForTransport,
   MAX_MARKERS_CHECKED,
   maskTruncatedTail,
@@ -94,7 +95,9 @@ describe("stepSummary", () => {
 
   it("masks the start of a secret left at the end of a cut-off text", () => {
     const cut = `deploy --key ${FAKE_SECRET.slice(0, 12)}`;
-    expect(stepSummary(tool(cut, true), [FAKE_SECRET])).toBe("deploy --key [REDACTED]");
+    // The whole text lies in the tail a cut text loses, so only the marker is left.
+    expect(stepSummary(tool(cut, true), [FAKE_SECRET])).toBe("[REDACTED]");
+    expect(maskTruncatedTail(cut, [FAKE_SECRET])).toBe("deploy --key [REDACTED]");
     expect(maskTruncatedTail(`x ${FAKE_SECRET.slice(0, 5)}`, [FAKE_SECRET])).toBe(`x ${FAKE_SECRET.slice(0, 5)}`);
   });
 
@@ -147,7 +150,8 @@ describe("stepSummary", () => {
     });
 
     it("masks its start at the end of a cut-off text after whitespace collapses", () => {
-      expect(stepSummary(tool("unlock correct  horse\nbatt", true), [PASSPHRASE])).toBe("unlock [REDACTED]");
+      expect(stepSummary(tool("unlock correct  horse\nbatt", true), [PASSPHRASE])).toBe("[REDACTED]");
+      expect(maskTruncatedTail("unlock correct horse batt", secretForms([PASSPHRASE]))).toBe("unlock [REDACTED]");
     });
   });
 
@@ -217,8 +221,9 @@ describe("overlapping secrets", () => {
 
   it("masks a cut-off start of the passphrase when a shorter secret is inside it", () => {
     expect(stepSummary({ kind: "tool", text: "unlock correct  horse\nbatt", truncated: true }, [P, "battery"])).toBe(
-      "unlock [REDACTED]",
+      "[REDACTED]",
     );
+    expect(maskTruncatedTail("unlock correct horse batt", secretForms([P, "battery"]))).toBe("unlock [REDACTED]");
   });
 
   it("marks a step truncated when token masking pushes it past 16 KiB, so no secret start survives", () => {
@@ -229,9 +234,9 @@ describe("overlapping secrets", () => {
       results: [],
     }).steps;
     expect(sent.truncated).toBe(true);
-    expect(stepSummary(sent, [FAKE_SECRET])).toBe(
-      "a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ [REDACTED]",
-    );
+    const out = stepSummary(sent, [FAKE_SECRET]);
+    expect(out).toBe("a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@");
+    expect(out).not.toContain(FAKE_SECRET.slice(0, 6));
   });
 
   it("still redacts a value that is wholly token-shaped", () => {
@@ -298,8 +303,19 @@ describe("a secret a token shape only partly covers", () => {
   describe("a cut text ending in the middle of a secret a token shape began", () => {
     const CAP = "wbcap_FAKErunCapability0123456789-xyzQ";
     const OWN = "agent-Own-Fake-secret-77";
-    // A token prefix glued to the secret's head, the text cut partway through the secret.
+    // A secret holding a token shape of its own: the proxy masks both token shapes, leaving a
+    // middle piece of the secret between two markers.
+    const INNER = `Fq8-Mid-Section-Value-Zz9 ghp_${"b".repeat(36)}-tailEndFakeVal`;
+    const HEAD = "npm run build in packages/app";
+    // A head, whitespace the summary collapses away, then a token prefix glued to the secret.
+    const headed = (tail: string): string => `${HEAD}${"\n".repeat(200)}run ghp_aaaaaaaaaaaaaaaaaaaa${tail}`;
     const glued = (secret: string): string => `run ghp_aaaaaaaaaaaaaaaaaaaa${secret.slice(0, 24)}`;
+    /** The first 6-character piece of `secret` found in `out`, if any. */
+    const pieceIn = (secret: string, out: string): string | undefined => {
+      for (let i = 0; i + 6 <= secret.length; i++)
+        if (out.includes(secret.slice(i, i + 6))) return secret.slice(i, i + 6);
+      return undefined;
+    };
     const codingCut = (text: string, own: string[], extras: string[]): string => {
       const [sent] = maskForTransport({
         steps: [{ kind: "said", callId: "s", text, truncated: true }],
@@ -313,21 +329,55 @@ describe("a secret a token shape only partly covers", () => {
       ["coding", codingCut],
       ["native", nativeCut],
     ] as const) {
-      it(`masks the middle piece of an agent's own value (${path} runs)`, () => {
-        expect(summarize(glued(CAP), [CAP], [])).toBe("run [REDACTED]");
+      it(`masks the piece between two markers of an agent's own value (${path} runs)`, () => {
+        const out = summarize(headed(INNER.slice(0, INNER.length - 6)), [INNER], []);
+        expect(out).toBe(HEAD);
+        expect(pieceIn(INNER, out)).toBeUndefined();
       });
-      it(`masks the middle piece of a run's extra value (${path} runs)`, () => {
-        expect(summarize(glued(CAP), [OWN], [CAP])).toBe("run [REDACTED]");
+      it(`masks the piece between two markers of a run's extra value (${path} runs)`, () => {
+        const out = summarize(headed(INNER.slice(0, INNER.length - 6)), [OWN], [INNER]);
+        expect(out).toBe(HEAD);
+        expect(pieceIn(INNER, out)).toBeUndefined();
+      });
+      it(`keeps only the marker when a short cut text is all tail (${path} runs)`, () => {
+        expect(summarize(`run ghp_aaaaaaaaaaaaaaaaaaaa${INNER.slice(0, INNER.length - 6)}`, [INNER], [])).toBe(
+          REDACTED_TEXT,
+        );
+        expect(summarize(glued(CAP), [OWN], [CAP])).toBe(REDACTED_TEXT);
+      });
+      it(`masks the middle piece of a value cut after its head (${path} runs)`, () => {
+        expect(summarize(headed(CAP.slice(0, 24)), [CAP], [])).toBe(HEAD);
+        expect(summarize(headed(CAP.slice(0, 24)), [OWN], [CAP])).toBe(HEAD);
+      });
+      it(`drops a secret that ends exactly at the cut (${path} runs)`, () => {
+        const out = summarize(`${HEAD}${"\n".repeat(200)}export KEY=${CAP}`, [CAP], []);
+        expect(out).toBe(HEAD);
+        expect(pieceIn(CAP, out)).toBeUndefined();
       });
     }
     it("masks the middle piece of a value longer than the piece index covers", () => {
       const long = `wbLong-${"Q7x".repeat(2000)}-fakeEnd`;
       const text = `run ghp_aaaaaaaaaaaaaaaaaaaa${long.slice(0, 3000)}`;
-      expect(codingCut(text, [long], [])).toBe("run [REDACTED]");
-      expect(nativeCut(text, [], [long])).toBe("run [REDACTED]");
+      expect(codingCut(text, [long], [])).toBe(REDACTED_TEXT);
+      expect(nativeCut(text, [], [long])).toBe(REDACTED_TEXT);
+    });
+    it("keeps the leading summary of a cut text with no secret in it", () => {
+      const text = "npm test --filter app ".repeat(800);
+      expect(text.length).toBeGreaterThan(MAX_STEP_TEXT_CHARS);
+      const whole = (kind: "tool" | "said") =>
+        stepSummary({ kind, text: text.slice(0, 2000), truncated: false }, [CAP]);
+      expect(nativeCut(text, [CAP], [])).toBe(whole("tool"));
+      expect(codingCut(text, [], [])).toBe(whole("said"));
+    });
+    it("keeps nothing but an empty summary for an empty cut text", () => {
+      expect(nativeCut("", [CAP], [])).toBe("");
+    });
+    // The passes after the drop stay as defence in depth.
+    it("still masks the middle piece after the last marker of a cut text (maskAroundMarkers)", () => {
+      expect(maskAroundMarkers("run [REDACTED]_FAKErunCapability0", secretForms([CAP]), true)).toBe("run [REDACTED]");
     });
     it("keeps a run after the last marker that is no piece of a secret", () => {
-      expect(codingCut("run ghp_aaaaaaaaaaaaaaaaaaaa plain-words-here", [CAP], [])).toBe(
+      expect(maskAroundMarkers("run [REDACTED] plain-words-here", secretForms([CAP]), true)).toBe(
         "run [REDACTED] plain-words-here",
       );
     });

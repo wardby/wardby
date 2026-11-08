@@ -4,8 +4,9 @@
  * collapsed first, then one pass masks every form of every secret value together (as written,
  * JSON-escaped, collapsed, token-masked: secretForms), then token shapes (redactSecrets), then any
  * piece of a secret left next to a marker (maskAroundMarkers). The summary is cut only after redaction, so a cut never splits a secret and
- * leaves half of it visible; a text an extractor already cut is checked for a secret's start at
- * its end (maskTruncatedTail).
+ * leaves half of it visible. A text that arrived cut first loses its last (longest form + 64)
+ * characters, where any piece of a secret crossing the cut must lie (stepSummarizer); its end is
+ * still checked for a secret's start (maskTruncatedTail) as defence in depth.
  */
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { CLAUDE_MCP_TOOL_PREFIX, WORKER_MCP_SERVER_KEY } from "../../coding/mcp-token.js";
@@ -445,12 +446,25 @@ function maskAround(text: string, allSets: readonly FormSet[], cut: boolean): st
 }
 
 /**
+ * Characters dropped from the end of a cut text beyond the longest form: room for the markers a
+ * token shape or the proxy's masking left in place of part of a secret.
+ */
+const CUT_TAIL_SLACK = 64;
+
+/**
  * Summaries for one batch: `secretValues` (the agent's own, cached across batches by content) and
  * `extraValues` (per run, such as a run's gateway capability: never cached, so each run doesn't
  * make a cache entry). Each summary is whitespace collapsed, then redacted once against every form
  * of every value together (secretForms) and by token shape, then a cut-off text's tail checked
  * against those forms, then any piece of a secret left next to a marker (or, in a cut-off text,
  * after the last marker) removed (maskAroundMarkers), then cut to 100 characters (tool) or 120 (said).
+ *
+ * A text that arrives cut (`truncated`, or over the step text bound) first loses its last L + 64
+ * characters, L being the length of the longest form of any value (own or extra; 0 if there are
+ * none), before anything else runs. Masking only ever shortens a text, so any piece of a secret
+ * that crosses the cut lies in that tail, wherever token shapes split it into pieces between
+ * markers. A cut text the drop leaves blank is summarised as just the marker. The passes after it
+ * (tail check, pieces next to and after markers) stay as defence in depth.
  */
 export function stepSummarizer(
   secretValues: readonly string[],
@@ -459,9 +473,16 @@ export function stepSummarizer(
   const own = cachedForms(secretValues);
   const sets = extraValues.length > 0 ? [own, new FormSet(buildForms(extraValues))] : [own];
   const values = sets.length > 1 ? [...own.forms, ...sets[1].forms] : own.forms;
+  // Forms are sorted longest first, so the first of each set is the longest.
+  const drop = Math.max(0, ...sets.map((set) => set.forms[0]?.length ?? 0)) + CUT_TAIL_SLACK;
   return (step) => {
     const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
-    let text = redactSecrets(collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS)), values);
+    let received = step.text.slice(0, MAX_STEP_TEXT_CHARS);
+    if (cut) {
+      received = received.slice(0, Math.max(0, received.length - drop));
+      if (!received.trim()) return step.text ? REDACTED : "";
+    }
+    let text = redactSecrets(collapseWhitespace(received), values);
     if (cut) text = maskTruncatedTail(text, values);
     text = maskAround(text, sets, cut);
     const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
