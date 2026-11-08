@@ -401,7 +401,10 @@ describe("extraction leak cases", () => {
 
   it("decodes cut-off JSON whose end is an escaped backslash or a partial \\u escape", () => {
     for (const secret of ["Fake/Slash-Secret-77", "Fäke-Ümlaut-Secret-77"]) {
-      const encoded = secret.replace(/\//g, "\\/").replace(/[^ -~]/g, (c) => `\\u00${c.charCodeAt(0).toString(16)}`);
+      const encoded = secret
+        .replace(/\\/g, "\\\\")
+        .replace(/\//g, "\\/")
+        .replace(/[^ -~]/g, (c) => `\\u00${c.charCodeAt(0).toString(16)}`);
       for (const end of ["\\u00", "\\\\", "\\"]) {
         const step = toolStepText("Bash", `{"command":"curl -u ${encoded} x${end}`);
         expect(step.truncated).toBe(true);
