@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { summaryCacheStats } from "./summarize.js";
 import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
 
@@ -84,6 +85,20 @@ describe("RunStepWriter", () => {
     await writer.record("r1", { steps: [], results: [{ callId: "c1", status: "ok" }] });
     expect(secretValues).not.toHaveBeenCalled();
     expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("builds no summary forms for a batch that has no step to store", async () => {
+    const unique = "wbFake-NoRows-Secret-41";
+    const writer = new RunStepWriter({
+      db: fakeDb() as unknown as RunStepWriterDb,
+      secretValues: async () => [unique],
+      level: "summary",
+      retentionDays: 30,
+    });
+    const before = summaryCacheStats().formBuilds;
+    // Its one step's callId holds a secret value, so the step is not stored at all.
+    await writer.record("r1", { steps: [{ ...step, callId: `c-${unique}` }], results: [] }, ["wbFake-NoRows-Cap-42"]);
+    expect(summaryCacheStats().formBuilds).toBe(before);
   });
 
   it("reads the secret values again for every batch", async () => {

@@ -133,7 +133,8 @@ export class RunStepWriter implements RunStepSink {
     const extras = steps.length > 0 ? extraSecretValues.filter(Boolean) : [];
     const values = [...own, ...extras];
     // The agent's own values' forms are cached across batches; a run's extra values never are.
-    const summarize = stepSummarizer(own, extras);
+    // Built on the first row, so a batch with no steps builds nothing.
+    let summarize: ReturnType<typeof stepSummarizer> | undefined;
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
@@ -142,7 +143,7 @@ export class RunStepWriter implements RunStepSink {
       kind: step.kind,
       tool: step.kind === "tool" ? safeToolName(step.tool, values) : null,
       callId: step.callId,
-      summary: summarize(step),
+      summary: (summarize ??= stepSummarizer(own, extras))(step),
       at,
       expiresAt,
     }));

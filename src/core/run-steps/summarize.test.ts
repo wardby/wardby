@@ -295,6 +295,44 @@ describe("a secret a token shape only partly covers", () => {
     });
   }
 
+  describe("a cut text ending in the middle of a secret a token shape began", () => {
+    const CAP = "wbcap_FAKErunCapability0123456789-xyzQ";
+    const OWN = "agent-Own-Fake-secret-77";
+    // A token prefix glued to the secret's head, the text cut partway through the secret.
+    const glued = (secret: string): string => `run ghp_aaaaaaaaaaaaaaaaaaaa${secret.slice(0, 24)}`;
+    const codingCut = (text: string, own: string[], extras: string[]): string => {
+      const [sent] = maskForTransport({
+        steps: [{ kind: "said", callId: "s", text, truncated: true }],
+        results: [],
+      }).steps;
+      return stepSummarizer(own, extras)(sent);
+    };
+    const nativeCut = (text: string, own: string[], extras: string[]): string =>
+      stepSummarizer(own, extras)({ kind: "tool", text, truncated: true });
+    for (const [path, summarize] of [
+      ["coding", codingCut],
+      ["native", nativeCut],
+    ] as const) {
+      it(`masks the middle piece of an agent's own value (${path} runs)`, () => {
+        expect(summarize(glued(CAP), [CAP], [])).toBe("run [REDACTED]");
+      });
+      it(`masks the middle piece of a run's extra value (${path} runs)`, () => {
+        expect(summarize(glued(CAP), [OWN], [CAP])).toBe("run [REDACTED]");
+      });
+    }
+    it("masks the middle piece of a value longer than the piece index covers", () => {
+      const long = `wbLong-${"Q7x".repeat(2000)}-fakeEnd`;
+      const text = `run ghp_aaaaaaaaaaaaaaaaaaaa${long.slice(0, 3000)}`;
+      expect(codingCut(text, [long], [])).toBe("run [REDACTED]");
+      expect(nativeCut(text, [], [long])).toBe("run [REDACTED]");
+    });
+    it("keeps a run after the last marker that is no piece of a secret", () => {
+      expect(codingCut("run ghp_aaaaaaaaaaaaaaaaaaaa plain-words-here", [CAP], [])).toBe(
+        "run [REDACTED] plain-words-here",
+      );
+    });
+  });
+
   it("leaves a text with no secret in it unchanged", () => {
     const text = "run npm test in src/app and git push origin main";
     expect(coding(text, [FAKE_SECRET])).toBe(text);

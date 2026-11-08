@@ -367,6 +367,32 @@ function prefixBefore(text: string, end: number, sets: readonly FormSet[], work:
 }
 
 /**
+ * Whether `text` from `at` to its end is a piece (GRAM or more characters, after a form's first
+ * character) of any form. Starts in the suffix index are found there; a form too long for the index
+ * to cover every start is searched whole, its length spent from the work budget.
+ */
+function pieceToEnd(text: string, at: number, sets: readonly FormSet[], work: Work): boolean {
+  const length = text.length - at;
+  if (length < GRAM) return false;
+  const hash = gramHash(text, at);
+  for (const set of sets) {
+    const { suffixes } = set.pieces();
+    for (let n = suffixes.first(hash); n >= 0; n = suffixes.link(n)) {
+      spend(work, 1);
+      const form = set.forms[suffixes.form[n]];
+      const start = suffixes.at[n];
+      if (start + length <= form.length && holdsAt(text, at, form, start, start + length, work)) return true;
+    }
+    for (const form of set.forms) {
+      if (form.length <= MAX_TAIL_CHECK + 1) continue;
+      spend(work, form.length);
+      if (form.includes(text.slice(at))) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * `text` with the rest of a secret next to each marker removed: a context-dependent token shape
  * (URL credentials, `Bearer`, an AWS key name, a token prefix glued to a secret) can mask only part
  * of a secret, so no whole form matches what is left. A run right after a marker that is a proper
@@ -375,13 +401,15 @@ function prefixBefore(text: string, end: number, sets: readonly FormSet[], work:
  * happens to equal such a piece of a secret is dropped too. Each marker is looked up in an index of
  * the forms' pieces, so the cost does not grow with the forms' total length; a text with more than
  * MAX_MARKERS_CHECKED markers, or one whose check walks or compares more than MAX_MARKER_WORK,
- * becomes just the marker.
+ * becomes just the marker. In a text that was cut (`cut`), a run from the last marker to the end
+ * that is any piece of a form is dropped too: a token shape took the secret's head and the cut its
+ * tail, so what is left is neither a suffix nor a prefix.
  */
-export function maskAroundMarkers(text: string, forms: readonly string[]): string {
-  return maskAround(text, [new FormSet(forms)]);
+export function maskAroundMarkers(text: string, forms: readonly string[], cut = false): string {
+  return maskAround(text, [new FormSet(forms)], cut);
 }
 
-function maskAround(text: string, allSets: readonly FormSet[]): string {
+function maskAround(text: string, allSets: readonly FormSet[], cut: boolean): string {
   const sets = allSets.filter((set) => set.checksPieces);
   if (!text.includes(REDACTED) || sets.length === 0) return text;
   let markers = 0;
@@ -404,6 +432,8 @@ function maskAround(text: string, allSets: readonly FormSet[]): string {
         at -= k;
       }
     }
+    const last = out.lastIndexOf(REDACTED) + REDACTED.length;
+    if (cut && pieceToEnd(out, last, sets, work)) out = out.slice(0, last);
     return out;
   } catch (error) {
     if (!(error instanceof WorkExceeded)) throw error;
@@ -419,8 +449,8 @@ function maskAround(text: string, allSets: readonly FormSet[]): string {
  * `extraValues` (per run, such as a run's gateway capability: never cached, so each run doesn't
  * make a cache entry). Each summary is whitespace collapsed, then redacted once against every form
  * of every value together (secretForms) and by token shape, then a cut-off text's tail checked
- * against those forms, then any piece of a secret left next to a marker removed
- * (maskAroundMarkers), then cut to 100 characters (tool) or 120 (said).
+ * against those forms, then any piece of a secret left next to a marker (or, in a cut-off text,
+ * after the last marker) removed (maskAroundMarkers), then cut to 100 characters (tool) or 120 (said).
  */
 export function stepSummarizer(
   secretValues: readonly string[],
@@ -433,7 +463,7 @@ export function stepSummarizer(
     const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
     let text = redactSecrets(collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS)), values);
     if (cut) text = maskTruncatedTail(text, values);
-    text = maskAround(text, sets);
+    text = maskAround(text, sets, cut);
     const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
     return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
   };
