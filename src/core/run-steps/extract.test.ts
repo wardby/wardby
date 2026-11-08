@@ -369,3 +369,34 @@ describe("resultsFromRequest", () => {
     expect(resultsFromRequest("anthropic-messages", null)).toEqual([]);
   });
 });
+
+describe("resultsFromRequest over real Codex 0.160.1 request recordings", () => {
+  const dir = new URL("../../providers/coding-proxy/fixtures/", import.meta.url);
+  const load = async (name: string): Promise<{ scenario: string; body: unknown }[]> => {
+    const raw = JSON.parse(await readFile(new URL(name, dir), "utf8"));
+    return Array.isArray(raw) ? raw : (raw.responses ?? []);
+  };
+
+  it.each(["codex-0.160.1-responses-requests.json", "codex-0.160.1-mcp-requests.json"])(
+    "yields results only for outputs present in every scenario of %s",
+    async (name) => {
+      const scenarios = await load(name);
+      expect(scenarios.length).toBeGreaterThan(0);
+      for (const { body } of scenarios) {
+        const results = resultsFromRequest("openai-responses", body);
+        const input = ((body as { input?: unknown[] }).input ?? []) as {
+          type?: string;
+          call_id?: string;
+        }[];
+        const outputIds = new Set(
+          input.filter((i) => typeof i.type === "string" && i.type.endsWith("_call_output")).map((i) => i.call_id),
+        );
+        for (const r of results) {
+          expect(outputIds.has(r.callId)).toBe(true);
+          expect(typeof r.status).toBe("string");
+        }
+        if (outputIds.size === 0) expect(results).toEqual([]);
+      }
+    },
+  );
+});
