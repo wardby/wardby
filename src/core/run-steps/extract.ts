@@ -16,6 +16,22 @@ export interface StreamStepExtractor {
   consume(frame: string): void;
   /** The steps completed since the last call. */
   take(): ExtractedStep[];
+  /**
+   * The steps left when the reply has ended. When it was cut (it ended without its terminal event,
+   * or stopped at the output limit), its open text is kept and the last text is marked truncated; a
+   * tool call still open never ran, so it is no step. Never throws.
+   */
+  finish(): ExtractedStep[];
+}
+
+/** Anthropic stop reasons that cut a reply off mid-output. */
+const CUT_STOP_REASONS = new Set(["max_tokens", "model_context_window_exceeded"]);
+
+/** Marks the reply's last step truncated when it was cut and that step is text being written. */
+function markCut(steps: ExtractedStep[], cut: boolean): ExtractedStep[] {
+  const last = steps.at(-1);
+  if (cut && last?.kind === "said" && !last.truncated) steps[steps.length - 1] = { ...last, truncated: true };
+  return steps;
 }
 
 export const MAX_RESULTS_PER_REQUEST = 64;
@@ -81,6 +97,8 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
   private messageId = `msg${++streamCount}`;
   private readonly blocks = new Map<number, OpenBlock>();
   private done: ExtractedStep[] = [];
+  private stopped = false;
+  private cutStop = false;
 
   consume(frame: string): void {
     try {
@@ -96,12 +114,35 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
     return out;
   }
 
+  finish(): ExtractedStep[] {
+    try {
+      const cut = !this.stopped || this.cutStop;
+      for (const [index, open] of [...this.blocks].sort(([a], [b]) => a - b)) {
+        this.blocks.delete(index);
+        if (open.kind !== "said") continue;
+        const step = closeBlock({ ...open, truncated: true });
+        if (step) this.done.push(step);
+      }
+      return markCut(this.take(), cut);
+    } catch {
+      return [];
+    }
+  }
+
   private read(frame: string): void {
-    if (!frame.includes("message_start") && !frame.includes("content_block_")) return;
+    if (!frame.includes("message_") && !frame.includes("content_block_")) return;
     const event = sseData(frame);
     if (!event) return;
     const index = typeof event.index === "number" ? event.index : undefined;
     switch (event.type) {
+      case "message_stop":
+        this.stopped = true;
+        return;
+      case "message_delta": {
+        const reason = str(obj(event.delta)?.stop_reason);
+        if (reason && CUT_STOP_REASONS.has(reason)) this.cutStop = true;
+        return;
+      }
       case "message_start":
         this.messageId = str(obj(event.message)?.id) ?? this.messageId;
         return;
@@ -184,7 +225,14 @@ export function openAiItemStep(value: unknown): ExtractedStep | undefined {
         .filter((part) => part?.type === "output_text")
         .map((part) => str(part?.text) ?? "")
         .join("\n");
-      return text.trim() ? { kind: "said", callId: `said:${id}`, ...bounded(text) } : undefined;
+      if (!text.trim()) return undefined;
+      const out = bounded(text);
+      return {
+        kind: "said",
+        callId: `said:${id}`,
+        text: out.text,
+        truncated: out.truncated || item.status === "incomplete",
+      };
     }
     default:
       return undefined;
@@ -194,11 +242,16 @@ export function openAiItemStep(value: unknown): ExtractedStep | undefined {
 /** OpenAI Responses streams: one step per response.output_item.done. */
 export class OpenAiStreamSteps implements StreamStepExtractor {
   private done: ExtractedStep[] = [];
+  private completed = false;
 
   consume(frame: string): void {
     try {
-      if (!frame.includes("response.output_item.done")) return;
+      if (!frame.includes("response.output_item.done") && !frame.includes("response.completed")) return;
       const event = sseData(frame);
+      if (event?.type === "response.completed") {
+        if (obj(event.response)?.status !== "incomplete") this.completed = true;
+        return;
+      }
       if (event?.type !== "response.output_item.done") return;
       const step = openAiItemStep(event.item);
       if (step) this.done.push(step);
@@ -212,6 +265,15 @@ export class OpenAiStreamSteps implements StreamStepExtractor {
     this.done = [];
     return out;
   }
+
+  finish(): ExtractedStep[] {
+    try {
+      // Anything but response.completed (incomplete, failed, an error or a cut stream) ended it early.
+      return markCut(this.take(), !this.completed);
+    } catch {
+      return [];
+    }
+  }
 }
 
 export function streamStepExtractor(protocol: StepWireProtocol): StreamStepExtractor {
@@ -224,7 +286,8 @@ export function stepsFromJson(protocol: StepWireProtocol, value: unknown): Extra
     const body = obj(value);
     if (!body) return [];
     if (protocol === "openai-responses") {
-      return (Array.isArray(body.output) ? body.output : []).flatMap((item) => openAiItemStep(item) ?? []);
+      const steps = (Array.isArray(body.output) ? body.output : []).flatMap((item) => openAiItemStep(item) ?? []);
+      return markCut(steps, body.status === "incomplete" || obj(body.incomplete_details) !== undefined);
     }
     const messageId = str(body.id) ?? "msg";
     const steps: ExtractedStep[] = [];
@@ -240,7 +303,8 @@ export function stepsFromJson(protocol: StepWireProtocol, value: unknown): Extra
         steps.push({ kind: "said", callId: `said:${messageId}:${index}`, ...bounded(text) });
       }
     });
-    return steps;
+    const reason = str(body.stop_reason);
+    return markCut(steps, reason !== undefined && CUT_STOP_REASONS.has(reason));
   } catch {
     return [];
   }

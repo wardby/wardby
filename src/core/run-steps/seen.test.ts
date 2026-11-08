@@ -18,4 +18,14 @@ describe("SeenIds", () => {
     seen.fresh("s4", [{ callId: "x" }, { callId: "y" }, { callId: "z" }]);
     expect(seen.fresh("s4", [{ callId: "x" }])).toEqual([{ callId: "x" }]);
   });
+
+  it("forgets a session it is told has ended", () => {
+    const seen = new SeenIds();
+    seen.fresh("s1", [{ callId: "a" }]);
+    seen.fresh("s2", [{ callId: "a" }]);
+    seen.forget("s1");
+    seen.forget("never-seen");
+    expect(seen.fresh("s1", [{ callId: "a" }])).toEqual([{ callId: "a" }]);
+    expect(seen.fresh("s2", [{ callId: "a" }])).toEqual([]);
+  });
 });

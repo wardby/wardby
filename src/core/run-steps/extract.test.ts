@@ -130,6 +130,75 @@ describe("OpenAiStreamSteps", () => {
     expect(first.take()[0].callId).not.toBe(second.take()[0].callId);
   });
 
+  it("marks the reply's last text cut when the stream stops at max_tokens or ends without message_stop", async () => {
+    const stream = await fixture("anthropic-run-command-stream.txt");
+    const whole = new AnthropicStreamSteps();
+    for (const part of stream.split("\n\n")) if (part) whole.consume(part);
+    expect(whole.finish().map((s) => s.truncated)).toEqual([false, false]);
+
+    const capped = new AnthropicStreamSteps();
+    capped.consume(frame("message_start", { message: { id: "m1" } }));
+    capped.consume(frame("content_block_start", { index: 0, content_block: { type: "text", text: "First." } }));
+    capped.consume(frame("content_block_stop", { index: 0 }));
+    capped.consume(frame("content_block_start", { index: 1, content_block: { type: "text", text: "Half a sen" } }));
+    capped.consume(frame("content_block_stop", { index: 1 }));
+    capped.consume(frame("message_delta", { delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 9 } }));
+    capped.consume(frame("message_stop", {}));
+    expect(capped.finish()).toEqual([
+      { kind: "said", callId: "said:m1:0", text: "First.", truncated: false },
+      { kind: "said", callId: "said:m1:1", text: "Half a sen", truncated: true },
+    ]);
+
+    const cut = new AnthropicStreamSteps();
+    cut.consume(frame("message_start", { message: { id: "m2" } }));
+    cut.consume(frame("content_block_start", { index: 0, content_block: { type: "text", text: "" } }));
+    cut.consume(frame("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Still writ" } }));
+    cut.consume(
+      frame("content_block_start", {
+        index: 1,
+        content_block: { type: "tool_use", id: "t1", name: "Bash", input: {} },
+      }),
+    );
+    // The open text is kept as cut; the open tool call never ran, so it is no step.
+    expect(cut.take()).toEqual([]);
+    expect(cut.finish()).toEqual([{ kind: "said", callId: "said:m2:0", text: "Still writ", truncated: true }]);
+    expect(cut.finish()).toEqual([]);
+
+    // Text that names a terminal event is still text.
+    const named = new AnthropicStreamSteps();
+    named.consume(frame("message_start", { message: { id: "m3" } }));
+    named.consume(frame("content_block_start", { index: 0, content_block: { type: "text", text: "" } }));
+    named.consume(frame("content_block_delta", { index: 0, delta: { type: "text_delta", text: "a message_stop" } }));
+    named.consume(frame("content_block_stop", { index: 0 }));
+    expect(named.finish()).toEqual([{ kind: "said", callId: "said:m3:0", text: "a message_stop", truncated: true }]);
+  });
+
+  it("marks Codex's last message cut when the response is incomplete or never completes", async () => {
+    const stream = await fixture("codex-responses-stream.txt");
+    const whole = new OpenAiStreamSteps();
+    for (const part of stream.split("\n\n")) if (part) whole.consume(part);
+    expect(whole.finish().every((s) => !s.truncated)).toBe(true);
+
+    const message = (id: string, text: string, status = "completed") =>
+      frame("response.output_item.done", {
+        item: { id, type: "message", role: "assistant", status, content: [{ type: "output_text", text }] },
+      });
+    const incomplete = new OpenAiStreamSteps();
+    incomplete.consume(message("m1", "Half a sen", "incomplete"));
+    incomplete.consume(
+      frame("response.incomplete", {
+        response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } },
+      }),
+    );
+    expect(incomplete.finish()).toEqual([{ kind: "said", callId: "said:m1", text: "Half a sen", truncated: true }]);
+
+    const cut = new OpenAiStreamSteps();
+    cut.consume(message("m2", "Done. response.completed"));
+    expect(cut.finish()).toEqual([
+      { kind: "said", callId: "said:m2", text: "Done. response.completed", truncated: true },
+    ]);
+  });
+
   it("is what streamStepExtractor builds for each protocol", () => {
     expect(streamStepExtractor("openai-responses")).toBeInstanceOf(OpenAiStreamSteps);
     expect(streamStepExtractor("anthropic-messages")).toBeInstanceOf(AnthropicStreamSteps);
@@ -159,6 +228,35 @@ describe("stepsFromJson", () => {
         content: [{ type: "tool_use", id: "t", name: "apply_patch", input: { input: "line1\nline2" } }],
       }),
     ).toEqual([{ kind: "tool", callId: "t", tool: "apply_patch", text: "line1", truncated: true }]);
+  });
+});
+
+describe("stepsFromJson cut replies", () => {
+  it("marks the last text cut at max_tokens or an incomplete response", () => {
+    expect(
+      stepsFromJson("anthropic-messages", {
+        id: "m",
+        stop_reason: "max_tokens",
+        content: [
+          { type: "text", text: "One." },
+          { type: "text", text: "Two" },
+        ],
+      }).map((s) => s.truncated),
+    ).toEqual([false, true]);
+    expect(
+      stepsFromJson("openai-responses", {
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [{ id: "m", type: "message", role: "assistant", content: [{ type: "output_text", text: "Half" }] }],
+      }),
+    ).toEqual([{ kind: "said", callId: "said:m", text: "Half", truncated: true }]);
+    expect(
+      stepsFromJson("anthropic-messages", {
+        id: "m",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "Ok." }],
+      }),
+    ).toEqual([{ kind: "said", callId: "said:m:0", text: "Ok.", truncated: false }]);
   });
 });
 

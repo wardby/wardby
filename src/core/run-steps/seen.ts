@@ -26,4 +26,9 @@ export class SeenIds {
     }
     return out;
   }
+
+  /** Drops a session's ids: called when its proxy session has ended. */
+  forget(sessionId: string): void {
+    this.bySession.delete(sessionId);
+  }
 }
