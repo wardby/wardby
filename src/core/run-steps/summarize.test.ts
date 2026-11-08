@@ -100,9 +100,9 @@ describe("stepSummary", () => {
     );
     // Below the minimum length a start is too likely to be ordinary text.
     expect(stepSummary(tool(`x ${FAKE_SECRET.slice(0, 5)}`, true), [FAKE_SECRET])).toBe(`x ${FAKE_SECRET.slice(0, 5)}`);
-    // Only a text that arrived cut is checked.
+    // Every text is checked, marked cut or not: a stream can stop mid-secret without saying so.
     expect(stepSummary(tool(`deploy --key ${FAKE_SECRET.slice(0, 12)}`), [FAKE_SECRET])).toBe(
-      `deploy --key ${FAKE_SECRET.slice(0, 12)}`,
+      "deploy --key [REDACTED]",
     );
   });
 
@@ -360,6 +360,67 @@ describe("leak cases", () => {
         expect(leaks(out, INNER), `f=${f} ${out}`).toBeUndefined();
       }
     }
+  });
+});
+
+/** Leaks in how step text is extracted and flagged, found in review (fake values). */
+describe("extraction leak cases", () => {
+  const OWN = "agent-Own-Fake-secret-77";
+  const both = (secret: string) =>
+    [
+      ["own", [secret]],
+      ["extra", [OWN, secret]],
+    ] as const;
+
+  it("masks a secret start at the end of a step not marked cut (a stream that stopped early)", () => {
+    const S = "FaKeSeCrEt-9x7Q2mZ4pL";
+    for (const [whose, values] of both(S)) {
+      for (const kind of ["said", "tool"] as const) {
+        const out = stepSummary({ kind, text: `The key is ${S.slice(0, 14)}`, truncated: false }, values);
+        expect(out, `${kind} ${whose}`).toBe("The key is [REDACTED]");
+      }
+    }
+  });
+
+  it("marks a free-form input cut when later lines are dropped, so a multi-line secret's first line is masked", () => {
+    const M = "FAKE_USER=alice-Q9z\nFAKE_PASS=pw-7731xyz";
+    const patch = toolStepText("apply_patch", JSON.stringify({ input: `${M}\nmore` }));
+    expect(patch).toEqual({ text: "FAKE_USER=alice-Q9z", truncated: true });
+    const echoed = toolStepText("apply_patch", JSON.stringify({ input: `echo ${M}` }));
+    const plain = toolStepText("custom", JSON.stringify(`${M}\nrest`));
+    expect(plain.truncated).toBe(true);
+    expect(toolStepText("custom", JSON.stringify("one line\n\n  "))).toEqual({ text: "one line", truncated: false });
+    for (const [whose, values] of both(M)) {
+      for (const step of [patch, echoed, plain]) {
+        const out = stepSummary({ kind: "tool", ...step }, values);
+        expect(leaks(out, "FAKE_USER=alice-Q9z"), `${whose} ${out}`).toBeUndefined();
+        expect(leaks(out, "FAKE_PASS=pw-7731xyz")).toBeUndefined();
+      }
+    }
+  });
+
+  it("decodes cut-off JSON whose end is an escaped backslash or a partial \\u escape", () => {
+    for (const secret of ["Fake/Slash-Secret-77", "Fäke-Ümlaut-Secret-77"]) {
+      const encoded = secret.replace(/\//g, "\\/").replace(/[^ -~]/g, (c) => `\\u00${c.charCodeAt(0).toString(16)}`);
+      for (const end of ["\\u00", "\\\\", "\\"]) {
+        const step = toolStepText("Bash", `{"command":"curl -u ${encoded} x${end}`);
+        expect(step.truncated).toBe(true);
+        for (const [whose, values] of both(secret)) {
+          const out = stepSummary({ kind: "tool", ...step }, values);
+          expect(out, `${whose} ${end}`).toMatch(/^curl -u \[REDACTED\] x\\?$/);
+        }
+      }
+    }
+    expect(toolStepText("Bash", '{"command":"echo a\\\\').text).toBe("echo a\\");
+    expect(toolStepText("Bash", '{"command":"echo a\\u00e').text).toBe("echo a");
+  });
+
+  it("shows only the marker for a cut-off field that still won't decode", () => {
+    // A raw control character is not valid inside a JSON string.
+    expect(toolStepText("Bash", '{"command":"echo Fake\\/Secret\tvalue')).toEqual({
+      text: "[REDACTED]",
+      truncated: true,
+    });
   });
 });
 

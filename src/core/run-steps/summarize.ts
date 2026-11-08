@@ -2,11 +2,11 @@
  * Turns a tool call or a model message into the text a step's summary is cut from, and cuts it.
  * Redaction runs on the control plane (stepSummarizer), on the raw step text, before anything is
  * stored, for native and coding runs alike: whitespace is collapsed, then one pass of the shared
- * redactor masks every form of every secret value together (secretForms) and any secret start a
- * cut text ends in, then token shapes. The summary is cut only after redaction, so a cut never
+ * redactor masks every form of every secret value together (secretForms) and any secret start the
+ * text ends in, then token shapes. The summary is cut only after redaction, so a cut never
  * splits a secret and leaves half of it visible.
  */
-import { redactSecrets } from "../../coding/redact.js";
+import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { CLAUDE_MCP_TOOL_PREFIX, WORKER_MCP_SERVER_KEY } from "../../coding/mcp-token.js";
 import { MIN_REDACTABLE_SECRET_LENGTH, withEscapedForms } from "../secret-spans.js";
 import {
@@ -72,35 +72,48 @@ function parseLiteral(literal: string): unknown {
   return parseJson(literal) ?? literal.slice(1, -1);
 }
 
-/** A free-form tool input (a patch, Codex code-mode JavaScript, anything else). */
-function customInputText(tool: string, input: string): string {
+/**
+ * A free-form tool input (a patch, Codex code-mode JavaScript, anything else). Otherwise its first
+ * non-blank line, `cut` when later lines are dropped: that line may be the start of a secret.
+ */
+function customInput(tool: string, input: string): { text: string; cut: boolean } {
   if (tool === "apply_patch" || input.startsWith("*** Begin Patch")) {
     const files = [...input.matchAll(PATCH_FILE)].map((match) => match[1].trim());
-    if (files.length > 0) return files.join(", ");
+    if (files.length > 0) return { text: files.join(", "), cut: false };
   }
   const cmd = CODE_MODE_CMD.exec(input);
   if (cmd) {
     const command = commandText(parseLiteral(cmd[1]));
-    if (command !== undefined) return command;
+    if (command !== undefined) return { text: command, cut: false };
   }
-  return (
-    input
-      .split("\n")
-      .find((line) => line.trim().length > 0)
-      ?.trim() ?? ""
-  );
+  const lines = input.split("\n");
+  const first = lines.findIndex((line) => line.trim().length > 0);
+  if (first < 0) return { text: "", cut: false };
+  return { text: lines[first].trim(), cut: lines.slice(first + 1).some((line) => line.trim().length > 0) };
 }
 
 /** The text a tool step's summary is cut from: the command, the path, the pattern, or the first argument. */
 export function toolInputText(tool: string, input: unknown): string {
-  if (typeof input === "string") return customInputText(tool, input);
+  return toolInput(tool, input).text;
+}
+
+/** toolInputText, and whether part of a free-form input was dropped (customInput). */
+function toolInput(tool: string, input: unknown): { text: string; cut: boolean } {
+  if (typeof input === "string") return customInput(tool, input);
+  if (tool === "apply_patch" && input && typeof input === "object" && !Array.isArray(input)) {
+    const patch = (input as Record<string, unknown>).input;
+    if (typeof patch === "string") return customInput(tool, patch);
+  }
+  return { text: plainInputText(tool, input), cut: false };
+}
+
+function plainInputText(tool: string, input: unknown): string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return "";
   const args = input as Record<string, unknown>;
   if (COMMAND_TOOLS.has(tool)) {
     const command = commandText(args.command ?? args.cmd);
     if (command !== undefined) return command;
   }
-  if (tool === "apply_patch" && typeof args.input === "string") return customInputText(tool, args.input);
   if (typeof args.pattern === "string") {
     return typeof args.path === "string" ? `${args.pattern} in ${args.path}` : args.pattern;
   }
@@ -115,25 +128,36 @@ export function toolInputText(tool: string, input: unknown): string {
   return "";
 }
 
-/** The leading string field of cut-off JSON; `open` when the string never closed (it ran to the end of the input). */
-function leadingStringField(json: string): { text: string; open: boolean } | undefined {
+/**
+ * The leading string field of cut-off JSON; `open` when the string never closed (it ran to the end
+ * of the input). Only an escape the cut left unfinished is dropped (an unpaired trailing backslash,
+ * or a partial `\\u` escape); a field that still won't decode is `undefined` text, never raw escapes.
+ */
+function leadingStringField(json: string): { text: string | undefined; open: boolean } | undefined {
   const match = LEADING_FIELD.exec(json);
   if (!match) return undefined;
   const open = json[match.index + match[0].length] !== '"';
-  const raw = match[1].replace(/\\$/, "");
+  const raw = match[1].replace(/(?<!\\)((?:\\\\)*)(?:\\u[0-9a-fA-F]{0,3}|\\)$/, "$1");
   const decoded = parseJson(`"${raw}"`);
-  return { text: typeof decoded === "string" ? decoded : raw, open };
+  return { text: typeof decoded === "string" ? decoded : undefined, open };
 }
 
 /** A tool step's text from its JSON arguments (complete or cut off). */
 export function toolStepText(tool: string, argsJson: string): { text: string; truncated: boolean } {
   const parsed = argsJson.length <= MAX_PARSE_CHARS ? parseJson(argsJson) : undefined;
-  const leading = parsed === undefined ? leadingStringField(argsJson.slice(0, MAX_STEP_TEXT_CHARS)) : undefined;
-  const out = bounded(parsed !== undefined ? toolInputText(tool, parsed) : (leading?.text ?? ""));
+  if (parsed !== undefined) {
+    const input = toolInput(tool, parsed);
+    const out = bounded(input.text);
+    return { text: out.text, truncated: out.truncated || input.cut };
+  }
+  const leading = leadingStringField(argsJson.slice(0, MAX_STEP_TEXT_CHARS));
+  // A field that won't decode could show a secret in escaped form: nothing of it is shown.
+  if (leading && leading.text === undefined) return { text: REDACTED, truncated: true };
+  const out = bounded(leading?.text ?? "");
   return {
     text: out.text,
     // An unclosed string was cut off by the provider or by us: it may end in the start of a secret.
-    truncated: out.truncated || (parsed === undefined && (argsJson.length > MAX_STEP_TEXT_CHARS || !!leading?.open)),
+    truncated: out.truncated || argsJson.length > MAX_STEP_TEXT_CHARS || !!leading?.open,
   };
 }
 
@@ -192,10 +216,10 @@ function secretTail(text: string, forms: readonly string[], tables: Map<string, 
  * run's own, such as its capability). The forms are built once per batch. Each step's text (at
  * most 16 KiB) is whitespace collapsed, then redacted once with the shared redactor
  * (redactSecrets: the union of every occurrence of every form, then token shapes), then cut to 100
- * characters (tool) or 120 (said). A text that arrived cut (`truncated`, or over the bound) may end
- * in the start of a secret: the longest such start (secretTail, on the collapsed text before any
- * masking) is redacted in the same pass as one more exact value, so it merges with any whole secret
- * it overlaps.
+ * characters (tool) or 120 (said). Any text may end in the start of a secret (it was cut, or a
+ * stream stopped early without saying so), so on every step the longest such start (secretTail,
+ * on the collapsed text before any masking) is redacted in the same pass as one more exact value,
+ * so it merges with any whole secret it overlaps.
  */
 export function stepSummarizer(
   secretValues: readonly string[],
@@ -203,9 +227,9 @@ export function stepSummarizer(
   const forms = secretForms(secretValues);
   const tables = new Map<string, Int32Array>();
   return (step) => {
-    const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
     const collapsed = collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS));
-    const tail = cut ? secretTail(collapsed, forms, tables) : "";
+    // Every step: a text can end mid-secret without being marked cut (a stream that stopped early).
+    const tail = secretTail(collapsed, forms, tables);
     const text = redactSecrets(collapsed, tail ? [...forms, tail] : forms);
     const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
     return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
