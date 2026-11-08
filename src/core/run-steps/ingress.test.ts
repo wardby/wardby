@@ -1,3 +1,4 @@
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { AddressInfo } from "node:net";
 import { request, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -46,7 +47,7 @@ describe("handleRunStepPost", () => {
   it("records a valid batch for the capability's run, with the capability as a value to redact", async () => {
     const d = deps();
     expect(await handleRunStepPost(d.value, `Bearer ${CAP}`, postBody())).toEqual({ status: 202, body: { ok: true } });
-    expect(d.record).toHaveBeenCalledWith("r1", batch, [CAP]);
+    expect(d.record).toHaveBeenCalledWith("r1", batch, [CAP, deriveRegistryToken(CAP)]);
   });
 
   it("refuses a batch naming another run than the capability's, recording nothing", async () => {

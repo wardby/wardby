@@ -23,6 +23,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { parseListenAddress, type ListenAddress } from "../listen-address.js";
@@ -35,7 +36,7 @@ const ingressLog = logger.child({ module: "run-steps" });
 const CAPABILITY = /^rrp_[A-Za-z0-9_-]{43}$/;
 /** A reply that finished just before the session's deadline may still be in the forwarder's queue. */
 const SESSION_GRACE_MS = 10 * 60_000;
-/** Open connections at once; more wait in the listen backlog. */
+/** Open connections at once; Node accepts and then closes any beyond this (they do not wait in the listen backlog). */
 export const MAX_INGRESS_CONNECTIONS = 64;
 /** How often Node checks requestTimeout and headersTimeout (its default, 30 s, would let a slow client stay). */
 const CONNECTIONS_CHECK_MS = 2_000;
@@ -98,7 +99,7 @@ async function accept(deps: RunStepIngressDeps, caller: Caller, body: string): P
   if (!post) return { status: 400, body: { error: "invalid_batch" } };
   // A capability names one run: a batch for any other run is refused, never written there.
   if (post.runId !== caller.runId) return { status: 403, body: { error: "run_mismatch" } };
-  await deps.sink.record(caller.runId, post.batch, [caller.capability]);
+  await deps.sink.record(caller.runId, post.batch, [caller.capability, deriveRegistryToken(caller.capability)]);
   return { status: 202, body: { ok: true } };
 }
 

@@ -27,8 +27,9 @@ remote MCP tool as `mcp:<tool>`.
 For Claude Code and Codex runs, the coding proxy reads the steps from the
 model's replies after relaying them and posts them to the server, which needs a
 listener for them: `WARDBY_RUN_STEPS_LISTEN` on `wardby serve` and
-`WARDBY_RUN_STEPS_URL` on the proxy. The reference GKE and kind manifests set
-both. Without either, coding runs record no steps; native runs are not
+`WARDBY_RUN_STEPS_URL` on the proxy. The reference GKE manifests set both; the
+kind overlay sets only `WARDBY_RUN_STEPS_URL`, so set
+`WARDBY_RUN_STEPS_LISTEN` on the host's `wardby serve`. Without either, coding runs record no steps; native runs are not
 affected. A slow or unreachable listener loses steps; it never slows the run.
 
 ## Read the steps

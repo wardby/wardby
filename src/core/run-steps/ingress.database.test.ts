@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../db.js";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
 import { startRunStepIngress } from "./ingress.js";
 import { stepSummary } from "./summarize.js";
@@ -124,6 +125,23 @@ describe.skipIf(!process.env.DATABASE_URL)("run-steps listener (PostgreSQL)", ()
     }
     expect(ingressWarn).not.toHaveBeenCalled();
     expect(writerWarn).not.toHaveBeenCalled();
+  });
+
+  it("removes the worker's registry token derived from the capability, whole, glued and cut", async () => {
+    const cap = `rrp_${"R".repeat(43)}`;
+    const runId = await codingRun(cap);
+    const token = deriveRegistryToken(cap);
+    const steps: ExtractedStep[] = [
+      { kind: "said", callId: "said:m1:0", text: `token ${token} done`, truncated: false },
+      { kind: "said", callId: "said:m1:1", text: `x${token}y`, truncated: false },
+      { kind: "said", callId: "said:m1:2", text: `https://w:${token.slice(0, 7)}`, truncated: true },
+    ];
+    const response = await post(JSON.stringify({ runId, steps, results: [] }), `Bearer ${cap}`);
+    expect(response.status).toBe(202);
+    const rows = await db.runStep.findMany({ where: { runId }, orderBy: { seq: "asc" } });
+    expect(rows.map((r) => r.summary)).toEqual(["token [REDACTED] done", "x[REDACTED]y", "https://w:[REDACTED]"]);
+    const stored = JSON.stringify(rows);
+    for (let i = 0; i + 6 <= token.length; i++) expect(stored).not.toContain(token.slice(i, i + 6));
   });
 
   it("refuses a wrong capability, another run's id, and an ended session, storing nothing and logging no value", async () => {
