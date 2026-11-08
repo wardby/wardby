@@ -2,14 +2,14 @@
  * Turns a tool call or a model message into the text a step's summary is cut from, and cuts it.
  * Redaction runs on the control plane (stepSummary), before anything is stored: whitespace is
  * collapsed first, then one pass masks every form of every secret value together (as written,
- * collapsed, token-masked, token-masked and collapsed: secretForms), then token shapes
- * (redactSecrets). The summary is cut only after redaction, so a cut never splits a secret and
+ * JSON-escaped, collapsed, token-masked: secretForms), then token shapes (redactSecrets), then any
+ * piece of a secret left next to a marker (maskAroundMarkers). The summary is cut only after redaction, so a cut never splits a secret and
  * leaves half of it visible; a text an extractor already cut is checked for a secret's start at
  * its end (maskTruncatedTail).
  */
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { CLAUDE_MCP_TOOL_PREFIX, WORKER_MCP_SERVER_KEY } from "../../coding/mcp-token.js";
-import { MIN_REDACTABLE_SECRET_LENGTH } from "../secret-spans.js";
+import { MIN_REDACTABLE_SECRET_LENGTH, withEscapedForms } from "../secret-spans.js";
 import {
   MAX_STEP_TEXT_CHARS,
   SAID_SUMMARY_CHARS,
@@ -159,27 +159,105 @@ export function maskTruncatedTail(text: string, secretValues: readonly string[])
 const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
- * Every form a secret value can take in a collapsed step text, longest first: the value, its
- * whitespace-collapsed form (the model wrote it with other whitespace), its token-masked form (the
- * coding proxy masked a token-shaped word inside it before sending, maskForTransport), and that
- * form collapsed. Matching them all in one pass means a shorter secret, or a token-shaped word,
- * inside a longer one can't break the longer match.
+ * Every form a secret value can take in a collapsed step text, longest first: the value and its
+ * JSON-escaped forms (withEscapedForms: a value inside JSON text), each as written,
+ * whitespace-collapsed (the model wrote it with other whitespace), token-masked (the coding proxy
+ * masked a token-shaped word inside it before sending, maskForTransport), and token-masked and
+ * collapsed. Matching them all in one pass means a shorter secret, or a token-shaped word, inside a
+ * longer one can't break the longer match. One batch's steps share one values array, so the forms
+ * are computed once per array.
  */
 export function secretForms(secretValues: readonly string[]): string[] {
+  const cached = formsCache.get(secretValues);
+  // The copy guards against an array changed after it was cached.
+  if (cached && sameValues(cached.values, secretValues)) return cached.forms;
   const forms = new Set<string>();
-  for (const value of secretValues) {
-    const masked = redactSecrets(value);
-    for (const form of [value, collapseWhitespace(value), masked, collapseWhitespace(masked)]) {
+  for (const escaped of withEscapedForms(secretValues.flatMap((value) => [value, collapseWhitespace(value)]))) {
+    const masked = redactSecrets(escaped);
+    for (const form of [escaped, collapseWhitespace(escaped), masked, collapseWhitespace(masked)]) {
       if (form && form !== REDACTED) forms.add(form);
     }
   }
-  return [...forms].sort((a, b) => b.length - a.length);
+  const out = [...forms].sort((a, b) => b.length - a.length);
+  formsCache.set(secretValues, { values: [...secretValues], forms: out });
+  return out;
+}
+const formsCache = new WeakMap<readonly string[], { values: string[]; forms: string[] }>();
+const sameValues = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((value, i) => value === b[i]);
+
+/** Whether `text` holds `form.slice(from, to)` at `at`. */
+function holdsAt(text: string, at: number, form: string, from: number, to: number): boolean {
+  if (at < 0 || at + (to - from) > text.length) return false;
+  for (let i = from; i < to; i++) if (text.charCodeAt(at + i - from) !== form.charCodeAt(i)) return false;
+  return true;
+}
+
+/** The longest proper suffix (at least the minimum length) of any form that `text` holds at `at`. */
+function suffixAt(text: string, at: number, forms: readonly string[]): number {
+  let best = 0;
+  if (at >= text.length) return 0;
+  const first = text[at];
+  for (const form of forms) {
+    // A suffix starting at form[i]: the first i is the longest.
+    for (let i = form.indexOf(first, 1); i >= 0; i = form.indexOf(first, i + 1)) {
+      const k = form.length - i;
+      if (k <= best || k < MIN_REDACTABLE_SECRET_LENGTH) break;
+      if (k > MAX_TAIL_CHECK) continue;
+      if (holdsAt(text, at, form, i, form.length)) {
+        best = k;
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+/** The longest proper prefix (at least the minimum length) of any form that `text` holds ending at `end`. */
+function prefixBefore(text: string, end: number, forms: readonly string[]): number {
+  let best = 0;
+  if (end <= 0) return 0;
+  const last = text[end - 1];
+  for (const form of forms) {
+    // A prefix ending at form[j]: the last j is the longest.
+    for (let j = form.lastIndexOf(last, form.length - 2); j >= 0; j = j > 0 ? form.lastIndexOf(last, j - 1) : -1) {
+      const k = j + 1;
+      if (k <= best || k < MIN_REDACTABLE_SECRET_LENGTH) break;
+      if (k > MAX_TAIL_CHECK) continue;
+      if (holdsAt(text, end - k, form, 0, k)) {
+        best = k;
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * `text` with the rest of a secret next to each marker removed: a context-dependent token shape
+ * (URL credentials, `Bearer`, an AWS key name, a token prefix glued to a secret) can mask only part
+ * of a secret, so no whole form matches what is left. A run right after a marker that is a proper
+ * suffix of a form, or right before one that is a proper prefix, is dropped (the marker stays).
+ */
+export function maskAroundMarkers(text: string, forms: readonly string[]): string {
+  let out = text;
+  for (let at = out.indexOf(REDACTED); at >= 0; at = out.indexOf(REDACTED, at + REDACTED.length)) {
+    for (let k = suffixAt(out, at + REDACTED.length, forms); k > 0; k = suffixAt(out, at + REDACTED.length, forms)) {
+      out = out.slice(0, at + REDACTED.length) + out.slice(at + REDACTED.length + k);
+    }
+    for (let k = prefixBefore(out, at, forms); k > 0; k = prefixBefore(out, at, forms)) {
+      out = out.slice(0, at - k) + out.slice(at);
+      at -= k;
+    }
+  }
+  return out;
 }
 
 /**
  * The stored summary: whitespace collapsed, then redacted once against every form of every secret
  * value together (secretForms) and by token shape, then a cut-off text's tail checked against
- * those forms, then cut to 100 characters (tool) or 120 (said).
+ * those forms, then any piece of a secret left next to a marker removed (maskAroundMarkers), then
+ * cut to 100 characters (tool) or 120 (said).
  */
 export function stepSummary(
   step: Pick<ExtractedStep, "kind" | "text" | "truncated">,
@@ -189,6 +267,7 @@ export function stepSummary(
   const values = secretForms(secretValues);
   let text = redactSecrets(collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS)), values);
   if (cut) text = maskTruncatedTail(text, values);
+  text = maskAroundMarkers(text, values);
   const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }

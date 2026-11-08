@@ -4,6 +4,7 @@ import {
   displayToolName,
   maskForTransport,
   maskTruncatedTail,
+  secretForms,
   stepSummary,
   toolInputText,
   toolStepText,
@@ -233,5 +234,86 @@ describe("overlapping secrets", () => {
     expect(stepSummary({ kind: "said", text: `a ${FAKE_TOKEN} b`, truncated: false }, [FAKE_TOKEN])).toBe(
       "a [REDACTED] b",
     );
+  });
+});
+
+describe("a secret a token shape only partly covers", () => {
+  /** Whether any 6-character-or-longer piece of `secret` is in `out`. */
+  const leaks = (out: string, secret: string): boolean => {
+    for (let i = 0; i + 6 <= secret.length; i++) if (out.includes(secret.slice(i, i + 6))) return true;
+    return false;
+  };
+  const coding = (text: string, secrets: string[]): string => {
+    const [sent] = maskForTransport({
+      steps: [{ kind: "said", callId: "s", text, truncated: false }],
+      results: [],
+    }).steps;
+    return stepSummary(sent, secrets);
+  };
+  const native = (text: string, secrets: string[]): string =>
+    stepSummary({ kind: "said", text, truncated: false }, secrets);
+  const cases: Array<[string, string, string, string[]]> = [
+    [
+      "a password in URL credentials",
+      "connect postgres://admin:p@ssw0rd-Fake9@db:5432/app now",
+      "p@ssw0rd-Fake9",
+      ["connect", "now"],
+    ],
+    [
+      "a bearer token followed by more words of the secret",
+      "Authorization: Bearer abcdefghijklmnopqrstu horse staple",
+      "abcdefghijklmnopqrstu horse staple",
+      ["Authorization"],
+    ],
+    [
+      "an AWS secret key value with a longer tail",
+      "aws_secret_access_key=AbCdEf1234567890-prod-fake-pw end",
+      "AbCdEf1234567890-prod-fake-pw",
+      ["end"],
+    ],
+    [
+      "a secret glued after a token prefix",
+      "ghp_aaaaaaaaaaaaaaaaaaaaFakeSecretXY99-tail-part ok",
+      "FakeSecretXY99-tail-part",
+      ["ok"],
+    ],
+  ];
+  for (const [name, text, secret, kept] of cases) {
+    it(`leaves no piece of ${name} (coding runs)`, () => {
+      const out = coding(text, [secret]);
+      expect(leaks(out, secret)).toBe(false);
+      for (const word of kept) expect(out).toContain(word);
+    });
+    it(`leaves no piece of ${name} (native runs)`, () => {
+      const out = native(text, [secret]);
+      expect(leaks(out, secret)).toBe(false);
+      for (const word of kept) expect(out).toContain(word);
+    });
+  }
+
+  it("leaves a text with no secret in it unchanged", () => {
+    const text = "run npm test in src/app and git push origin main";
+    expect(coding(text, [FAKE_SECRET])).toBe(text);
+    expect(native(text, [FAKE_SECRET])).toBe(text);
+  });
+
+  it("keeps ordinary words next to a masked token", () => {
+    expect(coding(`use ${FAKE_TOKEN} production-deploy now`, [FAKE_SECRET])).toBe(
+      "use [REDACTED] production-deploy now",
+    );
+  });
+
+  it("reuses one batch's forms, and still sees a value added to the same array later", () => {
+    const values = [FAKE_SECRET];
+    expect(secretForms(values)).toBe(secretForms(values));
+    values.push("other-Fake-value-2");
+    expect(native("x other-Fake-value-2 y", values)).toBe("x [REDACTED] y");
+  });
+
+  it("redacts a secret written JSON-escaped", () => {
+    const secret = 'qu"ote-Fake1';
+    const out = native('echo "{\\"pw\\":\\"qu\\"ote-Fake1\\"}"', [secret]);
+    expect(out).toBe('echo "{\\"pw\\":\\"[REDACTED]\\"}"');
+    expect(leaks(out, secret)).toBe(false);
   });
 });
