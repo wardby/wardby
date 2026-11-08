@@ -1,0 +1,60 @@
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 4096,
+  "stream": true,
+  "system": [{ "type": "text", "text": "You are a Claude agent." }],
+  "tools": [
+    {
+      "name": "mcp__wardby_tools__run_command",
+      "description": "Run a shell command in the workspace.",
+      "input_schema": { "type": "object", "properties": { "command": { "type": "string" } }, "required": ["command"] }
+    }
+  ],
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "Fix the failing test." }] },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_old",
+          "name": "mcp__wardby_tools__run_command",
+          "input": { "command": "ls" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [{ "type": "tool_result", "tool_use_id": "toolu_old", "content": "exit_code=0\nsrc\n" }]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "Running both." },
+        {
+          "type": "tool_use",
+          "id": "toolu_a",
+          "name": "mcp__wardby_tools__run_command",
+          "input": { "command": "npm test" }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_b",
+          "name": "mcp__wardby_tools__run_command",
+          "input": { "command": "npm run lint" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_a",
+          "content": [{ "type": "text", "text": "exit_code=0\n12 passed\n" }]
+        },
+        { "type": "tool_result", "tool_use_id": "toolu_b", "content": "exit_code=2\nlint failed\n", "is_error": true }
+      ]
+    }
+  ]
+}

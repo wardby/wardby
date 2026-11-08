@@ -1,0 +1,74 @@
+{
+  "note": "Constructed to match the Codex 0.160.1 request shapes in src/providers/coding-proxy/fixtures/codex-0.160.1-responses-requests.json. Replace with a redacted capture from a real Codex run before merge.",
+  "body": {
+    "model": "test-model",
+    "stream": true,
+    "max_output_tokens": 100,
+    "input": [
+      { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Fix the failing test." }] },
+      {
+        "type": "function_call",
+        "id": "fc_old",
+        "call_id": "call_old",
+        "name": "exec_command",
+        "arguments": "{\"cmd\":\"ls\"}"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_old",
+        "call_id": "call_old",
+        "output": "Chunk ID: 000000\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nsrc\n"
+      },
+      { "type": "reasoning", "id": "rs_steps_1", "summary": [], "encrypted_content": "gAAAAA-fixture" },
+      {
+        "type": "function_call",
+        "id": "fc_steps_1",
+        "call_id": "call_steps_1",
+        "name": "exec_command",
+        "arguments": "{\"cmd\":\"npm test\"}"
+      },
+      {
+        "type": "function_call",
+        "id": "fc_steps_2",
+        "call_id": "call_steps_2",
+        "name": "exec_command",
+        "arguments": "{\"cmd\":[\"bash\",\"-lc\",\"npm run lint\"]}"
+      },
+      {
+        "type": "custom_tool_call",
+        "id": "ctc_steps_1",
+        "status": "completed",
+        "call_id": "call_steps_3",
+        "name": "exec",
+        "input": "const r = await tools.exec_command({cmd: \"git status --short\"}); text(r.output);"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_steps_1",
+        "call_id": "call_steps_1",
+        "output": "Chunk ID: 000001\nWall time: 1.2 seconds\nProcess exited with code 1\nOriginal token count: 40\nOutput:\n1 failing\n"
+      },
+      {
+        "type": "function_call_output",
+        "id": "fco_steps_2",
+        "call_id": "call_steps_2",
+        "output": [
+          {
+            "type": "input_text",
+            "text": "Chunk ID: 000002\nWall time: 0.4 seconds\nProcess exited with code 0\nOutput:\n"
+          }
+        ]
+      },
+      {
+        "type": "custom_tool_call_output",
+        "id": "ctco_steps_1",
+        "call_id": "call_steps_3",
+        "output": [
+          { "type": "input_text", "text": "Script completed\nWall time 0.0 seconds\nOutput:\n" },
+          { "type": "input_text", "text": " M src/a.ts\n" }
+        ]
+      },
+      { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Continue." }] }
+    ]
+  }
+}

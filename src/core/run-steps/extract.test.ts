@@ -1,0 +1,203 @@
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+import {
+  AnthropicStreamSteps,
+  MAX_RESULTS_PER_REQUEST,
+  OpenAiStreamSteps,
+  resultsFromRequest,
+  statusFromOutput,
+  stepsFromJson,
+  streamStepExtractor,
+  type StreamStepExtractor,
+} from "./extract.js";
+import { MAX_STEP_TEXT_CHARS } from "./types.js";
+
+const fixture = (name: string) => readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+const frame = (type: string, body: Record<string, unknown>) =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}`;
+function feed(extractor: StreamStepExtractor, sse: string) {
+  for (const part of sse.split("\n\n")) if (part) extractor.consume(part);
+  return extractor.take();
+}
+
+describe("AnthropicStreamSteps", () => {
+  it("emits a Claude Code reply's text and its command as a Bash step, and skips thinking", async () => {
+    const extractor = new AnthropicStreamSteps();
+    expect(feed(extractor, await fixture("anthropic-run-command-stream.txt"))).toEqual([
+      { kind: "said", callId: "said:msg_steps_1:1", text: "I'll run the test suite.", truncated: false },
+      { kind: "tool", callId: "toolu_steps_1", tool: "Bash", text: "npm test", truncated: false },
+    ]);
+    expect(extractor.take()).toEqual([]);
+  });
+
+  it("buffers at most 16 KiB of a block's input and still finds the command", () => {
+    const extractor = new AnthropicStreamSteps();
+    const input = `{"command": "echo ${"x".repeat(40_000)}"}`;
+    extractor.consume(
+      frame("content_block_start", {
+        index: 0,
+        content_block: { type: "tool_use", id: "t1", name: "mcp__wardby_tools__run_command", input: {} },
+      }),
+    );
+    for (let at = 0; at < input.length; at += 1000) {
+      extractor.consume(
+        frame("content_block_delta", {
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: input.slice(at, at + 1000) },
+        }),
+      );
+    }
+    extractor.consume(frame("content_block_stop", { index: 0 }));
+    const [step] = extractor.take();
+    expect(step).toMatchObject({ kind: "tool", callId: "t1", tool: "Bash", truncated: true });
+    expect(step.text.startsWith("echo xxx")).toBe(true);
+    expect(step.text.length).toBeLessThanOrEqual(MAX_STEP_TEXT_CHARS);
+  });
+
+  it.each([
+    "",
+    "data: {not json",
+    'data: {"type":"content_block_delta","index":9,"delta":{}}',
+    'data: {"type":"content_block_start","index":"x"}',
+    "data: [DONE]",
+    "event: x\ndata: []",
+    ": a comment",
+  ])("ignores %j without throwing", (input) => {
+    const extractor = new AnthropicStreamSteps();
+    expect(() => extractor.consume(input)).not.toThrow();
+    expect(extractor.take()).toEqual([]);
+  });
+});
+
+describe("OpenAiStreamSteps", () => {
+  it("emits Codex's message, exec_command calls (cmd as a string and as argv) and code-mode exec", async () => {
+    expect(feed(new OpenAiStreamSteps(), await fixture("codex-responses-stream.txt"))).toEqual([
+      { kind: "said", callId: "said:msg_steps_1", text: "Running the tests now.", truncated: false },
+      { kind: "tool", callId: "call_steps_1", tool: "exec_command", text: "npm test", truncated: false },
+      { kind: "tool", callId: "call_steps_2", tool: "exec_command", text: "npm run lint", truncated: false },
+      { kind: "tool", callId: "call_steps_3", tool: "exec", text: "git status --short", truncated: false },
+    ]);
+  });
+
+  it("names a worker MCP call by its tool, and ignores frames it can't read", () => {
+    const extractor = new OpenAiStreamSteps();
+    extractor.consume(
+      frame("response.output_item.done", {
+        item: {
+          type: "function_call",
+          call_id: "m1",
+          name: "echo",
+          namespace: "mcp__wardby_mcp",
+          arguments: '{"text":"hi"}',
+        },
+      }),
+    );
+    extractor.consume("event: response.output_item.done\ndata: {broken");
+    expect(extractor.take()).toEqual([{ kind: "tool", callId: "m1", tool: "mcp:echo", text: "hi", truncated: false }]);
+  });
+
+  it("marks a code-mode input cut where later lines are dropped", () => {
+    const extractor = new OpenAiStreamSteps();
+    extractor.consume(
+      frame("response.output_item.done", {
+        item: { type: "custom_tool_call", call_id: "c1", name: "exec", input: "const a = 1;\nconst b = 2;" },
+      }),
+    );
+    expect(extractor.take()).toEqual([
+      { kind: "tool", callId: "c1", tool: "exec", text: "const a = 1;", truncated: true },
+    ]);
+  });
+
+  it("is what streamStepExtractor builds for each protocol", () => {
+    expect(streamStepExtractor("openai-responses")).toBeInstanceOf(OpenAiStreamSteps);
+    expect(streamStepExtractor("anthropic-messages")).toBeInstanceOf(AnthropicStreamSteps);
+  });
+});
+
+describe("stepsFromJson", () => {
+  it("reads whole replies of both protocols", async () => {
+    expect(
+      stepsFromJson("anthropic-messages", JSON.parse(await fixture("anthropic-run-command-response.json"))),
+    ).toEqual([
+      { kind: "said", callId: "said:msg_steps_2:0", text: "Checking the build.", truncated: false },
+      { kind: "tool", callId: "toolu_steps_2", tool: "Bash", text: "npm run build", truncated: false },
+    ]);
+    expect(
+      stepsFromJson("openai-responses", {
+        output: [
+          { type: "reasoning", summary: [] },
+          { type: "function_call", call_id: "c9", name: "exec_command", arguments: '{"cmd":"make"}' },
+        ],
+      }),
+    ).toEqual([{ kind: "tool", callId: "c9", tool: "exec_command", text: "make", truncated: false }]);
+    expect(stepsFromJson("openai-responses", "not an object")).toEqual([]);
+  });
+});
+
+describe("statusFromOutput", () => {
+  it.each<[string, boolean, string]>([
+    ["exit_code=0\nsrc\n", false, "ok"],
+    ["exit_code=2\nlint failed\n", true, "exit 2"],
+    ["Chunk ID: 1\nWall time: 0.1 seconds\nProcess exited with code 1\nOutput:\n", false, "exit 1"],
+    ["Exit code: 127\n", false, "exit 127"],
+    ["Error: boom", true, "error"],
+    ["Script completed\nWall time 0.0 seconds\n", false, "ok"],
+    ["exit_code=4000\n", false, "error"],
+    [`${"\n".repeat(9)}exit_code=3`, false, "ok"],
+    ["Script failed\nWall time 0.1 seconds\n", false, "error"],
+    ["Script terminated\nWall time 9.0 seconds\n", false, "error"],
+    ["Script error: ReferenceError: x is not defined\n", false, "error"],
+  ])("%j (is_error %s) -> %s", (head, isError, status) => {
+    expect(statusFromOutput(head, isError)).toBe(status);
+  });
+});
+
+describe("resultsFromRequest", () => {
+  it("reads only the newest Anthropic user message's results", async () => {
+    const body = JSON.parse(await fixture("anthropic-tool-result-request.json"));
+    const expected = [
+      { callId: "toolu_a", status: "ok" },
+      { callId: "toolu_b", status: "exit 2" },
+    ];
+    expect(resultsFromRequest("anthropic-messages", body)).toEqual(expected);
+    // An effort-only system message after it changes nothing.
+    body.messages.push({ role: "system", content: [], output_config: { effort: "high" } });
+    expect(resultsFromRequest("anthropic-messages", body)).toEqual(expected);
+    body.messages.push({ role: "assistant", content: [{ type: "text", text: "x" }] });
+    expect(resultsFromRequest("anthropic-messages", body)).toEqual([]);
+  });
+
+  it("reads Codex's outputs of the newest turn only", async () => {
+    const { body } = JSON.parse(await fixture("codex-tool-output-request.json"));
+    expect(resultsFromRequest("openai-responses", body)).toEqual([
+      { callId: "call_steps_1", status: "exit 1" },
+      { callId: "call_steps_2", status: "ok" },
+      { callId: "call_steps_3", status: "ok" },
+    ]);
+  });
+
+  it("reads results after the last assistant message too, and none from before it", () => {
+    const results = resultsFromRequest("openai-responses", {
+      input: [
+        { type: "function_call_output", call_id: "old", output: "Process exited with code 1" },
+        { type: "message", role: "assistant", content: [] },
+        { type: "custom_tool_call_output", call_id: "new", output: "Script failed\n" },
+        { type: "message", role: "user", content: [] },
+      ],
+    });
+    expect(results).toEqual([{ callId: "new", status: "error" }]);
+  });
+
+  it("reads at most the newest 64 results, and nothing from a body it can't read", () => {
+    const input = Array.from({ length: 100 }, (_, n) => ({
+      type: "function_call_output",
+      call_id: `c${n}`,
+      output: "ok",
+    }));
+    const results = resultsFromRequest("openai-responses", { input });
+    expect(results).toHaveLength(MAX_RESULTS_PER_REQUEST);
+    expect(results[results.length - 1].callId).toBe("c99");
+    expect(resultsFromRequest("openai-responses", { input: "hello" })).toEqual([]);
+    expect(resultsFromRequest("anthropic-messages", null)).toEqual([]);
+  });
+});
