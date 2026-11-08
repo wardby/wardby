@@ -34,8 +34,9 @@ export interface RunStepSink {
 }
 
 /**
- * The coding proxy's side: queues a masked batch for the control plane, for the run the capability
- * belongs to (the listener refuses any other). Synchronous; never throws.
+ * The coding proxy's side: queues a batch for the control plane, for the run the capability belongs
+ * to (the listener refuses any other). The step text is sent unmasked: the control plane redacts it
+ * by exact value (stepSummarizer) before anything is stored. Synchronous; never throws.
  */
 export interface RunStepSubmitter {
   submit(capability: string, runId: string, batch: RunStepBatch): void;

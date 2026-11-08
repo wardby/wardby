@@ -2,14 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   bounded,
   displayToolName,
-  maskAroundMarkers,
-  maskForTransport,
-  MAX_MARKERS_CHECKED,
-  maskTruncatedTail,
   secretForms,
   stepSummarizer,
   stepSummary,
-  summaryCacheStats,
   toolInputText,
   toolStepText,
 } from "./summarize.js";
@@ -71,6 +66,12 @@ describe("toolStepText", () => {
   });
 });
 
+/** Whether any 6-character-or-longer piece of `secret` is in `out`. */
+const leaks = (out: string, secret: string): string | undefined => {
+  for (let i = 0; i + 6 <= secret.length; i++) if (out.includes(secret.slice(i, i + 6))) return secret.slice(i, i + 6);
+  return undefined;
+};
+
 describe("stepSummary", () => {
   const tool = (text: string, truncated = false) => ({ kind: "tool" as const, text, truncated });
   const said = (text: string) => ({ kind: "said" as const, text, truncated: false });
@@ -94,26 +95,36 @@ describe("stepSummary", () => {
   });
 
   it("masks the start of a secret left at the end of a cut-off text", () => {
-    const cut = `deploy --key ${FAKE_SECRET.slice(0, 12)}`;
-    // The whole text lies in the tail a cut text loses, so only the marker is left.
-    expect(stepSummary(tool(cut, true), [FAKE_SECRET])).toBe("[REDACTED]");
-    expect(maskTruncatedTail(cut, [FAKE_SECRET])).toBe("deploy --key [REDACTED]");
-    expect(maskTruncatedTail(`x ${FAKE_SECRET.slice(0, 5)}`, [FAKE_SECRET])).toBe(`x ${FAKE_SECRET.slice(0, 5)}`);
+    expect(stepSummary(tool(`deploy --key ${FAKE_SECRET.slice(0, 12)}`, true), [FAKE_SECRET])).toBe(
+      "deploy --key [REDACTED]",
+    );
+    // Below the minimum length a start is too likely to be ordinary text.
+    expect(stepSummary(tool(`x ${FAKE_SECRET.slice(0, 5)}`, true), [FAKE_SECRET])).toBe(`x ${FAKE_SECRET.slice(0, 5)}`);
+    // Only a text that arrived cut is checked.
+    expect(stepSummary(tool(`deploy --key ${FAKE_SECRET.slice(0, 12)}`), [FAKE_SECRET])).toBe(
+      `deploy --key ${FAKE_SECRET.slice(0, 12)}`,
+    );
   });
 
-  const fragmentOf = (out: string) => {
-    for (let i = 0; i + 6 <= FAKE_SECRET.length; i++) {
-      for (let j = i + 6; j <= FAKE_SECRET.length; j++) if (out.includes(FAKE_SECRET.slice(i, j))) return true;
-    }
-    return false;
-  };
+  it("masks the longest secret start at the end across all secret values", () => {
+    const a = "abcdefgh";
+    const b = "LONGPREFIX12345abcdefgh";
+    expect(stepSummary(tool("x LONGPREFIX12345abcdefg", true), [a, b])).toBe("x [REDACTED]");
+    expect(stepSummary(tool("x LONGPREFIX12345abcdefg", true), [b, a])).toBe("x [REDACTED]");
+  });
+
+  it("masks a secret start longer than 4 KiB at the end of a cut text", () => {
+    const long = `wbLong-${"Q7x".repeat(2000)}-fakeEnd`;
+    const out = stepSummary(tool(`run ${long.slice(0, 5000)}`, true), [long]);
+    expect(out).toBe("run [REDACTED]");
+  });
 
   it("leaves no secret fragment when the summary cut falls inside a secret", () => {
     const toolOut = stepSummary(tool(`${"a".repeat(90)} ${FAKE_SECRET}`), [FAKE_SECRET]);
     expect(toolOut).toContain("[REDACTED]".slice(0, 5));
-    expect(fragmentOf(toolOut)).toBe(false);
+    expect(leaks(toolOut, FAKE_SECRET)).toBeUndefined();
     const saidOut = stepSummary(said(`${"b".repeat(110)} ${FAKE_SECRET}`), [FAKE_SECRET]);
-    expect(fragmentOf(saidOut)).toBe(false);
+    expect(leaks(saidOut, FAKE_SECRET)).toBeUndefined();
   });
 
   it("leaves no secret fragment when the 16 KiB cut falls inside a secret and whitespace collapses", () => {
@@ -121,45 +132,35 @@ describe("stepSummary", () => {
     expect(text.length).toBeGreaterThan(MAX_STEP_TEXT_CHARS);
     const out = stepSummary(tool(text), [FAKE_SECRET]);
     expect(out).toBe("[REDACTED]");
-    expect(fragmentOf(out)).toBe(false);
   });
 
-  describe("a passphrase written with other whitespace", () => {
-    const PASSPHRASE = "correct horse battery staple";
-    const words = /correct|horse|battery|staple/;
-
-    it("is redacted in a said step after whitespace collapses", () => {
-      const out = stepSummary(said("the passphrase is correct  horse\nbattery staple ok"), [PASSPHRASE]);
-      expect(out).toBe("the passphrase is [REDACTED] ok");
-      expect(out).not.toMatch(words);
-    });
-
-    it("is redacted in a tool step, and a value with its own odd whitespace is matched collapsed", () => {
-      expect(stepSummary(tool("echo correct\thorse  battery\n staple | gpg"), [PASSPHRASE])).toBe(
-        "echo [REDACTED] | gpg",
-      );
-      expect(stepSummary(tool("echo correct horse battery staple"), ["correct  horse\nbattery staple"])).toBe(
-        "echo [REDACTED]",
-      );
-    });
-
-    it("leaves no word of it when the summary cut falls inside it", () => {
-      const out = stepSummary(tool(`${"a".repeat(95)} correct  horse\nbattery   staple`), [PASSPHRASE]);
-      expect(out).toHaveLength(TOOL_SUMMARY_CHARS);
-      expect(out).not.toMatch(words);
-    });
-
-    it("masks its start at the end of a cut-off text after whitespace collapses", () => {
-      expect(stepSummary(tool("unlock correct  horse\nbatt", true), [PASSPHRASE])).toBe("[REDACTED]");
-      expect(maskTruncatedTail("unlock correct horse batt", secretForms([PASSPHRASE]))).toBe("unlock [REDACTED]");
-    });
+  it("keeps the leading summary of a cut text with no secret in it, and an empty cut text empty", () => {
+    const text = "npm test --filter app ".repeat(800);
+    expect(text.length).toBeGreaterThan(MAX_STEP_TEXT_CHARS);
+    expect(stepSummary(tool(text), [FAKE_SECRET])).toBe(stepSummary(tool(text.slice(0, 2000)), [FAKE_SECRET]));
+    expect(stepSummary(tool("", true), [FAKE_SECRET])).toBe("");
   });
 
-  it("masks the longest secret prefix at the end across all secret values", () => {
-    const a = "abcdefgh";
-    const b = "LONGPREFIX12345abcdefgh";
-    expect(maskTruncatedTail("x LONGPREFIX12345abcdefg", [a, b])).toBe("x [REDACTED]");
-    expect(maskTruncatedTail("x LONGPREFIX12345abcdefg", [b, a])).toBe("x [REDACTED]");
+  it("leaves a text with no secret in it unchanged, and keeps words next to a masked token", () => {
+    const text = "run npm test in src/app and git push origin main";
+    expect(stepSummary(said(text), [FAKE_SECRET])).toBe(text);
+    expect(stepSummary(said(`use ${FAKE_TOKEN} production-deploy now`), [FAKE_SECRET])).toBe(
+      "use [REDACTED] production-deploy now",
+    );
+  });
+
+  it("builds every form of a value once: as written, collapsed and JSON-escaped, longest first", () => {
+    expect(secretForms(['a  "b"'])).toEqual([
+      'a  \\\\\\"b\\\\\\"',
+      'a \\\\\\"b\\\\\\"',
+      'a  \\"b\\"',
+      'a \\"b\\"',
+      'a  "b"',
+      'a "b"',
+    ]);
+    const summarize = stepSummarizer([FAKE_SECRET]);
+    expect(summarize(said(`x ${FAKE_SECRET} y`))).toBe("x [REDACTED] y");
+    expect(summarize(tool(`x ${FAKE_SECRET.slice(0, 10)}`, true))).toBe("x [REDACTED]");
   });
 
   it("bounds text at 16 KiB", () => {
@@ -170,320 +171,228 @@ describe("stepSummary", () => {
   });
 });
 
-describe("maskForTransport", () => {
-  it("masks token shapes only: the proxy cannot know exact values, the control plane redacts those", () => {
-    const masked = maskForTransport({
-      steps: [{ kind: "tool", callId: "c1", tool: "Bash", text: `use ${FAKE_TOKEN} ${FAKE_SECRET}`, truncated: false }],
-      results: [{ callId: "c0", status: "ok" }],
-    });
-    expect(masked.steps[0].text).not.toContain(FAKE_TOKEN);
-    expect(masked.steps[0].text).toContain(FAKE_SECRET);
-    expect(masked.results).toEqual([{ callId: "c0", status: "ok" }]);
-  });
-
-  it("marks a step it cut at 16 KiB as truncated", () => {
-    const masked = maskForTransport({
-      steps: [{ kind: "said", callId: "c1", text: "z".repeat(MAX_STEP_TEXT_CHARS + 5), truncated: false }],
-      results: [],
-    });
-    expect(masked.steps[0].text).toHaveLength(MAX_STEP_TEXT_CHARS);
-    expect(masked.steps[0].truncated).toBe(true);
-  });
-});
-
-describe("overlapping secrets", () => {
+/**
+ * Every leak case found in review, on raw step text (as both native and coding runs hand it to the
+ * writer), for tool and said steps, with the secret as the agent's own value or as a run's extra
+ * value after the agent's. Each asserts no 6-character piece of the secret survives.
+ */
+describe("leak cases", () => {
+  const OWN = "agent-Own-Fake-secret-77";
+  const T = FAKE_TOKEN;
+  const INNER = `Fq8-Mid-Section-Value-Zz9 ghp_${"b".repeat(36)}-tailEndFakeVal`;
+  const CAP = "wbcap_FAKErunCapability0123456789-xyzQ";
+  const HEAD = "npm run build in packages/app";
   const P = "correct horse battery staple";
-  const P2 = `correct horse ${FAKE_TOKEN} staple`;
-  const words = /correct|horse|battery|staple/;
-
-  it("redacts a passphrase whose word is itself a secret, written with other whitespace", () => {
-    const out = stepSummary({ kind: "said", text: "pass is correct  horse\nbattery staple ok", truncated: false }, [
-      P,
-      "battery",
-    ]);
-    expect(out).toBe("pass is [REDACTED] ok");
-    expect(out).not.toMatch(words);
-  });
-
-  it("redacts a passphrase holding a token-shaped word, written with other whitespace", () => {
-    expect(
-      stepSummary({ kind: "said", text: `use correct  horse ${FAKE_TOKEN}\nstaple now`, truncated: false }, [P2]),
-    ).toBe("use [REDACTED] now");
-  });
-
-  it("redacts it after the proxy masked the token-shaped word (coding runs)", () => {
-    const [sent] = maskForTransport({
-      steps: [{ kind: "said", callId: "s", text: `use ${P2} now`, truncated: false }],
-      results: [],
-    }).steps;
-    expect(stepSummary(sent, [P2])).toBe("use [REDACTED] now");
-  });
-
-  it("masks a cut-off start of the passphrase when a shorter secret is inside it", () => {
-    expect(stepSummary({ kind: "tool", text: "unlock correct  horse\nbatt", truncated: true }, [P, "battery"])).toBe(
-      "[REDACTED]",
-    );
-    expect(maskTruncatedTail("unlock correct horse batt", secretForms([P, "battery"]))).toBe("unlock [REDACTED]");
-  });
-
-  it("marks a step truncated when token masking pushes it past 16 KiB, so no secret start survives", () => {
-    const text = "a://b:c@ ".repeat(4) + " ".repeat(16_308) + FAKE_SECRET;
-    expect(text.length).toBeLessThanOrEqual(MAX_STEP_TEXT_CHARS);
-    const [sent] = maskForTransport({
-      steps: [{ kind: "tool", callId: "c", tool: "Bash", text, truncated: false }],
-      results: [],
-    }).steps;
-    expect(sent.truncated).toBe(true);
-    const out = stepSummary(sent, [FAKE_SECRET]);
-    expect(out).toBe("a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@");
-    expect(out).not.toContain(FAKE_SECRET.slice(0, 6));
-  });
-
-  it("still redacts a value that is wholly token-shaped", () => {
-    expect(stepSummary({ kind: "said", text: `a ${FAKE_TOKEN} b`, truncated: false }, [FAKE_TOKEN])).toBe(
-      "a [REDACTED] b",
-    );
-  });
-});
-
-describe("a secret a token shape only partly covers", () => {
-  /** Whether any 6-character-or-longer piece of `secret` is in `out`. */
-  const leaks = (out: string, secret: string): boolean => {
-    for (let i = 0; i + 6 <= secret.length; i++) if (out.includes(secret.slice(i, i + 6))) return true;
-    return false;
-  };
-  const coding = (text: string, secrets: string[]): string => {
-    const [sent] = maskForTransport({
-      steps: [{ kind: "said", callId: "s", text, truncated: false }],
-      results: [],
-    }).steps;
-    return stepSummary(sent, secrets);
-  };
-  const native = (text: string, secrets: string[]): string =>
-    stepSummary({ kind: "said", text, truncated: false }, secrets);
-  const cases: Array<[string, string, string, string[]]> = [
+  // [name, text, secrets, cut, words kept]
+  const cases: Array<[string, string, string[], boolean, string[]]> = [
+    ["a passphrase with other whitespace", "pass is correct  horse\nbattery staple ok", [P], false, ["pass is", "ok"]],
     [
-      "a password in URL credentials",
+      "a passphrase whose word is itself a secret",
+      "pass is correct  horse\nbattery staple ok",
+      [P, "battery"],
+      false,
+      ["ok"],
+    ],
+    [
+      "a passphrase holding a token-shaped word",
+      `use correct  horse ${T}\nstaple now`,
+      [`correct horse ${T} staple`],
+      false,
+      ["now"],
+    ],
+    [
+      "a value with its own odd whitespace",
+      "echo correct horse battery staple",
+      ["correct  horse\nbattery staple"],
+      false,
+      ["echo"],
+    ],
+    ["edge tabs and newlines", "pw is hunter22\tfake\n\nvalue ok", ["\n hunter22 fake\tvalue \t"], false, ["ok"]],
+    ["a non-breaking space", "pw hunter22\u00a0fake value", ["hunter22 fake value"], false, ["pw"]],
+    [
+      "a prefix of another secret",
+      "use abcdefgh-long-secret-xyz and abcdefgh",
+      ["abcdefgh", "abcdefgh-long-secret-xyz"],
+      false,
+      ["use", "and"],
+    ],
+    [
+      "nested secrets",
+      "x outer-AAA-inner-BBB-outer y",
+      ["inner-BBB", "outer-AAA-inner-BBB-outer", "AAA-inner"],
+      false,
+      ["x", "y"],
+    ],
+    [
+      "a password in a DSN",
       "connect postgres://admin:p@ssw0rd-Fake9@db:5432/app now",
-      "p@ssw0rd-Fake9",
+      ["p@ssw0rd-Fake9"],
+      false,
       ["connect", "now"],
     ],
     [
-      "a bearer token followed by more words of the secret",
-      "Authorization: Bearer abcdefghijklmnopqrstu horse staple",
-      "abcdefghijklmnopqrstu horse staple",
+      "a bearer token followed by more words",
+      "curl -H 'Authorization: Bearer abcdefghijklmnopqrstu horse staple' x",
+      ["abcdefghijklmnopqrstu horse staple"],
+      false,
       ["Authorization"],
     ],
     [
-      "an AWS secret key value with a longer tail",
+      "an AWS secret key with a longer tail",
       "aws_secret_access_key=AbCdEf1234567890-prod-fake-pw end",
-      "AbCdEf1234567890-prod-fake-pw",
+      ["AbCdEf1234567890-prod-fake-pw"],
+      false,
       ["end"],
     ],
     [
-      "a secret glued after a token prefix",
+      "a secret glued after ghp_",
       "ghp_aaaaaaaaaaaaaaaaaaaaFakeSecretXY99-tail-part ok",
-      "FakeSecretXY99-tail-part",
+      ["FakeSecretXY99-tail-part"],
+      false,
       ["ok"],
     ],
+    [
+      "a secret after a token-prefix lookalike",
+      "xsk-ant-abcdefghijklmnopqrst-and-more words",
+      ["sk-ant-abcdefghijklmnopqrst-and-more"],
+      false,
+      ["words"],
+    ],
+    ["a token word at the start of a passphrase", `pass ${T} horse battery ok`, [`${T} horse battery`], false, ["ok"]],
+    ["a token word at the end of a passphrase", `pass horse battery ${T} ok`, [`horse battery ${T}`], false, ["ok"]],
+    ["a JSON-escaped secret", 'echo "{\\"pw\\":\\"qu\\"ote-Fake1\\"}"', ['qu"ote-Fake1'], false, ["echo"]],
+    ["regex specials", "run a.*+?^${}()|[]\\b-Fake end", ["a.*+?^${}()|[]\\b-Fake"], false, ["run", "end"]],
+    [
+      "a cut secret: head present, tail cut",
+      `deploy --key ${FAKE_SECRET.slice(0, 12)}`,
+      [FAKE_SECRET],
+      true,
+      ["deploy --key"],
+    ],
+    ["a cut passphrase with other whitespace", "unlock correct  horse\nbatt", [P, "battery"], true, ["unlock"]],
+    [
+      "a cut passphrase inside a token-shaped word",
+      `unlock correct horse ${T.slice(0, 12)}`,
+      [`correct horse ${T} staple`],
+      true,
+      ["unlock"],
+    ],
+    [
+      "a cut secret with an inner token (probe12)",
+      `${HEAD}\n\nrun ghp_${"a".repeat(20)}${INNER.slice(0, -6)}`,
+      [INNER],
+      true,
+      [HEAD],
+    ],
+    [
+      "a cut secret inside its inner token (probe12)",
+      `run ghp_${"a".repeat(20)}${INNER.slice(0, 64)}`,
+      [INNER],
+      true,
+      ["run"],
+    ],
+    ["a cut secret glued after ghp_ (probe9c)", `ghp_${"a".repeat(20)}${CAP.slice(0, 24)}`, [CAP], true, []],
+    [
+      "a cut secret behind URL credentials (probe12)",
+      "connect https://user:pAss-Fake:word/with-slash-and",
+      ["pAss-Fake:word/with-slash-and-more-chars"],
+      true,
+      ["connect"],
+    ],
+    [
+      "a cut secret starting with userinfo (probe14)",
+      "git clone h://u:p@Kz6FakePieceHeadxxyyzz-more-fa",
+      ["u:p@Kz6FakePieceHeadxxyyzz-more-fake"],
+      true,
+      ["git clone"],
+    ],
+    [
+      "a cut secret overlapping a whole one",
+      "x XXXXXXXX-secretB-Fake",
+      ["XXXXXXXX-secretB-Fake", "secretB-Fake-and-more"],
+      true,
+      ["x"],
+    ],
+    ["a secret ending exactly at the cut", `${HEAD}\n\nexport KEY=${CAP}`, [CAP], true, [HEAD]],
   ];
-  for (const [name, text, secret, kept] of cases) {
-    it(`leaves no piece of ${name} (coding runs)`, () => {
-      const out = coding(text, [secret]);
-      expect(leaks(out, secret)).toBe(false);
-      for (const word of kept) expect(out).toContain(word);
-    });
-    it(`leaves no piece of ${name} (native runs)`, () => {
-      const out = native(text, [secret]);
-      expect(leaks(out, secret)).toBe(false);
-      for (const word of kept) expect(out).toContain(word);
-    });
+  // probe16: a crossing secret written with other whitespace.
+  const S16 = `Fq8-Mid-Section-Value-Zz9 ghp_${"b".repeat(36)} tailEndFakeVal`;
+  const written16 = S16.replace(" tail", `${"\n".repeat(500)}tail`);
+  cases.push([
+    "a cut secret with other whitespace (probe16)",
+    `run ghp_${"a".repeat(20)}${written16.slice(0, -6)}`,
+    [S16],
+    true,
+    ["run"],
+  ]);
+  cases.push([
+    "a cut secret with other whitespace, no glued head (probe16)",
+    `run ${written16.slice(0, -6)}`,
+    [S16],
+    true,
+    ["run"],
+  ]);
+
+  for (const [name, text, secrets, truncated, kept] of cases) {
+    for (const kind of ["tool", "said"] as const) {
+      for (const [whose, values] of [
+        ["own", secrets],
+        ["extra", [OWN, ...secrets]],
+      ] as const) {
+        it(`${name} (${kind}, ${whose} value)`, () => {
+          const out = stepSummary({ kind, text, truncated }, values);
+          for (const secret of secrets) {
+            if (secret.length > 6) expect(leaks(out, secret.trim()), out).toBeUndefined();
+          }
+          expect(out).toContain("[REDACTED]");
+          for (const word of kept) expect(out).toContain(word);
+        });
+      }
+    }
   }
 
-  describe("a cut text ending in the middle of a secret a token shape began", () => {
-    const CAP = "wbcap_FAKErunCapability0123456789-xyzQ";
-    const OWN = "agent-Own-Fake-secret-77";
-    // A secret holding a token shape of its own: the proxy masks both token shapes, leaving a
-    // middle piece of the secret between two markers.
-    const INNER = `Fq8-Mid-Section-Value-Zz9 ghp_${"b".repeat(36)}-tailEndFakeVal`;
-    const HEAD = "npm run build in packages/app";
-    // A head, whitespace the summary collapses away, then a token prefix glued to the secret.
-    const headed = (tail: string): string => `${HEAD}${"\n".repeat(200)}run ghp_aaaaaaaaaaaaaaaaaaaa${tail}`;
-    const glued = (secret: string): string => `run ghp_aaaaaaaaaaaaaaaaaaaa${secret.slice(0, 24)}`;
-    /** The first 6-character piece of `secret` found in `out`, if any. */
-    const pieceIn = (secret: string, out: string): string | undefined => {
-      for (let i = 0; i + 6 <= secret.length; i++)
-        if (out.includes(secret.slice(i, i + 6))) return secret.slice(i, i + 6);
-      return undefined;
-    };
-    const codingCut = (text: string, own: string[], extras: string[]): string => {
-      const [sent] = maskForTransport({
-        steps: [{ kind: "said", callId: "s", text, truncated: true }],
-        results: [],
-      }).steps;
-      return stepSummarizer(own, extras)(sent);
-    };
-    const nativeCut = (text: string, own: string[], extras: string[]): string =>
-      stepSummarizer(own, extras)({ kind: "tool", text, truncated: true });
-    for (const [path, summarize] of [
-      ["coding", codingCut],
-      ["native", nativeCut],
-    ] as const) {
-      it(`masks the piece between two markers of an agent's own value (${path} runs)`, () => {
-        const out = summarize(headed(INNER.slice(0, INNER.length - 6)), [INNER], []);
-        expect(out).toBe(HEAD);
-        expect(pieceIn(INNER, out)).toBeUndefined();
-      });
-      it(`masks the piece between two markers of a run's extra value (${path} runs)`, () => {
-        const out = summarize(headed(INNER.slice(0, INNER.length - 6)), [OWN], [INNER]);
-        expect(out).toBe(HEAD);
-        expect(pieceIn(INNER, out)).toBeUndefined();
-      });
-      it(`keeps only the marker when a short cut text is all tail (${path} runs)`, () => {
-        expect(summarize(`run ghp_aaaaaaaaaaaaaaaaaaaa${INNER.slice(0, INNER.length - 6)}`, [INNER], [])).toBe(
-          REDACTED_TEXT,
-        );
-        expect(summarize(glued(CAP), [OWN], [CAP])).toBe(REDACTED_TEXT);
-      });
-      it(`masks the middle piece of a value cut after its head (${path} runs)`, () => {
-        expect(summarize(headed(CAP.slice(0, 24)), [CAP], [])).toBe(HEAD);
-        expect(summarize(headed(CAP.slice(0, 24)), [OWN], [CAP])).toBe(HEAD);
-      });
-      it(`drops a secret that ends exactly at the cut (${path} runs)`, () => {
-        const out = summarize(`${HEAD}${"\n".repeat(200)}export KEY=${CAP}`, [CAP], []);
-        expect(out).toBe(HEAD);
-        expect(pieceIn(CAP, out)).toBeUndefined();
-      });
-    }
-    it("masks the middle piece of a value longer than the piece index covers", () => {
-      const long = `wbLong-${"Q7x".repeat(2000)}-fakeEnd`;
-      const text = `run ghp_aaaaaaaaaaaaaaaaaaaa${long.slice(0, 3000)}`;
-      expect(codingCut(text, [long], [])).toBe(REDACTED_TEXT);
-      expect(nativeCut(text, [], [long])).toBe(REDACTED_TEXT);
-    });
-    it("keeps the leading summary of a cut text with no secret in it", () => {
-      const text = "npm test --filter app ".repeat(800);
-      expect(text.length).toBeGreaterThan(MAX_STEP_TEXT_CHARS);
-      const whole = (kind: "tool" | "said") =>
-        stepSummary({ kind, text: text.slice(0, 2000), truncated: false }, [CAP]);
-      expect(nativeCut(text, [CAP], [])).toBe(whole("tool"));
-      expect(codingCut(text, [], [])).toBe(whole("said"));
-    });
-    it("keeps nothing but an empty summary for an empty cut text", () => {
-      expect(nativeCut("", [CAP], [])).toBe("");
-    });
-    // The passes after the drop stay as defence in depth.
-    it("still masks the middle piece after the last marker of a cut text (maskAroundMarkers)", () => {
-      expect(maskAroundMarkers("run [REDACTED]_FAKErunCapability0", secretForms([CAP]), true)).toBe("run [REDACTED]");
-    });
-    it("keeps a run after the last marker that is no piece of a secret", () => {
-      expect(maskAroundMarkers("run [REDACTED] plain-words-here", secretForms([CAP]), true)).toBe(
-        "run [REDACTED] plain-words-here",
-      );
-    });
-  });
-
-  it("leaves a text with no secret in it unchanged", () => {
-    const text = "run npm test in src/app and git push origin main";
-    expect(coding(text, [FAKE_SECRET])).toBe(text);
-    expect(native(text, [FAKE_SECRET])).toBe(text);
-  });
-
-  it("keeps ordinary words next to a masked token", () => {
-    expect(coding(`use ${FAKE_TOKEN} production-deploy now`, [FAKE_SECRET])).toBe(
-      "use [REDACTED] production-deploy now",
-    );
-  });
-
-  it("reuses one batch's forms, and still sees a value added to the same array later", () => {
-    const values = [FAKE_SECRET];
-    expect(secretForms(values)).toBe(secretForms(values));
-    values.push("other-Fake-value-2");
-    expect(native("x other-Fake-value-2 y", values)).toBe("x [REDACTED] y");
-  });
-
-  it("hands out frozen forms, so a caller can't change the cached list", () => {
-    const values = [FAKE_SECRET];
-    const forms = secretForms(values) as string[];
-    expect(() => forms.push("x")).toThrow(TypeError);
-    expect(secretForms(values)).toContain(FAKE_SECRET);
-  });
-
-  describe("bounded cost", () => {
-    // Deterministic pseudo-random hex, so the test never depends on Math.random.
-    let seed = 7;
-    const hex = (n: number): string =>
-      Array.from({ length: n }, () => {
-        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
-        return "0123456789abcdef"[seed >>> 28];
-      }).join("");
-    const secrets = Array.from({ length: 200 }, () => hex(4096));
-    const markers = (count: number): string =>
-      Array.from({ length: count }, () => `${REDACTED_TEXT}${hex(1)}`).join("");
-
-    it("masks the whole summary when the text holds more than 64 markers", () => {
-      const out = native(`x ${markers(MAX_MARKERS_CHECKED + 1)}`, [FAKE_SECRET]);
-      expect(out).toBe(REDACTED_TEXT);
-    });
-
-    const said = (text: string) => ({ kind: "said" as const, text, truncated: false });
-
-    it("checks 64 markers against 200 secrets of 4 KiB with little work", () => {
-      const summarize = stepSummarizer(secrets); // one batch: forms and index built once
-      summarize(said(`warm-up ${REDACTED_TEXT} builds-the-index`));
-      const before = summaryCacheStats();
-      summarize(said(markers(MAX_MARKERS_CHECKED)));
-      const after = summaryCacheStats();
-      expect(after.work - before.work).toBeLessThan(10_000);
-      expect(after.indexBuilds).toBe(before.indexBuilds);
-    });
-
-    it("gives up on a text of literal markers without checking them", () => {
-      const before = summaryCacheStats();
-      const text = markers(1500).slice(0, MAX_STEP_TEXT_CHARS);
-      expect(stepSummary({ kind: "tool", text, truncated: false }, secrets)).toBe(REDACTED_TEXT);
-      const after = summaryCacheStats();
-      expect(after.markerCapStops).toBe(before.markerCapStops + 1);
-      expect(after.work).toBe(before.work);
-    });
-
-    it("gives up partway through one marker when self-similar secrets make the walk long", () => {
-      const similar = Array.from({ length: 200 }, (_, i) => `${"a".repeat(4000)}Z${String(i).padStart(4, "q")}`);
-      const summarize = stepSummarizer(similar);
-      const before = summaryCacheStats();
-      expect(summarize(said(`${REDACTED_TEXT}${"a".repeat(4000)}Q tail`))).toBe(REDACTED_TEXT);
-      const after = summaryCacheStats();
-      expect(after.workStops).toBe(before.workStops + 1);
-      // Stopped at the budget, not after the marker's whole walk.
-      expect(after.work - before.work).toBeLessThan(4_100_000);
-    });
-
-    it("reuses one agent's cached forms across runs with different extra values", () => {
-      const own = ["agent-Fake-secret-1", "agent-Fake-secret-2"];
-      const before = summaryCacheStats();
-      for (const run of [1, 2, 3]) {
-        const capability = `cap-run-${run}-FakeCapability`;
-        const out = stepSummarizer([...own], [capability])(said(`use ${own[0]} and ${capability} [REDACTED]x`));
-        expect(out).toBe("use [REDACTED] and [REDACTED] [REDACTED]x");
+  // probe14/15: a whole secret followed by filler, in a text marked cut, at many filler lengths.
+  it("masks a whole secret followed by any amount of filler in a cut text", () => {
+    for (let f = 40; f <= 200; f++) {
+      const text = `deploy${"\n".repeat(300)}run ghp_${"a".repeat(20)}${INNER}${"x".repeat(f)}${"\n".repeat(50)}`;
+      for (const kind of ["tool", "said"] as const) {
+        const out = stepSummary({ kind, text, truncated: true }, [OWN, INNER]);
+        expect(leaks(out, INNER), `f=${f} ${out}`).toBeUndefined();
       }
-      expect(summaryCacheStats().formBuilds).toBe(before.formBuilds + 1);
-    });
+    }
+  });
+});
 
-    it("does not keep a values list whose index is over the memory bound", () => {
-      const huge = Array.from({ length: 200 }, () => hex(4096));
-      const step = said(`before-text ${REDACTED_TEXT} after-text-here`);
-      stepSummary(step, huge);
-      const first = summaryCacheStats();
-      expect(first.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
-      stepSummary(step, huge);
-      expect(summaryCacheStats().indexBuilds).toBe(first.indexBuilds + 1);
-    });
+describe("cost", () => {
+  // Deterministic pseudo-random hex, so the test never depends on Math.random.
+  let seed = 7;
+  const hex = (n: number): string =>
+    Array.from({ length: n }, () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return "0123456789abcdef"[seed >>> 28];
+    }).join("");
+  const secrets = Array.from({ length: 200 }, () => hex(4096));
+
+  it("handles a 16 KiB flood of literal markers against 200 secrets of 4 KiB, cut or not", () => {
+    const text = Array.from({ length: 1500 }, () => `${REDACTED_TEXT}${hex(1)}`)
+      .join("")
+      .slice(0, MAX_STEP_TEXT_CHARS);
+    const summarize = stepSummarizer(secrets);
+    const started = performance.now();
+    for (const truncated of [false, true]) {
+      const out = summarize({ kind: "tool", text, truncated });
+      expect(out.startsWith(REDACTED_TEXT)).toBe(true);
+    }
+    // Generous for a loaded CI machine; it runs in a few milliseconds.
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
-  it("redacts a secret written JSON-escaped", () => {
-    const secret = 'qu"ote-Fake1';
-    const out = native('echo "{\\"pw\\":\\"qu\\"ote-Fake1\\"}"', [secret]);
-    expect(out).toBe('echo "{\\"pw\\":\\"[REDACTED]\\"}"');
-    expect(leaks(out, secret)).toBe(false);
+  it("stays linear on self-similar secrets at the end of a cut text", () => {
+    const similar = Array.from({ length: 200 }, (_, i) => `${"a".repeat(8000)}Z${"a".repeat(8000)}${i}`);
+    const started = performance.now();
+    expect(stepSummary({ kind: "tool", text: "a".repeat(MAX_STEP_TEXT_CHARS), truncated: true }, similar)).toBe(
+      REDACTED_TEXT,
+    );
+    expect(performance.now() - started).toBeLessThan(5000);
   });
 });

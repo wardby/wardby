@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { summaryCacheStats } from "./summarize.js";
 import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
 
@@ -87,20 +86,6 @@ describe("RunStepWriter", () => {
     expect(db.$transaction).toHaveBeenCalledTimes(1);
   });
 
-  it("builds no summary forms for a batch that has no step to store", async () => {
-    const unique = "wbFake-NoRows-Secret-41";
-    const writer = new RunStepWriter({
-      db: fakeDb() as unknown as RunStepWriterDb,
-      secretValues: async () => [unique],
-      level: "summary",
-      retentionDays: 30,
-    });
-    const before = summaryCacheStats().formBuilds;
-    // Its one step's callId holds a secret value, so the step is not stored at all.
-    await writer.record("r1", { steps: [{ ...step, callId: `c-${unique}` }], results: [] }, ["wbFake-NoRows-Cap-42"]);
-    expect(summaryCacheStats().formBuilds).toBe(before);
-  });
-
   it("reads the secret values again for every batch", async () => {
     const db = fakeDb();
     const secretValues = vi.fn(async () => [FAKE_SECRET]);
@@ -127,7 +112,7 @@ describe("RunStepWriter", () => {
     expect(db.run.findUnique).not.toHaveBeenCalled();
   });
 
-  it("redacts the caller's extra secret values (the gateway capability) from text and callIds", async () => {
+  it("redacts the caller's extra secret values (the gateway capability) from text, cut text and callIds", async () => {
     const CAPABILITY = "wbFake-Capability-Value-c0ffee12";
     const created: Array<Record<string, unknown>> = [];
     const tx = {
@@ -157,14 +142,15 @@ describe("RunStepWriter", () => {
         steps: [
           { kind: "said", callId: "said:ok", text: `token ${CAPABILITY} here`, truncated: false },
           { kind: "tool", callId: `call-${CAPABILITY}`, tool: "Bash", text: "ls", truncated: false },
+          { kind: "said", callId: "said:cut", text: `run ${CAPABILITY.slice(0, 20)}`, truncated: true },
         ],
         results: [],
       },
       [CAPABILITY],
     );
-    expect(created).toHaveLength(1);
-    expect(created[0].callId).toBe("said:ok");
-    expect(JSON.stringify(created)).not.toContain(CAPABILITY);
+    expect(created.map((row) => row.callId)).toEqual(["said:ok", "said:cut"]);
+    expect(created.map((row) => row.summary)).toEqual(["token [REDACTED] here", "run [REDACTED]"]);
+    expect(JSON.stringify(created)).not.toContain(CAPABILITY.slice(0, 6));
   });
 
   it("never rejects, even when the database does", async () => {
