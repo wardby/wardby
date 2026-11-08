@@ -16,6 +16,7 @@
  * locks regardless (core/scheduler.ts); the reconciler is deliberately not
  * lease-gated and is safe under concurrency (core/reconciler.ts).
  */
+import type { Server } from "node:http";
 import { loadCodingConcurrencyConfig, loadMcpConfig } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
 import { prisma } from "./core/db.js";
@@ -29,6 +30,7 @@ import { startScheduler } from "./core/scheduler.js";
 import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { RunStepSweeper } from "./core/run-steps/sweep.js";
+import { parseRunStepsListen, startRunStepIngress } from "./core/run-steps/ingress.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
@@ -60,6 +62,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // Parsed before anything starts, so a malformed CODING_MAX_CONCURRENT or
   // CODING_QUEUE_TIMEOUT_SEC fails fast instead of after HTTP is listening.
   const concurrency = loadCodingConcurrencyConfig();
+  // Run steps from the coding proxy (POST /internal/run-steps); parsed early so a bad value stops start-up.
+  const runStepsListen = parseRunStepsListen(process.env.WARDBY_RUN_STEPS_LISTEN);
   const providers = options.providers ?? buildMcpProviders().providers;
   const power = providers.power ?? DISABLED_POWER;
   if (power.enabled) {
@@ -71,6 +75,19 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     );
   }
   const mcp = await startMcp({ providers, schedulerAttached: true });
+  // Its own port (not the MCP listener's): only the coding proxy reaches it.
+  let runStepIngress: Server | undefined;
+  if (runStepsListen && providers.runSteps) {
+    try {
+      runStepIngress = await startRunStepIngress(runStepsListen, { db: prisma, sink: providers.runSteps });
+    } catch (err) {
+      await mcp.close();
+      throw err;
+    }
+    serveLog.info({ host: runStepsListen.host, port: runStepsListen.port }, "run steps listener started");
+  } else if (runStepsListen) {
+    serveLog.warn("WARDBY_RUN_STEPS_LISTEN is set but this server has no run-steps writer; not listening");
+  }
   const reviewHosts = providers.reviewHosts;
   const reconciler = startReconciler({
     executor: providers.executor,
@@ -119,6 +136,9 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       scheduler.stop();
       reconciler.stop();
       notifications.stop();
+      // Before mcp.close(), which flushes the run-steps writer: no batch arrives after the flush.
+      const ingress = runStepIngress;
+      if (ingress) await new Promise<void>((resolve) => ingress.close(() => resolve()));
       await mcp.close();
     },
   };

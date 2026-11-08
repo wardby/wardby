@@ -6,8 +6,9 @@ import { logger } from "../../core/logger.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import type { CodingProxy, CodingProxyOptions, ProxyResponseSink } from "./proxy.js";
 import { DependencyCacheService } from "./dependency-cache/service.js";
+import { RunStepForwarder } from "./run-step-forwarder.js";
 import { RegistryService } from "./registry/service.js";
-import { createRegistryUpstream, loadMcpGatewayUrl, startConfiguredCodingProxy } from "./runtime.js";
+import { createRegistryUpstream, loadMcpGatewayUrl, loadRunStepsUrl, startConfiguredCodingProxy } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
 
@@ -406,6 +407,172 @@ describe("configured coding proxy runtime: load-test mock upstream", () => {
       for (const event of events) expect(event).not.toHaveProperty("mockUpstream");
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+describe("loadRunStepsUrl", () => {
+  it("is unset by default and keeps an http(s) origin", () => {
+    expect(loadRunStepsUrl({})).toBeUndefined();
+    expect(loadRunStepsUrl({ WARDBY_RUN_STEPS_URL: " " })).toBeUndefined();
+    expect(loadRunStepsUrl({ WARDBY_RUN_STEPS_URL: "http://wardby-control-plane-internal:8792" })).toBe(
+      "http://wardby-control-plane-internal:8792",
+    );
+    expect(loadRunStepsUrl({ WARDBY_RUN_STEPS_URL: "http://host.docker.internal:8792/" })).toBe(
+      "http://host.docker.internal:8792",
+    );
+  });
+
+  it.each(["ftp://cp:8792", "http://user:pass@cp:8792", "http://cp:8792/steps", "http://cp:8792/?q=1", "not a url"])(
+    "refuses %s without echoing it",
+    (value) => {
+      expect(() => loadRunStepsUrl({ WARDBY_RUN_STEPS_URL: value })).toThrow(
+        "WARDBY_RUN_STEPS_URL must be an http(s) URL without credentials, path, query or fragment",
+      );
+      expect(() => loadRunStepsUrl({ WARDBY_RUN_STEPS_URL: value })).not.toThrow(value);
+    },
+  );
+});
+
+describe("configured coding proxy runtime: run steps", () => {
+  const startDenyPort = async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} });
+  const start = async (env: NodeJS.ProcessEnv) => {
+    constructed.length = 0;
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const handle = await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+    return { handle, startServer, options: constructed[constructed.length - 1] };
+  };
+
+  it("builds a forwarder when WARDBY_RUN_STEPS_URL is set, and shutdown closes it", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      const { handle, options } = await start({ WARDBY_RUN_STEPS_URL: "http://cp:8792" });
+      expect(options.steps).toBeInstanceOf(RunStepForwarder);
+      expect(close).not.toHaveBeenCalled();
+      await handle.close();
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  it("builds none when it is unset", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      const { handle, options } = await start({});
+      expect(options.steps).toBeUndefined();
+      await handle.close();
+      expect(close).not.toHaveBeenCalled();
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  it("an invalid value stops start-up naming the variable, without echoing it", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const secretUrl = "http://user:fake-secret-pw@cp:8792";
+    const result = startConfiguredCodingProxy({
+      db: {} as PrismaClient,
+      env: { WARDBY_RUN_STEPS_URL: secretUrl },
+      startServer,
+      startDenyPort,
+    });
+    await expect(result).rejects.toThrow("WARDBY_RUN_STEPS_URL");
+    await expect(result).rejects.not.toThrow("fake-secret-pw");
+    expect(startServer).not.toHaveBeenCalled();
+  });
+
+  it("builds none when WARDBY_RUN_STEPS is off, and builds one at the default and at detail", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      const url = "http://cp:8792";
+      const off = await start({ WARDBY_RUN_STEPS_URL: url, WARDBY_RUN_STEPS: "off" });
+      expect(off.options.steps).toBeUndefined();
+      await off.handle.close();
+      expect(close).not.toHaveBeenCalled();
+      for (const level of [undefined, "summary", "detail"]) {
+        const on = await start({ WARDBY_RUN_STEPS_URL: url, ...(level ? { WARDBY_RUN_STEPS: level } : {}) });
+        expect(on.options.steps).toBeInstanceOf(RunStepForwarder);
+      }
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  it("an invalid WARDBY_RUN_STEPS stops start-up", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    await expect(
+      startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { WARDBY_RUN_STEPS_URL: "http://cp:8792", WARDBY_RUN_STEPS: "bogus" },
+        startServer,
+        startDenyPort,
+      }),
+    ).rejects.toThrow("WARDBY_RUN_STEPS");
+    expect(startServer).not.toHaveBeenCalled();
+  });
+
+  it("closes the forwarder when the server fails to start", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      await expect(
+        startConfiguredCodingProxy({
+          db: {} as PrismaClient,
+          env: { WARDBY_RUN_STEPS_URL: "http://cp:8792" },
+          startServer: async () => {
+            throw new Error("bind failed");
+          },
+          startDenyPort,
+        }),
+      ).rejects.toThrow("bind failed");
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  it("closes the forwarder even when the server's close throws", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      const handle = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { WARDBY_RUN_STEPS_URL: "http://cp:8792" },
+        startServer: async () => ({
+          port: CODING_PROXY_PORT,
+          close: async () => {
+            throw new Error("close failed");
+          },
+        }),
+        startDenyPort,
+      });
+      await expect(handle.close()).rejects.toThrow("close failed");
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  it("closes the forwarder when the deny port fails to start", async () => {
+    const close = vi.spyOn(RunStepForwarder.prototype, "close").mockResolvedValue();
+    try {
+      await expect(
+        startConfiguredCodingProxy({
+          db: {} as PrismaClient,
+          env: { WARDBY_RUN_STEPS_URL: "http://cp:8792" },
+          startServer: async () => ({
+            port: CODING_PROXY_PORT,
+            close: async () => {
+              throw new Error("close failed");
+            },
+          }),
+          startDenyPort: async () => {
+            throw new Error("deny failed");
+          },
+        }),
+      ).rejects.toThrow("close failed");
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
     }
   });
 });

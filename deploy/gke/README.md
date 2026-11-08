@@ -88,6 +88,16 @@ plane manifest. Idle workers are extra pods, so raise the ResourceQuota to cover
 pods; each idle worker is billed for its 500m / 512Mi requests. See the
 [warm pool](../../docs/native-sandbox.md#warm-pool).
 
+## Run steps
+
+The overlay gives the control plane a run-steps listener on port 8792
+(`WARDBY_RUN_STEPS_LISTEN`) behind its own ClusterIP Service,
+`wardby-control-plane-internal`, separate from the load-balanced
+`wardby-control-plane` Service. The proxy's `WARDBY_RUN_STEPS_URL` points at it,
+and NetworkPolicies admit only proxy pods to port 8792; no worker pod can reach
+it. Nothing to configure; see
+[Run steps](../../docs/security-deployment.md#run-steps).
+
 ## Low-power mode
 
 `WARDBY_LOW_POWER=1 deploy/gke/up.sh` scales the coding proxy and native

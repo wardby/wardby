@@ -223,6 +223,11 @@ describe("buildHelpCatalog", () => {
     "RUN_STEP_RETENTION_DAYS",
     "lastStep",
     "what is my run doing",
+    "coding run steps",
+    "codex run steps",
+    "claude code run steps",
+    "WARDBY_RUN_STEPS_LISTEN",
+    "WARDBY_RUN_STEPS_URL",
   ])("ranks the run steps article first for %s", async (query) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     expect(searchHelp(catalog, query)[0]?.page.id).toBe("run-steps");

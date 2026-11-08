@@ -1,0 +1,22 @@
+: Constructed to match Codex 0.160.1 Responses shapes (an assistant message; function_call exec_command with cmd as a string and as an argv array; custom_tool_call exec carrying code-mode JavaScript). Replace with a redacted capture from a real Codex run before merge.
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_steps_1","status":"in_progress"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_steps_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Running the tests now.","annotations":[]}]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_steps_1","type":"function_call","status":"completed","call_id":"call_steps_1","name":"exec_command","arguments":"{\"cmd\":\"npm test\"}"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_steps_2","type":"function_call","status":"completed","call_id":"call_steps_2","name":"exec_command","arguments":"{\"cmd\":[\"bash\",\"-lc\",\"npm run lint\"]}"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":3,"item":{"id":"ctc_steps_1","type":"custom_tool_call","status":"completed","call_id":"call_steps_3","name":"exec","input":"const r = await tools.exec_command({cmd: \"git status --short\"}); text(r.output);"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_steps_1","status":"completed","usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0}}}}
+
+data: [DONE]
+

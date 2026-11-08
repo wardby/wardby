@@ -1,0 +1,21 @@
+# Only the `kind` overlay needs this: the kind control plane runs on your machine, so the proxy
+# reaches its run-steps listener (WARDBY_RUN_STEPS_LISTEN) at host.docker.internal:8792, the
+# Docker host as seen from the kind node. Port 8792 only, like the database rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-run-steps
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 8792

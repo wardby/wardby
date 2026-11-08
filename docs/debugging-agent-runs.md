@@ -146,8 +146,17 @@ While a run runs, Wardby records its steps: one line for each tool call (the
 tool, and its command, file or first argument, cut to about 100 characters) with
 its status once the result is back (`ok`, `error`, or `exit N`), and one line for
 what the model said (cut to about 120 characters). Tool output and full text are
-never recorded. Steps are recorded for native runs, in the control plane and on
-the native sandbox; Claude Code and Codex runs don't record steps.
+never recorded. Steps are recorded for native runs (in the control plane and on
+the native sandbox) and for Claude Code and Codex runs. A command shows as `Bash`
+or the tool's own name (for example `exec_command`), and a remote MCP tool as
+`mcp:<tool>`.
+
+For Claude Code and Codex, the coding proxy reads the steps from the model's
+replies after relaying them and posts them to the server's run-steps listener
+(`POST /internal/run-steps`). A slow or unreachable listener loses steps, never
+slows the run. Without the two settings in the table below, coding runs record no
+steps; native runs are unaffected. Steps for a Claude Code or Codex run need the
+listener, which only `wardby serve` runs.
 
 **Reading them.** `get_run_steps` (`runId`, optional `after` and `limit`) lists
 them oldest first, 50 at a time and at most 200; pass the last `seq` you have as
@@ -168,10 +177,18 @@ recorded. The scheduler leader deletes expired steps at most every ten minutes. 
 `expired` when a run finished more than `RUN_STEP_RETENTION_DAYS` ago and has no
 steps left.
 
-| Variable                  | Read by                                                                                 | Default   | Meaning                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WARDBY_RUN_STEPS`        | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway` | `summary` | `off` records nothing; `summary` records the lines above. `detail` is accepted and recorded as `summary` in this release. Any other value stops start-up. |
-| `RUN_STEP_RETENTION_DAYS` | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway` | `30`      | Days to keep a step, a whole number from 1 to 3650. A change applies to steps recorded after it. Any other value stops start-up.                          |
+| Variable                  | Read by                                                                                                   | Default   | Meaning                                                                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WARDBY_RUN_STEPS`        | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway`, the coding proxy | `summary` | `off` records nothing; `summary` records the lines above. `detail` is accepted and recorded as `summary` in this release. Any other value stops start-up.                                        |
+| `RUN_STEP_RETENTION_DAYS` | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway`                   | `30`      | Days to keep a step, a whole number from 1 to 3650. A change applies to steps recorded after it. Any other value stops start-up.                                                                 |
+| `WARDBY_RUN_STEPS_LISTEN` | `wardby serve`                                                                                            | unset     | `host:port` or `:port` of the run-steps listener the coding proxy posts coding runs' steps to. Unset: no listener. An invalid value stops start-up.                                              |
+| `WARDBY_RUN_STEPS_URL`    | the coding proxy                                                                                          | unset     | The listener's origin, for example `http://<server host>:8792`: `http` or `https`, no credentials, path, query or fragment. Unset: coding runs record no steps. An invalid value stops start-up. |
+
+The coding proxy also reads `WARDBY_RUN_STEPS`: with `off`, or with
+`WARDBY_RUN_STEPS_URL` unset, no step text leaves the proxy. The listener is a
+second network path into the server; see
+[Run steps in Security deployment](security-deployment.md#run-steps) for how to
+restrict it.
 
 **Upgrading.** The release adds the `RunStep` table and the `Run.stepsDropped`
 column; apply the migration with `prisma migrate deploy` as with any upgrade.

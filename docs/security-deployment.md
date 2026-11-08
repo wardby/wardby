@@ -650,6 +650,41 @@ run's agent and every token-shaped value; a step whose agent secrets can't be
 read is not stored. Tool output is never recorded. Set `WARDBY_RUN_STEPS=off` to
 record nothing.
 
+**Claude Code and Codex runs.** The coding proxy holds no secret values, so it
+sends step text to the control plane's run-steps listener
+(`WARDBY_RUN_STEPS_LISTEN` on `wardby serve`, `POST /internal/run-steps`)
+unmasked. Neither side logs, stores or echoes that text or a request body; the
+control plane redacts it by exact value (the same path as native runs) before
+writing. The proxy sends nothing unless `WARDBY_RUN_STEPS_URL` is set and
+`WARDBY_RUN_STEPS` is not `off`.
+
+The listener is authenticated by the run's capability. The run's worker holds
+that capability too (it is the worker's model API key), so it limits a caller to
+its own run; it cannot tell the proxy from the worker. The network boundary keeps
+workers off the port:
+
+- **Kubernetes:** a NetworkPolicy admits ingress to port 8792 only from the
+  proxy's pods, and the listener has its own ClusterIP Service, off any load
+  balancer. Admit no worker pod to that port.
+- **Docker backend:** the run's isolated network keeps run containers from
+  reaching the listener. A proxy container reaches a server on the host at
+  `host.docker.internal` (Docker Desktop). On Linux, add
+  `extra_hosts: ["host.docker.internal:host-gateway"]` to the proxy's service. A
+  `127.0.0.1` bind is unreachable from containers on Linux, and a `0.0.0.0` bind
+  exposes the listener to your LAN: bind to the Docker bridge address, or
+  firewall the port.
+
+The proxy-to-listener hop is plain `http` on the cluster or host network by default; use `https`, or keep the listener on a trusted network, wherever the path leaves one.
+
+Limits: a run's MCP token is masked only by its token shape. A write that times
+out can still land, so a step's status can arrive before or after its step. A
+cancelled run can post its last steps until its deadline.
+
+| Variable                  | Read by          | Default | Meaning                                                                                                                    |
+| ------------------------- | ---------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_RUN_STEPS_LISTEN` | `wardby serve`   | unset   | `host:port` or `:port` of the run-steps listener. Unset: none. `wardby serve` is the only process that runs it.            |
+| `WARDBY_RUN_STEPS_URL`    | the coding proxy | unset   | The listener's `http(s)` origin, without credentials or path. Unset: coding runs record no steps. Invalid: start-up stops. |
+
 ### Remote MCP servers
 
 Owners can register a remote MCP server (Streamable HTTP, HTTPS only) and attach

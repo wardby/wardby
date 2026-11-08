@@ -20,6 +20,14 @@ import {
 import { conversationKey, estimateHold } from "./hold.js";
 import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
+import {
+  resultsFromRequest,
+  stepsFromJson,
+  streamStepExtractor,
+  type StreamStepExtractor,
+} from "../../core/run-steps/extract.js";
+import { SeenIds } from "../../core/run-steps/seen.js";
+import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
 import type {
   CredentialResolver,
   ProxyAuditSink,
@@ -131,6 +139,15 @@ export interface CodingProxyOptions {
    * dependency cache's seal, ModelRequestSeal). Awaited; a failure is ignored, never the request's.
    */
   onModelRequest?: (runId: string) => Promise<void>;
+  /**
+   * Where coding runs' steps go (RunStepForwarder, to the control plane's run-steps listener);
+   * absent, no step is extracted. Steps are read from frames after they are relayed and handed over
+   * unmasked (the control plane redacts them by exact value before writing). Extraction never fails,
+   * delays or alters a relay, and nothing of it is logged or written to the proxy's database.
+   */
+  steps?: RunStepSubmitter;
+  /** Tests only: replaces the stream step extractor. */
+  createStepExtractor?: (protocol: ProxyProtocol) => StreamStepExtractor;
 }
 
 interface ParsedRequest {
@@ -1066,10 +1083,16 @@ export class CodingProxy {
   private readonly priceVersion: string;
   private readonly activeRequests = new Map<string, Set<AbortController>>();
   private readonly onModelRequest?: (runId: string) => Promise<void>;
+  private readonly steps?: RunStepSubmitter;
+  private readonly createStepExtractor?: (protocol: ProxyProtocol) => StreamStepExtractor;
+  /** Results already handed over, per session: each request resends the history. */
+  private readonly seenResults = new SeenIds();
 
   constructor(options: CodingProxyOptions) {
     this.ledger = options.ledger;
     this.onModelRequest = options.onModelRequest;
+    this.steps = options.steps;
+    this.createStepExtractor = options.createStepExtractor;
     this.credentials = options.credentials;
     this.upstreamUrls = {
       "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
@@ -1149,6 +1172,7 @@ export class CodingProxy {
   }
 
   async cancelSession(sessionId: string): Promise<void> {
+    this.seenResults.forget(sessionId);
     await this.ledger.cancelSession(sessionId);
     for (const controller of this.activeRequests.get(sessionId) ?? []) controller.abort();
   }
@@ -1254,6 +1278,8 @@ export class CodingProxy {
       now: this.now(),
     });
     if (reservation.outcome === "inactive") {
+      // The session has ended (cancelled, expired or closed): another replica may have ended it.
+      this.seenResults.forget(session.id);
       this.audit({ type: "request.rejected", runId: session.runId, reason: reservation.reason });
       throw new CodingProxyError(403, `session_${reservation.reason}`);
     }
@@ -1283,6 +1309,11 @@ export class CodingProxy {
       model: request.model,
       ...holdAudit,
     });
+    // Run steps: the results this (validated) request carries for the previous turn, once per call id.
+    this.submitSteps(input.bearer, session.runId, () => ({
+      steps: [],
+      results: this.seenResults.fresh(session.id, resultsFromRequest(session.protocol, parsed.body)),
+    }));
 
     let key: string;
     try {
@@ -1302,6 +1333,7 @@ export class CodingProxy {
 
     const remainingMs = session.deadlineAt.getTime() - this.now().getTime();
     if (remainingMs <= 0) {
+      this.seenResults.forget(session.id);
       await this.ledger.release(request.id, 403);
       throw new CodingProxyError(403, "session_expired");
     }
@@ -1380,8 +1412,8 @@ export class CodingProxy {
     }
 
     try {
-      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress);
-      else await this.forwardJson(session, request, upstream, sink);
+      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer);
+      else await this.forwardJson(session, request, upstream, sink, input.bearer);
     } catch (error) {
       await this.markUncertain(
         session,
@@ -1473,6 +1505,7 @@ export class CodingProxy {
     request: ProxyRequest,
     upstream: Response,
     sink: ProxyResponseSink,
+    capability: string,
   ): Promise<void> {
     const declaredLength = Number(upstream.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_JSON_BYTES) {
@@ -1493,6 +1526,7 @@ export class CodingProxy {
     sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
     await safeWrite(sink, bytes, { value: true });
     sink.end();
+    this.submitSteps(capability, session.runId, () => ({ steps: stepsFromJson(session.protocol, value), results: [] }));
   }
 
   private async forwardStream(
@@ -1501,6 +1535,7 @@ export class CodingProxy {
     upstream: Response,
     sink: ProxyResponseSink,
     progress: RelayProgress,
+    capability: string,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -1512,50 +1547,89 @@ export class CodingProxy {
     let failedWithoutUsage = false;
     const anthropicUsage =
       session.protocol === "anthropic-messages" ? (progress.anthropic = new AnthropicSseUsageTracker()) : undefined;
-    const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
-    for await (const chunk of body) {
-      receivedBytes += chunk.byteLength;
-      if (receivedBytes > MAX_UPSTREAM_JSON_BYTES) throw new Error("upstream_response_too_large");
-      buffer = (buffer + decoder.decode(chunk, { stream: true })).replaceAll("\r\n", "\n");
-      for (;;) {
-        const boundary = buffer.indexOf("\n\n");
-        if (boundary < 0) break;
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
-        if (!terminal.terminal) {
-          progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
-          await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
-          continue;
-        }
-        if (!terminal.usage) {
-          if (!terminal.failure) throw new Error("terminal_usage_missing");
-          // The upstream failed the response and reported no usage. Pass its failure on so the
-          // client sees the real error instead of a cut connection; the reservation stays held.
-          await this.recordUpstreamFailure(session, terminal.failure);
-          if (!completed) {
-            await this.markUncertain(
-              session,
-              request,
-              upstream.status,
-              `upstream_failed:${terminal.failure}`,
-              responseHeadersOf(upstream),
-              progress,
-            );
-          }
-          failedWithoutUsage = true;
-          await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
-          continue;
-        }
-        await this.complete(session, request, terminal.usage, upstream.status);
-        completed = true;
-        await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+    // Run steps: each frame is read after it was relayed. An extractor that throws is dropped, never the relay.
+    let steps = this.newStepExtractor(session.protocol);
+    const observe = (frame: string) => {
+      if (!steps) return;
+      try {
+        steps.consume(frame);
+      } catch {
+        steps = undefined;
       }
+    };
+    const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
+    try {
+      for await (const chunk of body) {
+        receivedBytes += chunk.byteLength;
+        if (receivedBytes > MAX_UPSTREAM_JSON_BYTES) throw new Error("upstream_response_too_large");
+        buffer = (buffer + decoder.decode(chunk, { stream: true })).replaceAll("\r\n", "\n");
+        for (;;) {
+          const boundary = buffer.indexOf("\n\n");
+          if (boundary < 0) break;
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
+          if (!terminal.terminal) {
+            progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
+            await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+            observe(frame);
+            continue;
+          }
+          if (!terminal.usage) {
+            if (!terminal.failure) throw new Error("terminal_usage_missing");
+            // The upstream failed the response and reported no usage. Pass its failure on so the
+            // client sees the real error instead of a cut connection; the reservation stays held.
+            await this.recordUpstreamFailure(session, terminal.failure);
+            if (!completed) {
+              await this.markUncertain(
+                session,
+                request,
+                upstream.status,
+                `upstream_failed:${terminal.failure}`,
+                responseHeadersOf(upstream),
+                progress,
+              );
+            }
+            failedWithoutUsage = true;
+            await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+            observe(frame);
+            continue;
+          }
+          await this.complete(session, request, terminal.usage, upstream.status);
+          completed = true;
+          await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+          observe(frame);
+        }
+      }
+      buffer = (buffer + decoder.decode()).replaceAll("\r\n", "\n");
+      if (!completed && !failedWithoutUsage) throw new Error("terminal_usage_missing");
+      if (buffer) await safeWrite(sink, Buffer.from(buffer), connected);
+      if (connected.value) sink.end();
+    } finally {
+      // The reply's steps, also when the stream broke (then its open text is marked cut).
+      const extractor = steps;
+      if (extractor) this.submitSteps(capability, session.runId, () => ({ steps: extractor.finish(), results: [] }));
     }
-    buffer = (buffer + decoder.decode()).replaceAll("\r\n", "\n");
-    if (!completed && !failedWithoutUsage) throw new Error("terminal_usage_missing");
-    if (buffer) await safeWrite(sink, Buffer.from(buffer), connected);
-    if (connected.value) sink.end();
+  }
+
+  /** Queues a step batch for the control plane. Best effort: any failure drops the steps, never the request. */
+  private submitSteps(capability: string, runId: string, build: () => RunStepBatch): void {
+    if (!this.steps) return;
+    try {
+      const batch = build();
+      if (batch.steps.length > 0 || batch.results.length > 0) this.steps.submit(capability, runId, batch);
+    } catch {
+      // Dropped: steps are never a reason to fail a model request.
+    }
+  }
+
+  private newStepExtractor(protocol: ProxyProtocol): StreamStepExtractor | undefined {
+    if (!this.steps) return undefined;
+    try {
+      return (this.createStepExtractor ?? streamStepExtractor)(protocol);
+    } catch {
+      return undefined;
+    }
   }
 
   /** Best effort: the executor reads it to name the failure; it must never break the relay. */

@@ -1,0 +1,61 @@
+# Run steps (docs/debugging-agent-runs.md#run-steps). The coding proxy posts each coding run's
+# steps to the control plane's run-steps listener (WARDBY_RUN_STEPS_LISTEN, POST
+# /internal/run-steps); the control plane removes the agent's secret values before it writes.
+# This is the one path into the control plane from inside the namespace: one port, from the
+# proxy's pods only, each request authenticated by the run's own capability. The coding worker
+# holds that capability too, so these NetworkPolicies are the boundary that keeps it out: no
+# rule here or anywhere else admits the worker pods to this port. It has its own ClusterIP
+# Service so the load-balanced wardby-control-plane Service keeps only its MCP port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-control-plane-internal
+  namespace: wardby-coding
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-control-plane
+  ports:
+    - name: run-steps
+      port: 8792
+      targetPort: 8792
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-run-steps
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-coding-proxy
+      ports:
+        - protocol: TCP
+          port: 8792
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-run-steps
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
+      ports:
+        - protocol: TCP
+          port: 8792

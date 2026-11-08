@@ -20,7 +20,7 @@ import { redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { effectiveRunStepsLevel, loadRunStepRetentionDays, loadRunStepsLevel, type RunStepsLevel } from "./config.js";
-import { stepSummary } from "./summarize.js";
+import { stepSummarizer } from "./summarize.js";
 import {
   MAX_RUN_STEPS,
   STEP_CALL_ID,
@@ -129,8 +129,11 @@ export class RunStepWriter implements RunStepSink {
     const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
     // Read fresh for every batch (never cached: a rotated or newly attached secret must be covered).
     // Rejects (and the batch is dropped) when the values can't be read: never an unredacted write.
-    const values =
-      steps.length > 0 ? [...(await this.deps.secretValues(run.agentId)), ...extraSecretValues.filter(Boolean)] : [];
+    const own = steps.length > 0 ? await this.deps.secretValues(run.agentId) : [];
+    const extras = steps.length > 0 ? extraSecretValues.filter(Boolean) : [];
+    const values = [...own, ...extras];
+    // The summary forms are built once per batch, on the first row.
+    let summarize: ReturnType<typeof stepSummarizer> | undefined;
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
@@ -139,7 +142,7 @@ export class RunStepWriter implements RunStepSink {
       kind: step.kind,
       tool: step.kind === "tool" ? safeToolName(step.tool, values) : null,
       callId: step.callId,
-      summary: stepSummary(step, values),
+      summary: (summarize ??= stepSummarizer(values))(step),
       at,
       expiresAt,
     }));

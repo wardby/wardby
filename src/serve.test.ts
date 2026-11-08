@@ -27,6 +27,20 @@ vi.mock("./providers/executor/deferred.js", async (importOriginal) => ({
   drainDeferredRuns,
 }));
 
+// Watches serve.ts start the run-steps listener, without changing what it does.
+const ingress = vi.hoisted(() => ({ started: [] as import("node:http").Server[] }));
+vi.mock("./core/run-steps/ingress.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./core/run-steps/ingress.js")>();
+  return {
+    ...actual,
+    startRunStepIngress: vi.fn(async (...args: Parameters<typeof actual.startRunStepIngress>) => {
+      const server = await actual.startRunStepIngress(...args);
+      ingress.started.push(server);
+      return server;
+    }),
+  };
+});
+
 // Captures the serve module's warn calls without silencing the real logger.
 const serveWarn = vi.hoisted(() => vi.fn());
 vi.mock("./core/logger.js", async (importOriginal) => {
@@ -56,6 +70,7 @@ const ENV_KEYS = [
   "AUTH_CREDENTIAL_HASH_KEY",
   "SECRET_APP_KEY",
   "CODING_MAX_CONCURRENT",
+  "WARDBY_RUN_STEPS_LISTEN",
   "WARDBY_JIRA_SITE_URL",
   "WARDBY_JIRA_API_BASE_URL",
   "WARDBY_JIRA_API_EMAIL",
@@ -75,6 +90,7 @@ afterEach(() => {
   }
   notificationsMock.startNotifications.mockClear();
   serveWarn.mockClear();
+  ingress.started.length = 0;
 });
 
 const fakeExecutor: Executor = { async start() {}, async stop() {} };
@@ -103,6 +119,12 @@ describe("startServe transport guard", () => {
   it("refuses stdio, whose stdout is the JSON-RPC wire", async () => {
     process.env.MCP_TRANSPORT = "stdio";
     await expect(startServe({ providers })).rejects.toThrow(/MCP_TRANSPORT=http/);
+  });
+
+  it("fails fast on a malformed WARDBY_RUN_STEPS_LISTEN, before MCP starts listening", async () => {
+    process.env.MCP_TRANSPORT = "http";
+    process.env.WARDBY_RUN_STEPS_LISTEN = "8792";
+    await expect(startServe({ providers })).rejects.toThrow(/WARDBY_RUN_STEPS_LISTEN must be host:port or :port/);
   });
 
   it("fails fast on a malformed coding concurrency setting, before MCP starts listening", async () => {
@@ -186,6 +208,58 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
 
     const notificationsHandle = await notificationsMock.startNotifications.mock.results[0].value;
     expect(notificationsHandle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  describe("run-steps listener", () => {
+    async function serveWithRunSteps(tag: string, listen: string | undefined) {
+      const port = await freePort();
+      const origin = `http://127.0.0.1:${port}`;
+      Object.assign(process.env, {
+        MCP_TRANSPORT: "http",
+        MCP_HTTP_BIND: `127.0.0.1:${port}`,
+        MCP_CANONICAL_URI: origin,
+        AUTH_PROVIDER: "self-hosted",
+        AUTH_AUDIENCE: origin,
+        AUTH_SIGNING_KEY: "a1".repeat(32),
+        AUTH_CREDENTIAL_HASH_KEY: "b2".repeat(32),
+        SECRET_APP_KEY: "c3".repeat(32),
+      });
+      if (listen === undefined) delete process.env.WARDBY_RUN_STEPS_LISTEN;
+      else process.env.WARDBY_RUN_STEPS_LISTEN = listen;
+      const record = vi.fn(async () => {});
+      const handle = await startServe({ providers: { ...providers, runSteps: { record } }, scope: `${scope}-${tag}` });
+      return { handle, record, mcpOrigin: origin };
+    }
+    afterAll(async () => {
+      await db.schedulerLease.deleteMany({ where: { scope: { startsWith: scope + "-steps" } } });
+    });
+
+    it("listens on its own port when WARDBY_RUN_STEPS_LISTEN is set, and closes it on close()", async () => {
+      const stepsPort = await freePort();
+      const { handle, mcpOrigin } = await serveWithRunSteps("steps-on", `127.0.0.1:${stepsPort}`);
+      const url = `http://127.0.0.1:${stepsPort}/internal/run-steps`;
+      try {
+        expect(ingress.started).toHaveLength(1);
+        // Up and authenticating (no capability: 401), on a port apart from MCP's.
+        const res = await fetch(url, { method: "POST", body: "{}" });
+        expect(res.status).toBe(401);
+        expect(new URL(mcpOrigin).port).not.toBe(String(stepsPort));
+        expect((await fetch(`${mcpOrigin}/internal/run-steps`, { method: "POST", body: "{}" })).status).not.toBe(401);
+      } finally {
+        await handle.close();
+      }
+      expect(ingress.started[0].listening).toBe(false);
+      await expect(fetch(url, { method: "POST", body: "{}" })).rejects.toThrow();
+    });
+
+    it("does not listen when WARDBY_RUN_STEPS_LISTEN is unset", async () => {
+      const { handle } = await serveWithRunSteps("steps-off", undefined);
+      try {
+        expect(ingress.started).toHaveLength(0);
+      } finally {
+        await handle.close();
+      }
+    });
   });
 
   describe("low-power mode", () => {

@@ -20,6 +20,11 @@ services:
       # by default: the proxy then answers /mcp with 503 and coding agents simply
       # get no MCP tools.
       # WARDBY_MCP_GATEWAY_URL: http://wardby-native-gateway:8790
+      # Optional: the server's run-steps listener (WARDBY_RUN_STEPS_LISTEN), so coding runs record
+      # their steps (docs/debugging-agent-runs.md#run-steps), for example
+      # http://host.docker.internal:8792 with the server listening on 127.0.0.1:8792 (Docker Desktop).
+      # Unset by default: coding runs then record no steps.
+      WARDBY_RUN_STEPS_URL: ${WARDBY_RUN_STEPS_URL:-}
       # Run dependency cache. Off unless WARDBY_DEPENDENCY_CACHE=true is in the
       # quickstart env file (.wardby/.env) or the shell: then the proxy keeps
       # snapshots on the named volume below. The flag alone switches it; the
