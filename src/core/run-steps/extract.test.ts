@@ -108,6 +108,28 @@ describe("OpenAiStreamSteps", () => {
     ]);
   });
 
+  it("keeps at most 64 blocks open and names a message without an id uniquely", () => {
+    const extractor = new AnthropicStreamSteps();
+    for (let index = 0; index < 70; index++) {
+      extractor.consume(frame("content_block_start", { index, content_block: { type: "text", text: "hi" } }));
+      extractor.consume(frame("content_block_stop", { index }));
+    }
+    for (let index = 0; index < 70; index++) {
+      extractor.consume(
+        frame("content_block_start", { index: 100 + index, content_block: { type: "text", text: "hi" } }),
+      );
+    }
+    for (let index = 0; index < 70; index++) extractor.consume(frame("content_block_stop", { index: 100 + index }));
+    expect(extractor.take()).toHaveLength(70 + 64);
+    const first = new AnthropicStreamSteps();
+    const second = new AnthropicStreamSteps();
+    for (const e of [first, second]) {
+      e.consume(frame("content_block_start", { index: 0, content_block: { type: "text", text: "hi" } }));
+      e.consume(frame("content_block_stop", { index: 0 }));
+    }
+    expect(first.take()[0].callId).not.toBe(second.take()[0].callId);
+  });
+
   it("is what streamStepExtractor builds for each protocol", () => {
     expect(streamStepExtractor("openai-responses")).toBeInstanceOf(OpenAiStreamSteps);
     expect(streamStepExtractor("anthropic-messages")).toBeInstanceOf(AnthropicStreamSteps);
@@ -131,6 +153,12 @@ describe("stepsFromJson", () => {
       }),
     ).toEqual([{ kind: "tool", callId: "c9", tool: "exec_command", text: "make", truncated: false }]);
     expect(stepsFromJson("openai-responses", "not an object")).toEqual([]);
+    expect(
+      stepsFromJson("anthropic-messages", {
+        id: "m",
+        content: [{ type: "tool_use", id: "t", name: "apply_patch", input: { input: "line1\nline2" } }],
+      }),
+    ).toEqual([{ kind: "tool", callId: "t", tool: "apply_patch", text: "line1", truncated: true }]);
   });
 });
 
@@ -144,6 +172,7 @@ describe("statusFromOutput", () => {
     ["Script completed\nWall time 0.0 seconds\n", false, "ok"],
     ["exit_code=4000\n", false, "error"],
     [`${"\n".repeat(9)}exit_code=3`, false, "ok"],
+    ["Output:\nScript error in my log\n", false, "ok"],
     ["Script failed\nWall time 0.1 seconds\n", false, "error"],
     ["Script terminated\nWall time 9.0 seconds\n", false, "error"],
     ["Script error: ReferenceError: x is not defined\n", false, "error"],
@@ -186,6 +215,47 @@ describe("resultsFromRequest", () => {
       ],
     });
     expect(results).toEqual([{ callId: "new", status: "error" }]);
+  });
+
+  it("reads every result of an interleaved Codex turn (calls and outputs alternate)", () => {
+    const call = (id: string) => ({ type: "function_call", call_id: id, name: "exec_command", arguments: "{}" });
+    const out = (id: string, output: string) => ({ type: "function_call_output", call_id: id, output });
+    const user = { type: "message", role: "user", content: [] };
+    const interleaved = [
+      { type: "message", role: "developer", content: [] },
+      user,
+      out("older", "Process exited with code 9"),
+      { type: "reasoning", summary: [] },
+      call("c1"),
+      out("c1", "Process exited with code 3"),
+      call("c2"),
+      out("c2", "Process exited with code 0"),
+    ];
+    const expected = [
+      { callId: "c1", status: "exit 3" },
+      { callId: "c2", status: "ok" },
+    ];
+    expect(resultsFromRequest("openai-responses", { input: interleaved })).toEqual(expected);
+    expect(resultsFromRequest("openai-responses", { input: [...interleaved, user, user] })).toEqual(expected);
+  });
+
+  it("reads Anthropic results from every user message after the last assistant message", () => {
+    const user = (content: unknown[]) => ({ role: "user", content });
+    const result = (id: string, content: string) => ({ type: "tool_result", tool_use_id: id, content });
+    const body = {
+      messages: [
+        user([result("old", "exit_code=1")]),
+        { role: "assistant", content: [] },
+        user([result("a", "exit_code=1")]),
+        { role: "system", content: [] },
+        user([{ type: "text", text: "go" }, result("b", "exit_code=0")]),
+        user([{ type: "text", text: "go" }]),
+      ],
+    };
+    expect(resultsFromRequest("anthropic-messages", body)).toEqual([
+      { callId: "a", status: "exit 1" },
+      { callId: "b", status: "ok" },
+    ]);
   });
 
   it("reads at most the newest 64 results, and nothing from a body it can't read", () => {

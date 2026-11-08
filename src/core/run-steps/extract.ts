@@ -5,7 +5,7 @@
  * first lines only. Each request resends the whole history, so results are read from the newest turn
  * only.
  */
-import { bounded, displayToolName, toolInputText, toolStepText } from "./summarize.js";
+import { bounded, displayToolName, toolStepText } from "./summarize.js";
 import type { ExtractedResult, ExtractedStep, StepStatus } from "./types.js";
 import { MAX_STEP_TEXT_CHARS } from "./types.js";
 
@@ -21,10 +21,10 @@ export interface StreamStepExtractor {
 export const MAX_RESULTS_PER_REQUEST = 64;
 const STATUS_HEAD_CHARS = 512;
 const EXIT_LINE = /^(?:exit_code=|Exit code: |Process exited with code )(-?\d{1,6})\s*$/m;
-const SCRIPT_FAILED = /^Script (?:failed|terminated|error)\b/m;
+const SCRIPT_FAILED = /^\s*Script (?:failed|terminated|error)\b/;
 const OUTPUT_ITEMS = new Set(["function_call_output", "custom_tool_call_output"]);
-/** Items the model itself produced; a turn's results follow the last of them. */
-const MODEL_ITEMS = new Set(["reasoning", "function_call", "custom_tool_call", "tool_search_call"]);
+/** Items of a turn's run of tool calls (their outputs are OUTPUT_ITEMS). */
+const CALL_ITEMS = new Set(["function_call", "custom_tool_call", "tool_search_call"]);
 
 type Json = Record<string, unknown>;
 const obj = (value: unknown): Json | undefined =>
@@ -73,9 +73,12 @@ function closeBlock(block: OpenBlock): ExtractedStep | undefined {
   return { kind: "tool", callId: block.id, tool, text: text.text, truncated: text.truncated || block.truncated };
 }
 
+let streamCount = 0;
+const MAX_OPEN_BLOCKS = 64;
+
 /** Anthropic Messages streams: input_json_delta assembled per block index, emitted on content_block_stop. */
 export class AnthropicStreamSteps implements StreamStepExtractor {
-  private messageId = "msg";
+  private messageId = `msg${++streamCount}`;
   private readonly blocks = new Map<number, OpenBlock>();
   private done: ExtractedStep[] = [];
 
@@ -105,6 +108,7 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
       case "content_block_start": {
         const block = obj(event.content_block);
         if (index === undefined || !block) return;
+        if (!this.blocks.has(index) && this.blocks.size >= MAX_OPEN_BLOCKS) return;
         const id = str(block.id);
         const name = str(block.name);
         if (block.type === "tool_use" && id && name) {
@@ -231,7 +235,7 @@ export function stepsFromJson(protocol: StepWireProtocol, value: unknown): Extra
       const text = str(block?.text);
       if (block?.type === "tool_use" && id && name) {
         const tool = displayToolName(name);
-        steps.push({ kind: "tool", callId: id, tool, ...bounded(toolInputText(tool, block.input)) });
+        steps.push({ kind: "tool", callId: id, tool, ...toolStepText(tool, JSON.stringify(block.input ?? {})) });
       } else if (block?.type === "text" && text?.trim()) {
         steps.push({ kind: "said", callId: `said:${messageId}:${index}`, ...bounded(text) });
       }
@@ -273,40 +277,39 @@ export function resultsFromRequest(protocol: StepWireProtocol, value: unknown): 
     if (!body) return [];
     if (protocol === "anthropic-messages") {
       const messages = Array.isArray(body.messages) ? body.messages : [];
+      const results: ExtractedResult[] = [];
+      // Every user message after the last assistant message: results may be split from a following text.
       for (let index = messages.length - 1; index >= 0; index--) {
         const message = obj(messages[index]);
         if (message?.role === "system") continue;
-        if (message?.role !== "user" || !Array.isArray(message.content)) return [];
-        return message.content
-          .flatMap((part): ExtractedResult[] => {
-            const block = obj(part);
-            const callId = str(block?.tool_use_id);
-            if (block?.type !== "tool_result" || !callId) return [];
-            return [{ callId, status: statusFromOutput(contentHead(block.content), block.is_error === true) }];
-          })
-          .slice(-MAX_RESULTS_PER_REQUEST);
+        if (message?.role !== "user") break;
+        if (!Array.isArray(message.content)) continue;
+        for (let at = message.content.length - 1; at >= 0; at--) {
+          const block = obj(message.content[at]);
+          const callId = str(block?.tool_use_id);
+          if (block?.type !== "tool_result" || !callId) continue;
+          results.push({ callId, status: statusFromOutput(contentHead(block.content), block.is_error === true) });
+        }
       }
-      return [];
+      return results.slice(0, MAX_RESULTS_PER_REQUEST).reverse();
     }
     const input = Array.isArray(body.input) ? body.input : [];
-    // The results follow the model's last item. A user message after them (Codex sends one) does not hide them.
-    let start = 0;
-    for (let index = input.length - 1; index >= 0; index--) {
-      const item = obj(input[index]);
-      const type = str(item?.type);
-      if ((type && MODEL_ITEMS.has(type)) || (type === "message" && item?.role === "assistant")) {
-        start = index + 1;
-        break;
-      }
+    // The newest turn: past trailing user/developer messages, the run of calls and their outputs
+    // (they interleave), back to a reasoning item, an assistant message or anything else.
+    let end = input.length;
+    while (end > 0) {
+      const item = obj(input[end - 1]);
+      if (item?.type === "message" && (item.role === "user" || item.role === "developer")) end--;
+      else break;
     }
     const results: ExtractedResult[] = [];
-    for (let index = input.length - 1; index >= start && results.length < MAX_RESULTS_PER_REQUEST; index--) {
+    for (let index = end - 1; index >= 0 && results.length < MAX_RESULTS_PER_REQUEST; index--) {
       const item = obj(input[index]);
       const type = str(item?.type);
-      const callId = str(item?.call_id);
-      if (type && OUTPUT_ITEMS.has(type) && callId) {
-        results.push({ callId, status: statusFromOutput(contentHead(item?.output), false) });
-      }
+      if (type && OUTPUT_ITEMS.has(type)) {
+        const callId = str(item?.call_id);
+        if (callId) results.push({ callId, status: statusFromOutput(contentHead(item?.output), false) });
+      } else if (!type || !CALL_ITEMS.has(type)) break;
     }
     return results.reverse();
   } catch {
