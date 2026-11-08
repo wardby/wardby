@@ -200,6 +200,9 @@ spec:
               value: http
             - name: MCP_HTTP_BIND
               value: 0.0.0.0:8080
+            # Run steps from the coding proxy (run-steps.yaml): POST /internal/run-steps only.
+            - name: WARDBY_RUN_STEPS_LISTEN
+              value: 0.0.0.0:8792
             # The address this server calls itself, and the audience every token
             # must carry. The server refuses a plain-HTTP canonical URI unless it
             # is loopback, which is the correct description of this deployment:
@@ -389,6 +392,8 @@ spec:
           ports:
             - name: mcp
               containerPort: 8080
+            - name: run-steps
+              containerPort: 8792
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -471,8 +476,8 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  # No ingress rules: nothing in this namespace may open a connection to the
-  # control plane. `kubectl exec` is not affected — it arrives from the kubelet,
+  # No ingress rules here: nothing in this namespace may open a connection to the
+  # control plane, except the coding proxy on the run-steps port (run-steps.yaml). `kubectl exec` is not affected — it arrives from the kubelet,
   # not across the pod network — and neither is a port-forward, for the same
   # reason. An external MCP endpoint would add an ingress rule here.
   egress:

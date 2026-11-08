@@ -1,0 +1,14 @@
+# The control plane's run-steps listener, through the internal Service in run-steps.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          env:
+            - name: WARDBY_RUN_STEPS_URL
+              value: http://wardby-control-plane-internal:8792

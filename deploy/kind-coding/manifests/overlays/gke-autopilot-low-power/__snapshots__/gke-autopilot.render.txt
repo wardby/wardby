@@ -217,6 +217,20 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: wardby-control-plane-internal
+  namespace: wardby-coding
+spec:
+  ports:
+  - name: run-steps
+    port: 8792
+    targetPort: 8792
+  selector:
+    app.kubernetes.io/name: wardby-control-plane
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: wardby-native-gateway
   namespace: wardby-coding
 spec:
@@ -280,6 +294,8 @@ spec:
         - node
         - dist/coding-proxy/main.js
         env:
+        - name: WARDBY_RUN_STEPS_URL
+          value: http://wardby-control-plane-internal:8792
         - name: DATABASE_URL
           value: wardby-proxy-database-url
         - name: NODE_ENV
@@ -408,6 +424,8 @@ spec:
           value: http
         - name: MCP_HTTP_BIND
           value: 0.0.0.0:8080
+        - name: WARDBY_RUN_STEPS_LISTEN
+          value: 0.0.0.0:8792
         - name: MCP_CANONICAL_URI
           value: https://wardby-control-plane-hostname/mcp
         - name: AUTH_AUDIENCE
@@ -488,6 +506,8 @@ spec:
         ports:
         - containerPort: 8080
           name: mcp
+        - containerPort: 8792
+          name: run-steps
         readinessProbe:
           httpGet:
             httpHeaders:
@@ -964,6 +984,26 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: wardby-coding-proxy-run-steps
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 8792
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: wardby-control-plane
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: wardby-control-plane
   namespace: wardby-coding
 spec:
@@ -1039,6 +1079,26 @@ spec:
         cidr: 35.191.0.0/16
     ports:
     - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-run-steps
+  namespace: wardby-coding
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: wardby-coding-proxy
+    ports:
+    - port: 8792
       protocol: TCP
   podSelector:
     matchLabels:

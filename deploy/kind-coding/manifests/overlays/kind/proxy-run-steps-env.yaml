@@ -1,0 +1,14 @@
+# The run-steps listener of the control plane on your machine (see proxy-run-steps-egress.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          env:
+            - name: WARDBY_RUN_STEPS_URL
+              value: http://host.docker.internal:8792

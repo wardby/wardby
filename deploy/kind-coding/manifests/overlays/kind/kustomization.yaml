@@ -2,3 +2,6 @@ resources:
   - ../../base
   - proxy-database-egress.yaml
   - native-gateway-database-egress.yaml
+  - proxy-run-steps-egress.yaml
+patches:
+  - path: proxy-run-steps-env.yaml

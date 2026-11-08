@@ -10,9 +10,11 @@ resources:
   - control-plane.yaml
   - control-plane-gateway.yaml
   - priority.yaml
+  - run-steps.yaml
 patches:
   - path: proxy-cloudsql.yaml
   - path: proxy-priority.yaml
   - path: proxy-resources.yaml
   - path: native-gateway-cloudsql.yaml
   - path: quota.yaml
+  - path: proxy-run-steps-env.yaml
