@@ -6,7 +6,9 @@ import {
   MAX_MARKERS_CHECKED,
   maskTruncatedTail,
   secretForms,
+  stepSummarizer,
   stepSummary,
+  summaryCacheStats,
   toolInputText,
   toolStepText,
 } from "./summarize.js";
@@ -336,19 +338,57 @@ describe("a secret a token shape only partly covers", () => {
       expect(out).toBe(REDACTED_TEXT);
     });
 
-    it("checks 64 markers against 200 secrets of 4 KiB quickly", () => {
-      native("warm", secrets); // builds the forms once, as the first step of a batch does
-      native(`warm ${REDACTED_TEXT} x`, secrets); // and the piece index
-      const started = performance.now();
-      native(markers(MAX_MARKERS_CHECKED), secrets);
-      expect(performance.now() - started).toBeLessThan(500);
+    const said = (text: string) => ({ kind: "said" as const, text, truncated: false });
+
+    it("checks 64 markers against 200 secrets of 4 KiB with little work", () => {
+      const summarize = stepSummarizer(secrets); // one batch: forms and index built once
+      summarize(said(`warm-up ${REDACTED_TEXT} builds-the-index`));
+      const before = summaryCacheStats();
+      summarize(said(markers(MAX_MARKERS_CHECKED)));
+      const after = summaryCacheStats();
+      expect(after.work - before.work).toBeLessThan(10_000);
+      expect(after.indexBuilds).toBe(before.indexBuilds);
     });
 
-    it("handles a text of literal markers quickly", () => {
+    it("gives up on a text of literal markers without checking them", () => {
+      const before = summaryCacheStats();
       const text = markers(1500).slice(0, MAX_STEP_TEXT_CHARS);
-      const started = performance.now();
       expect(stepSummary({ kind: "tool", text, truncated: false }, secrets)).toBe(REDACTED_TEXT);
-      expect(performance.now() - started).toBeLessThan(500);
+      const after = summaryCacheStats();
+      expect(after.markerCapStops).toBe(before.markerCapStops + 1);
+      expect(after.work).toBe(before.work);
+    });
+
+    it("gives up partway through one marker when self-similar secrets make the walk long", () => {
+      const similar = Array.from({ length: 200 }, (_, i) => `${"a".repeat(4000)}Z${String(i).padStart(4, "q")}`);
+      const summarize = stepSummarizer(similar);
+      const before = summaryCacheStats();
+      expect(summarize(said(`${REDACTED_TEXT}${"a".repeat(4000)}Q tail`))).toBe(REDACTED_TEXT);
+      const after = summaryCacheStats();
+      expect(after.workStops).toBe(before.workStops + 1);
+      // Stopped at the budget, not after the marker's whole walk.
+      expect(after.work - before.work).toBeLessThan(4_100_000);
+    });
+
+    it("reuses one agent's cached forms across runs with different extra values", () => {
+      const own = ["agent-Fake-secret-1", "agent-Fake-secret-2"];
+      const before = summaryCacheStats();
+      for (const run of [1, 2, 3]) {
+        const capability = `cap-run-${run}-FakeCapability`;
+        const out = stepSummarizer([...own], [capability])(said(`use ${own[0]} and ${capability} [REDACTED]x`));
+        expect(out).toBe("use [REDACTED] and [REDACTED] [REDACTED]x");
+      }
+      expect(summaryCacheStats().formBuilds).toBe(before.formBuilds + 1);
+    });
+
+    it("does not keep a values list whose index is over the memory bound", () => {
+      const huge = Array.from({ length: 200 }, () => hex(4096));
+      const step = said(`before-text ${REDACTED_TEXT} after-text-here`);
+      stepSummary(step, huge);
+      const first = summaryCacheStats();
+      expect(first.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+      stepSummary(step, huge);
+      expect(summaryCacheStats().indexBuilds).toBe(first.indexBuilds + 1);
     });
   });
 
