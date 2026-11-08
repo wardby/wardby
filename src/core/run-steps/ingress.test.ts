@@ -2,7 +2,13 @@ import type { AddressInfo } from "node:net";
 import { request, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
-import { handleRunStepPost, parseRunStepsListen, startRunStepIngress, type RunStepIngressDeps } from "./ingress.js";
+import {
+  handleRunStepPost,
+  MAX_INGRESS_CONNECTIONS,
+  parseRunStepsListen,
+  startRunStepIngress,
+  type RunStepIngressDeps,
+} from "./ingress.js";
 import { MAX_RUN_STEPS_POST_BYTES, RUN_STEPS_INGRESS_PATH, type RunStepBatch, type RunStepSink } from "./types.js";
 
 // Fake values only: never a real credential.
@@ -117,6 +123,36 @@ describe("parseRunStepsListen", () => {
   });
 });
 
+/**
+ * A POST whose body is sent in part and never ended: resolves with the answer, so a refusal that
+ * comes back proves the listener answered without waiting for (or reading) the body.
+ */
+function openPost(port: number, authorization: string | undefined, chunk: string) {
+  return new Promise<{ status: number | undefined; connection: string | undefined; text: string }>(
+    (resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: RUN_STEPS_INGRESS_PATH,
+          headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+        },
+        (res) => {
+          let text = "";
+          res.setEncoding("utf8");
+          res.on("data", (part: string) => (text += part));
+          res.on("end", () => resolve({ status: res.statusCode, connection: res.headers.connection, text }));
+          res.on("error", () => resolve({ status: res.statusCode, connection: res.headers.connection, text }));
+        },
+      );
+      // The listener closes the socket after a refusal: the unfinished upload may then see a reset.
+      req.on("error", (err) => (req.destroyed ? undefined : reject(err)));
+      req.write(chunk);
+    },
+  );
+}
+
 describe("startRunStepIngress", () => {
   const servers: Server[] = [];
   afterEach(async () => {
@@ -137,6 +173,42 @@ describe("startRunStepIngress", () => {
       });
     return { base, port, post, warn };
   }
+
+  it("caps open connections and closes the connection after a 404", async () => {
+    const d = deps();
+    const { base, post } = await start(d);
+    expect(servers[0].maxConnections).toBe(MAX_INGRESS_CONNECTIONS);
+    expect(MAX_INGRESS_CONNECTIONS).toBe(64);
+    const response = await post("/mcp", postBody());
+    expect(response.status).toBe(404);
+    expect(response.headers.get("connection")).toBe("close");
+    expect((await fetch(`${base}/`)).headers.get("connection")).toBe("close");
+  });
+
+  it.each([
+    ["a malformed token", `Bearer ${FAKE_SECRET}`, 401, "unauthorized"],
+    ["no Authorization", undefined, 401, "unauthorized"],
+    ["an unknown capability", `Bearer ${OTHER_CAP}`, 401, "unauthorized"],
+  ])(
+    "refuses %s from the headers, without reading a body that never ends",
+    async (_name, authorization, status, code) => {
+      const d = deps();
+      const { port, warn } = await start(d);
+      const answer = await openPost(port, authorization, `{"runId":"r1","steps":[{"text":"${FAKE_SECRET} ${CAP}`);
+      expect(answer).toEqual({ status, connection: "close", text: JSON.stringify({ error: code }) });
+      expect(d.record).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses an ended session from the headers, without reading a body that never ends", async () => {
+    const d = deps({ runId: "r1", deadlineAt: new Date(NOW.getTime() - 11 * 60_000) });
+    const { port, warn } = await start(d);
+    const answer = await openPost(port, `Bearer ${CAP}`, `{"runId":"r1","steps":[{"text":"${FAKE_SECRET}`);
+    expect(answer).toEqual({ status: 403, connection: "close", text: '{"error":"session_ended"}' });
+    expect(d.record).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
 
   it("serves POST /internal/run-steps only", async () => {
     const d = deps();
@@ -259,5 +331,23 @@ describe("startRunStepIngress", () => {
       status: 503,
       errorName: "TimeoutError",
     });
+  });
+
+  it("logs a write failing after the timeout answer by its name only", async () => {
+    const d = deps(undefined, {
+      record: () =>
+        new Promise((_, reject) => setTimeout(() => reject(new TypeError(`late: ${FAKE_SECRET} ${CAP}`)), 150)),
+      requestTimeoutMs: 30,
+    });
+    const { post, warn } = await start(d);
+    const body = postBody({
+      steps: [{ kind: "said", callId: "said:m1:0", text: `use ${FAKE_SECRET}`, truncated: false }],
+      results: [],
+    });
+    const response = await post(RUN_STEPS_INGRESS_PATH, body);
+    expect(response.status).toBe(503);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    expect(warn.mock.calls[1][0]).toEqual({ event: "run_steps_ingress_late_failure", errorName: "TypeError" });
+    for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(warn.mock.calls)).not.toContain(value);
   });
 });
