@@ -62,3 +62,5 @@ export const RUN_STEPS_INGRESS_PATH = "/internal/run-steps";
 /** One POST's bounds; the forwarder splits larger batches. */
 export const MAX_STEPS_PER_POST = 64;
 export const MAX_RESULTS_PER_POST = 256;
+/** The most bytes one POST body may carry (the listener refuses a larger one); parts are split to fit. */
+export const MAX_RUN_STEPS_POST_BYTES = 1 * 1024 * 1024;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RunStepForwarder } from "./run-step-forwarder.js";
-import type { RunStepBatch } from "../../core/run-steps/types.js";
+import { MAX_RUN_STEPS_POST_BYTES, MAX_STEP_TEXT_CHARS, type RunStepBatch } from "../../core/run-steps/types.js";
 
 // A fake capability with the real shape: never a real one.
 const CAP = `rrp_${"A".repeat(43)}`;
@@ -66,10 +66,11 @@ describe("RunStepForwarder", () => {
       log: { info },
     });
     forwarder.submit(CAP, "r1", batch); // taken at once, waiting on the gate
+    await new Promise((resolve) => setImmediate(resolve));
     forwarder.submit(CAP, "r1", batch); // queued
     forwarder.submit(CAP, "r1", batch); // queue full: dropped
     expect(info).toHaveBeenCalledWith(
-      { event: "run_steps.forward_dropped", reason: "queue_full", dropped: 1 },
+      { event: "run_steps.forward_dropped", reason: "queue_full", droppedParts: 1 },
       expect.any(String),
     );
     release();
@@ -104,7 +105,10 @@ describe("RunStepForwarder", () => {
       });
       expect(() => forwarder.submit(CAP, "r1", batch)).not.toThrow();
       await expect(forwarder.flush()).resolves.toBeUndefined();
-      expect(info).toHaveBeenCalledWith({ event: "run_steps.forward_dropped", reason, dropped: 1 }, expect.any(String));
+      expect(info).toHaveBeenCalledWith(
+        { event: "run_steps.forward_dropped", reason, droppedParts: 1 },
+        expect.any(String),
+      );
       expect(JSON.stringify(info.mock.calls)).not.toContain(CAP);
     },
   );
@@ -164,5 +168,79 @@ describe("RunStepForwarder", () => {
     });
     forwarder.submit(CAP, "r1", batch);
     await expect(forwarder.flush()).resolves.toBeUndefined();
+  });
+
+  it("splits by serialized size: max-length multi-byte steps never exceed the body cap and nothing is dropped", async () => {
+    const fetchImpl = accepted();
+    const info = vi.fn();
+    const forwarder = new RunStepForwarder({
+      url: URL_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      log: { info },
+    });
+    const text = "\u20ac".repeat(MAX_STEP_TEXT_CHARS); // 3 bytes each in UTF-8
+    forwarder.submit(CAP, "r1", {
+      steps: Array.from({ length: 64 }, (_, n) => ({ ...batch.steps[0], callId: `c${n}`, text })),
+      results: [],
+    });
+    await forwarder.flush();
+    const bodies = fetchImpl.mock.calls.map(([, init]) => init.body as string);
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_RUN_STEPS_POST_BYTES);
+    const total = bodies.reduce((n, body) => n + (JSON.parse(body) as RunStepBatch).steps.length, 0);
+    expect(total).toBe(64);
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("close(): starts no fetch afterwards, aborts the in-flight POST, resolves within the bound, leaks nothing", async () => {
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => {
+      signal = init.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    });
+    const info = vi.fn();
+    const forwarder = new RunStepForwarder({
+      url: URL_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      flushTimeoutMs: 20,
+      log: { info },
+    });
+    const secretBatch: RunStepBatch = {
+      steps: [{ kind: "said", callId: "s1", text: FAKE_SECRET, truncated: false }],
+      results: [],
+    };
+    forwarder.submit(CAP, "r1", secretBatch);
+    await new Promise((resolve) => setImmediate(resolve));
+    forwarder.submit(CAP, "r1", secretBatch); // queued behind the hung POST
+    const started = Date.now();
+    await expect(forwarder.close()).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(signal?.aborted).toBe(true);
+    forwarder.submit(CAP, "r1", secretBatch);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(info.mock.calls);
+    expect(logged).toContain("closed");
+    expect(logged).not.toContain(CAP);
+    expect(logged).not.toContain(FAKE_SECRET);
+  });
+
+  it("reports serialize_failed when a batch cannot be serialized", async () => {
+    const fetchImpl = accepted();
+    const info = vi.fn();
+    const forwarder = new RunStepForwarder({
+      url: URL_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      log: { info },
+    });
+    const cyclic = { kind: "said", callId: "x", text: "t", truncated: false } as Record<string, unknown>;
+    cyclic.self = cyclic;
+    forwarder.submit(CAP, "r1", { steps: [cyclic as never], results: [] });
+    await forwarder.flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(
+      { event: "run_steps.forward_dropped", reason: "serialize_failed", droppedParts: 1 },
+      expect.any(String),
+    );
   });
 });
