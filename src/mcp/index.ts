@@ -90,6 +90,9 @@ import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
+import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
+import { buildRunStepWriter } from "../core/run-steps/writer.js";
+import { registerRunStepsTool } from "./tools/run-steps.js";
 import { registerRunTranscriptTool } from "./tools/run-transcript.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";
 import { createBlobStore } from "../providers/storage/index.js";
@@ -174,6 +177,7 @@ export function registerAllTools(
     blobStoreConfigured: runTranscriptUrl !== undefined && opts.blobStoreConfigured === true,
     audience: opts.runTranscriptAudience ?? "http",
   });
+  registerRunStepsTool(mcp, { level: loadRunStepsLevel(), retentionDays: loadRunStepRetentionDays() });
   registerStopRunTool(mcp);
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
@@ -214,6 +218,8 @@ export function buildMcpProviders(): McpProviderComposition {
   const secretGuard = createDbSecretWriteGuard(prisma, secrets);
   const datastore = guardDatastore(new PostgresDatastore(prisma, secrets), secretGuard);
   const memory = guardAgentMemory(new PostgresAgentMemory(prisma), secretGuard);
+  // The one run-steps writer of this process (WARDBY_RUN_STEPS, RUN_STEP_RETENTION_DAYS; invalid stops start-up).
+  const runSteps = buildRunStepWriter(prisma, secrets);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
@@ -242,6 +248,7 @@ export function buildMcpProviders(): McpProviderComposition {
     reviewHosts,
     issueTrackers,
     repoAccess,
+    runSteps,
   };
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
@@ -276,6 +283,7 @@ export function buildMcpProviders(): McpProviderComposition {
       repoAccess,
       chat,
       power,
+      runSteps,
     },
   };
 }
@@ -394,6 +402,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       close: async () => {
         await closeQuietly(stdio.close(), "stdio transport close");
         await closeQuietly(providers.executor.close?.(), "executor close");
+        await providers.runSteps?.flush?.();
         modelCatalog.close();
       },
     };
@@ -556,6 +565,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
       await closeQuietly(providers.executor.close?.(), "executor close");
+      await providers.runSteps?.flush?.();
       modelCatalog.close();
     },
   };

@@ -28,6 +28,7 @@ import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
 import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
+import { RunStepSweeper } from "./core/run-steps/sweep.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
@@ -89,6 +90,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   });
   const notifications = await startNotifications({ db: prisma, chat: providers.chat ?? {} });
   const selfDefects = { db: prisma, issueTrackers: providers.issueTrackers };
+  // Expired run steps (RUN_STEP_RETENTION_DAYS), from the scheduler leader only.
+  const runStepSweeper = new RunStepSweeper(prisma);
   const scheduler = startScheduler({
     executor: providers.executor,
     scope: options.scope,
@@ -104,6 +107,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       });
       // Scale idle coding-proxy/native-gateway Deployments to zero (no-op unless WARDBY_LOW_POWER=1).
       await power.sleepIfIdle().catch((err) => serveLog.warn({ err }, "power_sleep_failed"));
+      await runStepSweeper.maybeSweep();
     },
   });
 

@@ -39,6 +39,8 @@ import {
   resolveCodingRepository,
 } from "./coding-repository.js";
 import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
+import { runStepsHook } from "./run-steps/native.js";
+import type { RunStepSink } from "./run-steps/types.js";
 
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
@@ -481,6 +483,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
   nativeSandbox?: WorkerLauncher;
   /** Overrides the sandbox's outbound network call — tests only. */
   sandboxFetch?: typeof safeFetch;
+  /** Records runs' steps (src/core/run-steps/writer.ts); absent = no steps are recorded. */
+  runSteps?: RunStepSink;
 };
 
 /**
@@ -2621,6 +2625,7 @@ async function executeTrackedRun(
     const { runSandboxTool } = tools;
 
     const onProgress = (progress: EngineProgress) => recordNativeRunProgress(db, runId, progress);
+    const onTurn = runStepsHook(providers.runSteps, runId);
     const llm =
       loaded.pricing && providers.llm instanceof RoutingLlmProvider
         ? providers.llm.forRun(loaded.pricing.entry)
@@ -2637,6 +2642,7 @@ async function executeTrackedRun(
         mcpSecretValues: tools.mcpSecretValues,
         drivability: () => runDrivability(db, runId),
         launcher: providers.nativeSandbox,
+        ...(providers.runSteps ? { runSteps: providers.runSteps } : {}),
       });
       return await finishNativeRun(finishContext, loaded.agent.model, engineResult);
     }
@@ -2651,6 +2657,7 @@ async function executeTrackedRun(
         : {}),
       onText,
       onProgress,
+      ...(onTurn ? { onTurn } : {}),
       step,
     });
 

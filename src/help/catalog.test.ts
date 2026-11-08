@@ -215,4 +215,16 @@ describe("buildHelpCatalog", () => {
       expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}`);
     }
   });
+
+  it.each([
+    "get_run_steps",
+    "run steps",
+    "WARDBY_RUN_STEPS",
+    "RUN_STEP_RETENTION_DAYS",
+    "lastStep",
+    "what is my run doing",
+  ])("ranks the run steps article first for %s", async (query) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(searchHelp(catalog, query)[0]?.page.id).toBe("run-steps");
+  });
 });

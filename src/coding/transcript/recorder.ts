@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import type { PrismaClient } from "#prisma";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
+import { loadRetentionDays } from "../../core/retention-days.js";
 import { withEscapedForms } from "../../core/secret-spans.js";
 import { REDACTED, redactSecrets } from "../redact.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
@@ -43,13 +44,7 @@ export function loadTranscriptMaxBytes(env: NodeJS.ProcessEnv = process.env): nu
 }
 
 export function loadTranscriptRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.RUN_TRANSCRIPT_RETENTION_DAYS?.trim();
-  if (!raw) return 30;
-  const days = Number(raw);
-  if (!Number.isInteger(days) || days < 1 || days > 3650) {
-    throw new Error("RUN_TRANSCRIPT_RETENTION_DAYS must be a whole number of days from 1 to 3650.");
-  }
-  return days;
+  return loadRetentionDays(env, "RUN_TRANSCRIPT_RETENTION_DAYS", 30);
 }
 
 export interface RunTranscriptRecorderDeps {

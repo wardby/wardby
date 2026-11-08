@@ -18,6 +18,7 @@ import { textResult } from "./text-result.js";
 import { loadBudgetEvents } from "../../core/budget-events.js";
 import { loadAgentSecretValues, maskNamedSecrets } from "../../core/secret-guard.js";
 import { logger } from "../../core/logger.js";
+import { loadLastSteps } from "../../core/run-steps/last-step.js";
 import type { McpRequestContext } from "../context.js";
 
 const runsLog = logger.child({ module: "mcp-runs" });
@@ -155,6 +156,11 @@ async function listRunsAcrossAgents(
     ctx,
     runs.map((run) => run.id),
   );
+  // The newest step of each run (the runs pane's one line), when it has any.
+  const lastSteps = await loadLastSteps(
+    ctx.db,
+    runs.map((run) => run.id),
+  );
   return runs.map((run) => {
     const agent = byId.get(run.agentId);
     return {
@@ -162,6 +168,7 @@ async function listRunsAcrossAgents(
       agentName: agent?.name ?? null,
       agentBudgetUsd: agent ? Number(agent.budgetUsd) : null,
       ...(graph.get(run.id) ?? { triggerInfo: null, outcomes: [], serviceReadiness: [] }),
+      ...(lastSteps.has(run.id) ? { lastStep: lastSteps.get(run.id) } : {}),
     };
   });
 }
@@ -192,7 +199,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
-      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes and serviceReadiness, and leaves out finalText " +
+      "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes, serviceReadiness and lastStep (the run's newest step as one line, when it has steps; the agentId listing has no lastStep), and leaves out finalText " +
       `and pricingSnapshot; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
       `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
@@ -247,7 +254,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     description:
       "One run in full: status, cost, request, result, errors and budget events, plus triggerInfo (what started it: " +
       "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
-      "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two.",
+      "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two. " +
+      "lastStep is the newest step; get_run_steps lists them all.",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       // Its triggerer keeps seeing it even after losing access to the agent;
@@ -322,12 +330,15 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
       // What started the run and what it produced, as the admin viewer shows them.
       const graph = (await runGraphFields(ctx, [run.id])).get(run.id);
+      // The newest step (get_run_steps has them all).
+      const lastStep = (await loadLastSteps(ctx.db, [run.id])).get(run.id);
       // What the run was asked to do: the trigger's or lead's task, without the agent's standing instructions.
       const request = codingRun?.request ? await requestForReader(ctx, run, codingRun.request) : {};
       return textResult({
         ...withOperatorMode(run),
         ...request,
         ...(graph ?? {}),
+        ...(lastStep ? { lastStep } : {}),
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
         ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),

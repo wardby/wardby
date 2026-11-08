@@ -14,6 +14,8 @@
 import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import pino from "pino";
+import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
+import type { RunStepSink } from "../core/run-steps/types.js";
 import {
   isPrivilegedBridgeName,
   redactExactSecretValues,
@@ -127,6 +129,8 @@ export interface SandboxedEngineOptions {
   mcpSecretValues?: () => Promise<string[]>;
   drivability: () => Promise<RunDrivability>;
   launcher: WorkerLauncher;
+  /** Records the run's steps (src/core/run-steps); absent = none. */
+  runSteps?: RunStepSink;
 }
 
 interface MeteredUsage {
@@ -212,6 +216,9 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
       const req = params.request;
       let sawDone = false;
       let streamedText = "";
+      // Run steps: what this call streams, and the results its request carries for the last turn.
+      const sink = options.runSteps;
+      const steps = sink ? new NativeStreamSteps(request.callId) : undefined;
       try {
         for await (const event of llm.stream(req, controller.signal)) {
           if (event.type === "done") {
@@ -220,6 +227,7 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
           } else if (event.type === "text") {
             streamedText += event.delta;
           }
+          steps?.observe(event);
           yield event;
         }
       } finally {
@@ -233,6 +241,9 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
             : 0;
           meter({ inputTokens, outputTokens, costUsd: llm.priceUsd(req.model, { inputTokens, outputTokens }) });
         }
+        // Recorded before the stream ends (bounded), so the next call's results find these steps.
+        // The run's capability (when the worker has one) is redacted like a secret value.
+        await recordStreamSteps(sink, runId, steps, req.messages, input.gateway ? [input.gateway.capability] : []);
       }
     },
 

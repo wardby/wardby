@@ -550,6 +550,11 @@ or the server running upkeep is not up.
 Gateway-side variables (`NATIVE_GATEWAY_LISTEN`, `NATIVE_GATEWAY_DENY_PORT`) are
 set on the gateway, not the server.
 
+The gateway also records sandbox runs' steps (see
+[Run steps](debugging-agent-runs.md#run-steps)), so when you change
+`WARDBY_RUN_STEPS` or `RUN_STEP_RETENTION_DAYS`, set them on the gateway as well
+as the server.
+
 ## Limits and deadline
 
 - Each worker is limited by `NATIVE_SANDBOX_CPUS`, `NATIVE_SANDBOX_MEMORY_MB`,

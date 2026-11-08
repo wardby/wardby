@@ -76,6 +76,8 @@ import { scheduleStartFields } from "./core/schedule-start.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
+import { RunStepSweeper } from "./core/run-steps/sweep.js";
+import { buildRunStepWriter } from "./core/run-steps/writer.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
@@ -162,6 +164,20 @@ function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["
 
 function buildMemory(cipher: ProviderRegistry["secrets"]): ProviderRegistry["memory"] {
   return guardAgentMemory(new PostgresAgentMemory(prisma), createDbSecretWriteGuard(prisma, cipher));
+}
+
+/** The run-steps writers this process built; each is flushed before the database disconnects. */
+const runStepWriters: ReturnType<typeof buildRunStepWriter>[] = [];
+
+/** The process's run-steps writer; an invalid WARDBY_RUN_STEPS or RUN_STEP_RETENTION_DAYS stops the command with the loader's message. */
+function buildRunSteps(cipher: ProviderRegistry["secrets"]): ReturnType<typeof buildRunStepWriter> {
+  try {
+    const writer = buildRunStepWriter(prisma, cipher);
+    runStepWriters.push(writer);
+    return writer;
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 function buildSecrets(): ProviderRegistry["secrets"] {
@@ -699,6 +715,7 @@ async function run(name: string | undefined): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory(secrets);
+  const runSteps = buildRunSteps(secrets);
 
   let run;
   // Ctrl-C (or a SIGTERM) records the run as cancelled rather than leaving a
@@ -715,6 +732,7 @@ async function run(name: string | undefined): Promise<void> {
         memory,
         reviewHosts: buildReviewHosts(process.env, prisma),
         issueTrackers: buildIssueTrackers(),
+        runSteps,
       },
       prisma,
       (delta) => {
@@ -890,6 +908,7 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory(secrets);
+  const runSteps = buildRunSteps(secrets);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const chat = buildChatProviders();
@@ -907,6 +926,7 @@ async function scheduler(args: string[]): Promise<void> {
     reviewHosts,
     issueTrackers,
     repoAccess,
+    runSteps,
   };
   const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
   const power = buildPower({ env: process.env, db: prisma });
@@ -944,6 +964,7 @@ async function scheduler(args: string[]): Promise<void> {
   });
   const notifications = await startNotifications({ db: prisma, chat });
   const selfDefects = { db: prisma, issueTrackers };
+  const runStepSweeper = new RunStepSweeper(prisma);
   const sched = startScheduler({
     executor,
     db: prisma,
@@ -959,6 +980,7 @@ async function scheduler(args: string[]): Promise<void> {
         onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
+      await runStepSweeper.maybeSweep();
     },
   });
 
@@ -1016,6 +1038,7 @@ async function nativeGateway(): Promise<void> {
     issueTrackers: buildIssueTrackers(),
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
     executor: new DeferredExecutor(prisma),
+    runSteps: buildRunSteps(secrets),
   };
   const server = await startGatewayServer(listen, {
     db: prisma,
@@ -1162,6 +1185,8 @@ async function main(): Promise<void> {
       fail(CLI_USAGE);
     }
   } finally {
+    // A run's last steps are written before the connection goes (bounded: flush never rejects).
+    await Promise.all(runStepWriters.map((writer) => writer.flush()));
     await prisma.$disconnect();
   }
 }

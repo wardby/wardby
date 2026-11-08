@@ -77,3 +77,31 @@ it("every npm package the worker's runtime import graph loads is installed in th
   }
   expect([...missing]).toEqual([]);
 });
+
+/**
+ * The worker image's final stage copies only some of dist/ (src/native-worker/Dockerfile). Each
+ * `COPY --from=build /build/dist/<path> ... <dest>` source is a file or a whole directory; a module
+ * in the worker's runtime graph that none of them covers fails the image's import smoke test.
+ */
+function imageCopiedSources(): string[] {
+  const dockerfile = readFileSync(resolve(SRC, "native-worker/Dockerfile"), "utf8").replace(/\\\n/g, " ");
+  const sources: string[] = [];
+  for (const line of dockerfile.split("\n")) {
+    const words = line.trim().split(/\s+/);
+    if (words[0] !== "COPY" || words[1] !== "--from=build") continue;
+    for (const word of words.slice(2, -1)) {
+      if (word.startsWith("/build/dist/")) sources.push(word.slice("/build/dist/".length));
+    }
+  }
+  return sources;
+}
+
+it("every module in the worker's runtime import graph is copied into the worker image", () => {
+  const sources = imageCopiedSources();
+  expect(sources).toContain("native-worker");
+  const copied = (file: string) => {
+    const built = file.replace(/\.ts$/, ".js");
+    return sources.some((source) => built === source || built.startsWith(`${source}/`));
+  };
+  expect(runtimeGraph("native-worker/main.ts").filter((file) => !copied(file))).toEqual([]);
+});

@@ -33,3 +33,5 @@ From Wardby 0.8.0, Claude Code can show your runs in a pane beside the chat
 through the `wardby-runs` plugin: run `wardby claude-plugin install`, then
 `/wardby-runs`. Search help for "claude code plugin" (article
 `claude-code-run-pane`, Wardby 0.8.0 and later).
+
+To follow what a run is doing, call `get_run_steps` (article `run-steps`).

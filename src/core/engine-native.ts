@@ -7,7 +7,14 @@
  * the budget guardrail must stay above whichever engine is running.
  */
 
-import type { Engine, EngineResult, EngineRunContext, EngineStatus, StepRunner } from "../providers/engine/types.js";
+import type {
+  Engine,
+  EngineResult,
+  EngineRunContext,
+  EngineStatus,
+  EngineTurnEvent,
+  StepRunner,
+} from "../providers/engine/types.js";
 import { RunOwnershipLostError, runStepInline } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
@@ -170,9 +177,11 @@ export class NativeEngine implements Engine {
       const assistantMessage: LlmMessage = { role: "assistant", content: turn.text };
       if (turn.toolCalls.length > 0) assistantMessage.toolCalls = turn.toolCalls;
       messages.push(assistantMessage);
+      this.emitTurn(ctx, () => ({ kind: "turn", turn: turns, text: turn.text, toolCalls: turn.toolCalls }));
 
       if (turn.toolCalls.length > 0) {
         const results = await this.runToolCalls(ctx, step, turns, turn.toolCalls);
+        this.emitTurn(ctx, () => ({ kind: "results", turn: turns, toolCalls: turn.toolCalls, results }));
         for (const [index, toolCall] of turn.toolCalls.entries()) {
           messages.push({
             role: "tool",
@@ -240,6 +249,19 @@ export class NativeEngine implements Engine {
     }
 
     return this.finish("budget_exhausted", turn.text || lastText, turns + 1, finalUsage);
+  }
+
+  /** Builds an event (only when ctx.onTurn is set) and hands it to ctx.onTurn. A failing hook is logged by name and never affects the run. */
+  private emitTurn(ctx: EngineRunContext, build: () => EngineTurnEvent): void {
+    if (!ctx.onTurn) return;
+    try {
+      ctx.onTurn(build());
+    } catch (err) {
+      engineLog.warn(
+        { event: "run_steps_hook_failed", errorName: err instanceof Error ? err.name : typeof err },
+        "run steps hook failed; the run goes on",
+      );
+    }
   }
 
   private finish(status: EngineStatus, finalText: string, turns: number, usage: Usage, error?: string): EngineResult {

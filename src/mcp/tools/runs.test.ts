@@ -102,6 +102,8 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
   };
   return {
     resourceGrant: fakeResourceGrants(grants),
+    // No run has steps here.
+    $queryRaw: async () => [],
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },

@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+
+const hookLog = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
+vi.mock("./logger.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./logger.js")>()),
+  logger: { child: () => hookLog },
+}));
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/index.js";
 import {
   RunOwnershipLostError,
@@ -7,6 +13,9 @@ import {
   type StepRunner,
 } from "../providers/engine/types.js";
 import { NativeEngine } from "./engine-native.js";
+import type { EngineTurnEvent } from "../providers/engine/types.js";
+import { runStepsHook } from "./run-steps/native.js";
+import type { RunStepBatch } from "./run-steps/types.js";
 
 /** Records each step's JSON result; on a later run replays it without calling fn. */
 function recordingStepRunner(record: Map<string, unknown>, calls: string[]): StepRunner {
@@ -811,5 +820,98 @@ describe("NativeEngine concurrent tool calls (runsConcurrently)", () => {
       }),
     );
     expect(replay.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("NativeEngine run steps", () => {
+  const usage = { inputTokens: 10, outputTokens: 5, costUsd: 0.001 };
+  const twoTurns = () =>
+    scriptedLlm(
+      [
+        [
+          { type: "text", delta: "Looking up." },
+          { type: "tool_call", id: "c1", name: "lookup", argsJson: '{"query":"weather"}' },
+          { type: "done", stopReason: "tool_calls", usage },
+        ],
+        [
+          { type: "text", delta: "Sunny." },
+          { type: "done", stopReason: "stop", usage },
+        ],
+      ],
+      () => 0.001,
+      () => 10,
+    );
+
+  it("hands each turn's text and calls, then its results, to onTurn", async () => {
+    const events: EngineTurnEvent[] = [];
+    await new NativeEngine().run(
+      makeContext({
+        llm: twoTurns(),
+        onTurn: (event) => events.push(event),
+        runSandboxTool: vi.fn(async () => '{"error":"not_found","message":"no such city"}'),
+      }),
+    );
+    expect(events).toEqual([
+      {
+        kind: "turn",
+        turn: 1,
+        text: "Looking up.",
+        toolCalls: [{ id: "c1", name: "lookup", argsJson: '{"query":"weather"}' }],
+      },
+      {
+        kind: "results",
+        turn: 1,
+        toolCalls: [{ id: "c1", name: "lookup", argsJson: '{"query":"weather"}' }],
+        results: ['{"error":"not_found","message":"no such city"}'],
+      },
+      { kind: "turn", turn: 2, text: "Sunny.", toolCalls: [] },
+    ]);
+  });
+
+  it("through the runner's hook, records each turn's steps, then its results, with ids a replay repeats", async () => {
+    const batches: RunStepBatch[] = [];
+    const onTurn = runStepsHook({ record: async (_runId, batch) => void batches.push(batch) }, "r1")!;
+    await new NativeEngine().run(
+      makeContext({
+        llm: twoTurns(),
+        onTurn,
+        runSandboxTool: vi.fn(async () => '{"error":"not_found","message":"no such city"}'),
+      }),
+    );
+    expect(batches).toEqual([
+      {
+        steps: [
+          { kind: "said", callId: "said:turn:1", text: "Looking up.", truncated: false },
+          { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+        ],
+        results: [],
+      },
+      { steps: [], results: [{ callId: "c1", status: "error" }] },
+      { steps: [{ kind: "said", callId: "said:turn:2", text: "Sunny.", truncated: false }], results: [] },
+    ]);
+  });
+
+  it("finishes the run when onTurn throws, logging its name and never its message", async () => {
+    hookLog.warn.mockClear();
+    const result = await new NativeEngine().run(
+      makeContext({
+        llm: twoTurns(),
+        onTurn: () => {
+          throw new Error("sk-fake-secret-in-error");
+        },
+      }),
+    );
+    expect(result).toMatchObject({ status: "succeeded", finalText: "Sunny.", turns: 2 });
+    expect(hookLog.warn).toHaveBeenCalledTimes(3); // one per event
+    expect(hookLog.warn).toHaveBeenCalledWith(
+      { event: "run_steps_hook_failed", errorName: "Error" },
+      expect.any(String),
+    );
+    expect(JSON.stringify(hookLog.warn.mock.calls)).not.toContain("sk-fake-secret-in-error");
+  });
+
+  it("completes a run with no onTurn hook", async () => {
+    const result = await new NativeEngine().run(makeContext({ llm: twoTurns() }));
+    expect(result).toMatchObject({ status: "succeeded", turns: 2 });
   });
 });

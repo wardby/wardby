@@ -11,6 +11,8 @@
  * reported usage; the worker's own usage numbers are never read.
  */
 
+import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
+import type { RunStepSink } from "../core/run-steps/types.js";
 import {
   createNativeRunTools,
   durableDelegate,
@@ -194,7 +196,14 @@ async function handle(
         kind: "stream",
         status: 200,
         events: checkedEvents(
-          streamModel(ctx, ledger, request.callId, params as GatewayParams<"llm.stream">),
+          streamModel(
+            ctx,
+            ledger,
+            request.callId,
+            params as GatewayParams<"llm.stream">,
+            deps.providers.runSteps,
+            token,
+          ),
           scope.secretValues,
         ),
       };
@@ -290,6 +299,9 @@ export async function* streamModel(
   ledger: PrismaGatewayLedger,
   callId: string,
   params: GatewayParams<"llm.stream">,
+  steps?: RunStepSink,
+  /** The request's bearer capability, redacted from the recorded steps like a secret value. */
+  capability?: string,
 ): AsyncIterable<LlmStreamEvent> {
   const req = params.request;
   if (req.model !== ctx.snapshot.input.agent.model)
@@ -309,6 +321,8 @@ export async function* streamModel(
     throw new GatewayError("budget_exhausted", "This run's budget cannot cover another model call.");
   }
 
+  // Run steps: what this call streams, and the results its request carries for the last turn.
+  const tap = steps ? new NativeStreamSteps(callId) : undefined;
   let settled = false;
   let sawEvent = false;
   // Set once the provider's response starts: it may bill hidden thinking or reasoning before any event.
@@ -335,6 +349,7 @@ export async function* streamModel(
           costUsd: event.usage.costUsd,
         });
       }
+      tap?.observe(event);
       yield event;
     }
   } catch (err) {
@@ -376,6 +391,8 @@ export async function* streamModel(
         costUsd: ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }),
       });
     }
+    // Recorded before the stream ends (bounded), so the next call's results find these steps.
+    await recordStreamSteps(steps, ctx.session.runId, tap, req.messages, capability ? [capability] : []);
   }
 }
 

@@ -38,6 +38,7 @@ access to.
 | `get_agent`, `list_repositories`, `list_subagents`                                                              | How the agent is set up: prompt, model, budget, repo links and triggers, sub-agents                                                                                                                                                                                                                                                                                                      |
 | `search_help`, `get_help_article`                                                                               | Help for an error code or failure category                                                                                                                                                                                                                                                                                                                                               |
 | `cost_report`                                                                                                   | What runs cost, when spend is the question                                                                                                                                                                                                                                                                                                                                               |
+| `get_run_steps` (from 0.9.0)                                                                                    | The run's steps, one line per tool call or model message, live while it runs; see [Run steps](#run-steps)                                                                                                                                                                                                                                                                                |
 | `get_run_transcript`                                                                                            | The run's conversation, for Claude Code runs with `sessionResume` on                                                                                                                                                                                                                                                                                                                     |
 | `stop_run`                                                                                                      | Stops a run that's stuck                                                                                                                                                                                                                                                                                                                                                                 |
 | The PR, issue or Jira ticket                                                                                    | The diff, CI, the review, and the comment the run posted                                                                                                                                                                                                                                                                                                                                 |
@@ -138,6 +139,42 @@ miss keeps happening, add the rule to `AGENTS.md` so future runs follow it.
 PR <PR URL> from Wardby didn't do what I expected: <what you expected>.
 Where did it go wrong? Draft a follow-up comment, but don't post it.
 ```
+
+## Run steps
+
+While a run runs, Wardby records its steps: one line for each tool call (the
+tool, and its command, file or first argument, cut to about 100 characters) with
+its status once the result is back (`ok`, `error`, or `exit N`), and one line for
+what the model said (cut to about 120 characters). Tool output and full text are
+never recorded. Steps are recorded for native runs, in the control plane and on
+the native sandbox; Claude Code and Codex runs don't record steps.
+
+**Reading them.** `get_run_steps` (`runId`, optional `after` and `limit`) lists
+them oldest first, 50 at a time and at most 200; pass the last `seq` you have as
+`after` to get only newer ones. `get_run` and `list_runs` without `agentId`
+include `lastStep`, the newest step as one line. Access is the same as
+`get_run`'s.
+
+**Limits.** A run records at most 2,000 steps; `dropped` in `get_run_steps`
+counts the rest.
+
+**Secrets.** Every step is redacted before it is stored: every secret value of
+the run's agent (attached secrets, readable or brokered, and its MCP servers'
+secrets) is replaced with `[REDACTED]`, then anything shaped like a token or key.
+If the agent's secrets can't be read at that moment, the step is not stored.
+
+**Retention.** Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are
+recorded. The scheduler leader deletes expired steps at most every ten minutes. `get_run_steps` reports
+`expired` when a run finished more than `RUN_STEP_RETENTION_DAYS` ago and has no
+steps left.
+
+| Variable                  | Read by                                                                                 | Default   | Meaning                                                                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_RUN_STEPS`        | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway` | `summary` | `off` records nothing; `summary` records the lines above. `detail` is accepted and recorded as `summary` in this release. Any other value stops start-up. |
+| `RUN_STEP_RETENTION_DAYS` | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway` | `30`      | Days to keep a step, a whole number from 1 to 3650. A change applies to steps recorded after it. Any other value stops start-up.                          |
+
+**Upgrading.** The release adds the `RunStep` table and the `Run.stepsDropped`
+column; apply the migration with `prisma migrate deploy` as with any upgrade.
 
 ## Run transcripts
 
