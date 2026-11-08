@@ -477,9 +477,11 @@ spec:
     - Ingress
     - Egress
   # No ingress rules here: nothing in this namespace may open a connection to the
-  # control plane, except the coding proxy on the run-steps port (run-steps.yaml). `kubectl exec` is not affected — it arrives from the kubelet,
-  # not across the pod network — and neither is a port-forward, for the same
-  # reason. An external MCP endpoint would add an ingress rule here.
+  # control plane. Ingress arrives only through run-steps.yaml (port 8792, from the
+  # coding proxy's pods) and the load-balancer policy (port 8080). `kubectl exec` is
+  # not affected — it arrives from the kubelet, not across the pod network — and
+  # neither is a port-forward, for the same reason. An external MCP endpoint would
+  # add an ingress rule here.
   egress:
     # DNS. Both link-local addresses for the reason documented in
     # proxy-dns-egress.yaml: Autopilot resolves via NodeLocal DNSCache at

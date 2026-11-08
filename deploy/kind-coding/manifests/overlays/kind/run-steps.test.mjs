@@ -1,3 +1,5 @@
+// Per-run worker egress policies are pinned in src/providers/jobs/kubernetes-isolation.test.ts and
+// src/native-worker/kubernetes-isolation.test.ts; these manifest tests cover the static policies.
 // On the kind harness the control plane runs on the host, so the only in-cluster piece is the
 // proxy's egress to the host's run-steps listener. Worker pods get no rule here.
 import { readFileSync, readdirSync } from "node:fs";
@@ -5,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAllYaml } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
+import { admitsRunStepsPort } from "../admits-port.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const base = join(here, "../../base");
@@ -17,7 +20,6 @@ const policies = [here, base]
       .flatMap((f) => loadAllYaml(readFileSync(join(dir, f), "utf8"))),
   )
   .filter((o) => o?.kind === "NetworkPolicy");
-const admits8792 = (rule) => (rule.ports ?? []).some((p) => p.port === 8792);
 
 describe("run steps path on the kind harness", () => {
   it("lets the proxy reach the host's run-steps listener on 8792 only", () => {
@@ -30,14 +32,14 @@ describe("run steps path on the kind harness", () => {
 
   it("admits no worker pod to 8792, in or out, under any policy", () => {
     const rules = policies.flatMap((p) =>
-      (p.spec.egress ?? []).filter(admits8792).map((r) => ({ policy: p, rule: r })),
+      (p.spec.egress ?? []).filter(admitsRunStepsPort).map((r) => ({ policy: p, rule: r })),
     );
     // Only the proxy's own policy opens 8792 egress, and nothing opens 8792 ingress.
     expect(rules.map((r) => r.policy.spec.podSelector.matchLabels)).toEqual([PROXY]);
     for (const p of policies) {
-      expect((p.spec.ingress ?? []).filter(admits8792)).toEqual([]);
+      expect((p.spec.ingress ?? []).filter(admitsRunStepsPort)).toEqual([]);
     }
-    expect(JSON.stringify(policies.filter((p) => (p.spec.egress ?? []).some(admits8792)))).not.toMatch(
+    expect(JSON.stringify(policies.filter((p) => (p.spec.egress ?? []).some(admitsRunStepsPort)))).not.toMatch(
       /coding-run|native-run/,
     );
   });

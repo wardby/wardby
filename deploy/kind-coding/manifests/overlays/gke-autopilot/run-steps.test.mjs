@@ -1,3 +1,5 @@
+// Per-run worker egress policies are pinned in src/providers/jobs/kubernetes-isolation.test.ts and
+// src/native-worker/kubernetes-isolation.test.ts; these manifest tests cover the static policies.
 // The run-steps path: the coding proxy posts each coding run's steps to the control plane's
 // listener on 8792. The listener authenticates with the run capability, which the coding worker
 // also holds, so these NetworkPolicies are the boundary: only the proxy's pods may reach the port.
@@ -6,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAllYaml } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
+import { admitsRunStepsPort } from "../admits-port.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const base = join(here, "../../base");
@@ -33,8 +36,19 @@ const selects = (policy, labels) => {
   const match = policy.spec.podSelector?.matchLabels ?? {};
   return Object.entries(match).every(([k, v]) => labels[k] === v);
 };
-const admitsPort = (rule, port) =>
-  rule.ports === undefined || rule.ports.some((p) => (p.port === undefined || p.port === port) && p.protocol !== "UDP");
+
+describe("admitsRunStepsPort", () => {
+  it("catches portless, named, ranged and bare-protocol rules, and ignores other ports", () => {
+    expect(admitsRunStepsPort({ to: [] })).toBe(true);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP" }] })).toBe(true);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP", port: 8792 }] })).toBe(true);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP", port: "run-steps" }] })).toBe(true);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP", port: 8000, endPort: 9000 }] })).toBe(true);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP", port: 8080 }] })).toBe(false);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "TCP", port: 8000, endPort: 8500 }] })).toBe(false);
+    expect(admitsRunStepsPort({ ports: [{ protocol: "UDP", port: 8792 }] })).toBe(false);
+  });
+});
 
 describe("run steps path on GKE Autopilot", () => {
   it("admits only the coding proxy to the control plane, on the run-steps port only", () => {
@@ -53,7 +67,7 @@ describe("run steps path on GKE Autopilot", () => {
     );
     expect(ingressToControlPlane.length).toBeGreaterThan(0);
     const admitting = ingressToControlPlane.flatMap((p) =>
-      (p.spec.ingress ?? []).filter((r) => admitsPort(r, 8792)).map((r) => ({ name: p.metadata.name, rule: r })),
+      (p.spec.ingress ?? []).filter((r) => admitsRunStepsPort(r)).map((r) => ({ name: p.metadata.name, rule: r })),
     );
     // The only rule admitting 8792 is the proxy rule: no rule without `from`, no namespace-wide or
     // ipBlock peer, and no peer naming the coding-run or native-run worker pods.
