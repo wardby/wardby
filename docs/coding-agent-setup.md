@@ -868,17 +868,6 @@ half-set `BLOB_STORE` (the kind set but its bucket or directory missing), or an
 invalid `RUN_TRANSCRIPT_RETENTION_DAYS` or `RUN_TRANSCRIPT_MAX_BYTES`, stops the server at startup with a
 message naming the variable.
 
-## Run steps
-
-Claude Code and Codex runs record their steps (each command with its status, and
-what the model said, one short line each) when the server's run-steps listener is
-set up: `WARDBY_RUN_STEPS_LISTEN` on `wardby serve` and `WARDBY_RUN_STEPS_URL` on
-the coding proxy. Without them, coding runs record no steps. Read the steps with
-`get_run_steps`. The Docker quickstart's proxy takes `WARDBY_RUN_STEPS_URL` from
-the environment (for example `http://host.docker.internal:8792`); see
-[Run steps](debugging-agent-runs.md#run-steps) and, for binding the listener
-safely, [Run steps in Security deployment](security-deployment.md#run-steps).
-
 **Custom worker images.** An agent that sets `workerImageRef` must rebuild its
 image from a release that includes session resume. Until then its runs fail at
 input (`worker_input_failed`). `update_agent` warns about this when you turn
@@ -997,6 +986,17 @@ The download responds with the gzip-compressed transcript and the headers
 run's repository and refs, as base64url JSON). A refused download returns
 JSON `{ "error": "<code>" }`; `wardby resume` explains each code (see the
 `errors/run-transcript-download` help article).
+
+## Run steps
+
+Claude Code and Codex runs record their steps (each command with its status, and
+what the model said, one short line each) when the server's run-steps listener is
+set up: `WARDBY_RUN_STEPS_LISTEN` on `wardby serve` and `WARDBY_RUN_STEPS_URL` on
+the coding proxy. Without them, coding runs record no steps. Read the steps with
+`get_run_steps`. The Docker quickstart's proxy takes `WARDBY_RUN_STEPS_URL` from
+the environment (for example `http://host.docker.internal:8792`); see
+[Run steps](debugging-agent-runs.md#run-steps) and, for binding the listener
+safely, [Run steps in Security deployment](security-deployment.md#run-steps).
 
 ## Stop the setup
 

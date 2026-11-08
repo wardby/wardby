@@ -64,9 +64,8 @@ Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are recorded (default
 | ------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `WARDBY_RUN_STEPS`        | `summary` | `off` records no steps; `summary` records the lines above. `detail` is accepted and records `summary` in this release. Any other value stops start-up. |
 | `RUN_STEP_RETENTION_DAYS` | `30`      | Days to keep a step, a whole number from 1 to 3650. Any other value stops start-up.                                                                    |
-
-| `WARDBY_RUN_STEPS_LISTEN` | unset | On `wardby serve` only: `host:port` (or `:port`) of the listener the coding proxy posts coding runs' steps to. Unset: no listener. |
-| `WARDBY_RUN_STEPS_URL` | unset | On the coding proxy: the listener's origin, for example `http://<server host>:8792`, with no credentials or path. Unset: coding runs record no steps. |
+| `WARDBY_RUN_STEPS_LISTEN` | unset     | On `wardby serve` only: `host:port` (or `:port`) of the listener the coding proxy posts coding runs' steps to. Unset: no listener.                     |
+| `WARDBY_RUN_STEPS_URL`    | unset     | On the coding proxy: the listener's origin, for example `http://<server host>:8792`, with no credentials or path. Unset: coding runs record no steps.  |
 
 Set `WARDBY_RUN_STEPS` and `RUN_STEP_RETENTION_DAYS` on every process that runs
 native agents or serves the native sandbox gateway: `wardby serve`,

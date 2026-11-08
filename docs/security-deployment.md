@@ -674,6 +674,8 @@ workers off the port:
   exposes the listener to your LAN: bind to the Docker bridge address, or
   firewall the port.
 
+The proxy-to-listener hop is plain `http` on the cluster or host network by default; use `https`, or keep the listener on a trusted network, wherever the path leaves one.
+
 Limits: a run's MCP token is masked only by its token shape. A write that times
 out can still land, so a step's status can arrive before or after its step. A
 cancelled run can post its last steps until its deadline.
