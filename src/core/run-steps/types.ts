@@ -56,3 +56,9 @@ export const STEP_STATUS = /^(?:ok|error|exit [1-9]\d{0,2})$/;
 export const STEP_TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** Printable ASCII, as the providers' and workers' ids are. */
 export const STEP_CALL_ID = /^[\x21-\x7e]{1,600}$/;
+
+/** The control plane's run-steps listener route (WARDBY_RUN_STEPS_LISTEN). */
+export const RUN_STEPS_INGRESS_PATH = "/internal/run-steps";
+/** One POST's bounds; the forwarder splits larger batches. */
+export const MAX_STEPS_PER_POST = 64;
+export const MAX_RESULTS_PER_POST = 256;
