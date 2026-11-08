@@ -181,3 +181,57 @@ describe("maskForTransport", () => {
     expect(masked.steps[0].truncated).toBe(true);
   });
 });
+
+describe("overlapping secrets", () => {
+  const P = "correct horse battery staple";
+  const P2 = `correct horse ${FAKE_TOKEN} staple`;
+  const words = /correct|horse|battery|staple/;
+
+  it("redacts a passphrase whose word is itself a secret, written with other whitespace", () => {
+    const out = stepSummary({ kind: "said", text: "pass is correct  horse\nbattery staple ok", truncated: false }, [
+      P,
+      "battery",
+    ]);
+    expect(out).toBe("pass is [REDACTED] ok");
+    expect(out).not.toMatch(words);
+  });
+
+  it("redacts a passphrase holding a token-shaped word, written with other whitespace", () => {
+    expect(
+      stepSummary({ kind: "said", text: `use correct  horse ${FAKE_TOKEN}\nstaple now`, truncated: false }, [P2]),
+    ).toBe("use [REDACTED] now");
+  });
+
+  it("redacts it after the proxy masked the token-shaped word (coding runs)", () => {
+    const [sent] = maskForTransport({
+      steps: [{ kind: "said", callId: "s", text: `use ${P2} now`, truncated: false }],
+      results: [],
+    }).steps;
+    expect(stepSummary(sent, [P2])).toBe("use [REDACTED] now");
+  });
+
+  it("masks a cut-off start of the passphrase when a shorter secret is inside it", () => {
+    expect(stepSummary({ kind: "tool", text: "unlock correct  horse\nbatt", truncated: true }, [P, "battery"])).toBe(
+      "unlock [REDACTED]",
+    );
+  });
+
+  it("marks a step truncated when token masking pushes it past 16 KiB, so no secret start survives", () => {
+    const text = "a://b:c@ ".repeat(4) + " ".repeat(16_308) + FAKE_SECRET;
+    expect(text.length).toBeLessThanOrEqual(MAX_STEP_TEXT_CHARS);
+    const [sent] = maskForTransport({
+      steps: [{ kind: "tool", callId: "c", tool: "Bash", text, truncated: false }],
+      results: [],
+    }).steps;
+    expect(sent.truncated).toBe(true);
+    expect(stepSummary(sent, [FAKE_SECRET])).toBe(
+      "a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ a://[REDACTED]@ [REDACTED]",
+    );
+  });
+
+  it("still redacts a value that is wholly token-shaped", () => {
+    expect(stepSummary({ kind: "said", text: `a ${FAKE_TOKEN} b`, truncated: false }, [FAKE_TOKEN])).toBe(
+      "a [REDACTED] b",
+    );
+  });
+});

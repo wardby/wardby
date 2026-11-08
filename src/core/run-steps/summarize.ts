@@ -1,9 +1,11 @@
 /**
  * Turns a tool call or a model message into the text a step's summary is cut from, and cuts it.
- * Redaction runs on the control plane (stepSummary), before anything is stored: by exact value
- * against the run's secret values, then by token shape (redactSecrets). The summary is cut only
- * after redaction, so a cut never splits a secret and leaves half of it visible; a text an
- * extractor already cut is checked for a secret's start at its end (maskTruncatedTail).
+ * Redaction runs on the control plane (stepSummary), before anything is stored: whitespace is
+ * collapsed first, then one pass masks every form of every secret value together (as written,
+ * collapsed, token-masked, token-masked and collapsed: secretForms), then token shapes
+ * (redactSecrets). The summary is cut only after redaction, so a cut never splits a secret and
+ * leaves half of it visible; a text an extractor already cut is checked for a secret's start at
+ * its end (maskTruncatedTail).
  */
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { CLAUDE_MCP_TOOL_PREFIX, WORKER_MCP_SERVER_KEY } from "../../coding/mcp-token.js";
@@ -157,22 +159,35 @@ export function maskTruncatedTail(text: string, secretValues: readonly string[])
 const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
- * The stored summary: redacted (exact values, then token shapes), a cut-off text's tail checked,
- * whitespace collapsed, then redacted and tail-checked again against the values and their
- * whitespace-collapsed forms (collapsing can rebuild a value the model wrote with other
- * whitespace), then cut to 100 characters (tool) or 120 (said).
+ * Every form a secret value can take in a collapsed step text, longest first: the value, its
+ * whitespace-collapsed form (the model wrote it with other whitespace), its token-masked form (the
+ * coding proxy masked a token-shaped word inside it before sending, maskForTransport), and that
+ * form collapsed. Matching them all in one pass means a shorter secret, or a token-shaped word,
+ * inside a longer one can't break the longer match.
+ */
+export function secretForms(secretValues: readonly string[]): string[] {
+  const forms = new Set<string>();
+  for (const value of secretValues) {
+    const masked = redactSecrets(value);
+    for (const form of [value, collapseWhitespace(value), masked, collapseWhitespace(masked)]) {
+      if (form && form !== REDACTED) forms.add(form);
+    }
+  }
+  return [...forms].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * The stored summary: whitespace collapsed, then redacted once against every form of every secret
+ * value together (secretForms) and by token shape, then a cut-off text's tail checked against
+ * those forms, then cut to 100 characters (tool) or 120 (said).
  */
 export function stepSummary(
   step: Pick<ExtractedStep, "kind" | "text" | "truncated">,
   secretValues: readonly string[],
 ): string {
   const cut = step.truncated || step.text.length > MAX_STEP_TEXT_CHARS;
-  let text = redactSecrets(step.text.slice(0, MAX_STEP_TEXT_CHARS), secretValues);
-  if (cut) text = maskTruncatedTail(text, secretValues);
-  text = collapseWhitespace(text);
-  const collapsed = secretValues.map(collapseWhitespace).filter((value) => value && !secretValues.includes(value));
-  const values = [...secretValues, ...new Set(collapsed)];
-  text = redactSecrets(text, values);
+  const values = secretForms(secretValues);
+  let text = redactSecrets(collapseWhitespace(step.text.slice(0, MAX_STEP_TEXT_CHARS)), values);
   if (cut) text = maskTruncatedTail(text, values);
   const limit = step.kind === "tool" ? TOOL_SUMMARY_CHARS : SAID_SUMMARY_CHARS;
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
@@ -184,11 +199,15 @@ export function stepSummary(
  */
 export function maskForTransport(batch: RunStepBatch): RunStepBatch {
   return {
-    steps: batch.steps.map((step) => ({
-      ...step,
-      text: redactSecrets(step.text).slice(0, MAX_STEP_TEXT_CHARS),
-      truncated: step.truncated || step.text.length > MAX_STEP_TEXT_CHARS,
-    })),
+    steps: batch.steps.map((step) => {
+      const masked = redactSecrets(step.text);
+      return {
+        ...step,
+        text: masked.slice(0, MAX_STEP_TEXT_CHARS),
+        // Token masking can lengthen a text, so the cut is judged on the masked text too.
+        truncated: step.truncated || step.text.length > MAX_STEP_TEXT_CHARS || masked.length > MAX_STEP_TEXT_CHARS,
+      };
+    }),
     results: batch.results,
   };
 }
