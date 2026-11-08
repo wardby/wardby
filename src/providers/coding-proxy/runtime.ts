@@ -1,3 +1,4 @@
+import { RunStepForwarder } from "./run-step-forwarder.js";
 import type { PrismaClient } from "#prisma";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import {
@@ -90,6 +91,35 @@ export function loadMcpGatewayUrl(env: NodeJS.ProcessEnv): string | undefined {
   return url.href.replace(/\/+$/, "");
 }
 
+/**
+ * WARDBY_RUN_STEPS_URL: the control plane's run-steps listener (WARDBY_RUN_STEPS_LISTEN on the
+ * server), which the proxy posts coding runs' steps to. Unset or empty: coding runs record no steps.
+ * Anything but an http(s) origin without credentials, path, query or fragment stops start-up (the
+ * value is not echoed, so a credential in it never reaches a log).
+ */
+export function loadRunStepsUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.WARDBY_RUN_STEPS_URL?.trim();
+  if (!value) return undefined;
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  if (
+    !url ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("WARDBY_RUN_STEPS_URL must be an http(s) URL without credentials, path, query or fragment");
+  }
+  return url.origin;
+}
+
 export interface CodingProxyRuntimeOptions {
   db: PrismaClient;
   /** The package registry's own client, so its traffic (many concurrent
@@ -130,6 +160,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     : options.audit;
   // Throws on an invalid setting, before anything listens.
   const mcpGatewayUrl = loadMcpGatewayUrl(env);
+  // Throws on an invalid setting, before anything listens.
+  const runStepsUrl = loadRunStepsUrl(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -200,6 +232,9 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   }
 
   const seal = modelRequestSeal;
+  // Coding runs' steps go to the control plane only when WARDBY_RUN_STEPS_URL is set; otherwise no
+  // submitter is passed and the proxy does no step extraction.
+  const steps = runStepsUrl ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
   const ledger = new PrismaProxyLedger(options.db);
   const proxy = new CodingProxy({
     ledger,
@@ -214,6 +249,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
         : {}),
     // The run's first model request closes its dependency cache (no-op for a run with it off).
     ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
+    ...(steps ? { steps } : {}),
   });
   const startServer = options.startServer ?? startCodingProxyServer;
   let server: CodingProxyServerHandle;
@@ -229,6 +265,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     });
   } catch (error) {
     eviction?.stop();
+    await steps?.close();
     throw error;
   }
   let deny: DenyPortListenerHandle;
@@ -239,6 +276,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     // prove a policy is enforced, and every launch would fail at the gate instead of at startup.
     eviction?.stop();
     await server.close();
+    await steps?.close();
     throw error;
   }
   return {
@@ -247,6 +285,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
       eviction?.stop();
       await deny.close();
       await server.close();
+      // Last: requests are done, so this is the final chance to hand over queued steps (bounded).
+      await steps?.close();
     },
   };
 }
