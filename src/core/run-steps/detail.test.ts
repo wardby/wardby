@@ -297,6 +297,42 @@ describe("cost", () => {
     expect(elapsed).toBeLessThan(2000);
   });
 
+  it("checks every line break of a 16 KiB text of short lines, 200 secrets of 4 KiB, well under 100 ms a call", () => {
+    const filler = (n: number) => hex(n).replace(/[0-9]/g, "g");
+    // About a thousand 15-character lines, with a secret split around an elision within the input head.
+    const lines = Array.from({ length: 1000 }, () => filler(15));
+    lines[100] = `T=${secrets[9].slice(0, 40)}`;
+    lines[101] = "…99 tokens truncated…";
+    lines[102] = `${secrets[9].slice(-40)} end`;
+    const text = lines.join("\n").padEnd(MAX_STEP_TEXT_CHARS, "g");
+    const detail = stepDetailer(secrets);
+    const times: number[] = [];
+    let input = "";
+    let said_ = "";
+    for (let round = 0; round < 3; round++) {
+      let started = performance.now();
+      input = detail.step(tool(text));
+      times.push(performance.now() - started);
+      started = performance.now();
+      said_ = detail.step(said(text));
+      times.push(performance.now() - started);
+      started = performance.now();
+      detail.output({ output: text, outputCut: true });
+      times.push(performance.now() - started);
+    }
+    expect(text.length).toBe(MAX_STEP_TEXT_CHARS);
+    for (const out of [input, said_]) {
+      expect(out).toContain(`T=${REDACTED_TEXT}\n…99 tokens truncated…\n${REDACTED_TEXT} end`);
+      expectNoFragment(out, [secrets[9]]);
+    }
+    const worst = Math.max(...times);
+    console.info(
+      `detail cost: every line break, 200 x 4 KiB secrets, 16 KiB of 15-character lines: worst ${worst.toFixed(1)} ms, ` +
+        `mean ${(times.reduce((a, b) => a + b, 0) / times.length).toFixed(1)} ms a call`,
+    );
+    expect(worst).toBeLessThan(100);
+  });
+
   it("stays linear on self-similar secrets at both edges of a cut text", () => {
     // Half end in the text's start (the head check), half start with its end (the tail check).
     const similar = Array.from({ length: 200 }, (_, i) =>
@@ -314,6 +350,35 @@ describe("cost", () => {
     const elapsed = performance.now() - started;
     console.info(`detail cost: 200 self-similar 16 KiB secrets, both edges: ${elapsed.toFixed(1)} ms`);
     expect(elapsed).toBeLessThan(5000);
+  });
+});
+
+describe("a secret split around an elided middle", () => {
+  // Fake value only. Coding agents elide a long output's middle before the model sees it.
+  const secret = "hunter2-secret-value-xyz";
+  const detail = stepDetailer([secret]);
+  const elisions = [
+    "[... omitted 40 of 90 lines ...]",
+    // Codex's middle truncation marker.
+    "…1234 tokens truncated…",
+    // Claude Code's shortened Bash output.
+    "... [187 lines truncated] ...",
+  ];
+
+  for (const marker of elisions) {
+    it(`masks both parts around ${JSON.stringify(marker)}`, () => {
+      const output = `x\nTOKEN=hunter2-sec\n${marker}\nret-value-xyz end\n`;
+      const out = detail.output({ output, outputCut: false });
+      expect(out).toBe(`${DETAIL_OUTPUT_HEADING}x\nTOKEN=${REDACTED_TEXT}\n${marker}\n${REDACTED_TEXT} end\n`);
+      const input = detail.step(tool(`printenv\nTOKEN=hunter2-sec\n${marker}\nret-value-xyz end`));
+      expect(input).toBe(`printenv\nTOKEN=${REDACTED_TEXT}\n${marker}\n${REDACTED_TEXT} end`);
+    });
+  }
+
+  it("masks a part only at that line's edge, and leaves parts shorter than the minimum", () => {
+    const out = detail.output({ output: "a hunter2-sec b\nhunter2-sec\nhunte\nxyz next", outputCut: false });
+    // Mid-line, the same fragment is not at a line edge: it is not a split secret.
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}a hunter2-sec b\n${REDACTED_TEXT}\nhunte\nxyz next`);
   });
 });
 
