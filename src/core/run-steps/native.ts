@@ -1,7 +1,8 @@
 /**
  * Steps of native runs. The in-process engine knows each call's result; the native gateways see
  * the model's events and, in the next request, the trailing `role: "tool"` messages. A tool
- * result's content is never kept: its status is whether it starts as the runner's JSON error.
+ * result's content is kept only as a bounded tail for the writer, which stores it only for a run
+ * at the detail level, redacted. Its status is whether it starts as the runner's JSON error.
  */
 import { createHash } from "node:crypto";
 import type { EngineTurnEvent } from "../../providers/engine/types.js";
@@ -10,6 +11,7 @@ import { logger } from "../logger.js";
 import { UNTRUSTED_TOOL_OUTPUT_TAG } from "../untrusted-content.js";
 import { bounded, displayToolName, toolStepText } from "./summarize.js";
 import {
+  MAX_RESULT_OUTPUT_CHARS,
   MAX_STEP_TEXT_CHARS,
   type ExtractedResult,
   type ExtractedStep,
@@ -21,11 +23,22 @@ import {
 const stepsLog = logger.child({ module: "run-steps" });
 const UNTRUSTED_OPEN = `<${UNTRUSTED_TOOL_OUTPUT_TAG}>\n`;
 /** runSandboxTool's failure shape: `{"error": ...}` (src/providers/engine/types.ts). */
+const UNTRUSTED_CLOSE = `\n</${UNTRUSTED_TOOL_OUTPUT_TAG}>`;
 const ERROR_RESULT = /^\s*\{\s*"error"\s*:/;
 
 export function nativeToolStatus(content: string): StepStatus {
   const raw = content.startsWith(UNTRUSTED_OPEN) ? content.slice(UNTRUSTED_OPEN.length) : content;
   return ERROR_RESULT.test(raw.slice(0, 64)) ? "error" : "ok";
+}
+
+/** A native tool result's text for the detail level: the untrusted-output wrapper removed, its end only. */
+export function nativeResultOutput(content: string): { output: string; outputCut: boolean } {
+  let raw = content.startsWith(UNTRUSTED_OPEN) ? content.slice(UNTRUSTED_OPEN.length) : content;
+  if (raw.endsWith(UNTRUSTED_CLOSE)) raw = raw.slice(0, -UNTRUSTED_CLOSE.length);
+  // The tail is cut here, not with detail.ts's tailOf: that module pulls in redaction code the native worker image does not carry.
+  return raw.length > MAX_RESULT_OUTPUT_CHARS
+    ? { output: raw.slice(raw.length - MAX_RESULT_OUTPUT_CHARS), outputCut: true }
+    : { output: raw, outputCut: false };
 }
 
 export function nativeTurnSteps(
@@ -37,13 +50,23 @@ export function nativeTurnSteps(
   if (text.trim()) steps.push({ kind: "said", callId: `said:${turnKey}`, ...bounded(text) });
   for (const call of toolCalls) {
     const tool = displayToolName(call.name);
-    steps.push({ kind: "tool", callId: call.id, tool, ...toolStepText(tool, call.argsJson) });
+    steps.push({
+      kind: "tool",
+      callId: call.id,
+      tool,
+      ...toolStepText(tool, call.argsJson),
+      input: call.argsJson.slice(0, MAX_STEP_TEXT_CHARS),
+      inputTruncated: call.argsJson.length > MAX_STEP_TEXT_CHARS,
+    });
   }
   return steps;
 }
 
 export function nativeToolResults(toolCalls: readonly { id: string }[], results: readonly string[]): ExtractedResult[] {
-  return toolCalls.map((call, index) => ({ callId: call.id, status: nativeToolStatus(results[index] ?? "") }));
+  return toolCalls.map((call, index) => {
+    const content = results[index] ?? "";
+    return { callId: call.id, status: nativeToolStatus(content), ...nativeResultOutput(content) };
+  });
 }
 
 /** The results a model request carries for the previous turn: the `tool` messages after the last assistant one. */
@@ -59,7 +82,11 @@ export function nativeRequestResults(messages: readonly LlmMessage[]): Extracted
   // A trailing non-tool message (the engine's wind-down `user` message) does not hide the results.
   for (const message of messages.slice(lastAssistant + 1)) {
     if (message.role === "tool" && message.toolCallId) {
-      results.push({ callId: message.toolCallId, status: nativeToolStatus(message.content) });
+      results.push({
+        callId: message.toolCallId,
+        status: nativeToolStatus(message.content),
+        ...nativeResultOutput(message.content),
+      });
     }
   }
   return results;

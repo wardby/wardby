@@ -639,9 +639,17 @@ describe("runSandboxedEngine run steps", () => {
         {
           steps: [
             { kind: "said", callId: "said:29b48932e3b4af06690778f20598ed04", text: "Looking it up.", truncated: false },
-            { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+            {
+              kind: "tool",
+              callId: "c1",
+              tool: "lookup",
+              text: "weather",
+              truncated: false,
+              input: '{"query":"weather"}',
+              inputTruncated: false,
+            },
           ],
-          results: [{ callId: "c0", status: "error" }],
+          results: [{ callId: "c0", status: "error", output: '{"error":"x"}', outputCut: false }],
         },
       ],
     ]);

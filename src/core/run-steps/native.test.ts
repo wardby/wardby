@@ -9,7 +9,9 @@ import {
   recordStreamSteps,
   runStepsHook,
 } from "./native.js";
-import { MAX_STEP_TEXT_CHARS, type RunStepSink } from "./types.js";
+import type { LlmMessage } from "../../providers/llm/types.js";
+import { UNTRUSTED_TOOL_OUTPUT_TAG } from "../untrusted-content.js";
+import { MAX_RESULT_OUTPUT_CHARS, MAX_STEP_TEXT_CHARS, type RunStepSink } from "./types.js";
 
 const wrapped = (content: string) => `<untrusted_tool_output>\n${content}\n</untrusted_tool_output>`;
 
@@ -31,13 +33,49 @@ describe("nativeTurnSteps / nativeToolResults", () => {
       nativeTurnSteps("turn:1", "Looking up.", [{ id: "c1", name: "lookup", argsJson: '{"query":"weather"}' }]),
     ).toEqual([
       { kind: "said", callId: "said:turn:1", text: "Looking up.", truncated: false },
-      { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+      {
+        kind: "tool",
+        callId: "c1",
+        tool: "lookup",
+        text: "weather",
+        truncated: false,
+        input: '{"query":"weather"}',
+        inputTruncated: false,
+      },
     ]);
     expect(nativeTurnSteps("turn:2", "  ", [])).toEqual([]);
     expect(nativeToolResults([{ id: "c1" }, { id: "c2" }], ['{"error":"x"}', "fine"])).toEqual([
-      { callId: "c1", status: "error" },
-      { callId: "c2", status: "ok" },
+      { callId: "c1", status: "error", output: '{"error":"x"}', outputCut: false },
+      { callId: "c2", status: "ok", output: "fine", outputCut: false },
     ]);
+  });
+});
+
+describe("native detail material", () => {
+  it("attaches a tool's raw input and the end of its result", () => {
+    const args = JSON.stringify({ command: "npm test" });
+    const [step] = nativeTurnSteps("t1", "", [{ id: "c1", name: "run_command", argsJson: args }]);
+    expect(step).toMatchObject({ kind: "tool", input: args, inputTruncated: false });
+    const long = `<${UNTRUSTED_TOOL_OUTPUT_TAG}>\n${"x".repeat(10_000)}END\n</${UNTRUSTED_TOOL_OUTPUT_TAG}>`;
+    const [result] = nativeToolResults([{ id: "c1" }], [long]);
+    expect(result.output!.endsWith("END")).toBe(true);
+    expect(result.output!.length).toBe(MAX_RESULT_OUTPUT_CHARS);
+    expect(result.outputCut).toBe(true);
+    expect(result.status).toBe("ok");
+  });
+
+  it("cuts an over-long input and says so", () => {
+    const args = JSON.stringify({ text: "y".repeat(MAX_STEP_TEXT_CHARS + 50) });
+    const [step] = nativeTurnSteps("t1", "", [{ id: "c1", name: "lookup", argsJson: args }]);
+    expect(step).toMatchObject({ input: args.slice(0, MAX_STEP_TEXT_CHARS), inputTruncated: true });
+  });
+
+  it("the gateway's request results carry their output too", () => {
+    const results = nativeRequestResults([
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "run_command", argsJson: "{}" }] },
+      { role: "tool", toolCallId: "c1", content: '{"error":"boom"}' },
+    ] as LlmMessage[]);
+    expect(results).toEqual([{ callId: "c1", status: "error", output: '{"error":"boom"}', outputCut: false }]);
   });
 });
 
@@ -53,8 +91,8 @@ describe("nativeRequestResults", () => {
         { role: "tool", toolCallId: "c2", content: wrapped("done") },
       ]),
     ).toEqual([
-      { callId: "c1", status: "error" },
-      { callId: "c2", status: "ok" },
+      { callId: "c1", status: "error", output: '{"error":"x"}', outputCut: false },
+      { callId: "c2", status: "ok", output: "done", outputCut: false },
     ]);
     expect(nativeRequestResults([{ role: "user", content: "Begin." }])).toEqual([]);
   });
@@ -67,7 +105,7 @@ describe("nativeRequestResults", () => {
         { role: "tool", toolCallId: "c1", content: wrapped('{"error":"x"}') },
         { role: "user", content: "Wrap up now." },
       ]),
-    ).toEqual([{ callId: "c1", status: "error" }]);
+    ).toEqual([{ callId: "c1", status: "error", output: '{"error":"x"}', outputCut: false }]);
   });
 });
 
@@ -82,7 +120,15 @@ describe("NativeStreamSteps", () => {
     // The said id is a hash of the worker's request id: no worker text is stored as an id.
     expect(said).toMatchObject({ kind: "said", callId: "said:4a01086e5a3c8ba8c531dad0cf21c81c", truncated: true });
     expect(said.text).toHaveLength(MAX_STEP_TEXT_CHARS);
-    expect(tool).toEqual({ kind: "tool", callId: "t1", tool: "mcp:echo", text: "hi", truncated: false });
+    expect(tool).toEqual({
+      kind: "tool",
+      callId: "t1",
+      tool: "mcp:echo",
+      text: "hi",
+      truncated: false,
+      input: '{"text":"hi"}',
+      inputTruncated: false,
+    });
   });
 });
 
@@ -106,7 +152,7 @@ describe("recordStreamSteps", () => {
       "r1",
       {
         steps: [{ kind: "said", callId: expect.stringMatching(/^said:[0-9a-f]{32}$/), text: "Hi.", truncated: false }],
-        results: [{ callId: "c0", status: "ok" }],
+        results: [{ callId: "c0", status: "ok", output: "fine", outputCut: false }],
       },
       ["extra"],
     );
@@ -171,7 +217,10 @@ describe("runStepsHook", () => {
       ],
       results: [],
     });
-    expect(sink.record).toHaveBeenNthCalledWith(2, "r1", { steps: [], results: [{ callId: "c1", status: "error" }] });
+    expect(sink.record).toHaveBeenNthCalledWith(2, "r1", {
+      steps: [],
+      results: [{ callId: "c1", status: "error", output: '{"error":"x"}', outputCut: false }],
+    });
   });
 
   it("records nothing for a turn with no text and no tool calls", () => {

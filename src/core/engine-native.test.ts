@@ -882,11 +882,29 @@ describe("NativeEngine run steps", () => {
       {
         steps: [
           { kind: "said", callId: "said:turn:1", text: "Looking up.", truncated: false },
-          { kind: "tool", callId: "c1", tool: "lookup", text: "weather", truncated: false },
+          {
+            kind: "tool",
+            callId: "c1",
+            tool: "lookup",
+            text: "weather",
+            truncated: false,
+            input: expect.any(String),
+            inputTruncated: false,
+          },
         ],
         results: [],
       },
-      { steps: [], results: [{ callId: "c1", status: "error" }] },
+      {
+        steps: [],
+        results: [
+          {
+            callId: "c1",
+            status: "error",
+            output: '{"error":"not_found","message":"no such city"}',
+            outputCut: false,
+          },
+        ],
+      },
       { steps: [{ kind: "said", callId: "said:turn:2", text: "Sunny.", truncated: false }], results: [] },
     ]);
   });
