@@ -311,6 +311,28 @@ test("Refresh asks again, and /wardby-runs close closes the pane and stops polli
   expect(sinces).toHaveLength(2);
 });
 
+test("a list row shows a long pull request task as one short linked line", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const quoted = "The earlier review said: " + "x".repeat(2000);
+  const reviewer = {
+    ...runRow("r1", "succeeded", 60_000),
+    agentName: "reviewer",
+    trigger: "host_event",
+    taskOverride: `Review pull request #12 in your-org/api (head 0123456789abcdef).\n\nA review-fix round concluded.\n\n<untrusted_context>\n${quoted}\n</untrusted_context>`,
+  };
+  recordingServer(on, () => [reviewer]);
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  const link = await ui.find({ type: "Link", text: /Review pull request #12/ });
+  expect(link?.props.href).toBe("https://github.com/your-org/api/pull/12");
+  expect(link?.props.label).toBe("Review pull request #12 in your-org/api");
+  expect(await ui.find({ text: /untrusted_context|xxxxxxxxxx/ })).toBeUndefined();
+});
+
 test("rows show the trigger and task, and the status and text filters narrow the list", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);

@@ -1900,11 +1900,12 @@ export const register: Register = (on, options) => {
                         {row.task ? " · " : ""}
                       </Text>
                       {row.task && taskUrl(row.task) ? (
-                        <Link href={taskUrl(row.task) as string} label={row.task} />
+                        // One short line: a follow-up task quotes a whole review below its first line.
+                        <Link href={taskUrl(row.task) as string} label={taskLine(row.task) ?? row.task.slice(0, 90)} />
                       ) : (
                         row.task && (
                           <Text dimColor wrap="truncate-end">
-                            {row.task}
+                            {taskLine(row.task) ?? row.task.slice(0, 90)}
                           </Text>
                         )
                       )}
