@@ -1353,7 +1353,11 @@ function stepsReply(on: Parameters<Parameters<typeof test>[1]>[1], summary: stri
   });
 }
 
-function detailServer(on: Parameters<Parameters<typeof test>[1]>[1], withDetail: boolean) {
+function detailServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  withDetail: boolean,
+  details = ["npm test\n\n--- output (end) ---\nall [link](https://evil.invalid) passed", "ls"],
+) {
   const reply = (value: unknown) => ({
     value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
   });
@@ -1373,7 +1377,7 @@ function detailServer(on: Parameters<Parameters<typeof test>[1]>[1], withDetail:
       return reply({
         runId: "r1",
         level: withDetail ? "detail" : "summary",
-        steps: [step(1, "npm test\n\n--- output (end) ---\nall [link](https://evil.invalid) passed"), step(2, "ls")],
+        steps: details.map((detail, i) => step(i + 1, detail)),
         next: null,
         dropped: 0,
       });
@@ -1440,3 +1444,44 @@ test("an older server (no detail in steps): no expand controls", async ($, on) =
   expect(await ui.find({ key: "step-next" })).toBeUndefined();
   await ui.unmount();
 });
+
+test("an empty detail is no detail: no expand control for that step", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true, ["", "ls"]);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await ui.find({ key: "step-detail-1" })).toBeUndefined();
+  expect(await ui.find({ key: "step-detail-2" })).toBeDefined();
+  expect(await texts(ui)).toContain("Bash: cmd 1");
+  expect(await texts(ui)).not.toMatch(/cmd 1.*▸/);
+  await ui.unmount();
+});
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: a long detail shows its last 40 lines, wrapped, under a count of the rest`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    const lines = Array.from({ length: 100 }, (_, i) => `output line ${i + 1}`);
+    detailServer(on, true, [lines.join("\n"), "ls"]);
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    await ui.press({ key: "step-detail-1" });
+    const shown = await texts(ui);
+    expect(shown).toContain("… 60 more lines");
+    expect(shown).not.toMatch(/^output line 60$/m);
+    expect(shown).toMatch(/^output line 61$/m);
+    expect(shown).toMatch(/^output line 100$/m);
+    const detailText = (await ui.findAll({ type: "Text" })).find((el) => el.text.startsWith("output line 61"));
+    expect(detailText?.props.wrap).toBe("wrap");
+    await ui.unmount();
+  });
+}

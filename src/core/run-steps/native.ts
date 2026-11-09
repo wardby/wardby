@@ -35,8 +35,9 @@ export function nativeToolStatus(content: string): StepStatus {
 export function nativeResultOutput(content: string): { output: string; outputCut: boolean } {
   let raw = content.startsWith(UNTRUSTED_OPEN) ? content.slice(UNTRUSTED_OPEN.length) : content;
   if (raw.endsWith(UNTRUSTED_CLOSE)) raw = raw.slice(0, -UNTRUSTED_CLOSE.length);
-  // Upstream caps (the MCP client's) keep a result's head and drop its end, which the writer's
-  // tail-edge check covers; only this cut drops a head, so only it sets outputCut.
+  // Upstream caps (the MCP client's) keep a result's head and drop its end, after redacting the
+  // whole result (core/mcp-client/results.ts redacts before it cuts), so no secret is split
+  // there; only this cut drops a head, so only it sets outputCut.
   const tail = tailOf(raw);
   return { output: tail.text, outputCut: tail.cut };
 }

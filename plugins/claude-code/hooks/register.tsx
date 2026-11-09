@@ -477,10 +477,21 @@ function toSteps(value: unknown): Step[] {
         tool: str(s.tool),
         summary: s.summary,
         status: str(s.status),
-        detail: typeof s.detail === "string" ? s.detail : null,
+        // An empty detail is no detail: nothing to expand.
+        detail: typeof s.detail === "string" && s.detail !== "" ? s.detail : null,
       },
     ];
   });
+}
+
+/** The most lines of a step's detail the pane shows: its end, as a detail ends in the output's end. */
+const DETAIL_LINES = 40;
+
+/** The last DETAIL_LINES lines of `detail`, and how many lines before them are not shown. */
+function detailTail(detail: string): { text: string; hidden: number } {
+  const lines = detail.split("\n");
+  const hidden = Math.max(0, lines.length - DETAIL_LINES);
+  return { text: lines.slice(hidden).join("\n"), hidden };
 }
 
 /** The seqs of steps that have detail, in order. */
@@ -1107,14 +1118,25 @@ export const register: Register = (on, options) => {
                   ) : (
                     line
                   )}
-                  {isOpen && (
-                    // Stored already redacted; plain text only: a detail never becomes markdown or a link.
-                    <Box key={`step-text-${step.seq}`} paddingLeft={2}>
-                      <Text dimColor wrap="wrap">
-                        {step.detail}
-                      </Text>
-                    </Box>
-                  )}
+                  {isOpen &&
+                    step.detail !== null &&
+                    (() => {
+                      // Stored already redacted; plain text only: a detail never becomes markdown or a link.
+                      // Its last lines only, so one step cannot push the pane off the screen.
+                      const { text, hidden } = detailTail(step.detail);
+                      return (
+                        <Box key={`step-text-${step.seq}`} flexDirection="column" paddingLeft={2}>
+                          {hidden > 0 && (
+                            <Text dimColor>
+                              … {hidden} more {hidden === 1 ? "line" : "lines"}
+                            </Text>
+                          )}
+                          <Text dimColor wrap="wrap">
+                            {text}
+                          </Text>
+                        </Box>
+                      );
+                    })()}
                 </Box>
               );
             })}

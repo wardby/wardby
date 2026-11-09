@@ -48,6 +48,7 @@ are off on this server." See `run-steps`. Steps need Wardby 0.9.0 or later
 on the server. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
 terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
 appears only for the agent's owner and the run's starter (and the stdio
-operator), on a server at the detail level.
+operator), on a server at the detail level. An expanded detail shows its last
+40 lines, with a count of the lines above them.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

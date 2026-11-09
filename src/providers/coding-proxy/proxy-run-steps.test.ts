@@ -484,6 +484,23 @@ describe("CodingProxy run steps", () => {
       expect(toolSteps.some((s) => "input" in s)).toBe(sent);
     });
 
+    it.each(cases)(
+      "a whole (non-stream) reply, session %s under proxy ceiling %s: input sent = %s",
+      async (level, ceiling, sent) => {
+        const reply = JSON.parse(await stepsFixture("anthropic-run-command-response.json"));
+        const request = JSON.parse(await stepsFixture("anthropic-tool-result-request.json"));
+        request.stream = false;
+        const h = await harness("anthropic-messages", () => Response.json(reply), {
+          runStepsLevel: level,
+          runStepsCeiling: ceiling,
+        });
+        await h.execute(JSON.stringify(request), "k1");
+        const toolSteps = h.stepBatches()[0].batch.steps.filter((s) => s.kind === "tool");
+        expect(toolSteps.map((s) => s.callId)).toEqual(["toolu_steps_2"]);
+        expect(toolSteps.some((s) => "input" in s)).toBe(sent);
+      },
+    );
+
     it.each(["anthropic-messages", "openai-responses"] as const)(
       "%s: a session at off extracts and submits nothing",
       async (protocol) => {

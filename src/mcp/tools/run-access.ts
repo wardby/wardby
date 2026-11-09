@@ -29,9 +29,9 @@ export async function canReadRun(
 
 /**
  * Detail text (the run steps' detail level): only the agent's owner, the run's starter, or the
- * stdio operator. Defence in depth, narrower than canReadRun on purpose: a reader who gets a run
- * through an owner-level grant or admin role, without owning the agent or starting the run,
- * still gets the step lines only.
+ * stdio operator. Today these are exactly canReadRun's readers (no grant reaches owner access, and
+ * run reads consult no admin role); this is defence in depth, so that a way to read runs added
+ * later does not reach detail text without its own decision.
  */
 export async function canReadRunDetail(
   db: Pick<PrismaClient, "agent">,
