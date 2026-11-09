@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudePluginCommand, PANE_TOOLS, type ClaudePluginDeps } from "./command.js";
+import { claudePluginCommand, claudePluginDoctorLines, PANE_TOOLS, type ClaudePluginDeps } from "./command.js";
 
 /** A fake `claude`: answers by subcommand, records every call. */
 function fakeDeps(
@@ -253,9 +253,68 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
       "mcp__wardby-prod__list_agents",
       "mcp__wardby-prod__get_run",
       "mcp__wardby-prod__get_run_transcript",
+      "mcp__wardby-prod__get_run_steps",
     ]);
     const bad = fakeDeps({ hasServer: true });
     expect(await claudePluginCommand(["install", "--server-name", "x y"], bad.deps)).toBe(1);
+  });
+
+  it("an install from before run steps gains only the get_run_steps rule, and uninstall removes it", async () => {
+    const earlier = [
+      "mcp__wardby__list_runs",
+      "mcp__wardby__list_agents",
+      "mcp__wardby__get_run",
+      "mcp__wardby__get_run_transcript",
+    ];
+    const { deps, lines, settings, wardbyDir, configDir } = fakeDeps({
+      hasServer: true,
+      settings: { permissions: { allow: ["Bash(git status)", ...earlier] } },
+    });
+    // The record an older install left, in the file the install writes.
+    writeFileSync(
+      join(wardbyDir, "claude-plugin.json"),
+      JSON.stringify({ settingsPath: join(configDir, "settings.json"), rules: earlier, tui: false }),
+    );
+    // Status and doctor name the missing rule and say how to add it.
+    await claudePluginCommand(["install", "--no-allow-tools"], deps);
+    lines.length = 0;
+    await claudePluginCommand(["status"], deps);
+    const status = lines.join("\n");
+    expect(status).toContain("mcp__wardby__get_run_steps");
+    expect(status).not.toContain("mcp__wardby__list_runs,");
+    expect(status).toMatch(/Re-run `wardby claude-plugin install --allow-tools`/);
+    const doctor = claudePluginDoctorLines(deps).join("\n");
+    expect(doctor).toContain("mcp__wardby__get_run_steps");
+    expect(doctor).toMatch(/claude-plugin install --allow-tools/);
+
+    await claudePluginCommand(["install", "--allow-tools"], deps);
+    expect(lines).toContain("✓ Allowed mcp__wardby__get_run_steps.");
+    expect((settings().permissions as { allow: string[] }).allow).toEqual([
+      "Bash(git status)",
+      ...earlier,
+      "mcp__wardby__get_run_steps",
+    ]);
+    // A third run changes nothing.
+    await claudePluginCommand(["install", "--allow-tools"], deps);
+    expect(lines).toContain("✓ The pane's tools are already allowed.");
+    expect((settings().permissions as { allow: string[] }).allow).toHaveLength(6);
+
+    await claudePluginCommand(["uninstall"], deps);
+    expect((settings().permissions as { allow: string[] }).allow).toEqual(["Bash(git status)"]);
+  });
+
+  it("uninstall leaves a get_run_steps rule the user added themselves", async () => {
+    const { deps, settings, wardbyDir, configDir } = fakeDeps({
+      hasServer: true,
+      settings: { permissions: { allow: ["mcp__wardby__get_run_steps"] } },
+    });
+    writeFileSync(
+      join(wardbyDir, "claude-plugin.json"),
+      JSON.stringify({ settingsPath: join(configDir, "settings.json"), rules: [], tui: false }),
+    );
+    await claudePluginCommand(["install", "--allow-tools"], deps);
+    await claudePluginCommand(["uninstall"], deps);
+    expect((settings().permissions as { allow: string[] }).allow).toEqual(["mcp__wardby__get_run_steps"]);
   });
 
   it("quickstart offers the pane only once Claude Code is connected, and honours its flags", async () => {

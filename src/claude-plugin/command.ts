@@ -21,9 +21,14 @@ export const PLUGIN = "wardby-runs";
 export const DEFAULT_MARKETPLACE = "wardby/wardby";
 export const MCP_SERVER = "wardby";
 
-/** The pane's read-only tools on a server: what auto mode needs allowed. stop_run is never added: it changes a run. */
+/**
+ * The pane's read-only tools on a server: what auto mode needs allowed. stop_run is never added: it
+ * changes a run. get_run_steps backs Recent steps and Steps; against an older server the rule is harmless.
+ */
 export function paneTools(server: string): string[] {
-  return ["list_runs", "list_agents", "get_run", "get_run_transcript"].map((tool) => `mcp__${server}__${tool}`);
+  return ["list_runs", "list_agents", "get_run", "get_run_transcript", "get_run_steps"].map(
+    (tool) => `mcp__${server}__${tool}`,
+  );
 }
 export const PANE_TOOLS = paneTools(MCP_SERVER);
 
@@ -332,7 +337,7 @@ export function pluginStatus(deps: ClaudePluginDeps, serverName = MCP_SERVER): n
   deps.out(
     missing.length === 0
       ? `✓ the pane's tools are allowed in ${settingsPath}`
-      : `! not allowed in ${settingsPath} (auto mode refuses them): ${missing.join(", ")}`,
+      : `! not allowed in ${settingsPath} (auto mode refuses them): ${missing.join(", ")}. Re-run \`wardby claude-plugin install --allow-tools\` to add them.`,
   );
   return plugin && server ? 0 : 1;
 }
@@ -386,7 +391,7 @@ export function claudePluginDoctorLines(deps: ClaudePluginDeps, serverName = MCP
   lines.push(
     missing.length === 0
       ? "✓ the pane's tools are allowed for auto mode"
-      : `! not allowed for auto mode in ${settingsPath}: ${missing.join(", ")} (needed only in auto mode)`,
+      : `! not allowed for auto mode in ${settingsPath}: ${missing.join(", ")} (needed only in auto mode; re-run \`claude-plugin install --allow-tools\` to add them)`,
   );
   return lines;
 }
