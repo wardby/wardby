@@ -1485,3 +1485,51 @@ for (const surface of ["desktop", "terminal"] as const) {
     await ui.unmount();
   });
 }
+
+test("a step stored by an older server with escape sequences is drawn without them", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  // Fake content: an OSC 8 link and colour codes in the summary, an OSC 52 clipboard write in the detail.
+  const esc = "\u001b";
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded" });
+    if (e.tool === "get_run_steps")
+      return reply({
+        runId: "r1",
+        level: "detail",
+        steps: [
+          {
+            seq: 1,
+            at: iso(1000),
+            kind: "tool",
+            tool: "Bash",
+            summary: `${esc}]8;;https://evil.invalid\u0007npm${esc}]8;;\u0007 ${esc}[1mtest${esc}[0m`,
+            status: "ok",
+            detail: `npm test\n\n--- output (end) ---\n${esc}]52;c;ZmFrZQ==\u0007${esc}[31mfailed${esc}[0m\r\n`,
+          },
+        ],
+        next: null,
+        dropped: 0,
+      });
+    return reply({});
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  await ui.press({ key: "step-detail-1" });
+  const shown = await texts(ui);
+  expect(shown).toContain("Bash: npm test");
+  expect(shown).toContain("--- output (end) ---\nfailed");
+  expect(shown).not.toContain(esc);
+  expect(shown).not.toContain("\r");
+  expect(shown).not.toContain("evil.invalid");
+  expect(shown).not.toContain("ZmFrZQ");
+  await ui.unmount();
+});

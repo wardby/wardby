@@ -278,6 +278,64 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     }
   });
 
+  describe("a malformed escape sequence just before a secret value", () => {
+    // Fake run-given value; each probe's sequence would take its first character as a final byte.
+    const value = "Zq9vLmT4pXw2Rk7s";
+    const probes = ["\u001b", "\u001b[", "\u001b[12", "\u001b(", "\u009b"].map((lead) => `${lead}${value}`);
+
+    for (const probe of probes) {
+      const shown = probe.replace(/[^ -~]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+      it(`masks ${shown} in summary and detail, as said text, input and output`, async () => {
+        for (const level of ["summary", "detail"] as const) {
+          const run = await newRun(level);
+          const w = writer({ level: "detail" });
+          await w.record(
+            run.id,
+            {
+              steps: [
+                { ...tool("c1", `echo ${probe} done`), input: `{"command":"echo ${probe} done"}` },
+                { kind: "said", callId: "said:1", text: `the value is ${probe} ok`, truncated: false },
+              ],
+              results: [],
+            },
+            [value],
+          );
+          await w.record(
+            run.id,
+            { steps: [], results: [{ callId: "c1", status: "ok", output: `out ${probe}\nend` }] },
+            [value],
+          );
+          const rows = await rowsOf(run.id);
+          expect(rows).toHaveLength(2);
+          for (const row of rows) {
+            for (const text of [row.summary, row.detail ?? ""]) {
+              expect(text).not.toContain(value.slice(1, 7));
+              expect(text).not.toContain(value.slice(-6));
+            }
+            expect(row.summary).toContain("[REDACTED]");
+            if (level === "detail") expect(row.detail).toContain("[REDACTED]");
+          }
+          // A malformed sequence's own bytes may remain ("12"), never the value's.
+          if (level === "detail")
+            expect(rows[0].detail).toMatch(/--- output \(end\) ---\nout (?:12)?\[REDACTED\]\nend$/);
+        }
+      });
+    }
+  });
+
+  it("adds no stripped form of a value too short to redact safely", async () => {
+    const run = await newRun("detail");
+    // Fake value that strips to "ab": masking every "ab" would blank ordinary text.
+    await writer({ level: "detail" }).record(
+      run.id,
+      { steps: [{ kind: "said", callId: "said:1", text: "about tab labs", truncated: false }], results: [] },
+      ["\u001b[31mab"],
+    );
+    const [row] = await rowsOf(run.id);
+    expect(row.summary).toBe("about tab labs");
+    expect(row.detail).toBe("about tab labs");
+  });
+
   it("below detail never stores detail, even when the batch carries it", async () => {
     for (const level of ["summary", null] as const) {
       const run = await newRun(level);

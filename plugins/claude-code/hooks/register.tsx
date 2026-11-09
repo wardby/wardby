@@ -475,13 +475,32 @@ function toSteps(value: unknown): Step[] {
         at: String(s.at ?? ""),
         kind: String(s.kind ?? ""),
         tool: str(s.tool),
-        summary: s.summary,
+        summary: plainText(s.summary),
         status: str(s.status),
         // An empty detail is no detail: nothing to expand.
-        detail: typeof s.detail === "string" && s.detail !== "" ? s.detail : null,
+        detail: typeof s.detail === "string" && plainText(s.detail) !== "" ? plainText(s.detail) : null,
       },
     ];
   });
+}
+
+/* eslint-disable no-control-regex -- matching control characters is the point */
+// A copy of src/core/run-steps/control-chars.ts (the plugin cannot import src/): servers strip step
+// text before storing it, but rows stored by an older server can still hold escape sequences.
+const STRING_SEQUENCE = /(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)/g;
+const CSI_SEQUENCE = /(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
+const ESCAPE_SEQUENCE = /\x1b[\x20-\x2f]*[\x30-\x7e]?/g;
+const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+/* eslint-enable no-control-regex */
+
+/** Step text without terminal control sequences or control characters other than \n and \t. */
+function plainText(text: string): string {
+  return text
+    .replace(STRING_SEQUENCE, "")
+    .replace(CSI_SEQUENCE, "")
+    .replace(ESCAPE_SEQUENCE, "")
+    .replace(/\r\n/g, "\n")
+    .replace(CONTROL, "");
 }
 
 /** The most lines of a step's detail the pane shows: its end, as a detail ends in the output's end. */

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { stripControlSequences } from "./control-chars.js";
 
@@ -45,5 +46,16 @@ describe("stripControlSequences", () => {
   it("keeps plain text, Unicode included, exactly", () => {
     const text = "plain\ttext\nwith ünïcödé, emoji 🙂 and … ellipsis";
     expect(stripControlSequences(text)).toBe(text);
+  });
+});
+
+describe("the run pane's copy (plugins/claude-code, which cannot import src/)", () => {
+  it("uses the same four patterns", () => {
+    const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+    const source = read("./control-chars.ts");
+    const pane = read("../../../plugins/claude-code/hooks/register.tsx");
+    const patterns = [...source.matchAll(/^const [A-Z_]+ = \/.*\/g;$/gm)].map((m) => m[0]);
+    expect(patterns).toHaveLength(4);
+    for (const pattern of patterns) expect(pane).toContain(pattern);
   });
 });
