@@ -682,7 +682,7 @@ logs `power: proxy slept (idle 30m)`.
 
 **Waking.** Starting a coding run scales the proxy to 1 and waits for a ready
 endpoint. Starting a sandbox run does the same for the gateway, and so does starting a
-coding run with MCP tools, whose MCP calls go through the gateway (0.8.1 and later): it wakes the
+coding run with MCP tools, whose MCP calls go through the gateway (0.9.0 and later): it wakes the
 proxy and gateway at once and fails before launch with
 [`coding_failure_mcp_gateway_unavailable`](../help/errors/coding-mcp-gateway-unavailable.md)
 if the gateway does not wake. The wait is at
