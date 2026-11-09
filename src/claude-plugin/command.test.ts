@@ -10,6 +10,12 @@ function fakeDeps(
     hasClaude?: boolean;
     hasServer?: boolean;
     installFails?: boolean;
+    /** Claude Code leaves the newly installed plugin turned off, as some versions do. */
+    installsDisabled?: boolean;
+    /** `claude plugin enable` fails. */
+    enableFails?: boolean;
+    /** Plugin list output to return instead of the fake's own (for parsing tests). */
+    listOutput?: string;
     confirm?: boolean;
     settings?: unknown;
   } = {},
@@ -25,6 +31,7 @@ function fakeDeps(
   const calls: string[][] = [];
   const lines: string[] = [];
   let pluginListed = false;
+  let pluginEnabled = !opts.installsDisabled;
   const deps: ClaudePluginDeps = {
     run: (command, args) => {
       calls.push([command, ...args]);
@@ -38,8 +45,20 @@ function fakeDeps(
         pluginListed = true;
         return ok;
       }
-      if (args[0] === "plugin" && args[1] === "list")
-        return { ...ok, stdout: pluginListed ? "  ❯ wardby-runs@wardby\n" : "" };
+      if (args[0] === "plugin" && args[1] === "enable") {
+        if (opts.enableFails) return { status: 1, stdout: "", stderr: "Plugin not found in any marketplace" };
+        pluginEnabled = true;
+        return ok;
+      }
+      if (args[0] === "plugin" && args[1] === "list") {
+        if (opts.listOutput !== undefined) return { ...ok, stdout: opts.listOutput };
+        return {
+          ...ok,
+          stdout: pluginListed
+            ? `  ❯ wardby-runs@wardby\n    Version: 0.9.0\n    Scope: user\n    Status: ${pluginEnabled ? "✔ enabled" : "✘ disabled"}\n`
+            : "",
+        };
+      }
       if (args[0] === "plugin" && args[1] === "uninstall") {
         pluginListed = false;
         return ok;
@@ -157,6 +176,48 @@ describe("wardby claude-plugin install", () => {
   });
 });
 
+describe("wardby claude-plugin install turns the plugin on", () => {
+  it("enables a plugin that Claude Code installed turned off, by its exact id", async () => {
+    const { deps, calls, lines } = fakeDeps({ hasServer: true, installsDisabled: true });
+    expect(await claudePluginCommand(["install", "--no-allow-tools"], deps)).toBe(0);
+    expect(calls).toContainEqual(["claude", "plugin", "enable", "wardby-runs@wardby"]);
+    expect(lines.join("\n")).toMatch(/Turned on wardby-runs@wardby/);
+  });
+
+  it("says how to turn it on when enabling fails", async () => {
+    const { deps, lines } = fakeDeps({ hasServer: true, installsDisabled: true, enableFails: true });
+    await claudePluginCommand(["install", "--no-allow-tools"], deps);
+    expect(lines.join("\n")).toMatch(
+      /! wardby-runs@wardby is installed but turned off, and turning it on failed: Plugin not found in any marketplace\. Run \/plugin/,
+    );
+  });
+
+  it("leaves an already enabled plugin alone", async () => {
+    const { deps, calls } = fakeDeps({ hasServer: true });
+    await claudePluginCommand(["install", "--no-allow-tools"], deps);
+    expect(calls.some((c) => c[2] === "enable")).toBe(false);
+  });
+
+  it("reads each plugin's own Status line, not a neighbour's", async () => {
+    const { pluginEntries } = await import("./command.js");
+    const listOutput = [
+      "Installed plugins:",
+      "  ❯ wardby-runs@wardby",
+      "    Version: 0.9.0",
+      "    Status: ✔ enabled",
+      "  ❯ other-plugin@somewhere",
+      "    Status: ✘ disabled",
+      "  ❯ wardby-runs@wardby-runs-local",
+      "    Status: ✘ disabled",
+      "",
+    ].join("\n");
+    expect(pluginEntries(fakeDeps({ listOutput }).deps)).toEqual([
+      { id: "wardby-runs@wardby", enabled: true },
+      { id: "wardby-runs@wardby-runs-local", enabled: false },
+    ]);
+  });
+});
+
 describe("wardby claude-plugin uninstall and status", () => {
   it("removes the plugin and only the rules and view install added", async () => {
     const { deps, calls, settings } = fakeDeps({
@@ -179,14 +240,31 @@ describe("wardby claude-plugin uninstall and status", () => {
     lines.length = 0;
     expect(await claudePluginCommand(["status"], deps)).toBe(0);
     expect(lines).toEqual([
-      "✓ wardby-runs plugin installed",
+      "✓ wardby-runs plugin installed and on",
       "✓ wardby MCP server configured",
       expect.stringMatching(/^✓ the pane's tools are allowed in /),
     ]);
   });
+
+  it("reports an installed-but-off plugin as a failure, naming the command that turns it on", async () => {
+    const listOutput = "  ❯ wardby-runs@wardby\n    Status: ✘ disabled\n";
+    const { deps, lines } = fakeDeps({ hasServer: true, listOutput });
+    expect(await claudePluginCommand(["status"], deps)).toBe(1);
+    expect(lines[0]).toBe(
+      "✗ wardby-runs@wardby is installed but turned off: run `claude plugin enable wardby-runs@wardby`",
+    );
+    expect(lines.join("\n")).not.toMatch(/installed and on/);
+  });
 });
 
 describe("wardby doctor's Claude Code pane lines", () => {
+  it("warns when the plugin is installed but turned off", async () => {
+    const listOutput = "  ❯ wardby-runs@wardby\n    Status: ✘ disabled\n";
+    const lines = claudePluginDoctorLines(fakeDeps({ hasServer: true, listOutput }).deps);
+    expect(lines[0]).toMatch(/^! wardby-runs@wardby is installed but turned off/);
+    expect(lines[0]).toContain("claude plugin enable wardby-runs@wardby");
+  });
+
   it("says nothing without Claude Code, and suggests the pane when it isn't installed", async () => {
     const { claudePluginDoctorLines } = await import("./command.js");
     expect(claudePluginDoctorLines(fakeDeps({ hasClaude: false }).deps)).toEqual([]);
