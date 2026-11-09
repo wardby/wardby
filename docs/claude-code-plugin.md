@@ -108,23 +108,33 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   one row with its state and total cost, folded once every run in it finished.
   A pull request with one run is one line. Runs that touch no pull request are
   under **Other**. Each line names its step (opened, review, fix 1, …), with
-  sub-agent runs under their lead.
+  sub-agent runs under their lead, and shows the run's status as a coloured
+  pill, its spend as "$x of $y", what started it, its task and how long it
+  ran, over a thin budget bar.
 - **Strips** (desktop): one card per pull request, its steps drawn as a row of
   dots; click a step's name to see it.
 - **Filters**: show all, active, failed or finished runs, or type to match an
   agent, status, trigger or task.
-- **Run detail**: what started the run and what it produced, its request and
-  final answer (as markdown; **Show full text** for all of it), services,
-  errors, the run tree, and **Continue locally** for finished Claude Code runs
-  with `sessionResume` on (see [Resume Claude Code runs locally](coding-agent-setup.md#resume-a-run-locally)).
+- **Run detail**: a header with the run's status, short id, repository, model,
+  duration and budget bar, then a card each for what started the run (with its
+  request), what it produced, the run tree, services (ready, starting or
+  failed), steps, the final answer and **Continue locally** for finished Claude
+  Code runs with `sessionResume` on (see [Resume Claude Code runs locally](coding-agent-setup.md#resume-a-run-locally)).
+  The request and final answer show about three lines, as markdown, then how
+  many more; **Show full text** shows all of it. The pull request link and the
+  other actions sit at the bottom.
+- **Copy**: on the desktop, each card (and an error, and an open step's detail)
+  has a **Copy** button that copies its full text as the server sent it. In the
+  terminal, **Copy section** (`y`) copies the open step's detail; **Copy run
+  id** is on both.
 - **Recent steps** (a running run's detail): its last 8 steps, one line each
-  (the tool and its command or file, or what the model said, with `✗` and the
-  exit status when a command failed), refreshed with the run. Long lines wrap
-  rather than cut.
+  (the tool and its command or file, or what the model said), each after a
+  pill with its result (ok, error, the exit status of a failed command, or
+  said), refreshed with the run. Long lines wrap rather than cut.
 - **Steps** (a finished run's detail): every recorded step, 200 at a time;
   **More steps** loads the next 200.
-- **Step detail**: From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
-  terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
+- **Step detail**: From 0.9.0, a step with detail (marked ▸) expands: click it,
+  or its **Show detail** button, on the desktop; in the terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
   appears only for the agent's owner and the run's starter (and the stdio
   operator), on a server at the detail level. An expanded detail shows its last
   40 lines, with a count of the lines above them.
@@ -151,8 +161,8 @@ polls only while it is open.
 
 Claude Code's classic terminal view draws a plugin pane as a band above the
 prompt and doesn't pass mouse clicks to plugins: use the keyboard (ctrl+x tab
-focuses the pane, then `1`–`9` open a run, `r` refreshes, `b` goes back, `x` or
-Escape closes). In the fullscreen view the pane is a side bar beside the chat
+focuses the pane, then `1`–`9` open a run, `r` refreshes, `b` goes back, `m`
+shows full text, `y` copies an open step's detail, `x` or Escape closes). In the fullscreen view the pane is a side bar beside the chat
 and takes clicks. Turn it on with `"tui": "fullscreen"` in your Claude Code
 settings (or `--fullscreen` above, or `CLAUDE_CODE_NO_FLICKER=1`), then restart
 Claude Code. The desktop app needs none of this.

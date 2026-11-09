@@ -3,7 +3,7 @@ id: claude-code-run-pane
 title: See your runs in Claude Code (the wardby-runs plugin)
 summary: Install the wardby-runs Claude Code plugin to see your runs beside the chat, grouped by pull request, with run details and Continue locally.
 audience: operator
-tags: [run steps, get_run_steps, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode, permissions]
+tags: [run steps, get_run_steps, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode, permissions, copy]
 appliesTo: >=0.8.0
 ---
 
@@ -50,5 +50,10 @@ terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
 appears only for the agent's owner and the run's starter (and the stdio
 operator), on a server at the detail level. An expanded detail shows its last
 40 lines, with a count of the lines above them.
+
+Each section of a run's detail is a card. On the desktop each card, an error
+and an open step's detail have a **Copy** button that copies the full text as
+the server sent it; in the terminal, **Copy section** (`y`) copies the open
+step's detail.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).
