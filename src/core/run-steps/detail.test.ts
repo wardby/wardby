@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collapseWithMap, joinDetail, stepDetailer, tailOf } from "./detail.js";
+import { collapseWithMap, joinDetail, stepDetailer } from "./detail.js";
 import { collapseWhitespace, stepSummarizer } from "./summarize.js";
 import {
   DETAIL_INPUT_CHARS,
@@ -9,6 +9,7 @@ import {
   MAX_RESULT_OUTPUT_CHARS,
   MAX_STEP_DETAIL_CHARS,
   MAX_STEP_TEXT_CHARS,
+  tailOf,
 } from "./types.js";
 
 // Fake values only: never real credentials.

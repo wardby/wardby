@@ -15,11 +15,11 @@ import {
   DETAIL_OUTPUT_CHARS,
   DETAIL_OUTPUT_HEADING,
   DETAIL_SAID_CHARS,
-  MAX_RESULT_OUTPUT_CHARS,
   MAX_STEP_DETAIL_CHARS,
   MAX_STEP_TEXT_CHARS,
   type ExtractedResult,
   type ExtractedStep,
+  tailOf,
 } from "./types.js";
 
 const WS = /\s/;
@@ -56,11 +56,6 @@ export function collapseWithMap(text: string): { collapsed: string; from: number
     }
   }
   return { collapsed: parts.join(""), from, to };
-}
-
-/** The end of `text`, at most `max` characters, and whether anything before it was dropped. */
-export function tailOf(text: string, max = MAX_RESULT_OUTPUT_CHARS): { text: string; cut: boolean } {
-  return text.length > max ? { text: text.slice(text.length - max), cut: true } : { text, cut: false };
 }
 
 /** What follows the first line break; nothing when there is none (a cut head leaves a partial first line). */

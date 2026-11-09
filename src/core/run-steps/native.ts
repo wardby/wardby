@@ -11,19 +11,19 @@ import { logger } from "../logger.js";
 import { UNTRUSTED_TOOL_OUTPUT_TAG } from "../untrusted-content.js";
 import { bounded, displayToolName, toolStepText } from "./summarize.js";
 import {
-  MAX_RESULT_OUTPUT_CHARS,
   MAX_STEP_TEXT_CHARS,
   type ExtractedResult,
   type ExtractedStep,
   type RunStepBatch,
   type RunStepSink,
   type StepStatus,
+  tailOf,
 } from "./types.js";
 
 const stepsLog = logger.child({ module: "run-steps" });
 const UNTRUSTED_OPEN = `<${UNTRUSTED_TOOL_OUTPUT_TAG}>\n`;
-/** runSandboxTool's failure shape: `{"error": ...}` (src/providers/engine/types.ts). */
 const UNTRUSTED_CLOSE = `\n</${UNTRUSTED_TOOL_OUTPUT_TAG}>`;
+/** runSandboxTool's failure shape: `{"error": ...}` (src/providers/engine/types.ts). */
 const ERROR_RESULT = /^\s*\{\s*"error"\s*:/;
 
 export function nativeToolStatus(content: string): StepStatus {
@@ -35,10 +35,10 @@ export function nativeToolStatus(content: string): StepStatus {
 export function nativeResultOutput(content: string): { output: string; outputCut: boolean } {
   let raw = content.startsWith(UNTRUSTED_OPEN) ? content.slice(UNTRUSTED_OPEN.length) : content;
   if (raw.endsWith(UNTRUSTED_CLOSE)) raw = raw.slice(0, -UNTRUSTED_CLOSE.length);
-  // The tail is cut here, not with detail.ts's tailOf: that module pulls in redaction code the native worker image does not carry.
-  return raw.length > MAX_RESULT_OUTPUT_CHARS
-    ? { output: raw.slice(raw.length - MAX_RESULT_OUTPUT_CHARS), outputCut: true }
-    : { output: raw, outputCut: false };
+  // Upstream caps (the MCP client's) keep a result's head and drop its end, which the writer's
+  // tail-edge check covers; only this cut drops a head, so only it sets outputCut.
+  const tail = tailOf(raw);
+  return { output: tail.text, outputCut: tail.cut };
 }
 
 export function nativeTurnSteps(

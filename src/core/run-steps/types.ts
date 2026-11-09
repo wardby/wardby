@@ -72,6 +72,11 @@ export const DETAIL_SAID_CHARS = 8 * 1024;
 export const MAX_STEP_DETAIL_CHARS = 16 * 1024;
 /** The most of a tool result's output a source sends (its end): more than DETAIL_OUTPUT_CHARS, so a secret across the cut is still whole. */
 export const MAX_RESULT_OUTPUT_CHARS = 4 * 1024;
+
+/** The end of `text`, at most `max` characters, and whether anything before it was dropped. */
+export function tailOf(text: string, max = MAX_RESULT_OUTPUT_CHARS): { text: string; cut: boolean } {
+  return text.length > max ? { text: text.slice(text.length - max), cut: true } : { text, cut: false };
+}
 /** Between a tool's input and its output in the detail text. */
 export const DETAIL_OUTPUT_HEADING = "\n\n--- output (end) ---\n";
 
