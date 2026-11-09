@@ -69,7 +69,7 @@ describe("RunStepForwarder", () => {
     expect(ids).toEqual(results.map((r) => r.callId));
   });
 
-  it("counts input and output bytes in the queue bound: detail-sized steps are dropped past 8 MiB", async () => {
+  it("counts input and output bytes in the queue bound: a detail-sized batch is dropped where its text alone would fit", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
     const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => {
@@ -80,15 +80,17 @@ describe("RunStepForwarder", () => {
     const forwarder = new RunStepForwarder({
       url: URL_BASE,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      maxQueueBytes: 100_000,
       log: { info },
     });
+    // Small text, so an estimate that ignores input and output sees about 1.5 KB; with them it is about 63 KB.
     const big: RunStepBatch = {
       steps: [
         {
           kind: "tool",
           callId: "c1",
           tool: "Bash",
-          text: "t".repeat(MAX_STEP_TEXT_CHARS),
+          text: "ls",
           truncated: false,
           input: "i".repeat(MAX_STEP_TEXT_CHARS),
           inputTruncated: false,
@@ -98,17 +100,13 @@ describe("RunStepForwarder", () => {
     };
     forwarder.submit(CAP, "r1", big); // taken at once, waiting on the gate
     await new Promise((resolve) => setImmediate(resolve));
-    for (let n = 0; n < 300; n += 1) forwarder.submit(CAP, "r1", big);
+    for (let n = 0; n < 5; n += 1) forwarder.submit(CAP, "r1", big);
+    // One fits the 100 KB bound; the other four are dropped.
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue_full" }), expect.any(String));
     release();
     await forwarder.flush();
-    const queuedBodies = fetchImpl.mock.calls
-      .slice(1)
-      .filter(([, init]) => (init.body as string).includes('"steps":[{'));
-    const bytes = queuedBodies.reduce((sum, [, init]) => sum + Buffer.byteLength(init.body as string), 0);
-    expect(queuedBodies.length).toBeGreaterThan(10);
-    expect(queuedBodies.length).toBeLessThan(300);
-    expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    // Two batches sent (the first, and the one queued), two POSTs each (steps, then results).
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
   it("drops on a full queue and logs only a reason and a count", async () => {
