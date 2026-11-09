@@ -46,6 +46,7 @@ async function run(
     finishedAt?: Date | null;
     triggeredById?: string;
     finalText?: string;
+    taskOverride?: string;
   } = {},
 ) {
   return db.run.create({
@@ -56,6 +57,7 @@ async function run(
       finishedAt: opts.finishedAt ?? null,
       triggeredById: opts.triggeredById ?? null,
       finalText: opts.finalText ?? "a long final answer",
+      taskOverride: opts.taskOverride ?? null,
     },
   });
 }
@@ -125,6 +127,28 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     await db.agent.deleteMany({ where: { id: { in: agentIds } } });
     await db.principal.deleteMany({ where: { id: { in: principalIds } } });
     await db.$disconnect();
+  });
+
+  it("cuts each row's taskOverride to 600 characters, so a long issue body can't overflow the reply", async () => {
+    const owner = await principal();
+    const mine = await agent(owner.id, "long-task");
+    const head = "Automatic fix round 1 of 2 for PR #491: the review requested changes.";
+    const long = `${head}\n\n${"x".repeat(10_000)}`;
+    const big = await run(mine.id, { taskOverride: long });
+    const small = await run(mine.id, { taskOverride: "Review pull request #12 in your-org/api" });
+    const c = await connect(owner);
+    const rows = await c.list({ limit: 200 });
+    const bigRow = rows.find((r) => r.id === big.id) as Row;
+    expect(String(bigRow.taskOverride).length).toBe(600);
+    expect(String(bigRow.taskOverride).startsWith(head)).toBe(true);
+    expect(bigRow.taskOverrideTruncated).toBe(true);
+    const smallRow = rows.find((r) => r.id === small.id) as Row;
+    expect(smallRow.taskOverride).toBe("Review pull request #12 in your-org/api");
+    expect(smallRow.taskOverrideTruncated).toBeUndefined();
+    // One agent's listing and get_run still give the whole text.
+    const own = await c.list({ agentId: mine.id });
+    expect(String(own.find((r) => r.id === big.id)?.taskOverride).length).toBe(long.length);
+    await c.close();
   });
 
   it("lists every run of my agents and only my own runs on agents I can read, newest first", async () => {

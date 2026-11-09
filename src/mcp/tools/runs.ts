@@ -100,6 +100,12 @@ async function runGraphFields(ctx: Pick<McpRequestContext, "db">, runIds: readon
 const ACTIVE_STATUSES: RunStatus[] = ["pending", "running"];
 /** Rows returned without an agentId: a default and a cap, since it spans every agent the caller can see. */
 const ACROSS_AGENTS_DEFAULT_LIMIT = 50;
+/**
+ * The most of a run's taskOverride a cross-agent row carries. A run started from GitHub or Jira holds the
+ * whole issue or review text (often 5-10 KB), and a full listing of such rows can pass an MCP client's
+ * result limit; a list needs the task's first lines only. One agent's listing and get_run keep it whole.
+ */
+export const ACROSS_AGENTS_TASK_CHARS = 600;
 const ACROSS_AGENTS_MAX_LIMIT = 200;
 
 /** The `active` and `since` filters, as clauses to AND onto the visibility rule. */
@@ -163,8 +169,12 @@ async function listRunsAcrossAgents(
   );
   return runs.map((run) => {
     const agent = byId.get(run.agentId);
+    const cut = run.taskOverride !== null && run.taskOverride.length > ACROSS_AGENTS_TASK_CHARS;
     return {
       ...run,
+      ...(cut
+        ? { taskOverride: run.taskOverride?.slice(0, ACROSS_AGENTS_TASK_CHARS), taskOverrideTruncated: true }
+        : {}),
       agentName: agent?.name ?? null,
       agentBudgetUsd: agent ? Number(agent.budgetUsd) : null,
       ...(graph.get(run.id) ?? { triggerInfo: null, outcomes: [], serviceReadiness: [] }),
@@ -200,7 +210,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     description:
       "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
       "(each row adds agentName, agentBudgetUsd, triggerInfo, outcomes, serviceReadiness and lastStep (the run's newest step as one line, when it has steps; the agentId listing has no lastStep), and leaves out finalText " +
-      `and pricingSnapshot; default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
+      `and pricingSnapshot, and cuts taskOverride to its first ${ACROSS_AGENTS_TASK_CHARS} characters (taskOverrideTruncated: true; get_run has it whole); default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, ` +
       `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
       "plus any still pending or running. all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
