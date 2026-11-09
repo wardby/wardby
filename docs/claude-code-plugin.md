@@ -16,11 +16,15 @@ so it shows exactly what those tools show you and needs no token of its own.
 ### With the wardby CLI
 
 ```sh
-npx @wardby/cli@latest claude-plugin install
+npx @wardby/cli@latest claude-plugin install --allow-tools --fullscreen
 ```
 
-This installs the plugin from `wardby/wardby` and offers to allow the pane's
-read-only tools for auto mode (see [Permissions](#permissions)). Options:
+This installs the plugin from `wardby/wardby`, allows the pane's read-only
+tools for auto mode (see [Permissions](#permissions)), and switches Claude
+Code's terminal to its fullscreen view, which the side pane and clicking need
+(see [Terminal](#in-the-terminal)). Fullscreen applies to every Claude Code
+session; leave out `--fullscreen` if you use only the desktop app or want to
+keep the classic view. Without either flag, install asks about each. Options:
 
 | Option                 | What it does                                                                                                                                            |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

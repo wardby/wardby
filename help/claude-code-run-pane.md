@@ -13,11 +13,15 @@ The `wardby-runs` plugin opens a pane in Claude Code that lists your wardby
 runs, grouped by pull request, and shows each run's details. It uses the
 `wardby` MCP server your session already has and only reads.
 
-Install it, and allow its read-only tools for auto mode, with:
+Install it, allow its read-only tools for auto mode, and switch the terminal
+to the fullscreen view the side pane needs, with:
 
 ```sh
-npx @wardby/cli@latest claude-plugin install
+npx @wardby/cli@latest claude-plugin install --allow-tools --fullscreen
 ```
+
+Fullscreen applies to every Claude Code session; leave it out if you use only
+the desktop app. Without the flags, install asks about each.
 
 Add `--server-url https://<your wardby host>/mcp` if Claude Code has no MCP
 server named `wardby` yet. Or install it yourself with

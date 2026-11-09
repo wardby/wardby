@@ -241,7 +241,7 @@ After connecting, try:
 From Wardby 0.8.0, Claude Code can also show your runs in a pane beside the
 chat. With `--client claude` or `both`, quickstart offers to install it
 (`--claude-plugin` installs it unattended, `--no-claude-plugin` skips the
-question); otherwise run `npx @wardby/cli@latest claude-plugin install`, then
+question); otherwise run `npx @wardby/cli@latest claude-plugin install --allow-tools --fullscreen`, then
 `/wardby-runs`. `wardby doctor` reports whether it is set up. See the
 [Claude Code plugin](claude-code-plugin.md) guide.
 
