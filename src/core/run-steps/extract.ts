@@ -5,7 +5,14 @@
  * first lines only. Each request resends the whole history, so results are read from the newest turn
  * only.
  */
-import { bounded, displayToolName, toolStepText } from "./summarize.js";
+import {
+  bounded,
+  CLAUDE_RESULT_TOOL,
+  codingResultStepText,
+  displayToolName,
+  FINISHED_STEP_TEXT,
+  toolStepText,
+} from "./summarize.js";
 import type { ExtractedResult, ExtractedStep, StepStatus } from "./types.js";
 import { MAX_STEP_TEXT_CHARS } from "./types.js";
 
@@ -78,12 +85,19 @@ function append(block: OpenBlock, piece: string): void {
   } else block.buffer += piece;
 }
 
+/** A coding run's final answer (Claude Code's StructuredOutput call) as one said step, never its arguments. */
+function resultStep(callId: string, argsJson: string, cut: boolean): ExtractedStep {
+  const answer = codingResultStepText(argsJson) ?? { text: FINISHED_STEP_TEXT, truncated: false };
+  return { kind: "said", callId, text: answer.text, truncated: answer.truncated || cut };
+}
+
 function closeBlock(block: OpenBlock): ExtractedStep | undefined {
   if (block.kind === "said") {
     return block.buffer.trim()
       ? { kind: "said", callId: block.id, text: block.buffer, truncated: block.truncated }
       : undefined;
   }
+  if (block.name === CLAUDE_RESULT_TOOL) return resultStep(block.id, block.buffer || "{}", block.truncated);
   const tool = displayToolName(block.name);
   const text = toolStepText(tool, block.buffer || "{}");
   return { kind: "tool", callId: block.id, tool, text: text.text, truncated: text.truncated || block.truncated };
@@ -226,7 +240,8 @@ export function openAiItemStep(value: unknown): ExtractedStep | undefined {
         .map((part) => str(part?.text) ?? "")
         .join("\n");
       if (!text.trim()) return undefined;
-      const out = bounded(text);
+      // Codex's last message is its final answer as JSON: said as the answer's summary.
+      const out = codingResultStepText(text) ?? bounded(text);
       return {
         kind: "said",
         callId: `said:${id}`,
@@ -296,7 +311,9 @@ export function stepsFromJson(protocol: StepWireProtocol, value: unknown): Extra
       const id = str(block?.id);
       const name = str(block?.name);
       const text = str(block?.text);
-      if (block?.type === "tool_use" && id && name) {
+      if (block?.type === "tool_use" && id && name === CLAUDE_RESULT_TOOL) {
+        steps.push(resultStep(id, JSON.stringify(block.input ?? {}), false));
+      } else if (block?.type === "tool_use" && id && name) {
         const tool = displayToolName(name);
         steps.push({ kind: "tool", callId: id, tool, ...toolStepText(tool, JSON.stringify(block.input ?? {})) });
       } else if (block?.type === "text" && text?.trim()) {

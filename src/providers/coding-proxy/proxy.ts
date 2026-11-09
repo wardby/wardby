@@ -27,6 +27,7 @@ import {
   type StreamStepExtractor,
 } from "../../core/run-steps/extract.js";
 import { SeenIds } from "../../core/run-steps/seen.js";
+import { CLAUDE_RESULT_TOOL } from "../../core/run-steps/summarize.js";
 import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
 import type {
   CredentialResolver,
@@ -64,7 +65,7 @@ const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 export const OPTIONAL_ANTHROPIC_BETAS = ["per-turn-control-2026-07-01"] as const;
 const APPROVED_ANTHROPIC_BETAS = new Set<string>([...CLAUDE_CODE_ANTHROPIC_BETAS, ...OPTIONAL_ANTHROPIC_BETAS]);
 const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
-const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
+const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 /**
