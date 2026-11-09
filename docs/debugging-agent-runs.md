@@ -145,9 +145,9 @@ Where did it go wrong? Draft a follow-up comment, but don't post it.
 While a run runs, Wardby records its steps: one line for each tool call (the
 tool, and its command, file or first argument, cut to about 100 characters) with
 its status once the result is back (`ok`, `error`, or `exit N`), and one line for
-what the model said (cut to about 120 characters). Tool output and full text are
-never recorded. Steps are recorded for native runs (in the control plane and on
-the native sandbox) and for Claude Code and Codex runs. Every agent's
+what the model said (cut to about 120 characters). At the default level, tool
+output and full text are never recorded; see Levels below. Steps are recorded
+for native runs (in the control plane and on the native sandbox) and for Claude Code and Codex runs. Every agent's
 shell command shows as `Bash` (a native `run_command`, Claude Code's command tool,
 Codex's `exec_command`, `shell`, `local_shell` and `shell_command`), another tool
 under its own name (for example `apply_patch`), and a remote MCP tool as
@@ -162,11 +162,53 @@ slows the run. Without the two settings in the table below, coding runs record n
 steps; native runs are unaffected. Steps for a Claude Code or Codex run need the
 listener, which only `wardby serve` runs.
 
+**Levels.**
+
+| Level     | Tool input           | Tool result                             | Model text           |
+| --------- | -------------------- | --------------------------------------- | -------------------- |
+| `off`     | -                    | -                                       | -                    |
+| `summary` | about 100 characters | status only (`ok`, `error`, `exit N`)   | about 120 characters |
+| `detail`  | up to about 4 KB     | status and the last ~2 KB of its output | up to about 8 KB     |
+
+At `summary`, the default, tool output is never recorded. At `detail` each step
+also keeps a **detail** text, at most 16 KB. When the output is cut at the
+start, the partial first line is dropped if it ends within 256 characters;
+otherwise only the first 256 characters are dropped, so a long single-line
+output, such as a JSON result, keeps about its last 1.8 KB. At every level,
+terminal escape sequences (colour codes, links, clipboard writes, title changes)
+and every other control character except line breaks and tabs are removed from
+step text before it is stored.
+
+A run's level is the lower of two settings, fixed when the run is dispatched (a
+change reaches later runs only; lowering the ceiling also stops detail for runs
+already in flight):
+
+- the instance's ceiling, `WARDBY_RUN_STEPS` (default `summary`);
+- the agent's `runSteps` (`off`, `summary` or `detail`), set by the agent's
+  owner with `create_agent` or `update_agent`. Unset counts as `summary`. Set
+  `null` to clear it.
+
+So `detail` needs both the operator and the agent's owner. If `runSteps` asks
+for more than the instance allows, the value is stored, `update_agent` and
+`get_agent` say so in `warnings`, and runs record at the ceiling.
+
+> **Warning: `detail` stores tool output.** Before a step is stored, every
+> secret value the run was given is removed and anything shaped like a token or
+> key is masked. A secret that exists only inside a repository file, or another
+> source the run read, and that matches no known shape, is not known to Wardby
+> and can remain in the detail text. That is why detail is off unless both the
+> operator and the agent's owner ask for it. Turn it on only for agents whose
+> tool output you are prepared to keep for the retention period.
+
 **Reading them.** `get_run_steps` (`runId`, optional `after` and `limit`) lists
 them oldest first, 50 at a time and at most 200; pass the last `seq` you have as
 `after` to get only newer ones. `get_run` and `list_runs` without `agentId`
 include `lastStep`, the newest step as one line. Access is the same as
-`get_run`'s. The `wardby-runs` Claude Code pane shows them (see
+`get_run`'s. At `detail`, `get_run_steps` also returns each step's `detail` to the agent's
+owner and to the person who started the run (and to the stdio operator); anyone
+else, including an admin who does not own the agent, gets the lines only.
+`lastStep`, the admin viewer API and its `step` events never include detail.
+The `wardby-runs` Claude Code pane shows them (see
 [Claude Code plugin](claude-code-plugin.md#using-the-pane)); the admin viewer API
 sends a `step` event for each one and lists a run's newest 200 in its detail
 (see [Viewer API](viewer-api.md)), and the Wardby Viewer app shows them in a
@@ -177,7 +219,8 @@ counts the rest.
 
 **Secrets.** Every step is redacted before it is stored: every secret value of
 the run's agent (attached secrets, readable or brokered, and its MCP servers'
-secrets) is replaced with `[REDACTED]`, then anything shaped like a token or key.
+secrets), the run's own capability and its registry token are replaced with
+`[REDACTED]`, then anything shaped like a token or key.
 If the agent's secrets can't be read at that moment, the step is not stored.
 
 **Retention.** Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are
@@ -187,19 +230,26 @@ steps left.
 
 | Variable                  | Read by                                                                                                   | Default   | Meaning                                                                                                                                                                                          |
 | ------------------------- | --------------------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `WARDBY_RUN_STEPS`        | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway`, the coding proxy | `summary` | `off` records nothing; `summary` records the lines above. `detail` is accepted and recorded as `summary` in this release. Any other value stops start-up.                                        |
+| `WARDBY_RUN_STEPS`        | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway`, the coding proxy | `summary` | `off` records nothing; `summary` records the lines above; `detail` allows agents whose `runSteps` is `detail` to record detail. The ceiling for every run. Any other value stops start-up.       |
 | `RUN_STEP_RETENTION_DAYS` | `wardby serve`, `wardby scheduler`, `wardby run`, `wardby mcp`, `wardby native-gateway`                   | `30`      | Days to keep a step, a whole number from 1 to 3650. A change applies to steps recorded after it. Any other value stops start-up.                                                                 |
 | `WARDBY_RUN_STEPS_LISTEN` | `wardby serve`                                                                                            | unset     | `host:port` or `:port` of the run-steps listener the coding proxy posts coding runs' steps to. Unset: no listener. An invalid value stops start-up.                                              |
 | `WARDBY_RUN_STEPS_URL`    | the coding proxy                                                                                          | unset     | The listener's origin, for example `http://<server host>:8792`: `http` or `https`, no credentials, path, query or fragment. Unset: coding runs record no steps. An invalid value stops start-up. |
 
 The coding proxy also reads `WARDBY_RUN_STEPS`: with `off`, or with
-`WARDBY_RUN_STEPS_URL` unset, no step text leaves the proxy. The listener is a
+`WARDBY_RUN_STEPS_URL` unset, no step text leaves the proxy. For coding runs at
+`detail`, set `WARDBY_RUN_STEPS=detail` on the proxy too: below `detail`, the
+proxy never sends any tool output to the server. Set `WARDBY_RUN_STEPS=detail`
+on every process that writes steps (`wardby serve`, the scheduler, the native
+gateway and `wardby run`). The listener is a
 second network path into the server; see
 [Run steps in Security deployment](security-deployment.md#run-steps) for how to
 restrict it.
 
-**Upgrading.** The release adds the `RunStep` table and the `Run.stepsDropped`
-column; apply the migration with `prisma migrate deploy` as with any upgrade.
+**Upgrading.** The release adds the `RunStep` table, the `Run.stepsDropped`
+column, `Agent.runSteps`, `Run.runStepsLevel` and
+`CodingProxySession.runStepsLevel`; apply the migrations with
+`prisma migrate deploy` as with any upgrade. Runs started before the upgrade
+record at most `summary`.
 
 ## Run transcripts
 

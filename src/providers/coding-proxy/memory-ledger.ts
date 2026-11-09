@@ -61,6 +61,7 @@ export class MemoryProxyLedger implements ProxyLedger {
       mcpTools: input.mcpTools ? structuredClone(input.mcpTools) : null,
       mcpTokenHash: input.mcpTokenHash ?? null,
       mcpCallCount: 0,
+      runStepsLevel: input.runStepsLevel ?? null,
     };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);

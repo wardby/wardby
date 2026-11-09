@@ -6,7 +6,7 @@ import {
   startupTestSimulators,
 } from "../../config/test-simulators.js";
 import { logger } from "../../core/logger.js";
-import { effectiveRunStepsLevel, loadRunStepsLevel } from "../../core/run-steps/config.js";
+import { loadRunStepsLevel } from "../../core/run-steps/config.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
@@ -164,7 +164,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // Throws on an invalid setting, before anything listens.
   const runStepsUrl = loadRunStepsUrl(env);
   // Throws on an invalid WARDBY_RUN_STEPS. At off no step text leaves the proxy.
-  const runStepsLevel = effectiveRunStepsLevel(loadRunStepsLevel(env));
+  const runStepsCeiling = loadRunStepsLevel(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -238,7 +238,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // Coding runs' steps go to the control plane only when WARDBY_RUN_STEPS_URL is set and
   // WARDBY_RUN_STEPS is not off; otherwise no
   // submitter is passed and the proxy does no step extraction.
-  const steps = runStepsUrl && runStepsLevel !== "off" ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
+  const steps = runStepsUrl && runStepsCeiling !== "off" ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
   const ledger = new PrismaProxyLedger(options.db);
   const proxy = new CodingProxy({
     ledger,
@@ -254,6 +254,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     // The run's first model request closes its dependency cache (no-op for a run with it off).
     ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
     ...(steps ? { steps } : {}),
+    runStepsCeiling,
   });
   const startServer = options.startServer ?? startCodingProxyServer;
   let server: CodingProxyServerHandle;

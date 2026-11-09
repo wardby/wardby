@@ -32,7 +32,7 @@ async function connect(who: Principal) {
     mcpReq: { requestState: () => undefined },
   });
   registerRunTools(mcp);
-  registerRunStepsTool(mcp, { level: "summary", retentionDays: 30 });
+  registerRunStepsTool(mcp, { level: "detail", retentionDays: 30 });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
@@ -116,5 +116,45 @@ describe.skipIf(!process.env.DATABASE_URL)("run steps through MCP (PostgreSQL)",
     const rows = JSON.parse(listed) as { id: string; lastStep?: unknown }[];
     expect(rows.map((r) => r.id)).toEqual([run.id]);
     expect(rows[0]).not.toHaveProperty("lastStep");
+  });
+
+  it("returns redacted detail to the owner and never the fake secret", async () => {
+    const me = await db.principal.create({ data: { subject: `run-steps-${randomUUID()}` } });
+    principalIds.push(me.id);
+    const agent = await db.agent.create({
+      data: { name: `steps-${randomUUID()}`, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1, ownerId: me.id },
+    });
+    agentIds.push(agent.id);
+    const run = await db.run.create({ data: { agentId: agent.id, status: "running", runStepsLevel: "detail" } });
+    const writer = new RunStepWriter({
+      db,
+      secretValues: async () => [FAKE_SECRET],
+      level: "detail",
+      retentionDays: 30,
+    });
+    await writer.record(run.id, {
+      steps: [
+        { kind: "said", callId: "said:turn:1", text: `Using ${FAKE_SECRET} now.`, truncated: false },
+        {
+          kind: "tool",
+          callId: "c1",
+          tool: "Bash",
+          text: `echo ${FAKE_SECRET}`,
+          truncated: false,
+          input: JSON.stringify({ command: `echo ${FAKE_SECRET}` }),
+        },
+      ],
+      results: [{ callId: "c1", status: "ok", output: `out ${FAKE_SECRET}` }],
+    });
+
+    const mcp = await connect(me);
+    const steps = await mcp.call("get_run_steps", { runId: run.id });
+    await mcp.close();
+
+    expect(steps).not.toContain(FAKE_SECRET);
+    expect(steps).toContain("[REDACTED]");
+    const got = JSON.parse(steps).steps as { detail: string }[];
+    expect(got[0].detail).toBe("Using [REDACTED] now.");
+    expect(got[1].detail).toContain("--- output (end) ---\nout [REDACTED]");
   });
 });

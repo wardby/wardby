@@ -7,6 +7,12 @@
  */
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { z } from "zod";
+import {
+  RUN_STEPS_LEVELS,
+  loadRunStepsLevel,
+  runStepsAboveCeilingWarning,
+  type RunStepsLevel,
+} from "../../core/run-steps/config.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import {
@@ -196,6 +202,30 @@ function withProfileWarnings<T extends { codingProfile: WarnedProfile | null }>(
   return warnings.length ? { ...shown, warnings } : shown;
 }
 
+// No JSON-schema enum on purpose: the zod check then refuses a bad value naming off, summary and detail.
+const RUN_STEPS_DESCRIPTION =
+  "Run steps level for this agent's runs (owner only): off records nothing, summary one line per tool call or message " +
+  "(the default), detail also the tool input, the end of each tool's output and the model's text, readable only by the " +
+  "agent's owner and the run's starter. A run records the lower of this and the instance's WARDBY_RUN_STEPS, fixed " +
+  "when it starts. detail stores tool output: secrets the run was given are removed, but a secret that exists only in " +
+  "a file the run read can remain. Null clears it (summary).";
+
+/** For a warning only: an invalid WARDBY_RUN_STEPS stopped start-up already; never fails the tool call. */
+function runStepsCeiling(): RunStepsLevel | undefined {
+  try {
+    return loadRunStepsLevel(process.env);
+  } catch {
+    return undefined;
+  }
+}
+
+/** An agent as returned to operators: a warning when its runSteps is above the instance's ceiling. */
+function withRunStepsWarning<T extends { runSteps?: RunStepsLevel | null; warnings?: string[] }>(agent: T): T {
+  const ceiling = runStepsCeiling();
+  const warning = ceiling ? runStepsAboveCeilingWarning(agent.runSteps, ceiling) : undefined;
+  return warning ? { ...agent, warnings: [...(agent.warnings ?? []), warning] } : agent;
+}
+
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
   systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_CHARS),
@@ -212,6 +242,7 @@ const agentFields = {
   budgetGroupId: z.string().min(1).max(128),
   memoryEnabled: z.boolean(),
   effort: z.enum(LLM_EFFORT_LEVELS),
+  runSteps: z.enum(RUN_STEPS_LEVELS as [RunStepsLevel, ...RunStepsLevel[]]),
   nativeExecutionMode: z.enum(NATIVE_EXECUTION_MODES),
   defectProjectKey: z.string().regex(PROJECT_KEY, "must be an upper-case Jira project key"),
   defectIssueType: z.string().trim().min(1).max(100),
@@ -254,6 +285,7 @@ const CreateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.optional(),
     memoryEnabled: agentFields.memoryEnabled.default(false),
     effort: agentFields.effort.optional(),
+    runSteps: agentFields.runSteps.optional(),
     nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
     defectProjectKey: agentFields.defectProjectKey.optional(),
     defectIssueType: agentFields.defectIssueType.optional(),
@@ -315,6 +347,7 @@ const UpdateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
     effort: agentFields.effort.nullable().optional(),
+    runSteps: agentFields.runSteps.nullable().optional(),
     nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
     defectProjectKey: agentFields.defectProjectKey.nullable().optional(),
     defectIssueType: agentFields.defectIssueType.nullable().optional(),
@@ -637,6 +670,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS],
           description: "Reasoning effort for native agents. Unset uses the provider default.",
         },
+        runSteps: { type: "string", description: RUN_STEPS_DESCRIPTION },
         nativeExecutionMode: {
           type: "string",
           enum: [...NATIVE_EXECUTION_MODES],
@@ -702,7 +736,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         include: { codingProfile: true },
       });
-      return textResult(withProfileWarnings(withOperatorMode(agent)));
+      return textResult(withRunStepsWarning(withProfileWarnings(withOperatorMode(agent))));
     },
   });
 
@@ -746,6 +780,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS, null],
           description: "Reasoning effort for native agents. Null clears it back to the provider default.",
         },
+        runSteps: { type: ["string", "null"], description: RUN_STEPS_DESCRIPTION },
         nativeExecutionMode: {
           type: "string",
           enum: [...NATIVE_EXECUTION_MODES],
@@ -869,15 +904,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // and budget-group membership direct what runs do with the owner's
       // repository access and money: owner-only, like the repository itself
       // (review I1/M1/M6). Write keeps name, prompt, model, budget amount,
-      // turns, effort, memory and schedule.
+      // turns, effort, memory and schedule. The run steps level is the owner's too:
+      // detail records tool output that only the owner and the run's starter may read.
       const ownerOnlyChange = (existingKind: string) =>
         args.codingProfile !== undefined ||
         (args.kind !== undefined && args.kind !== existingKind) ||
-        args.budgetGroupId !== undefined;
+        args.budgetGroupId !== undefined ||
+        args.runSteps !== undefined;
       const refuseOwnerOnly = () => {
         throw new McpError(
           403,
-          `Agent "${args.id}": only its owner can change its coding profile, kind or budget group.`,
+          `Agent "${args.id}": only its owner can change its coding profile, kind, budget group or run steps level.`,
         );
       };
       if (!adminEdit && !isOwner && ownerOnlyChange(before.kind)) refuseOwnerOnly();
@@ -1097,7 +1134,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           "coding package audit mode set",
         );
       }
-      const shown = withProfileWarnings(withOperatorMode(agent));
+      const shown = withRunStepsWarning(withProfileWarnings(withOperatorMode(agent)));
       // Becoming Codex (a provider switch, or a native agent becoming coding) leaves out every attached
       // MCP tool the server doesn't mark read-only: say which, so the owner isn't surprised by a run.
       const wasCodex = before.kind === "coding" && isCodexCoding(before.codingProfile?.provider);
@@ -1116,7 +1153,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column. " +
-      "summary: true returns only id, name, kind, model, codingProvider, budgetUsd, ownerId and access per agent, for listings that don't need the full configuration. " +
+      "summary: true returns only id, name, kind, model, codingProvider, budgetUsd, ownerId, runSteps and access per agent, for listings that don't need the full configuration. " +
       "all: true lists every agent in the deployment (admins only, admin:view); an agent you have no grant on shows access `none`.",
     inputSchema: {
       type: "object",
@@ -1139,6 +1176,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             model: true,
             budgetUsd: true,
             ownerId: true,
+            runSteps: true,
             codingProfile: { select: { provider: true } },
           },
           orderBy: { name: "asc" },
@@ -1179,7 +1217,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // A7: a tool's code and schema are its owner's, whoever can read the
       // agent (the agent's owner included). Capabilities stay visible: config.
       return textResult({
-        ...withProfileWarnings(withOperatorMode(agent)),
+        ...withRunStepsWarning(withProfileWarnings(withOperatorMode(agent))),
         access,
         mcpServers: await agentMcpServerViews(ctx.db, agent.id),
         // Zod 3 window: the caller's own tools carry their warnings (see core/zod3-window.ts).

@@ -9,15 +9,16 @@ const agentIds: string[] = [];
 // Fake values only: never a real credential.
 const FAKE_SECRET = "wbFake-Secret-Value-7f3a91";
 const FAKE_TOKEN = "ghp_FAKEfakeFAKEfake0123456789abcd";
+const FAKE_CAPABILITY = `rrp_${"F".repeat(43)}`;
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-11-07T12:00:00.000Z");
 
-async function newRun() {
+async function newRun(runStepsLevel: "off" | "summary" | "detail" | null = null) {
   const agent = await db.agent.create({
     data: { name: `steps-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1 },
   });
   agentIds.push(agent.id);
-  return db.run.create({ data: { agentId: agent.id, status: "running" } });
+  return db.run.create({ data: { agentId: agent.id, status: "running", runStepsLevel } });
 }
 
 function writer(opts: { maxSteps?: number; level?: "off" | "summary" | "detail" } = {}) {
@@ -31,7 +32,7 @@ function writer(opts: { maxSteps?: number; level?: "off" | "summary" | "detail" 
   });
 }
 
-const tool = (callId: string, text: string): ExtractedStep => ({
+const tool = (callId: string, text: string): Extract<ExtractedStep, { kind: "tool" }> => ({
   kind: "tool",
   callId,
   tool: "Bash",
@@ -202,5 +203,274 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     const run = await newRun();
     await writer({ level: "off" }).record(run.id, { steps: [tool("c1", "ls")], results: [] });
     expect(await db.runStep.count({ where: { runId: run.id } })).toBe(0);
+  });
+  it("at detail stores the redacted input, then the redacted end of the output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(
+      run.id,
+      {
+        steps: [{ ...tool("c1", `echo ${FAKE_SECRET}`), input: `{"command":"echo ${FAKE_SECRET} ${FAKE_TOKEN}"}` }],
+        results: [],
+      },
+      [FAKE_CAPABILITY],
+    );
+    await w.record(
+      run.id,
+      {
+        steps: [],
+        results: [
+          { callId: "c1", status: "exit 1", output: `boom ${FAKE_SECRET}\n${FAKE_CAPABILITY}`, outputCut: false },
+        ],
+      },
+      [FAKE_CAPABILITY],
+    );
+    const [row] = await rowsOf(run.id);
+    expect(row.status).toBe("exit 1");
+    expect(row.detail).toContain('"command":"echo [REDACTED]');
+    expect(row.detail).toContain("--- output (end) ---\nboom [REDACTED]");
+    for (const fake of [FAKE_SECRET, FAKE_TOKEN, FAKE_CAPABILITY]) expect(row.detail).not.toContain(fake);
+    expect(row.detail!.length).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it("at detail redacts a said step's text and a result-only batch's output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(run.id, {
+      steps: [tool("c2", "ls"), { kind: "said", callId: "said:1", text: `key ${FAKE_SECRET}`, truncated: false }],
+      results: [],
+    });
+    await w.record(run.id, { steps: [], results: [{ callId: "c2", status: "ok", output: FAKE_SECRET }] });
+    const rows = await rowsOf(run.id);
+    expect(rows.map((r) => r.detail)).toEqual(["ls\n\n--- output (end) ---\n[REDACTED]", "key [REDACTED]"]);
+  });
+
+  it("removes terminal control sequences before redaction, so a secret split by colour codes is masked", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    // Fake value split by a colour code; an OSC 52 clipboard write and an OSC 8 link around it.
+    const coloured = `${FAKE_SECRET.slice(0, 9)}\u001b[31m${FAKE_SECRET.slice(9)}\u001b[0m`;
+    const hostile = "\u001b]52;c;ZmFrZQ==\u0007\u001b]8;;https://example.invalid\u0007link\u001b]8;;\u0007";
+    await w.record(run.id, {
+      steps: [
+        { ...tool("c1", `echo ${coloured} ${hostile}`), input: `{"command":"echo ${coloured}"}\r\n` },
+        { kind: "said", callId: "said:1", text: `key ${coloured}\r\n${hostile}`, truncated: false },
+      ],
+      results: [],
+    });
+    await w.record(run.id, {
+      steps: [],
+      results: [{ callId: "c1", status: "ok", output: `out ${coloured}\r\n${hostile}\rend` }],
+    });
+    const rows = await rowsOf(run.id);
+    expect(rows.map((r) => r.summary)).toEqual(["echo [REDACTED] link", "key [REDACTED] link"]);
+    expect(rows.map((r) => r.detail)).toEqual([
+      '{"command":"echo [REDACTED]"}\n\n\n--- output (end) ---\nout [REDACTED]\nlinkend',
+      "key [REDACTED]\nlink",
+    ]);
+    for (const row of rows) {
+      for (const text of [row.summary, row.detail!]) {
+        // eslint-disable-next-line no-control-regex -- asserting no control character survives
+        expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+        expect(text).not.toContain(FAKE_SECRET.slice(0, 9));
+        expect(text).not.toContain(FAKE_SECRET.slice(9));
+      }
+    }
+  });
+
+  describe("a malformed escape sequence just before a secret value", () => {
+    // Fake run-given value; each probe's sequence would take its first character as a final byte.
+    const value = "Zq9vLmT4pXw2Rk7s";
+    const probes = ["\u001b", "\u001b[", "\u001b[12", "\u001b(", "\u009b"].map((lead) => `${lead}${value}`);
+
+    for (const probe of probes) {
+      const shown = probe.replace(/[^ -~]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+      it(`masks ${shown} in summary and detail, as said text, input and output`, async () => {
+        for (const level of ["summary", "detail"] as const) {
+          const run = await newRun(level);
+          const w = writer({ level: "detail" });
+          await w.record(
+            run.id,
+            {
+              steps: [
+                { ...tool("c1", `echo ${probe} done`), input: `{"command":"echo ${probe} done"}` },
+                { kind: "said", callId: "said:1", text: `the value is ${probe} ok`, truncated: false },
+              ],
+              results: [],
+            },
+            [value],
+          );
+          await w.record(
+            run.id,
+            { steps: [], results: [{ callId: "c1", status: "ok", output: `out ${probe}\nend` }] },
+            [value],
+          );
+          const rows = await rowsOf(run.id);
+          expect(rows).toHaveLength(2);
+          for (const row of rows) {
+            for (const text of [row.summary, row.detail ?? ""]) {
+              expect(text).not.toContain(value.slice(1, 7));
+              expect(text).not.toContain(value.slice(-6));
+            }
+            expect(row.summary).toContain("[REDACTED]");
+            if (level === "detail") expect(row.detail).toContain("[REDACTED]");
+          }
+          // A malformed sequence's own printable bytes may remain ("[", "[12", "("), never the value's.
+          if (level === "detail") {
+            expect(rows[0].detail).toMatch(/--- output \(end\) ---\nout (?:\[|\[12|\()?\[REDACTED\]\nend$/);
+          }
+        }
+      });
+    }
+  });
+
+  it("stores a value behind a bare ESC and split by a colour code as [REDACTED]", async () => {
+    // Fake value; a bare ESC before it and a colour code inside it.
+    const value = "Zq9vLmT4pXw2Rk7s";
+    const probe = "\u001bZq9v\u001b[31mLmT4pXw2Rk7s";
+    for (const level of ["summary", "detail"] as const) {
+      const run = await newRun(level);
+      const w = writer({ level: "detail" });
+      await w.record(
+        run.id,
+        {
+          steps: [
+            { ...tool("c1", `echo ${probe} done`), input: `echo ${probe} done` },
+            { kind: "said", callId: "said:1", text: `the value is ${probe} ok`, truncated: false },
+          ],
+          results: [],
+        },
+        [value],
+      );
+      await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: `out ${probe}\nend` }] }, [
+        value,
+      ]);
+      const rows = await rowsOf(run.id);
+      expect(rows.map((r) => r.summary)).toEqual(["echo [REDACTED] done", "the value is [REDACTED] ok"]);
+      expect(rows.map((r) => r.detail)).toEqual(
+        level === "detail"
+          ? ["echo [REDACTED] done\n\n--- output (end) ---\nout [REDACTED]\nend", "the value is [REDACTED] ok"]
+          : [null, null],
+      );
+    }
+  });
+
+  describe("a malformed escape sequence at a partial secret", () => {
+    // Fake run-given value.
+    const value = "Zq9vLmT4pXw2Rk7s";
+
+    it("masks a secret's start after `…\\x1bZ` at an input's tail cut, in summary and detail", async () => {
+      const run = await newRun("detail");
+      const cutInput = `{"command":"echo …\u001b${value.slice(0, 8)}`;
+      await writer({ level: "detail" }).record(
+        run.id,
+        {
+          steps: [
+            {
+              ...tool("c1", `echo …\u001b${value.slice(0, 8)}`),
+              truncated: true,
+              input: cutInput,
+              inputTruncated: true,
+            },
+          ],
+          results: [],
+        },
+        [value],
+      );
+      const [row] = await rowsOf(run.id);
+      for (const text of [row.summary, row.detail!]) {
+        expect(text).not.toContain(value.slice(1, 8));
+        expect(text).toContain("[REDACTED]");
+      }
+    });
+
+    it("masks a secret's start before a boundary after `\\x1bZ`, mid-text", async () => {
+      const run = await newRun("detail");
+      const output = `TOKEN=\u001b${value.slice(0, 9)}\n…40 tokens truncated…\n${value.slice(-9)} end`;
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [{ ...tool("c1", "env"), input: "env" }], results: [] },
+        [value],
+      );
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [], results: [{ callId: "c1", status: "ok", output }] },
+        [value],
+      );
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).not.toContain(value.slice(1, 9));
+      expect(row.detail).not.toContain(value.slice(-9));
+      expect(row.detail).toContain("TOKEN=[REDACTED]\n…40 tokens truncated…\n[REDACTED] end");
+    });
+
+    it("masks a secret's end after `\\x1b(Z` at a head-cut output", async () => {
+      const run = await newRun("detail");
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [{ ...tool("c1", "cat log"), input: "cat log" }], results: [] },
+        [value],
+      );
+      for (const lead of ["\u001b(Z", "\u001b("]) {
+        await writer({ level: "detail" }).record(
+          run.id,
+          {
+            steps: [],
+            results: [{ callId: "c1", status: "ok", output: `${lead}${value.slice(-10)} tail`, outputCut: true }],
+          },
+          [value],
+        );
+      }
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).not.toContain(value.slice(-9));
+      expect(row.detail).not.toContain(value.slice(-6));
+    });
+  });
+
+  it("adds no stripped form of a value too short to redact safely", async () => {
+    const run = await newRun("detail");
+    // Fake value that strips to "ab": masking every "ab" would blank ordinary text.
+    await writer({ level: "detail" }).record(
+      run.id,
+      { steps: [{ kind: "said", callId: "said:1", text: "about tab labs", truncated: false }], results: [] },
+      ["\u001b[31mab"],
+    );
+    const [row] = await rowsOf(run.id);
+    expect(row.summary).toBe("about tab labs");
+    expect(row.detail).toBe("about tab labs");
+  });
+
+  it("below detail never stores detail, even when the batch carries it", async () => {
+    for (const level of ["summary", null] as const) {
+      const run = await newRun(level);
+      const w = writer({ level: "detail" });
+      await w.record(run.id, { steps: [{ ...tool("c1", "ls"), input: `{"command":"${FAKE_SECRET}"}` }], results: [] });
+      await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: FAKE_SECRET }] });
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).toBeNull();
+      expect(row.status).toBe("ok");
+    }
+  });
+
+  it("a run fixed at off records nothing; a summary ceiling caps a run fixed at detail", async () => {
+    const off = await newRun("off");
+    await writer({ level: "detail" }).record(off.id, { steps: [tool("c1", "ls")], results: [] });
+    expect(await rowsOf(off.id)).toHaveLength(0);
+    const detail = await newRun("detail");
+    await writer({ level: "summary" }).record(detail.id, {
+      steps: [{ ...tool("c1", "ls"), input: "{}" }],
+      results: [],
+    });
+    expect((await rowsOf(detail.id))[0].detail).toBeNull();
+  });
+
+  it("the first status wins: a replayed result appends no second output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(run.id, { steps: [{ ...tool("c1", "ls"), input: "{}" }], results: [] });
+    await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: "one" }] });
+    await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "error", output: "two" }] });
+    const [row] = await rowsOf(run.id);
+    expect(row.status).toBe("ok");
+    expect(row.detail).toBe("{}\n\n--- output (end) ---\none");
   });
 });

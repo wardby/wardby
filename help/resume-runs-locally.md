@@ -50,7 +50,8 @@ blob store nothing is stored, and `update_agent` warns you.
   `too_large`, `not_captured` or `failed`) with a reason code.
 
 For a short line-per-step record of any run, without a blob store and without
-continuing it, see `run-steps`.
+continuing it, see `run-steps`; from 0.9.0 its `detail` level is a lighter way to
+see tool output without a transcript.
 
 ## Who can read it
 

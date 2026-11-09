@@ -6,6 +6,7 @@ import { buildMcpServer } from "../server.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import { fakeCtx } from "./run-transcript.test-support.js";
+import { canReadRunDetail } from "./run-access.js";
 import { registerRunStepsTool, RUN_STEPS_MAX_LIMIT } from "./run-steps.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -26,6 +27,7 @@ interface FakeRun {
   triggeredById: string | null;
   finishedAt: Date | null;
   stepsDropped: number;
+  runStepsLevel?: "off" | "summary" | "detail" | null;
   steps: FakeStep[];
 }
 
@@ -115,9 +117,8 @@ describe("get_run_steps", () => {
     };
     expect(body).toMatchObject({ level: "summary", next: null, dropped: 0 });
     expect(body.steps).toHaveLength(5);
-    expect(Object.keys(body.steps[0]).sort()).toEqual(["at", "kind", "seq", "status", "summary", "tool"]);
+    expect(Object.keys(body.steps[0]).sort()).toEqual(["at", "detail", "kind", "seq", "status", "summary", "tool"]);
     expect(asTriggerer.text).not.toContain("callId");
-    expect(asTriggerer.text).not.toContain("detail");
     expect((await (await setup(db, "owner"))({ runId: "r1" })).isError).toBe(false);
     const other = await (await setup(db, "reader"))({ runId: "r1" });
     expect(other.isError).toBe(true);
@@ -154,11 +155,68 @@ describe("get_run_steps", () => {
     expect(JSON.parse((await call({ runId: "recent" })).text)).not.toHaveProperty("expired");
   });
 
-  it("reports the level this release records: detail is recorded as summary", async () => {
+  it("a run with no recorded level reports summary at most, capped by the ceiling", async () => {
     const db = fakeStepsDb([run()]);
-    expect(JSON.parse((await (await setup(db, "trig", { level: "detail" }))({ runId: "r1" })).text).level).toBe(
-      "summary",
-    );
-    expect(JSON.parse((await (await setup(db, "trig", { level: "off" }))({ runId: "r1" })).text).level).toBe("off");
+    const level = async (ceiling: "off" | "summary" | "detail") =>
+      JSON.parse((await (await setup(db, "trig", { level: ceiling }))({ runId: "r1" })).text).level;
+    expect(await level("detail")).toBe("summary");
+    expect(await level("summary")).toBe("summary");
+    expect(await level("off")).toBe("off");
+  });
+
+  it("reports a run's own detail level, capped by the process ceiling", async () => {
+    const db = fakeStepsDb([run({ runStepsLevel: "detail" })]);
+    const level = async (ceiling: "off" | "summary" | "detail") =>
+      JSON.parse((await (await setup(db, "trig", { level: ceiling }))({ runId: "r1" })).text).level;
+    expect(await level("detail")).toBe("detail");
+    expect(await level("summary")).toBe("summary");
+    expect(await level("off")).toBe("off");
+  });
+
+  it("returns detail to the agent's owner and the run's starter only", async () => {
+    const text = "ls\n\n--- output (end) ---\na";
+    const db = fakeStepsDb([
+      run({
+        runStepsLevel: "detail",
+        steps: [{ ...step(1), summary: "ls", detail: text }],
+      }),
+    ]);
+    for (const who of ["owner", "trig"]) {
+      const out = JSON.parse((await (await setup(db, who, { level: "detail" }))({ runId: "r1" })).text);
+      expect(out.level).toBe("detail");
+      expect(out.steps[0].detail).toBe(text);
+    }
+  });
+
+  it("canReadRunDetail: a reader with read access but neither owner nor starter gets no detail", async () => {
+    const fakeAgentDb = (ownerId: string | null) => ({ agent: { findUnique: async () => ({ ownerId }) } }) as never;
+    const r = (triggeredById: string | null) => ({ agentId: "a1", triggeredById });
+    expect(await canReadRunDetail(fakeAgentDb("o"), r("s"), { principalId: "someone" })).toBe(false);
+    expect(await canReadRunDetail(fakeAgentDb("o"), r(null), { principalId: "o" })).toBe(true);
+    expect(await canReadRunDetail(fakeAgentDb("o"), r("s"), { principalId: "s" })).toBe(true);
+    expect(await canReadRunDetail(fakeAgentDb(null), r(null), { principalId: "x", operator: true })).toBe(true);
+    expect(await canReadRunDetail(fakeAgentDb(null), r(null), { principalId: "x" })).toBe(false);
+  });
+
+  it("a reader who can read the run but not its detail gets no detail key, and the column is not selected", async () => {
+    // Today canReadRun's readers are all detail readers; simulate them diverging: the agent lookup that
+    // canReadRun makes names the reader as owner, the one canReadRunDetail makes does not.
+    const db = fakeStepsDb([run({ runStepsLevel: "detail", steps: [{ ...step(1), detail: "SHOULD-NOT-SHOW" }] })]);
+    let lookups = 0;
+    (db.agent as { findUnique: unknown }).findUnique = async () => ({
+      id: "a1",
+      ownerId: ++lookups === 1 ? "granted" : "owner",
+    });
+    const selects: Record<string, unknown>[] = [];
+    const inner = db.runStep.findMany.bind(db.runStep);
+    (db.runStep as { findMany: unknown }).findMany = (q: { select: Record<string, unknown> }) => {
+      selects.push(q.select);
+      return inner(q as never);
+    };
+    const out = await (await setup(db, "granted", { level: "detail" }))({ runId: "r1" });
+    expect(out.isError).toBe(false);
+    expect(JSON.parse(out.text).steps[0]).not.toHaveProperty("detail");
+    expect(out.text).not.toContain("SHOULD-NOT-SHOW");
+    expect(selects[0]).not.toHaveProperty("detail");
   });
 });

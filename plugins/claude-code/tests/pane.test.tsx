@@ -1352,3 +1352,184 @@ function stepsReply(on: Parameters<Parameters<typeof test>[1]>[1], summary: stri
     return reply({});
   });
 }
+
+function detailServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  withDetail: boolean,
+  details = ["npm test\n\n--- output (end) ---\nall [link](https://evil.invalid) passed", "ls"],
+) {
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded" });
+    if (e.tool === "get_run_steps") {
+      const step = (seq: number, detail: string) => ({
+        seq,
+        at: iso(1000),
+        kind: "tool",
+        tool: "Bash",
+        summary: `cmd ${seq}`,
+        status: "ok",
+        ...(withDetail ? { detail } : {}),
+      });
+      return reply({
+        runId: "r1",
+        level: withDetail ? "detail" : "summary",
+        steps: details.map((detail, i) => step(i + 1, detail)),
+        next: null,
+        dropped: 0,
+      });
+    }
+    return reply({});
+  });
+}
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: a step with detail expands to plain wrapped text`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    detailServer(on, true);
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    expect(await texts(ui)).not.toContain("all [link](https://evil.invalid) passed");
+    await ui.press({ key: "step-detail-1" });
+    const detailText = (await ui.findAll({ type: "Text" })).find((el) => el.text.includes("all [link]"));
+    expect(detailText?.props.wrap).toBe("wrap");
+    expect(await ui.findAll({ type: "Markdown" })).toHaveLength(0);
+    expect(await ui.findAll({ type: "Link" })).toHaveLength(0);
+    await ui.press({ key: "step-detail-1" });
+    expect(await texts(ui)).not.toContain("passed");
+    await ui.unmount();
+  });
+}
+
+test("terminal: j and k move between steps with detail, e opens one", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect((await ui.find({ key: "step-next" }))?.props.hotkey).toBe("j");
+  await ui.press({ key: "step-next" });
+  await ui.press({ key: "step-open" });
+  expect(await texts(ui)).toContain("--- output (end) ---");
+  await ui.press({ key: "step-next" });
+  expect(await texts(ui)).not.toContain("--- output (end) ---");
+  expect(await texts(ui)).toMatch(/^ls$/m);
+  await ui.unmount();
+});
+
+test("an older server (no detail in steps): no expand controls", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, false);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await texts(ui)).toContain("Bash: cmd 1");
+  expect(await ui.find({ key: "step-detail-1" })).toBeUndefined();
+  expect(await ui.find({ key: "step-next" })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("an empty detail is no detail: no expand control for that step", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true, ["", "ls"]);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await ui.find({ key: "step-detail-1" })).toBeUndefined();
+  expect(await ui.find({ key: "step-detail-2" })).toBeDefined();
+  expect(await texts(ui)).toContain("Bash: cmd 1");
+  expect(await texts(ui)).not.toMatch(/cmd 1.*▸/);
+  await ui.unmount();
+});
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: a long detail shows its last 40 lines, wrapped, under a count of the rest`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    const lines = Array.from({ length: 100 }, (_, i) => `output line ${i + 1}`);
+    detailServer(on, true, [lines.join("\n"), "ls"]);
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    await ui.press({ key: "step-detail-1" });
+    const shown = await texts(ui);
+    expect(shown).toContain("… 60 more lines");
+    expect(shown).not.toMatch(/^output line 60$/m);
+    expect(shown).toMatch(/^output line 61$/m);
+    expect(shown).toMatch(/^output line 100$/m);
+    const detailText = (await ui.findAll({ type: "Text" })).find((el) => el.text.startsWith("output line 61"));
+    expect(detailText?.props.wrap).toBe("wrap");
+    await ui.unmount();
+  });
+}
+
+test("a step stored by an older server with escape sequences is drawn without them", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  // Fake content: an OSC 8 link and colour codes in the summary, an OSC 52 clipboard write in the detail.
+  const esc = "\u001b";
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded" });
+    if (e.tool === "get_run_steps")
+      return reply({
+        runId: "r1",
+        level: "detail",
+        steps: [
+          {
+            seq: 1,
+            at: iso(1000),
+            kind: "tool",
+            tool: "Bash",
+            summary: `${esc}]8;;https://evil.invalid\u0007npm${esc}]8;;\u0007 ${esc}[1mtest${esc}[0m`,
+            status: "ok",
+            detail: `npm test\n\n--- output (end) ---\n${esc}]52;c;ZmFrZQ==\u0007${esc}[31mfailed${esc}[0m\r\n`,
+          },
+        ],
+        next: null,
+        dropped: 0,
+      });
+    return reply({});
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  await ui.press({ key: "step-detail-1" });
+  const shown = await texts(ui);
+  expect(shown).toContain("Bash: npm test");
+  expect(shown).toContain("--- output (end) ---\nfailed");
+  expect(shown).not.toContain(esc);
+  expect(shown).not.toContain("\r");
+  expect(shown).not.toContain("evil.invalid");
+  expect(shown).not.toContain("ZmFrZQ");
+  await ui.unmount();
+});

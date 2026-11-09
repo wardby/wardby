@@ -274,6 +274,26 @@ describe("dispatchRun", () => {
     expect(state.runs.map((run) => run.triggeredById)).toEqual(["p-trigger", null]);
   });
 
+  it("fixes the run steps level on the run: min(WARDBY_RUN_STEPS, the agent's runSteps)", async () => {
+    const executor: Executor = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const levelFor = async (ceiling: string, runSteps: string | null): Promise<unknown> => {
+      vi.stubEnv("WARDBY_RUN_STEPS", ceiling);
+      const state = fakeDb({ ...nativeAgent(), runSteps });
+      await dispatchRun({ db: state.db, executor, agentId: "agent_1" });
+      return state.runs[0].runStepsLevel;
+    };
+    try {
+      expect(await levelFor("detail", "detail")).toBe("detail");
+      expect(await levelFor("summary", "detail")).toBe("summary");
+      expect(await levelFor("off", "detail")).toBe("off");
+      expect(await levelFor("detail", null)).toBe("summary");
+      expect(await levelFor("off", null)).toBe("off");
+      expect(await levelFor("detail", "off")).toBe("off");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("no longer writes allowedEgress onto the coding run", async () => {
     const agent = {
       ...nativeAgent(),

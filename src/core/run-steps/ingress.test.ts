@@ -2,6 +2,7 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { AddressInfo } from "node:net";
 import { request, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { traceLogCapture } from "./log-capture.test-support.js";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
 import {
   handleRunStepPost,
@@ -23,6 +24,23 @@ const batch: RunStepBatch = {
 };
 /** A POST body: the batch with the run it is for. */
 const postBody = (value: Record<string, unknown> = { ...batch }, runId = "r1") => JSON.stringify({ runId, ...value });
+
+/** A detail-level batch whose tool input and output tails hold the fake secret. */
+const detailBody = () =>
+  postBody({
+    steps: [
+      {
+        kind: "tool",
+        callId: "c1",
+        tool: "Bash",
+        text: "ls",
+        truncated: false,
+        input: `{"k":"${FAKE_SECRET}"}`,
+        inputTruncated: true,
+      },
+    ],
+    results: [{ callId: "c1", status: "ok", output: `out ${FAKE_SECRET}`, outputCut: true }],
+  });
 
 function deps(
   session: { runId: string; deadlineAt: Date } | null = { runId: "r1", deadlineAt: new Date(NOW.getTime() + 60_000) },
@@ -109,6 +127,25 @@ describe("handleRunStepPost", () => {
       await handleRunStepPost(deps(null).value, `Bearer ${CAP}`, withSecret),
     ];
     for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(responses)).not.toContain(value);
+  });
+
+  it("answers a writer failure quoting a tool input or output tail with no secret in the response", async () => {
+    const d = deps(undefined, {
+      record: async () => {
+        throw new Error(`writer failed on ${FAKE_SECRET}`);
+      },
+    });
+    // The handler lets the writer's error propagate (the listener maps it to a fixed code and logs
+    // its name only: the HTTP cases below prove that); the refusals it builds itself are fixed.
+    const failure = await handleRunStepPost(d.value, `Bearer ${CAP}`, detailBody()).catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(Error);
+    expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+    const refused = await handleRunStepPost(
+      d.value,
+      `Bearer ${CAP}`,
+      detailBody().replace('"runId":"r1"', '"runId":"r2"'),
+    );
+    expect(refused).toEqual({ status: 403, body: { error: "run_mismatch" } });
   });
 });
 
@@ -321,6 +358,33 @@ describe("startRunStepIngress", () => {
     ]);
   });
 
+  it("answers a fixed code and logs by name only when the writer fails on a tool input and output tail", async () => {
+    const d = deps(undefined, {
+      record: async () => {
+        throw new TypeError(`write failed: ${FAKE_SECRET}`);
+      },
+    });
+    const { post, warn } = await start(d);
+    const response = await post(RUN_STEPS_INGRESS_PATH, detailBody());
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe('{"error":"internal"}');
+    expect(d.record).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+    expect(warn.mock.calls).toEqual([
+      [{ event: "run_steps_ingress_failed", status: 500, errorName: "TypeError" }, "run steps request failed"],
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
+  it("logs nothing and answers fixed text for an accepted batch with a tool input and output tail", async () => {
+    const d = deps();
+    const { post, warn } = await start(d);
+    const response = await post(RUN_STEPS_INGRESS_PATH, detailBody());
+    expect(response.status).toBe(202);
+    expect(await response.text()).toBe('{"ok":true}');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("answers 503 timeout when a request takes longer than its limit", async () => {
     const d = deps(undefined, { record: () => new Promise(() => {}), requestTimeoutMs: 50 });
     const { post, warn } = await start(d);
@@ -351,4 +415,57 @@ describe("startRunStepIngress", () => {
     expect(warn.mock.calls[1][0]).toEqual({ event: "run_steps_ingress_late_failure", errorName: "TypeError" });
     for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(warn.mock.calls)).not.toContain(value);
   });
+});
+
+describe("startRunStepIngress, through its default logger at trace level and console", () => {
+  const capture = traceLogCapture();
+  const servers: Server[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => new Promise((resolve) => s.close(resolve))));
+    capture.restore();
+  });
+
+  it.each([
+    ["an accepted detail batch", undefined, 202],
+    [
+      "a writer failing on a detail batch",
+      async () => {
+        throw new TypeError(`write failed: ${FAKE_SECRET}`);
+      },
+      500,
+    ],
+    ["a write that outlasts the request limit", () => new Promise<void>(() => {}), 503],
+    [
+      "a write failing after the timeout answer",
+      () => new Promise<void>((_, reject) => setTimeout(() => reject(new TypeError(`late: ${FAKE_SECRET}`)), 150)),
+      503,
+    ],
+  ] as const)(
+    "keeps a tool input and output tail out of every log line and console call: %s",
+    async (_name, record, status) => {
+      const { startRunStepIngress: startIngress } = await capture.load(() => import("./ingress.js"));
+      const d = deps(undefined, { record: record as RunStepSink["record"] | undefined });
+      const server = await startIngress(
+        { host: "127.0.0.1", port: 0 },
+        { ...d.value, ...(status === 503 ? { requestTimeoutMs: 40 } : {}) },
+      );
+      servers.push(server);
+      const port = (server.address() as AddressInfo).port;
+      const response = await fetch(`http://127.0.0.1:${port}${RUN_STEPS_INGRESS_PATH}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${CAP}`, "content-type": "application/json" },
+        body: detailBody(),
+      });
+      expect(response.status).toBe(status);
+      expect(await response.text()).not.toContain(FAKE_SECRET);
+      expect(d.record).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+      if (status !== 202) await vi.waitFor(() => expect(capture.lineCount()).toBeGreaterThan(0), { timeout: 2_000 });
+      if (_name.includes("after the timeout")) {
+        await vi.waitFor(() => expect(capture.text()).toContain("run_steps_ingress_late_failure"), { timeout: 2_000 });
+      }
+      expect(capture.text()).not.toContain(FAKE_SECRET);
+      expect(capture.text()).not.toContain(CAP);
+    },
+  );
 });

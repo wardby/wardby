@@ -216,7 +216,7 @@ export function codingResultStepText(json: string): { text: string; truncated: b
   return { text: bounded(summary.text).text, truncated: true };
 }
 
-const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
+export const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
  * Every form a secret value can take in a collapsed step text, longest first: each value as
@@ -247,7 +247,7 @@ function failureTable(pattern: string): Int32Array {
  * "" if none. Linear in the text per form (a KMP scan), whatever the forms look like. `tables`
  * holds each form's failure table, built the first time a cut text needs it.
  */
-function secretTail(text: string, forms: readonly string[], tables: Map<string, Int32Array>): string {
+export function secretTail(text: string, forms: readonly string[], tables: Map<string, Int32Array>): string {
   let best = 0;
   for (const form of forms) {
     // A form's proper prefixes; the text is never longer than the step text bound.

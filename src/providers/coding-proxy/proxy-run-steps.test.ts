@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLogLineFilter } from "../../core/logger.js";
 import { SeenIds } from "../../core/run-steps/seen.js";
 import type { StreamStepExtractor } from "../../core/run-steps/extract.js";
+import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
@@ -10,6 +11,11 @@ import { CLAUDE_CODE_ANTHROPIC_BETAS, CodingProxy, type ProxyResponseSink } from
 import { RunStepForwarder } from "./run-step-forwarder.js";
 import { logProxyAudit, startCodingProxyServer } from "./server.js";
 import type { ProxyAuditEvent, ProxyLedger, ProxyProtocol } from "./types.js";
+
+// Trace level for this file, so a log line below info is captured by the no-logging tests.
+vi.hoisted(() => {
+  process.env.LOG_LEVEL = "trace";
+});
 
 /** Faults the tests inject into the real extractors (passed through otherwise). */
 const faults = vi.hoisted(() => ({
@@ -92,6 +98,9 @@ async function harness(
     steps?: RunStepSubmitter | null;
     createStepExtractor?: (protocol: ProxyProtocol) => StreamStepExtractor;
     deadlineMs?: number;
+    runStepsLevel?: RunStepsLevel | null;
+    runStepsCeiling?: RunStepsLevel;
+    audit?: (event: ProxyAuditEvent) => void;
   } = {},
 ) {
   const events: ProxyAuditEvent[] = [];
@@ -111,7 +120,11 @@ async function harness(
     now: () => NOW,
     pricing: () => PRICE,
     pricingVersion: "test-v1",
-    audit: (event) => events.push(event),
+    audit: (event) => {
+      events.push(event);
+      opts.audit?.(event);
+    },
+    ...(opts.runStepsCeiling ? { runStepsCeiling: opts.runStepsCeiling } : {}),
     ...(steps ? { steps } : {}),
     ...(opts.createStepExtractor ? { createStepExtractor: opts.createStepExtractor } : {}),
   });
@@ -122,6 +135,7 @@ async function harness(
     allowedModels: [protocol === "anthropic-messages" ? "claude-sonnet-5" : "test-model"],
     deadlineAt: new Date(NOW.getTime() + (opts.deadlineMs ?? 60_000)),
     budgetUsd: 1,
+    ...(opts.runStepsLevel ? { runStepsLevel: opts.runStepsLevel } : {}),
   });
   const execute = async (rawBody: string, requestKey: string) => {
     const sink = new TestSink();
@@ -413,6 +427,180 @@ describe("CodingProxy run steps", () => {
         expect(record).not.toContain(value);
       }
     }
+  });
+
+  describe("output tails need the session and the proxy ceiling both at detail", () => {
+    const cases = [
+      ["summary", "detail", false],
+      ["detail", "summary", false],
+      [null, "detail", false],
+      ["detail", "detail", true],
+    ] as const;
+    const toolStream = (command: string) => sse(anthropicToolStream("Running.", command));
+    const anthropicRequest = async (output: string) => {
+      const body = JSON.parse(await stepsFixture("anthropic-tool-result-request.json"));
+      body.messages.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "c1", content: `${output}\nexit_code=1` }],
+      });
+      return JSON.stringify(body);
+    };
+    const responsesRequest = (output: string) =>
+      JSON.stringify({
+        model: "test-model",
+        stream: true,
+        max_output_tokens: 100,
+        input: [{ type: "function_call_output", call_id: "c1", output: `${output}\nExit code: 1` }],
+      });
+
+    it.each(cases)(
+      "Claude Code, session %s under proxy ceiling %s: output and input sent = %s",
+      async (level, ceiling, sent) => {
+        const h = await harness("anthropic-messages", toolStream("npm test"), {
+          runStepsLevel: level,
+          runStepsCeiling: ceiling,
+        });
+        await h.execute(await anthropicRequest(`secret ${FAKE_SECRET}`), "k1");
+        const results = h.submitted.flatMap((s) => s.batch.results);
+        expect(results[0]?.status).toBeDefined();
+        expect(results.some((r) => "output" in r)).toBe(sent);
+        const toolSteps = h.submitted.flatMap((s) => s.batch.steps).filter((s) => s.kind === "tool");
+        expect(toolSteps).not.toHaveLength(0);
+        expect(toolSteps.some((s) => "input" in s)).toBe(sent);
+      },
+    );
+
+    it.each(cases)("Codex, session %s under proxy ceiling %s: output sent = %s", async (level, ceiling, sent) => {
+      const h = await harness("openai-responses", sse(await stepsFixture("codex-responses-stream.txt")), {
+        runStepsLevel: level,
+        runStepsCeiling: ceiling,
+      });
+      await h.execute(responsesRequest(`secret ${FAKE_SECRET}`), "k1");
+      const results = h.submitted.flatMap((s) => s.batch.results);
+      expect(results[0]?.status).toBe("exit 1");
+      expect(results.some((r) => "output" in r)).toBe(sent);
+      const toolSteps = h.submitted.flatMap((s) => s.batch.steps).filter((s) => s.kind === "tool");
+      expect(toolSteps).not.toHaveLength(0);
+      expect(toolSteps.some((s) => "input" in s)).toBe(sent);
+    });
+
+    it.each(cases)(
+      "a whole (non-stream) reply, session %s under proxy ceiling %s: input sent = %s",
+      async (level, ceiling, sent) => {
+        const reply = JSON.parse(await stepsFixture("anthropic-run-command-response.json"));
+        const request = JSON.parse(await stepsFixture("anthropic-tool-result-request.json"));
+        request.stream = false;
+        const h = await harness("anthropic-messages", () => Response.json(reply), {
+          runStepsLevel: level,
+          runStepsCeiling: ceiling,
+        });
+        await h.execute(JSON.stringify(request), "k1");
+        const toolSteps = h.stepBatches()[0].batch.steps.filter((s) => s.kind === "tool");
+        expect(toolSteps.map((s) => s.callId)).toEqual(["toolu_steps_2"]);
+        expect(toolSteps.some((s) => "input" in s)).toBe(sent);
+      },
+    );
+
+    it.each(["anthropic-messages", "openai-responses"] as const)(
+      "%s: a session at off extracts and submits nothing",
+      async (protocol) => {
+        const create = vi.fn();
+        const h = await harness(
+          protocol,
+          protocol === "anthropic-messages"
+            ? toolStream("npm test")
+            : sse(await stepsFixture("codex-responses-stream.txt")),
+          { runStepsLevel: "off", runStepsCeiling: "detail", createStepExtractor: create },
+        );
+        await h.execute(protocol === "anthropic-messages" ? await anthropicRequest("x") : responsesRequest("x"), "k1");
+        expect(h.submitted).toHaveLength(0);
+        expect(create).not.toHaveBeenCalled();
+        expect(faults.resultsCalls).toBe(0);
+      },
+    );
+
+    it("a proxy ceiling of off reads nothing, whatever the session says", async () => {
+      const h = await harness("anthropic-messages", toolStream("npm test"), {
+        runStepsLevel: "detail",
+        runStepsCeiling: "off",
+      });
+      await h.execute(await anthropicRequest("x"), "k1");
+      expect(h.submitted).toHaveLength(0);
+    });
+
+    it("never logs or audits a tool output", async () => {
+      const audit = vi.fn();
+      const h = await harness("anthropic-messages", toolStream("npm test"), {
+        runStepsLevel: "detail",
+        runStepsCeiling: "detail",
+        audit,
+      });
+      await h.execute(await anthropicRequest(`x ${FAKE_SECRET}`), "k1");
+      expect(JSON.stringify(h.submitted)).toContain(FAKE_SECRET);
+      expect(JSON.stringify(audit.mock.calls)).not.toContain(FAKE_SECRET);
+      expect(JSON.stringify(h.ledgerCalls)).not.toContain(FAKE_SECRET);
+    });
+
+    it.each(["anthropic-messages", "openai-responses"] as const)(
+      "writes no tool input or output to any log line or console call at trace level (%s)",
+      async (protocol) => {
+        const lines: string[] = [];
+        const consoleCalls: unknown[][] = [];
+        for (const method of ["log", "info", "warn", "error", "debug", "trace"] as const) {
+          vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void consoleCalls.push(args));
+        }
+        setLogLineFilter((line) => {
+          lines.push(line);
+          return "";
+        });
+        try {
+          const audit = vi.fn((event: Parameters<typeof logProxyAudit>[0]) => logProxyAudit(event));
+          const h =
+            protocol === "anthropic-messages"
+              ? await harness("anthropic-messages", toolStream(`echo ${FAKE_SECRET}`), {
+                  runStepsLevel: "detail",
+                  runStepsCeiling: "detail",
+                  audit,
+                })
+              : await harness(
+                  "openai-responses",
+                  sse((await stepsFixture("codex-responses-stream.txt")).replaceAll("npm test", `echo ${FAKE_SECRET}`)),
+                  { runStepsLevel: "detail", runStepsCeiling: "detail", audit },
+                );
+          await h.execute(
+            protocol === "anthropic-messages"
+              ? await anthropicRequest(`x ${FAKE_SECRET}`)
+              : responsesRequest(`x ${FAKE_SECRET}`),
+            "k1",
+          );
+          // Both fields reach the submitter, so the log check below is not vacuous.
+          const tools = h.submitted.flatMap((s) => s.batch.steps).filter((s) => s.kind === "tool");
+          expect(tools.some((s) => s.input?.includes(FAKE_SECRET))).toBe(true);
+          expect(h.submitted.flatMap((s) => s.batch.results).some((r) => r.output?.includes(FAKE_SECRET))).toBe(true);
+        } finally {
+          setLogLineFilter((line) => line);
+        }
+        // Trace level (LOG_LEVEL is set for this file), so a debug or trace line would show here.
+        expect(lines.length).toBeGreaterThan(0);
+        expect(lines.join("")).not.toContain(FAKE_SECRET);
+        expect(JSON.stringify(consoleCalls)).not.toContain(FAKE_SECRET);
+      },
+    );
+  });
+
+  it("rejects an unknown run steps level when creating a session", async () => {
+    const h = await harness("anthropic-messages", sse(""));
+    await expect(
+      h.proxy.createSession({
+        runId: "run-x",
+        credentialRef: "anthropic/project-a",
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-sonnet-5"],
+        deadlineAt: new Date(NOW.getTime() + 60_000),
+        budgetUsd: 1,
+        runStepsLevel: "bogus" as RunStepsLevel,
+      }),
+    ).rejects.toThrow("invalid_proxy_run_steps_level");
   });
 
   it("does no step work without a steps option", async () => {

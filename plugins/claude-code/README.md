@@ -10,7 +10,10 @@ show you.
   a ledger with time and cost columns or as one strip of steps per pull request.
 - A run's request, final answer, outcomes, services, errors and run tree.
 - A running run's recent steps, a finished run's steps, and each run's last
-  step in the list.
+  step in the list. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
+  terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
+  appears only for the agent's owner and the run's starter (and the stdio
+  operator), on a server at the detail level.
 - Continue a finished Claude Code run in your own terminal with
   `wardby resume`.
 - Filters, adaptive refreshing, and a toast when a run finishes.

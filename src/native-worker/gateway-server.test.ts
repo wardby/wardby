@@ -496,9 +496,17 @@ describe("streamModel run steps", () => {
   const expectedBatch = {
     steps: [
       { kind: "said", callId: "said:5e447f59d541311dada70f8d9d26d0e3", text: "Checking.", truncated: false },
-      { kind: "tool", callId: "t1", tool: "lookup", text: "x", truncated: false },
+      {
+        kind: "tool",
+        callId: "t1",
+        tool: "lookup",
+        text: "x",
+        truncated: false,
+        input: '{"query":"x"}',
+        inputTruncated: false,
+      },
     ],
-    results: [{ callId: "t0", status: "ok" }],
+    results: [{ callId: "t0", status: "ok", output: "fine", outputCut: false }],
   };
 
   it("records the call's steps and the request's results for the session's run", async () => {

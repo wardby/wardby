@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as controlChars from "./control-chars.js";
+import { traceLogCapture } from "./log-capture.test-support.js";
 import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
 
@@ -69,6 +71,85 @@ describe("RunStepWriter", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toEqual({ runId: "r1", event: "run_steps_write_failed", errorName: "Error" });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
+  it("logs neither a tool input nor an output when it fails closed on unreadable values or a failing write", async () => {
+    const batch = {
+      steps: [{ kind: "tool" as const, callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+      results: [{ callId: "c1", status: "ok" as const, output: FAKE_SECRET, outputCut: true }],
+    };
+    const unreadable = fakeDb();
+    const warn = vi.fn();
+    const closed = new RunStepWriter({
+      db: unreadable as unknown as RunStepWriterDb,
+      secretValues: async () => {
+        throw new Error(`vault down ${FAKE_SECRET}`);
+      },
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await closed.record("r1", batch);
+    expect(unreadable.$transaction).not.toHaveBeenCalled();
+    const failing = fakeDb();
+    failing.$transaction.mockRejectedValueOnce(new Error(`insert failed ${FAKE_SECRET}`));
+    const failed = new RunStepWriter({
+      db: failing as unknown as RunStepWriterDb,
+      secretValues: async () => [FAKE_SECRET],
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await failed.record("r1", batch);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
+  it("drops a tool's input before any redaction when the run's level is below detail", async () => {
+    const strip = vi.spyOn(controlChars, "stripControlSequences");
+    for (const runStepsLevel of ["summary", null]) {
+      const db = {
+        run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel })) },
+        runStep: {},
+        $transaction: vi.fn(async () => undefined),
+      };
+      const writer = new RunStepWriter({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => [FAKE_SECRET],
+        level: "detail",
+        retentionDays: 30,
+      });
+      await writer.record("r1", {
+        steps: [{ ...step, input: `{"command":"echo wbFake-input-only-3e1a ${FAKE_SECRET}"}` }],
+        results: [],
+      });
+      expect(db.$transaction).toHaveBeenCalledTimes(1);
+    }
+    const seen = strip.mock.calls.map(([text]) => text);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((text) => text.includes("wbFake-input-only-3e1a"))).toBe(false);
+  });
+
+  it("writes nothing when values are unreadable for a detail result-only batch", async () => {
+    const db = {
+      run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel: "detail" })) },
+      runStep: {},
+      $transaction: vi.fn(async () => undefined),
+    };
+    const warn = vi.fn();
+    const writer = new RunStepWriter({
+      db: db as unknown as RunStepWriterDb,
+      secretValues: async () => {
+        throw new Error(`cannot read ${FAKE_SECRET}`);
+      },
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await writer.record("r1", { steps: [], results: [{ callId: "c1", status: "ok", output: FAKE_SECRET }] });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
   });
 
@@ -170,4 +251,33 @@ describe("RunStepWriter", () => {
       expect.any(String),
     );
   });
+});
+
+describe("RunStepWriter, through its default logger at trace level and console", () => {
+  const capture = traceLogCapture();
+  afterEach(() => capture.restore());
+
+  it.each(["secret values unreadable", "write failing"] as const)(
+    "keeps a tool input and output out of every log line and console call: %s",
+    async (path) => {
+      const { RunStepWriter: Writer } = await capture.load(() => import("./writer.js"));
+      const db = fakeDb();
+      if (path === "write failing") db.$transaction.mockRejectedValueOnce(new Error(`insert failed ${FAKE_SECRET}`));
+      const writer = new Writer({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => {
+          if (path === "secret values unreadable") throw new Error(`vault down ${FAKE_SECRET}`);
+          return [FAKE_SECRET];
+        },
+        level: "detail",
+        retentionDays: 30,
+      });
+      await writer.record("r1", {
+        steps: [{ kind: "tool", callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+        results: [{ callId: "c1", status: "ok", output: FAKE_SECRET, outputCut: true }],
+      });
+      expect(capture.text()).toContain("run_steps_write_failed");
+      expect(capture.text()).not.toContain(FAKE_SECRET);
+    },
+  );
 });

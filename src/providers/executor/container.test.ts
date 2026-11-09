@@ -1608,6 +1608,22 @@ describe("ContainerExecutor", () => {
     });
   });
 
+  it.each([
+    ["detail", "detail"],
+    ["summary", "summary"],
+    ["off", "off"],
+  ] as const)("copies the run's run steps level %s onto its proxy session", async (level, expected) => {
+    const created = await harness({ runStepsLevel: level });
+    await created.executor.start("run-1");
+    expect(created.sessions.lastInput?.runStepsLevel).toBe(expected);
+  });
+
+  it.each([null, undefined])("sends no run steps level to the proxy for a run with %s", async (level) => {
+    const created = await harness({ runStepsLevel: level });
+    await created.executor.start("run-1");
+    expect(created.sessions.lastInput).not.toHaveProperty("runStepsLevel");
+  });
+
   it("launches once, cancels spend before materialization, and persists a typed PR result", async () => {
     const created = await harness();
     await Promise.all([created.executor.start("run-1"), created.executor.start("run-1")]);

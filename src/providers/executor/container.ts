@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import {
   isPackageAuditMode,
   mergePackageAuditReports,
@@ -300,6 +301,8 @@ export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: L
 type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | null;
 
 export interface ContainerRunSnapshot {
+  /** Run.runStepsLevel, fixed at dispatch; absent on older snapshots = summary. */
+  runStepsLevel?: RunStepsLevel | null;
   runId: string;
   agentId: string;
   status: string;
@@ -535,6 +538,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       : null;
     return {
       runId: row.id,
+      runStepsLevel: row.runStepsLevel,
       agentId: row.agentId,
       status: row.status,
       agentKind: row.agent.kind,
@@ -995,6 +999,8 @@ export interface CodingSessionController {
     mcpTools?: McpToolPin[];
     /** The hash of the run's MCP token (src/coding/mcp-token.ts); the token itself stays in the vault. */
     mcpTokenHash?: string;
+    /** The run's run-steps level (Run.runStepsLevel); the proxy reads tool output only at detail. */
+    runStepsLevel?: RunStepsLevel;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -1356,6 +1362,7 @@ export class ContainerExecutor implements Executor {
           budgetUsd: run.budgetUsd,
           terms: this.modelTerms(run),
           ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
+          ...(run.runStepsLevel ? { runStepsLevel: run.runStepsLevel } : {}),
         });
         spendEnabled = true;
         sessionId = session.id;

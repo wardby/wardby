@@ -11,24 +11,34 @@
  * no gaps or duplicates whichever process writes. Known limits: a dropped step may be counted again
  * after a process restart, after its run is evicted from the remembered set, past the per-run id
  * limit, or when two processes write the same run. A result is matched only to a stored callId, which
- * is already clean, so a result's callId is never persisted. Log lines
+ * is already clean, so a result's callId is never persisted. At the detail level (the run's
+ * Run.runStepsLevel, fixed at dispatch), each step's detail text is redacted the same way
+ * (stepDetailer) before it is cut and stored; below it, detail material in a batch is dropped
+ * unread. Step text, input and output lose terminal control sequences and control characters
+ * (plainText: exact values masked on the raw text first, then stripControlSequences, then the full
+ * redaction), so no reader is sent an escape sequence. Log lines
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
-import { redactSecrets } from "../../coding/redact.js";
+import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { effectiveRunStepsLevel, loadRunStepRetentionDays, loadRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { MIN_REDACTABLE_SECRET_LENGTH } from "../secret-spans.js";
+import { loadRunStepRetentionDays, loadRunStepsLevel, recordedRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { stripControlSequences } from "./control-chars.js";
+import { joinDetail, stepDetailer, type StepDetailer } from "./detail.js";
 import { stepSummarizer } from "./summarize.js";
 import {
   MAX_RUN_STEPS,
+  MAX_STEP_DETAIL_CHARS,
   STEP_CALL_ID,
   STEP_STATUS,
   STEP_TOOL_NAME,
   type ExtractedStep,
   type RunStepBatch,
   type RunStepSink,
+  tailOf,
 } from "./types.js";
 
 const stepsLog = logger.child({ module: "run-steps" });
@@ -47,6 +57,7 @@ export interface RunStepWriterDeps {
   db: RunStepWriterDb;
   /** Every secret value of the agent (already with JSON-escaped forms); rejects when any can't be read. */
   secretValues: (agentId: string) => Promise<string[]>;
+  /** The process's ceiling: off stops this writer; otherwise used only for runs without a fixed level. */
   level: RunStepsLevel;
   retentionDays: number;
   /** Tests only; MAX_RUN_STEPS otherwise. */
@@ -66,6 +77,50 @@ function uniqueByCallId(steps: readonly ExtractedStep[]): ExtractedStep[] {
   });
 }
 
+/** A private-use character: stands in for a masked value while control sequences are stripped. */
+const HELD = "\uE000";
+
+/**
+ * Untrusted text as plain text, safely: every secret value is masked on the raw text first, whole
+ * and partial (StepDetailer.premask: the text's edges and every line and ellipsis boundary), then
+ * control sequences are stripped (stripControlSequences), and only then does the full redaction
+ * run. Stripping first could take a secret's first character as a malformed sequence's final byte
+ * (`ESC Z` + value) and leave the rest of it matching nothing; the full redaction after the strip
+ * still masks a value that only the strip joined (one split by colour codes). The mask is a
+ * placeholder no sequence pattern can take as a byte of its own (a sequence before `[REDACTED]`
+ * would eat its "["), swapped for the marker after the strip.
+ */
+function plainText(raw: string, premask: PremaskOf | undefined, headWasCut = false): string {
+  if (!premask) return stripControlSequences(raw);
+  const held = premask(raw.replaceAll(HELD, ""), headWasCut, HELD);
+  return stripControlSequences(held).replaceAll(HELD, REDACTED);
+}
+type PremaskOf = StepDetailer["premask"];
+
+/**
+ * A result's detail suffix: its end taken from the raw output first (tailOf), so the premask's head
+ * check runs at the cut the detailer will see, then plainText, then the detailer.
+ */
+function plainOutput(raw: string, outputCut: boolean, premask: PremaskOf | undefined, detailer: StepDetailer): string {
+  const source = tailOf(raw);
+  const cut = outputCut || source.cut;
+  return detailer.output({ output: plainText(source.text, premask, cut), outputCut: cut });
+}
+
+/** `step` without its detail-only input. */
+function withoutInput(step: ExtractedStep): ExtractedStep {
+  if (step.kind !== "tool" || step.input === undefined) return step;
+  const { input: _input, inputTruncated: _inputTruncated, ...rest } = step;
+  return rest;
+}
+
+/** A step's text and input as plainText. */
+function plainStep(step: ExtractedStep, premask: PremaskOf | undefined): ExtractedStep {
+  if (step.kind === "said") return { ...step, text: plainText(step.text, premask) };
+  const input = step.input === undefined ? {} : { input: plainText(step.input, premask) };
+  return { ...step, text: plainText(step.text, premask), ...input };
+}
+
 function safeToolName(tool: string, secretValues: readonly string[]): string {
   const shown = redactSecrets(tool, secretValues);
   return STEP_TOOL_NAME.test(shown) ? shown : "tool";
@@ -82,7 +137,7 @@ export class RunStepWriter implements RunStepSink {
   constructor(private readonly deps: RunStepWriterDeps) {}
 
   record(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[] = []): Promise<void> {
-    if (effectiveRunStepsLevel(this.deps.level) === "off") return Promise.resolve();
+    if (this.deps.level === "off") return Promise.resolve();
     if (batch.steps.length === 0 && batch.results.length === 0) return Promise.resolve();
     const previous = this.queues.get(runId) ?? Promise.resolve();
     const next = previous
@@ -124,16 +179,42 @@ export class RunStepWriter implements RunStepSink {
 
   private async write(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[]): Promise<void> {
     const { db } = this.deps;
-    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true, runStepsLevel: true } });
     if (!run) return;
-    const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
-    // Read fresh for every batch (never cached: a rotated or newly attached secret must be covered).
-    // Rejects (and the batch is dropped) when the values can't be read: never an unredacted write.
-    const own = steps.length > 0 ? await this.deps.secretValues(run.agentId) : [];
-    const extras = steps.length > 0 ? extraSecretValues.filter(Boolean) : [];
-    const values = [...own, ...extras];
-    // The summary forms are built once per batch, on the first row.
+    const level = recordedRunStepsLevel(run.runStepsLevel, this.deps.level);
+    if (level === "off") return;
+    const detailed = level === "detail";
+    // Below detail a tool's input is never stored, so it is dropped here, before any redaction.
+    const extracted = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said")).map(
+      (step) => (detailed ? step : withoutInput(step)),
+    );
+    const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
+    const outputs = detailed && results.some((r) => typeof r.output === "string");
+    // Read fresh for every batch that stores text (steps, or outputs at detail), never cached: a
+    // rotated or newly attached secret must be covered. Rejects (and the batch is dropped) when the
+    // values can't be read: never an unredacted write.
+    const needsValues = extracted.length > 0 || outputs;
+    const own = needsValues ? await this.deps.secretValues(run.agentId) : [];
+    const extras = needsValues ? extraSecretValues.filter(Boolean) : [];
+    const rawValues = [...own, ...extras];
+    // Each value also as plain text, as the step text is: a value holding a control character
+    // (never a stripped form too short to redact safely).
+    const values = [
+      ...new Set(
+        rawValues.flatMap((value) => {
+          const plain = stripControlSequences(value);
+          return plain.length >= MIN_REDACTABLE_SECRET_LENGTH ? [value, plain] : [value];
+        }),
+      ),
+    ];
+    // The summary forms are built once per batch, on the first row; the detailer (whose premask
+    // every text goes through first) once per batch that has any secret value.
     let summarize: ReturnType<typeof stepSummarizer> | undefined;
+    let detailer: StepDetailer | undefined;
+    const detailOf = (): StepDetailer => (detailer ??= stepDetailer(values));
+    const premask: PremaskOf | undefined =
+      values.length > 0 ? (raw, headWasCut, marker) => detailOf().premask(raw, headWasCut, marker) : undefined;
+    const steps = extracted.map((step) => plainStep(step, premask));
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
@@ -143,16 +224,23 @@ export class RunStepWriter implements RunStepSink {
       tool: step.kind === "tool" ? safeToolName(step.tool, values) : null,
       callId: step.callId,
       summary: (summarize ??= stepSummarizer(values))(step),
+      detail: detailed ? detailOf().step(step).slice(0, MAX_STEP_DETAIL_CHARS) : null,
       at,
       expiresAt,
     }));
-    const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const maxSteps = this.deps.maxSteps ?? MAX_RUN_STEPS;
     const counted = this.droppedIds.get(runId) ?? new Set<string>();
     if (this.droppedIds.has(runId)) {
       this.droppedIds.delete(runId);
       this.droppedIds.set(runId, counted);
     }
+    // Each result's detail suffix, computed before the transaction: redaction is CPU work, and the
+    // transaction holds the run's row lock.
+    const suffixes = results.map((result) =>
+      outputs && typeof result.output === "string"
+        ? plainOutput(result.output, result.outputCut === true, premask, detailOf())
+        : undefined,
+    );
     const newlyDropped: string[] = [];
     await db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT 1 FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
@@ -174,11 +262,24 @@ export class RunStepWriter implements RunStepSink {
         const dropped = over.length;
         if (dropped > 0) await tx.run.update({ where: { id: runId }, data: { stepsDropped: { increment: dropped } } });
       }
-      for (const result of results) {
-        // The first status wins: a result resent with the history, or replayed, changes nothing.
-        await tx.runStep.updateMany({
+      for (const [index, result] of results.entries()) {
+        const suffix = suffixes[index];
+        if (suffix === undefined) {
+          // The first status wins: a result resent with the history, or replayed, changes nothing.
+          await tx.runStep.updateMany({
+            where: { runId, callId: result.callId, kind: "tool", status: null },
+            data: { status: result.status },
+          });
+          continue;
+        }
+        const open = await tx.runStep.findFirst({
           where: { runId, callId: result.callId, kind: "tool", status: null },
-          data: { status: result.status },
+          select: { id: true, detail: true },
+        });
+        if (!open) continue;
+        await tx.runStep.update({
+          where: { id: open.id },
+          data: { status: result.status, detail: joinDetail(open.detail, suffix) },
         });
       }
     }, TX);

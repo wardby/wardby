@@ -6,15 +6,29 @@
 
 /** A step as an extractor saw it: `text` is what the summary is cut from (at most MAX_STEP_TEXT_CHARS). */
 export type ExtractedStep =
-  | { kind: "tool"; callId: string; tool: string; text: string; truncated: boolean }
+  | {
+      kind: "tool";
+      callId: string;
+      tool: string;
+      text: string;
+      truncated: boolean;
+      /** Detail level only: the tool's raw input (at most MAX_STEP_TEXT_CHARS). */
+      input?: string;
+      /** The input was cut (it may end in the start of a secret). */
+      inputTruncated?: boolean;
+    }
   | { kind: "said"; callId: string; text: string; truncated: boolean };
 
 export type StepStatus = "ok" | "error" | `exit ${number}`;
 
-/** A tool call's status, matched to its step by callId. Never the result's content. */
+/** A tool call's status, matched to its step by callId. Never the result's content below the detail level. */
 export interface ExtractedResult {
   callId: string;
   status: StepStatus;
+  /** Detail level only: the end of the result's text output (at most MAX_RESULT_OUTPUT_CHARS). */
+  output?: string;
+  /** Text before `output` was dropped (it may start with the end of a secret). */
+  outputCut?: boolean;
 }
 
 export interface RunStepBatch {
@@ -50,6 +64,21 @@ export const TOOL_SUMMARY_CHARS = 100;
 export const SAID_SUMMARY_CHARS = 120;
 /** The summary column's bound. */
 export const MAX_SUMMARY_CHARS = 300;
+/** The detail level's parts: a tool's input head, its output's tail, a model message's head. */
+export const DETAIL_INPUT_CHARS = 4 * 1024;
+export const DETAIL_OUTPUT_CHARS = 2 * 1024;
+export const DETAIL_SAID_CHARS = 8 * 1024;
+/** The detail column's bound. */
+export const MAX_STEP_DETAIL_CHARS = 16 * 1024;
+/** The most of a tool result's output a source sends (its end): more than DETAIL_OUTPUT_CHARS, so a secret across the cut is still whole. */
+export const MAX_RESULT_OUTPUT_CHARS = 4 * 1024;
+
+/** The end of `text`, at most `max` characters, and whether anything before it was dropped. */
+export function tailOf(text: string, max = MAX_RESULT_OUTPUT_CHARS): { text: string; cut: boolean } {
+  return text.length > max ? { text: text.slice(text.length - max), cut: true } : { text, cut: false };
+}
+/** Between a tool's input and its output in the detail text. */
+export const DETAIL_OUTPUT_HEADING = "\n\n--- output (end) ---\n";
 
 /** ok, error, or exit 1-999: fixed shapes only, so no free text can reach a status. */
 export const STEP_STATUS = /^(?:ok|error|exit [1-9]\d{0,2})$/;

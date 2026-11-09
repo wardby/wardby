@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { traceLogCapture } from "../../core/run-steps/log-capture.test-support.js";
 import { RunStepForwarder } from "./run-step-forwarder.js";
 import { MAX_RUN_STEPS_POST_BYTES, MAX_STEP_TEXT_CHARS, type RunStepBatch } from "../../core/run-steps/types.js";
 
@@ -49,6 +50,64 @@ describe("RunStepForwarder", () => {
       [0, 256],
       [0, 44],
     ]);
+  });
+
+  it("splits detail-sized results by serialized size: every result once, no body over the cap", async () => {
+    const fetchImpl = accepted();
+    const forwarder = new RunStepForwarder({ url: URL_BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const results = Array.from({ length: 400 }, (_, n) => ({
+      callId: `c${n}`,
+      status: "ok" as const,
+      output: "x".repeat(4096),
+      outputCut: true,
+    }));
+    forwarder.submit(CAP, "r1", { steps: [], results });
+    await forwarder.flush();
+    const bodies = fetchImpl.mock.calls.map(([, init]) => init.body as string);
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_RUN_STEPS_POST_BYTES);
+    const ids = bodies.flatMap((body) => (JSON.parse(body) as RunStepBatch).results.map((r) => r.callId));
+    expect(ids).toEqual(results.map((r) => r.callId));
+  });
+
+  it("counts input and output bytes in the queue bound: a detail-sized batch is dropped where its text alone would fit", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => {
+      await gate;
+      return new Response(null, { status: 202 });
+    });
+    const info = vi.fn();
+    const forwarder = new RunStepForwarder({
+      url: URL_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      maxQueueBytes: 100_000,
+      log: { info },
+    });
+    // Small text, so an estimate that ignores input and output sees about 1.5 KB; with them it is about 63 KB.
+    const big: RunStepBatch = {
+      steps: [
+        {
+          kind: "tool",
+          callId: "c1",
+          tool: "Bash",
+          text: "ls",
+          truncated: false,
+          input: "i".repeat(MAX_STEP_TEXT_CHARS),
+          inputTruncated: false,
+        },
+      ],
+      results: [{ callId: "c1", status: "ok", output: "o".repeat(4096), outputCut: true }],
+    };
+    forwarder.submit(CAP, "r1", big); // taken at once, waiting on the gate
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let n = 0; n < 5; n += 1) forwarder.submit(CAP, "r1", big);
+    // One fits the 100 KB bound; the other four are dropped.
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue_full" }), expect.any(String));
+    release();
+    await forwarder.flush();
+    // Two batches sent (the first, and the one queued), two POSTs each (steps, then results).
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
   it("drops on a full queue and logs only a reason and a count", async () => {
@@ -157,6 +216,163 @@ describe("RunStepForwarder", () => {
     expect(logged).not.toContain(CAP);
     expect(logged).not.toContain(FAKE_SECRET);
     expect(logged).not.toContain("curl");
+  });
+
+  describe("tool input and output tails", () => {
+    const detailBatch: RunStepBatch = {
+      steps: [
+        {
+          kind: "tool",
+          callId: "c1",
+          tool: "Bash",
+          text: "ls",
+          truncated: false,
+          input: `{"k":"${FAKE_SECRET}"}`,
+          inputTruncated: true,
+        },
+      ],
+      results: [{ callId: "c1", status: "ok", output: `out ${FAKE_SECRET}`, outputCut: true }],
+    };
+    const never = (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("x"))));
+
+    it.each([
+      [
+        "unreachable",
+        () => vi.fn(async (_u: string, init: RequestInit) => Promise.reject(new Error(`boom ${init.body as string}`))),
+      ],
+      [
+        "http_500",
+        () =>
+          vi.fn(async (_u: string, init: RequestInit) => new Response(`echo ${init.body as string}`, { status: 500 })),
+      ],
+      ["timeout", () => vi.fn(never)],
+    ])("keeps them out of every log call and thrown error on the %s path", async (reason, makeFetch) => {
+      const info = vi.fn();
+      const fetchImpl = makeFetch();
+      const forwarder = new RunStepForwarder({
+        url: URL_BASE,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        timeoutMs: 10,
+        log: { info },
+      });
+      expect(() => forwarder.submit(CAP, "r1", detailBatch)).not.toThrow();
+      await expect(forwarder.flush()).resolves.toBeUndefined();
+      // The body is raw by design: both parts were posted, so the check below is not vacuous.
+      const bodies = fetchImpl.mock.calls.map(([, init]) => init.body as string).join("");
+      expect(bodies).toContain(FAKE_SECRET);
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason }), expect.any(String));
+      expect(JSON.stringify(info.mock.calls)).not.toContain(FAKE_SECRET);
+      expect(JSON.stringify(info.mock.calls)).not.toContain(CAP);
+    });
+
+    describe("through the default logger at trace level and console", () => {
+      const capture = traceLogCapture();
+      afterEach(() => capture.restore());
+
+      it.each(["unreachable", "http_500", "queue_full", "closed", "submit_failed", "serialize_failed"] as const)(
+        "keeps input and output out of every log line and console call on the %s path",
+        async (reason) => {
+          const { RunStepForwarder: Forwarder } = await capture.load(() => import("./run-step-forwarder.js"));
+          const posted: string[] = [];
+          let release = () => {};
+          const gate = new Promise<void>((resolve) => (release = resolve));
+          const fetchImpl = vi.fn(async (_u: string, init: RequestInit) => {
+            posted.push(init.body as string);
+            if (reason === "unreachable") throw new Error(`boom ${init.body as string}`);
+            if (reason === "http_500") return new Response(`echo ${init.body as string}`, { status: 500 });
+            await gate;
+            return new Response(null, { status: 202 });
+          });
+          const forwarder = new Forwarder({
+            url: URL_BASE,
+            fetchImpl: fetchImpl as unknown as typeof fetch,
+            maxQueue: 1,
+            flushTimeoutMs: 20,
+          });
+          if (reason === "submit_failed") {
+            // A batch whose size estimate throws: the bound is on the submit path itself.
+            const hostile = {
+              steps: [{ kind: "tool", callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+              get results(): never {
+                throw new Error(`getter ${FAKE_SECRET}`);
+              },
+            };
+            forwarder.submit(CAP, "r1", hostile as unknown as RunStepBatch);
+          } else if (reason === "serialize_failed") {
+            const cyclic: Record<string, unknown> = {
+              kind: "tool",
+              callId: "c9",
+              tool: "Bash",
+              text: "ls",
+              truncated: false,
+              input: FAKE_SECRET,
+            };
+            cyclic.self = cyclic;
+            forwarder.submit(CAP, "r1", {
+              steps: [cyclic as never],
+              results: [{ callId: "c9", status: "ok", output: FAKE_SECRET, outputCut: true }],
+            });
+          } else {
+            forwarder.submit(CAP, "r1", detailBatch);
+            await new Promise((resolve) => setImmediate(resolve));
+            if (reason === "queue_full" || reason === "closed") {
+              forwarder.submit(CAP, "r1", detailBatch); // queued
+              forwarder.submit(CAP, "r1", detailBatch); // queue full
+            }
+            if (reason === "closed") {
+              const closing = forwarder.close();
+              forwarder.submit(CAP, "r1", detailBatch);
+              await closing;
+            }
+          }
+          release();
+          await forwarder.flush();
+          await forwarder.close();
+          expect(capture.text()).toContain(reason);
+          if (reason !== "submit_failed" && reason !== "serialize_failed") {
+            expect(posted.join("")).toContain(FAKE_SECRET);
+          }
+          expect(capture.text()).not.toContain(FAKE_SECRET);
+          expect(capture.text()).not.toContain(CAP);
+        },
+      );
+    });
+
+    it("keeps them out of the queue_full and serialize_failed log lines", async () => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const info = vi.fn();
+      const forwarder = new RunStepForwarder({
+        url: URL_BASE,
+        fetchImpl: async () => {
+          await gate;
+          return new Response(null, { status: 202 });
+        },
+        maxQueue: 1,
+        log: { info },
+      });
+      forwarder.submit(CAP, "r1", detailBatch);
+      await new Promise((resolve) => setImmediate(resolve));
+      forwarder.submit(CAP, "r1", detailBatch); // queued
+      forwarder.submit(CAP, "r1", detailBatch); // queue full
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue_full" }), expect.any(String));
+      release();
+      await forwarder.flush();
+      const cyclic: Record<string, unknown> = {
+        kind: "tool",
+        callId: "c9",
+        tool: "Bash",
+        text: "ls",
+        truncated: false,
+      };
+      cyclic.input = FAKE_SECRET;
+      cyclic.self = cyclic;
+      forwarder.submit(CAP, "r1", { steps: [cyclic as never], results: [] });
+      await forwarder.flush();
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "serialize_failed" }), expect.any(String));
+      expect(JSON.stringify(info.mock.calls)).not.toContain(FAKE_SECRET);
+    });
   });
 
   it("flush is bounded: it returns even when a POST never settles", async () => {

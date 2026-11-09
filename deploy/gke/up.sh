@@ -11,6 +11,8 @@
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
 #   WARDBY_SESSION_TRANSCRIPTS=true   # optional: store sessionResume transcripts on the control plane (default false; needs session_transcripts_enabled in terraform.tfvars)
 #   RUN_TRANSCRIPT_MAX_BYTES=20971520   # optional: largest transcript stored, with WARDBY_SESSION_TRANSCRIPTS=true (default 10 MiB)
+#   WARDBY_RUN_STEPS=detail   # optional: most a run's steps are recorded at, off|summary|detail (default summary; see docs/debugging-agent-runs.md)
+#   RUN_STEP_RETENTION_DAYS=14   # optional: days a run step is kept, 1-3650 (default 30; see docs/debugging-agent-runs.md)
 #   CODING_MAX_DISK_MB=8192   # optional: largest per-agent workspaceDiskMb the control plane accepts (default 2048)
 #   CODING_MEMORY_MB=6144   # optional: memory for each coding run's pod, in MiB (default 2048)
 #   CODING_CPUS=2   # optional: CPUs for each coding run's pod (default 1)
@@ -144,6 +146,58 @@ inject_mention_explanations_env() {
     }'
 }
 # --- end WARDBY_MENTION_EXPLANATIONS control-plane env ---
+
+# --- WARDBY_RUN_STEPS and RUN_STEP_RETENTION_DAYS check ---
+# Optional: the instance's run-steps ceiling (off, summary or detail) and how
+# many days a step is kept (1-3650). Empty = not set: the server defaults
+# (summary, 30 days) apply and nothing is injected. The server validates both
+# at start-up too; this stops a bad value before anything changes.
+WARDBY_RUN_STEPS="${WARDBY_RUN_STEPS:-}"
+RUN_STEP_RETENTION_DAYS="${RUN_STEP_RETENTION_DAYS:-}"
+if [[ -n "$WARDBY_RUN_STEPS" ]]; then
+  case "$WARDBY_RUN_STEPS" in
+    off | summary | detail) ;;
+    *)
+      echo "up.sh: WARDBY_RUN_STEPS must be off, summary or detail (got \"$WARDBY_RUN_STEPS\")." >&2
+      exit 1
+      ;;
+  esac
+  echo "up.sh: run steps are recorded at most at ${WARDBY_RUN_STEPS}."
+fi
+if [[ -n "$RUN_STEP_RETENTION_DAYS" ]]; then
+  if ! [[ "$RUN_STEP_RETENTION_DAYS" =~ ^[1-9][0-9]{0,3}$ ]] || ((RUN_STEP_RETENTION_DAYS > 3650)); then
+    echo "up.sh: RUN_STEP_RETENTION_DAYS must be a whole number of days between 1 and 3650 (got \"$RUN_STEP_RETENTION_DAYS\")." >&2
+    exit 1
+  fi
+  echo "up.sh: run steps are kept ${RUN_STEP_RETENTION_DAYS} days."
+fi
+# --- end WARDBY_RUN_STEPS and RUN_STEP_RETENTION_DAYS check ---
+
+# --- WARDBY_RUN_STEPS and RUN_STEP_RETENTION_DAYS env ---
+# Adds whichever is set to every container that writes or relays run steps, right
+# after an env entry that container alone has (the same way as the injections
+# above): the control plane (WARDBY_MOBILE_ENABLED), the coding proxy
+# (DATABASE_URL, wardby-proxy-database-url) and the native gateway (DATABASE_URL,
+# wardby-gateway-database-url). The ceiling goes to all three; retention only to
+# the control plane and gateway, the processes that write or sweep steps (the
+# proxy never reads it). Does nothing when neither is set.
+inject_run_steps_env() {
+  if [[ -z "$WARDBY_RUN_STEPS" && -z "$RUN_STEP_RETENTION_DAYS" ]]; then
+    cat
+    return
+  fi
+  awk -v level="$WARDBY_RUN_STEPS" -v days="$RUN_STEP_RETENTION_DAYS" '
+    function emit(with_days) {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      if (level != "") { print item_indent "- name: WARDBY_RUN_STEPS"; print value_indent "value: \"" level "\"" }
+      if (with_days && days != "") { print item_indent "- name: RUN_STEP_RETENTION_DAYS"; print value_indent "value: \"" days "\"" }
+    }
+    { print }
+    /^ *value: wardby_mobile_enabled$/ { emit(1) }
+    /^ *value: wardby-gateway-database-url$/ { emit(1) }
+    /^ *value: wardby-proxy-database-url$/ { emit(0) }'
+}
+# --- end WARDBY_RUN_STEPS and RUN_STEP_RETENTION_DAYS env ---
 
 # --- CODING_MAX_DISK_MB check ---
 # Optional: the largest workspace (MiB) an agent's workspaceDiskMb may ask for.
@@ -743,6 +797,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_mention_explanations_env \
   | inject_coding_max_disk_env \
   | inject_coding_resources_env \
+  | inject_run_steps_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \

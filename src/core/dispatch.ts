@@ -43,6 +43,7 @@ import {
   type CodingRepositoryTarget,
 } from "./coding-repository.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
+import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -829,6 +830,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             executionManaged: true,
             // Fixed for the run's life: the executor routes on this, never on the agent's current setting.
             nativeExecutionMode: agent.kind === "native" ? agent.nativeExecutionMode : null,
+            // Fixed for the run's life, like nativeExecutionMode: a later runSteps change reaches only later runs.
+            runStepsLevel: dispatchRunStepsLevel(agent),
             parentRunId: options.parentRunId,
             parentCallId: options.parentCallId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],

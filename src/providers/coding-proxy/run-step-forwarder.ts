@@ -51,8 +51,12 @@ interface Entry {
 /** A cheap upper-ish bound on a batch's serialized size, with no stringify on the caller's stack. */
 function estimate(batch: RunStepBatch): number {
   let bytes = ENVELOPE_SLACK_BYTES;
-  for (const step of batch.steps) bytes += step.text.length * 3 + step.callId.length * 3 + 256;
-  return bytes + batch.results.length * 128;
+  for (const step of batch.steps) {
+    bytes += step.text.length * 3 + step.callId.length * 3 + 256;
+    if (step.kind === "tool") bytes += (step.input?.length ?? 0) * 3;
+  }
+  for (const result of batch.results) bytes += 128 + (result.output?.length ?? 0) * 3;
+  return bytes;
 }
 
 /** Splits by count and by serialized UTF-8 size, so no body passes MAX_RUN_STEPS_POST_BYTES. */
@@ -72,9 +76,22 @@ function split(batch: RunStepBatch, runId: string): RunStepBatch[] {
     size += bytes;
   }
   if (steps.length > 0) parts.push({ steps, results: [] });
-  for (let at = 0; at < batch.results.length; at += MAX_RESULTS_PER_POST) {
-    parts.push({ steps: [], results: batch.results.slice(at, at + MAX_RESULTS_PER_POST) });
+  let results: RunStepBatch["results"] = [];
+  let resultBytes = base;
+  for (const result of batch.results) {
+    const bytes = Buffer.byteLength(JSON.stringify(result)) + 1;
+    if (
+      results.length > 0 &&
+      (results.length >= MAX_RESULTS_PER_POST || resultBytes + bytes > MAX_RUN_STEPS_POST_BYTES)
+    ) {
+      parts.push({ steps: [], results });
+      results = [];
+      resultBytes = base;
+    }
+    results.push(result);
+    resultBytes += bytes;
   }
+  if (results.length > 0) parts.push({ steps: [], results });
   return parts;
 }
 

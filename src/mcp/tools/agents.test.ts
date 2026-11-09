@@ -352,6 +352,76 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  describe("runSteps", () => {
+    const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+    const AGENT = { name: "stepper", systemPrompt: "x", model: "gpt-4o", budgetUsd: 5 };
+    async function owner() {
+      const db = fakeDb();
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+
+    it("create_agent accepts runSteps and get_agent and list_agents return it", async () => {
+      const client = await owner();
+      const created = await client.callTool({ name: "create_agent", arguments: { ...AGENT, runSteps: "off" } });
+      expect(created.isError).toBeFalsy();
+      const agent = JSON.parse(text(created));
+      expect(agent.runSteps).toBe("off");
+      expect(JSON.parse(text(await client.callTool({ name: "get_agent", arguments: { id: agent.id } }))).runSteps).toBe(
+        "off",
+      );
+      for (const args of [{}, { summary: true }]) {
+        const rows = JSON.parse(text(await client.callTool({ name: "list_agents", arguments: args })));
+        expect(rows.find((row: { id: string }) => row.id === agent.id)?.runSteps).toBe("off");
+      }
+      await client.close();
+    });
+
+    it("update_agent stores runSteps, warns above the instance's ceiling, and null clears it", async () => {
+      vi.stubEnv("WARDBY_RUN_STEPS", "summary");
+      try {
+        const client = await owner();
+        const agent = JSON.parse(text(await client.callTool({ name: "create_agent", arguments: AGENT })));
+        const out = JSON.parse(
+          text(await client.callTool({ name: "update_agent", arguments: { id: agent.id, runSteps: "detail" } })),
+        );
+        expect(out.runSteps).toBe("detail");
+        expect(out.warnings).toContain(
+          "runSteps is detail but this instance allows up to summary (WARDBY_RUN_STEPS), so its runs record summary. See the run-steps help article.",
+        );
+        const got = JSON.parse(text(await client.callTool({ name: "get_agent", arguments: { id: agent.id } })));
+        expect(got.runSteps).toBe("detail");
+        expect(got.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/allows up to summary/)]));
+        const cleared = JSON.parse(
+          text(await client.callTool({ name: "update_agent", arguments: { id: agent.id, runSteps: null } })),
+        );
+        expect(cleared.runSteps).toBeNull();
+        expect(cleared.warnings ?? []).toEqual([]);
+        vi.stubEnv("WARDBY_RUN_STEPS", "detail");
+        const allowed = JSON.parse(
+          text(await client.callTool({ name: "update_agent", arguments: { id: agent.id, runSteps: "detail" } })),
+        );
+        expect(allowed.warnings ?? []).toEqual([]);
+        await client.close();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("rejects an unknown runSteps value, naming the allowed values", async () => {
+      const client = await owner();
+      const agent = JSON.parse(text(await client.callTool({ name: "create_agent", arguments: AGENT })));
+      const bad = await client.callTool({ name: "update_agent", arguments: { id: agent.id, runSteps: "full" } });
+      expect(bad.isError).toBe(true);
+      expect(text(bad)).toMatch(/off.*summary.*detail/s);
+      const badCreate = await client.callTool({ name: "create_agent", arguments: { ...AGENT, runSteps: "full" } });
+      expect(badCreate.isError).toBe(true);
+      await client.close();
+    });
+  });
+
   it("create_agent atomically creates a normalized coding profile", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -3270,6 +3340,26 @@ describe("agent tools under grants", () => {
     expect(toCoding.isError).toBe(true);
     expect(text(toCoding)).toMatch(/owner/);
     await nativeWriter.client.close();
+  });
+
+  it("runSteps is owner-only: write, execute and read grantees are refused, and the value is unchanged", async () => {
+    for (const level of ["write", "execute", "read"]) {
+      const other = await as("g", base(), [grant(level)]);
+      const refused = await other.client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", runSteps: "detail" },
+      });
+      expect(refused.isError, level).toBe(true);
+      expect(text(refused)).toMatch(
+        level === "write" ? /only its owner can change .* run steps level/ : /write access/,
+      );
+      expect((await other.db.agent.findUnique({ where: { id: "a1" } }))?.runSteps).toBeUndefined();
+      await other.client.close();
+    }
+    const owner = await as("owner", base(), []);
+    const ok = await owner.client.callTool({ name: "update_agent", arguments: { id: "a1", runSteps: "detail" } });
+    expect(ok.isError).toBeFalsy();
+    await owner.client.close();
   });
 
   it("I1: budgetGroupId is owner-only; write covers name, prompt, model, budget amount, turns, effort, memory and schedule", async () => {

@@ -216,6 +216,7 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
       budgetUsd: 3,
       ownerId: me.id,
       codingProvider: null,
+      runSteps: null,
       access: "owner",
     });
     expect(rows.some((r) => r.ownerId === other.id && r.access === "none")).toBe(false);

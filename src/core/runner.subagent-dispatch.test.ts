@@ -57,6 +57,7 @@ interface FakeAgent {
   budgetGroupId?: string | null;
   kind?: "native" | "coding";
   nativeExecutionMode?: "control_plane" | "sandbox";
+  runSteps?: "off" | "summary" | "detail" | null;
   codingProfile?: FakeCodingProfile;
   ownerId?: string | null;
   allowedOverrunPercent?: number;
@@ -459,6 +460,48 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRun[0].finalText).toBe("the child found it");
     // No executor watches an inline child, so it beats itself (its budget-group hold stays live).
     expect(childRun[0].heartbeatAt).toBeInstanceOf(Date);
+  });
+
+  it("fixes the child run's steps level from the child agent's own setting, not the parent's", async () => {
+    vi.stubEnv("WARDBY_RUN_STEPS", "detail");
+    try {
+      const orchestrator: FakeAgent = {
+        id: "parent-agent",
+        name: "orchestrator",
+        systemPrompt: "You orchestrate.",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+        runSteps: "off",
+      };
+      const researcher: FakeAgent = {
+        id: "child-agent",
+        name: "researcher",
+        systemPrompt: "You research.",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+        runSteps: "detail",
+      };
+      const db = fakeDb(
+        [orchestrator, researcher],
+        [{ parentAgentId: "parent-agent", childAgentId: "child-agent", boundName: "researcher" }],
+      );
+      const parentRun = await db.run.create({ data: { agentId: "parent-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_researcher", JSON.stringify({ task: "find the answer" })),
+        finalAnswer("the child found it"),
+        finalAnswer("done"),
+      ]);
+      await executeRun(parentRun.id, providers(llm), db);
+      const children = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        runStepsLevel?: string;
+      }>;
+      expect(children).toHaveLength(1);
+      expect(children[0].runStepsLevel).toBe("detail");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   describe("masks the parent's attached secret values in the delegated task", () => {

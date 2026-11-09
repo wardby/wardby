@@ -1,4 +1,5 @@
 import { parseStoredEntry, type CatalogEntry } from "../llm/catalog-types.js";
+import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import type { ProxyRefusalDetails } from "../../core/budget-events.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
@@ -62,6 +63,8 @@ export interface ProxySession {
   mcpTokenHash: string | null;
   /** The run's MCP tools/call count so far. */
   mcpCallCount: number;
+  /** The run's Run.runStepsLevel, copied at session creation; null on sessions from before run steps detail. */
+  runStepsLevel: RunStepsLevel | null;
 }
 
 export interface ProxyRequest {
@@ -113,6 +116,8 @@ export interface CreateProxySessionInput {
   mcpTools?: McpToolPin[];
   /** SHA-256 (base64url) of the run's MCP token (mcpTokenHash in src/coding/mcp-token.ts). */
   mcpTokenHash?: string;
+  /** The run's level, fixed at dispatch; absent counts as summary. */
+  runStepsLevel?: RunStepsLevel;
 }
 
 export interface ReserveProxyRequestInput {
