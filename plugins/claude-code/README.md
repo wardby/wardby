@@ -10,10 +10,12 @@ show you.
   a ledger (each run with a status pill, its spend against its budget and a
   thin budget bar) or as one strip of steps per pull request.
 - A run's request, final answer, outcomes, services, errors and run tree, each
-  in its own card, with a **Copy** button on the desktop.
+  in its own card (coloured by kind), with a **Copy** button on the desktop.
 - A running run's recent steps, a finished run's steps, and each run's last
-  step in the list. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
-  terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
+  step in the list: a ✓ or the exit code at the left, then the tool and its
+  command. From 0.9.0, a step with detail has a ▸ at its right that opens it
+  ("$ command", the exit status and the output); in the terminal, `j`/`k` move
+  between such steps and `e` shows or hides one. Detail
   appears only for the agent's owner and the run's starter (and the stdio
   operator), on a server at the detail level.
 - Continue a finished Claude Code run in your own terminal with

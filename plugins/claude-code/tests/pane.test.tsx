@@ -1137,9 +1137,9 @@ test("a running run's detail shows its last 8 steps, read again each poll", asyn
     expect(stepCalls[0]).toEqual({ runId: "r1", after: 4, limit: 200 });
     expect(await texts(ui)).toContain("Recent steps");
     expect(await ui.find({ key: "step-4" })).toBeUndefined();
-    expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("Bash: step 5");
-    // The result is a pill beside the line: "exit 1", then "Bash: step 10".
-    expect((await ui.find({ key: "step-10" }))?.text).toMatch(/exit 1.*Bash: step 10/);
+    expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("step 5");
+    // The result is the row's gutter: the exit code "1", then the tool and "step 10".
+    expect((await ui.find({ key: "step-10" }))?.text).toMatch(/^\s*1\s*Bash:?\s*step 10/);
     expect((await ui.find({ key: "step-12" }))?.type).toBe("Box");
     state.last = 14;
     await clock.advance(10_000);
@@ -1392,8 +1392,9 @@ test("a step summary is drawn as plain text: never markdown, never a link", asyn
   await clock.settle();
   const row = await ui.find({ key: "step-1" });
   expect(row?.type).toBe("Box");
-  // A "said" pill, then the summary as written.
-  expect(row?.text).toMatch(/said\s+\[click\]\(https:\/\/example\.invalid\) \*\*b\*\*/);
+  // No pill: the summary as written.
+  expect(row?.text).toContain("[click](https://example.invalid) **b**");
+  expect(row?.text).not.toContain("said");
   expect(await ui.find({ type: "Link", text: /click/ })).toBeUndefined();
   expect((await ui.findAll({ type: "Markdown" })).some((el) => String(el.props.text).includes("example.invalid"))).toBe(
     false,
@@ -1401,7 +1402,7 @@ test("a step summary is drawn as plain text: never markdown, never a link", asyn
   await ui.unmount();
 });
 
-test("a long step summary wraps: every stored character is drawn, on both surfaces", async ($, on) => {
+test("a long said step wraps to about two rows, and its chevron shows every stored character", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
   const long = `${"alpha beta gamma delta ".repeat(40)}END-OF-SUMMARY`;
@@ -1413,10 +1414,14 @@ test("a long step summary wraps: every stored character is drawn, on both surfac
     const ui = await $.ui.mount({ ...PANE, surface });
     await openRun(ui, surface, "r1");
     await clock.settle();
+    const cut = JSON.stringify(await ui.find({ key: "step-1" }));
+    expect(cut).not.toContain("END-OF-SUMMARY");
+    expect(cut).toContain("…");
+    expect(cut).not.toContain("truncate");
+    expect(cut).toContain('"wrap":"wrap"');
+    await ui.press({ key: "step-detail-1" });
     const row = JSON.stringify(await ui.find({ key: "step-1" }));
     expect(row).toContain(long);
-    expect(row).toContain("END-OF-SUMMARY");
-    expect(row).not.toContain("truncate");
     expect(row).toContain('"wrap":"wrap"');
     await ui.press({ key: "back" });
     await ui.unmount();
@@ -1498,7 +1503,7 @@ for (const surface of ["desktop", "terminal"] as const) {
   });
 }
 
-test("desktop: a step with detail has a labelled Show detail button that opens and closes it", async ($, on) => {
+test("desktop: no Show detail button, and the row's one chevron opens and closes the step", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
   detailServer(on, true);
@@ -1508,12 +1513,26 @@ test("desktop: a step with detail has a labelled Show detail button that opens a
   const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
   await openRun(ui, "desktop", "r1");
   await clock.settle();
-  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Show detail");
-  await ui.press({ key: "step-toggle-button-1" });
+  expect(await ui.find({ key: "step-toggle-button-1" })).toBeUndefined();
+  const buttons = (await ui.findAll({ type: "Button" })).filter((el) => /show detail|hide detail/i.test(el.text));
+  expect(buttons).toHaveLength(0);
+  // The row itself is a Box, not a Button; its only control is a one-glyph plain chevron.
+  const row = (await ui.find({ key: "step-row-1" })) as unknown as { type: string };
+  expect(row.type).toBe("Box");
+  // It tints under the pointer: a see-through wash, so it suits light and dark (find leaves hover out; the tree has it).
+  const tree = JSON.stringify((await ui.findAll({ type: "Box" }))[0]);
+  expect(tree).toMatch(/"key":"step-row-1"[^}]*\},"hover":\{"backgroundColor":"#[0-9a-f]{6}[0-3][0-9a-f]"\}/);
+  const inRow = JSON.stringify(row);
+  expect(inRow.match(/"type":"Button"/g)).toHaveLength(1);
+  const chevron = await ui.find({ key: "step-detail-1" });
+  expect(chevron?.props.plain).toBe(true);
+  expect(chevron?.props.label).toBe("▸");
+  await ui.press({ key: "step-detail-1" });
   expect(await texts(ui)).toContain("all [link](https://evil.invalid) passed");
-  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Hide detail");
-  await ui.press({ key: "step-toggle-button-1" });
+  expect((await ui.find({ key: "step-detail-1" }))?.props.label).toBe("▾");
+  await ui.press({ key: "step-detail-1" });
   expect(await texts(ui)).not.toContain("passed");
+  expect((await ui.find({ key: "step-detail-1" }))?.props.label).toBe("▸");
   await ui.unmount();
 });
 
@@ -1747,8 +1766,7 @@ test("pills: a soft tint and the theme colour on the desktop, coloured text on t
     await clock.settle();
     const status = await ui.find({ type: "Text", text: surface === "desktop" ? /^ succeeded $/ : /^✓ succeeded$/ });
     expect(status?.props.color).toBe("success");
-    const words =
-      surface === "desktop" ? [" PR ", " ready ", " detail ", " ok "] : ["[PR]", "[ready]", "[detail]", "[ok]"];
+    const words = surface === "desktop" ? [" PR ", " ready ", " detail "] : ["[PR]", "[ready]", "[detail]"];
     for (const word of words) {
       const el = (await ui.findAll({ type: "Text" })).find((t) => t.text === word);
       expect(el, word).toBeDefined();
@@ -1788,7 +1806,7 @@ test("the terminal never gets a tint, an SVG or a hex colour", async ($, on) => 
   await ui.press({ key: "step-detail-1" });
   await check();
   // Pills are words in brackets on the terminal, coloured but never tinted.
-  for (const word of ["[PR]", "[ready]", "[detail]", "[ok]"]) {
+  for (const word of ["[PR]", "[ready]", "[detail]"]) {
     expect(
       (await ui.findAll({ type: "Text" })).some((t) => t.text === word),
       word,
@@ -1904,9 +1922,9 @@ test("desktop: each section's Copy button copies its full, uncut text and says s
   expect(copies.at(-1)).toBe("builder failed r1 $0.21\n  helper succeeded k1 $0.01");
   await ui.press({ key: "copy-error" });
   expect(copies.at(-1)).toBe("the worker could not start");
-  // An open step's detail: Copy beside Hide detail, the detail as stored.
+  // An open step's detail: Copy in its header, the detail as stored.
   expect(await ui.find({ key: "copy-step-1" })).toBeUndefined();
-  await ui.press({ key: "step-toggle-button-1" });
+  await ui.press({ key: "step-detail-1" });
   await ui.press({ key: "copy-step-1" });
   expect(copies.at(-1)).toBe("npm test\n--- output (end) ---\nall passed");
   isCopied = false;
@@ -1939,5 +1957,216 @@ test("terminal: one Copy section key (y) copies the open step's detail", async (
   await ui.press({ key: "copy-section" });
   expect(copies).toEqual(["npm test\n--- output (end) ---\nall passed"]);
   expect(toasts.at(-1)).toBe("Copied");
+  await ui.unmount();
+});
+
+/** Codex-shaped steps: ls -la (exit 0), git log (exit 128) and a long said step, each with detail. */
+const CODEX_LS =
+  '{"cmd":"ls -la","workdir":"/workspace"}\n\n--- output (end) ---\n' +
+  "Chunk ID: 0a1b2c\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 12\nOutput:\n" +
+  "total 53\nREADME.md\npyproject.toml\n";
+const CODEX_GIT =
+  '{"cmd":["bash","-lc","git log --oneline -10"]}\n\n--- output (end) ---\n' +
+  "Chunk ID: 0a1b2d\nWall time: 0.0 seconds\nProcess exited with code 128\nOriginal token count: 9\nOutput:\n" +
+  "fatal: not a git repository\n";
+const SAID = `The package is named knock-knock-jokes. ${"It has a small command-line joke system. ".repeat(12)}LAST-WORDS`;
+
+function codexServer(on: Parameters<Parameters<typeof test>[1]>[1]) {
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded" });
+    if (e.tool === "get_run_steps")
+      return reply({
+        runId: "r1",
+        level: "detail",
+        steps: [
+          { seq: 1, at: iso(3000), kind: "tool", tool: "Bash", summary: "ls -la", status: "ok", detail: CODEX_LS },
+          {
+            seq: 2,
+            at: iso(2000),
+            kind: "tool",
+            tool: "Bash",
+            summary: "git log --oneline -10",
+            status: "exit 128",
+            detail: CODEX_GIT,
+          },
+          { seq: 3, at: iso(1000), kind: "said", tool: null, summary: SAID, status: null, detail: SAID },
+        ],
+        next: null,
+        dropped: 0,
+      });
+    return reply({});
+  });
+}
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: an open step shows "$ command", its exit status and the output without Codex's framing`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    codexServer(on);
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    await ui.press({ key: "step-detail-1" });
+    const shown = await texts(ui);
+    expect(shown).toMatch(/^\$ ls -la$/m);
+    expect(shown).toMatch(/^exit 0$/m);
+    expect(shown).toContain("total 53\nREADME.md\npyproject.toml");
+    for (const framing of ["Chunk ID", "Wall time", "Process exited", "Original token count", "Output:", "workdir"]) {
+      expect(shown, framing).not.toContain(framing);
+    }
+    // A shell's -lc argv reads as its script; the exit code comes from the output's framing.
+    await ui.press({ key: "step-detail-2" });
+    const failed = await texts(ui);
+    expect(failed).toMatch(/^\$ git log --oneline -10$/m);
+    expect(failed).toMatch(/^exit 128$/m);
+    expect(failed).toContain("fatal: not a git repository");
+    expect(failed).not.toContain("total 53");
+    await ui.unmount();
+  });
+}
+
+test("desktop: an open step's Copy copies the full stored detail, framing and all", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  codexServer(on);
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "step-detail-1" });
+  // The panel shows the output without Codex's framing, but Copy copies the detail as stored.
+  expect(await texts(ui)).not.toContain("Chunk ID");
+  await ui.press({ key: "copy-step-1" });
+  expect(copies).toEqual([CODEX_LS]);
+  expect(copies[0]).toContain("Chunk ID: 0a1b2c");
+  await ui.unmount();
+});
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: a failed step's gutter shows its exit code, a passed one ✓, and no pill`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    codexServer(on);
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    const failedMark = JSON.stringify(await ui.find({ key: "step-mark-2" }));
+    expect(failedMark).toContain("128");
+    expect(failedMark).not.toContain("exit");
+    expect(JSON.stringify(await ui.find({ key: "step-mark-1" }))).toContain("✓");
+    expect((await ui.find({ key: "step-2" }))?.text).not.toMatch(/\[exit 128\]| exit 128 /);
+    if (surface === "desktop") {
+      const code = (await ui.findAll({ type: "Text" })).find((el) => el.text.trim() === "128");
+      expect(code?.props.color).toBe("#e33d37");
+      expect(String(code?.props.backgroundColor)).toMatch(/^#e33d37[0-3][0-9a-f]$/);
+      const ok = (await ui.findAll({ type: "Text" })).find((el) => el.text === "✓");
+      expect(ok?.props.color).toBe("#15b982");
+    }
+    await ui.unmount();
+  });
+}
+
+test("desktop: a said row is not a Button, is cut to about two rows, and never runs off the edge", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  codexServer(on);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  const row = (await ui.find({ key: "step-row-3" })) as unknown as { type: string };
+  expect(row.type).toBe("Box");
+  // Its one Button is the chevron.
+  expect(JSON.stringify(row).match(/"type":"Button"/g)).toHaveLength(1);
+  const said = (await ui.findAll({ type: "Text" })).find((el) => el.text.startsWith("The package is named"));
+  expect(said?.props.wrap).toBe("wrap");
+  expect(said?.text.endsWith("…")).toBe(true);
+  expect(said?.text).not.toContain("LAST-WORDS");
+  // About two rows of the pane's room (48 columns less the card, gutter and chevron).
+  expect(said?.text.length).toBeLessThanOrEqual(2 * 48);
+  // The quiet rule on its left: a narrow tinted column, not a border.
+  expect(await ui.find({ key: "step-rule-3" })).toBeDefined();
+  await ui.press({ key: "step-detail-3" });
+  const full = (await ui.findAll({ type: "Text" })).find((el) => el.text.startsWith("The package is named"));
+  expect(full?.text).toContain("LAST-WORDS");
+  await ui.unmount();
+});
+
+/** Every detail card fullServer's failed r1 draws, with its colour. */
+const CARD_COLORS: Record<string, string> = {
+  "error-card": "#e33d37",
+  "started-card": "#75d4ff",
+  "produced-card": "#15b982",
+  "tree-card": "#3d6aa3",
+  "services-card": "#c9aa70",
+  "steps-card": "#657287",
+  "final-card": "#3d6aa3",
+  "continue-card": "#657287",
+};
+
+test("desktop: every detail card opens with a colour bar in its kind's wardby colour", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fullServer(on, { error: "boom", status: "failed" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  for (const [key, color] of Object.entries(CARD_COLORS)) {
+    const card = (await ui.find({ key })) as unknown as {
+      props: Record<string, unknown>;
+      children: { props: { key?: string } }[];
+    };
+    expect(card, key).toBeDefined();
+    expect(card.props.borderColor, key).toBe("promptBorder");
+    // The bar is the card's first child: a 3 px SVG strip in the card's colour.
+    expect(card.children[0].props.key, key).toBe(`${key}-bar`);
+    const bar = JSON.stringify(await ui.find({ key: `${key}-bar` }));
+    expect(bar, key).toContain('"type":"Svg"');
+    expect(bar, key).toContain(`fill=\\"${color}\\"`);
+    expect(bar, key).toContain('"height":3');
+  }
+  await ui.unmount();
+});
+
+test("terminal: every detail card's rounded border is in its kind's colour, and no SVG", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fullServer(on, { error: "boom", status: "failed" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  for (const [key, color] of Object.entries(CARD_COLORS)) {
+    const card = await ui.find({ key });
+    expect(card, key).toBeDefined();
+    expect(card?.props.borderStyle, key).toBe("round");
+    expect(card?.props.borderColor, key).toBe(color);
+    expect(await ui.find({ key: `${key}-bar` }), key).toBeUndefined();
+  }
+  expect(await ui.findAll({ type: "Svg" })).toHaveLength(0);
   await ui.unmount();
 });

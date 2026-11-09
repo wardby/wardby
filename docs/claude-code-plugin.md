@@ -121,6 +121,8 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   request), what it produced, the run tree, services (ready, starting or
   failed), steps, the final answer and **Continue locally** for finished Claude
   Code runs with `sessionResume` on (see [Resume Claude Code runs locally](coding-agent-setup.md#resume-a-run-locally)).
+  Each kind of card has its own colour, the same on every run: a thin bar
+  along its top on the desktop, its rounded border in the terminal.
   The request and final answer show about three lines, as markdown, then how
   many more; **Show full text** shows all of it. The pull request link and the
   other actions sit at the bottom.
@@ -128,17 +130,22 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   has a **Copy** button that copies its full text as the server sent it. In the
   terminal, **Copy section** (`y`) copies the open step's detail; **Copy run
   id** is on both.
-- **Recent steps** (a running run's detail): its last 8 steps, one line each
-  (the tool and its command or file, or what the model said), each after a
-  pill with its result (ok, error, the exit status of a failed command, or
-  said), refreshed with the run. Long lines wrap rather than cut.
+- **Recent steps** (a running run's detail): its last 8 steps, refreshed with
+  the run. A tool step is one row: its result at the left (✓ when it passed,
+  the exit code of a failed command, or ! for an error), then the tool and its
+  command or file; on the desktop a long command is cut with "…". What the
+  model said wraps to about two lines.
 - **Steps** (a finished run's detail): every recorded step, 200 at a time;
   **More steps** loads the next 200.
-- **Step detail**: From 0.9.0, a step with detail (marked ▸) expands: click it,
-  or its **Show detail** button, on the desktop; in the terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
-  appears only for the agent's owner and the run's starter (and the stdio
-  operator), on a server at the detail level. An expanded detail shows its last
-  40 lines, with a count of the lines above them.
+- **Step detail**: From 0.9.0, a step with detail, or a longer message, has a
+  ▸ at its right that opens it (▾ closes it); in the terminal, `j`/`k` also
+  move between such steps and `e` shows or hides one. One step is open at a
+  time. An open command shows "$ command", its exit status and its output;
+  Codex's framing lines (chunk id, wall time, token count) are left out, and
+  **Copy** still copies the detail exactly as stored. Detail appears only for
+  the agent's owner and the run's starter (and the stdio operator), on a
+  server at the detail level. An open detail shows its last 40 lines, with a
+  count of the lines above them.
 - **Last step**: in the list, a running or failed run shows its newest step
   under the agent's name.
 

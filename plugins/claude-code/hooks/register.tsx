@@ -526,9 +526,6 @@ function detailTail(detail: string): { text: string; hidden: number } {
   return { text: lines.slice(hidden).join("\n"), hidden };
 }
 
-/** The seqs of steps that have detail, in order. */
-const detailSeqs = (steps: Step[]): number[] => steps.filter((s) => s.detail !== null).map((s) => s.seq);
-
 /** The cursor moved by `delta` among `seqs` (from the first or last when there is none). */
 function moveCursor(current: OpenStep | null, runId: string, seqs: number[], delta: 1 | -1): OpenStep | null {
   if (seqs.length === 0) return current;
@@ -538,16 +535,77 @@ function moveCursor(current: OpenStep | null, runId: string, seqs: number[], del
   return { runId, seq: seqs[next], open: current?.runId === runId && current.open };
 }
 
-/** A step's text beside its result pill: "Bash: npm test" for a tool, what the model said for the rest. */
+/** A tool step's text for the terminal's one-line row: "Bash: npm test"; what the model said for the rest. */
 function stepText(step: Step): string {
   return step.kind === "tool" ? `${step.tool ?? "tool"}: ${step.summary}` : step.summary;
 }
 
-/** A step's result as a pill: ok, error or the exit status, running for a tool still going, said in grey. */
-function stepPill(step: Step): { label: string; tone: Tone } {
-  if (step.kind !== "tool") return { label: step.kind || "said", tone: "grey" };
-  if (step.status === null) return { label: "running", tone: "blue" };
-  return step.status === "ok" ? { label: "ok", tone: "green" } : { label: step.status, tone: "red" };
+/** A tool step's result in its row's gutter: ✓ for ok, the exit code, ! for an error, … while it runs. */
+function stepMark(step: Step): { mark: string; failed: boolean } | null {
+  if (step.kind !== "tool") return null;
+  if (step.status === null) return { mark: "…", failed: false };
+  if (step.status === "ok") return { mark: "✓", failed: false };
+  const code = /^exit (\d+)$/.exec(step.status)?.[1];
+  return { mark: code ?? "!", failed: true };
+}
+
+/** The first DETAIL_LINES lines of `text`, and how many lines after them are not shown (what a model said reads from its start). */
+function detailHead(text: string): { text: string; hidden: number } {
+  const lines = text.split("\n");
+  const hidden = Math.max(0, lines.length - DETAIL_LINES);
+  return { text: lines.slice(0, DETAIL_LINES).join("\n"), hidden };
+}
+
+// The detail's input and output halves (src/core/run-steps/types.ts DETAIL_OUTPUT_HEADING); a JSON input
+// has no raw newline, so the first match is the heading.
+const OUTPUT_HEADING = /\n--- output \(end\) ---(?:\n|$)/;
+// Codex's framing at the head of a command's output: dropped for display, the exit code kept.
+const CODEX_FRAME = /^(?:Chunk ID: .*|Wall time: .*|Original token count: .*)$/;
+const CODEX_EXIT = /^Process exited with code (-?\d{1,6})$/;
+const SHELL = /^(?:\/(?:usr\/)?bin\/)?(?:ba|z|da)?sh$/;
+
+/** A command input as one line: a string, or an argv (a shell's -c / -lc script read as its script). */
+function commandOf(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((part) => typeof part === "string")) return null;
+  const argv = value as string[];
+  if (argv.length === 3 && SHELL.test(argv[0]) && (argv[1] === "-c" || argv[1] === "-lc"))
+    return argv[2].trim() || null;
+  return argv.join(" ");
+}
+
+/**
+ * A step's stored detail as the open step shows it: the command (the input JSON's `cmd` or `command`),
+ * the exit code when the output says it, and the output without Codex's framing lines. Display only:
+ * Copy copies the stored detail unchanged. Null when the input is not a command, to show the detail as is.
+ */
+function detailParts(detail: string): { command: string; exit: string | null; output: string } | null {
+  const heading = OUTPUT_HEADING.exec(detail);
+  const input = (heading ? detail.slice(0, heading.index) : detail).trim();
+  let command: string | null = null;
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const fields = parsed as Record<string, unknown>;
+      command = commandOf(fields.cmd) ?? commandOf(fields.command);
+    }
+  } catch {
+    return null;
+  }
+  if (command === null) return null;
+  const lines = heading ? detail.slice(heading.index + heading[0].length).split("\n") : [];
+  let exit: string | null = null;
+  // Only the framing at the head goes: once "Output:" is passed, or a line is not framing, the rest is output.
+  let at = 0;
+  for (; at < lines.length; at++) {
+    const code = CODEX_EXIT.exec(lines[at])?.[1];
+    if (code !== undefined) exit = code;
+    else if (lines[at] === "Output:") {
+      at++;
+      break;
+    } else if (!CODEX_FRAME.test(lines[at])) break;
+  }
+  return { command, exit, output: lines.slice(at).join("\n").replace(/\n+$/, "") };
 }
 
 /** Runs that are active, or finished within RECENT_MS, newest first. */
@@ -602,6 +660,41 @@ const TONES: Record<Tone, { fg: string; bg: string }> = {
 };
 // The current run's row in a run tree: a faint wash, the same on light and dark.
 const HIGHLIGHT_BG = "#a8a29e1f";
+// The wardby.com palette, for the detail cards' colour bars (one colour per kind of section) and the
+// desktop's step gutter. The mod cannot tell light from dark mode, so navy is a mid-tone that reads on both.
+const WARDBY = {
+  sky: "#75d4ff",
+  mint: "#15b982",
+  navy: "#3d6aa3",
+  gold: "#c9aa70",
+  slate: "#657287",
+  red: "#e33d37",
+} as const;
+/** Each detail card's colour, by kind of section. */
+const CARD_COLOR = {
+  started: WARDBY.sky,
+  produced: WARDBY.mint,
+  tree: WARDBY.navy,
+  final: WARDBY.navy,
+  services: WARDBY.gold,
+  steps: WARDBY.slate,
+  error: WARDBY.red,
+  continue: WARDBY.slate,
+} as const;
+type CardKind = keyof typeof CARD_COLOR;
+// A failed step's exit code sits on a soft tint of wardby red (14%, see-through on light and dark).
+const FAIL_TINT = "#e33d3724";
+// The open step's inset panel, and a said step's quiet left rule.
+const WELL_BG = "#a8a29e14";
+const RULE_BG = "#a8a29e33";
+
+/** A card's colour bar for the desktop: a full-width strip, stretched to the width it is drawn at. */
+function cardBarSvg(fill: string): string {
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="3" viewBox="0 0 2000 3" preserveAspectRatio="none">` +
+    `<rect width="2000" height="3" fill="${fill}" /></svg>`
+  );
+}
 /** A run status's tone: running blue, pending grey, succeeded green, anything else (failed, stopped, …) red. */
 const statusTone = (status: string): Tone =>
   status === "running" ? "blue" : status === "pending" ? "grey" : status === "succeeded" ? "green" : "red";
@@ -1146,9 +1239,18 @@ export const register: Register = (on, options) => {
           .copy({ text, surface: press.surface })
           .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
           .catch(() => $.ui.toast("Couldn't copy"));
-      // Each section is a rounded card: the theme's prompt-box border, visible in light and dark.
-      const card = (key: string, children: unknown) => (
-        <Box key={key} flexDirection="column" {...GROUP_BOX}>
+      /**
+       * Each section is a rounded card with its kind's colour from the wardby.com palette: on the desktop a
+       * thin bar along the card's top (the theme's prompt-box border stays, visible in light and dark); on
+       * the terminal, which draws no SVG, the card's rounded border in that colour.
+       */
+      const card = (key: string, kind: CardKind, children: unknown) => (
+        <Box key={key} flexDirection="column" {...GROUP_BOX} {...(D && Svg ? {} : { borderColor: CARD_COLOR[kind] })}>
+          {D && Svg && (
+            <Box key={`${key}-bar`} marginBottom="sm">
+              <Svg source={cardBarSvg(CARD_COLOR[kind])} alt="" height={3} />
+            </Box>
+          )}
           {children as never}
         </Box>
       );
@@ -1224,8 +1326,14 @@ export const register: Register = (on, options) => {
           ) : null;
         }
         const isRecent = stepsOf.mode === "recent";
+        // What the model said is cut to about two rows of the room beside the gutter and the chevron.
+        const saidCut = (step: Step) => collapse(step.summary, Math.max(20, inner - 8), 2);
+        // A step opens when it has detail, or when it is something said that does not fit its two rows.
+        const canOpen = (step: Step) => step.detail !== null || (step.kind !== "tool" && saidCut(step).more > 0);
+        const openSeqs = stepsOf.steps.filter(canOpen).map((s) => s.seq);
         return card(
           "steps-card",
+          "steps",
           <>
             <Box key="steps-head">
               {heading(isRecent ? "Recent steps" : "Steps")}
@@ -1235,40 +1343,141 @@ export const register: Register = (on, options) => {
                 pill(stepsOf.level, stepsOf.level === "detail" ? "amber" : "grey")}
             </Box>
             {stepsOf.steps.map((step) => {
-              const result = stepPill(step);
-              const hasDetail = step.detail !== null;
+              const isTool = step.kind === "tool";
+              const result = stepMark(step);
+              const openable = canOpen(step);
               const isCursor = cursor?.runId === open.id && cursor.seq === step.seq;
-              const isOpen = hasDetail && isCursor && cursor.open;
-              const line = (
-                <Text wrap="wrap">
-                  {!D && isCursor ? "› " : ""}
-                  {pill(result.label, result.tone)} {stepText(step)}
-                  {hasDetail ? (isOpen ? " ▾" : " ▸") : ""}
-                </Text>
-              );
+              const isOpen = openable && isCursor && cursor.open;
               const toggle = () =>
                 void update($, openStep, (current): OpenStep => ({
                   runId: open.id,
                   seq: step.seq,
                   open: !(current?.runId === open.id && current.seq === step.seq && current.open),
                 }));
-              return (
-                <Box key={`step-${step.seq}`} flexDirection="column">
-                  <Box key={`step-line-${step.seq}`} alignItems="flex-start">
-                    <Box flexGrow={1} flexShrink={1}>
-                      {hasDetail ? (
-                        <Button key={`step-detail-${step.seq}`} onPress={toggle}>
-                          {line}
-                        </Button>
-                      ) : (
-                        line
-                      )}
+              // The gutter: ✓ in wardby mint, a failure's exit code (or ! for an error) in wardby red on a
+              // soft red tint, … while it runs; nothing for what the model said. The terminal draws theme
+              // colours, and the cursor before the mark.
+              const markColor = (failed: boolean, mark: string) =>
+                failed ? (D ? WARDBY.red : FAILED_COLOR) : mark === "✓" ? (D ? WARDBY.mint : "success") : TONES.blue.fg;
+              const gutter = D ? (
+                <Box key={`step-mark-${step.seq}`} width={5} flexShrink={0} justifyContent="center">
+                  {result &&
+                    (result.failed ? (
+                      <Text mono size="caption" weight="semibold" color={WARDBY.red} backgroundColor={FAIL_TINT}>
+                        {` ${result.mark} `}
+                      </Text>
+                    ) : (
+                      <Text weight="semibold" color={markColor(false, result.mark)}>
+                        {result.mark}
+                      </Text>
+                    ))}
+                </Box>
+              ) : (
+                <Box key={`step-mark-${step.seq}`} width={5} flexShrink={0}>
+                  <Text>
+                    {isCursor ? "› " : "  "}
+                    {result ? (
+                      <Text color={markColor(result.failed, result.mark)}>{result.mark}</Text>
+                    ) : (
+                      <Text dimColor>│</Text>
+                    )}
+                  </Text>
+                </Box>
+              );
+              // Plain text only: a summary or detail never becomes markdown or a link.
+              const said = isOpen ? detailHead(step.detail ?? step.summary) : { ...saidCut(step), hidden: 0 };
+              const content = isTool ? (
+                D ? (
+                  // The tool small and dim, the command in mono on one line, cut with … rather than overflowing.
+                  <Box flexGrow={1} flexShrink={1} minWidth={0} gap={1} alignItems="center">
+                    <Box flexShrink={0}>
+                      <Text size="caption" dimColor>
+                        {step.tool ?? "tool"}
+                      </Text>
                     </Box>
-                    {D && hasDetail && (
-                      // The desktop has no j/k/e row: a labelled button at the line's right says the step opens.
-                      <Box key={`step-toggle-${step.seq}`} flexShrink={0} paddingLeft={1}>
-                        <Box gap={1}>
-                          {isOpen && step.detail !== null && (
+                    <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                      <Text mono size="footnote" wrap="truncate-end">
+                        {step.summary}
+                      </Text>
+                    </Box>
+                  </Box>
+                ) : (
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="wrap">{stepText(step)}</Text>
+                  </Box>
+                )
+              ) : (
+                // What the model said: wrapped, never past the right edge, after a quiet rule on the desktop
+                // (a narrow tinted column, as a Box has no one-sided border).
+                <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                  {D && <Box key={`step-rule-${step.seq}`} width={1} flexShrink={0} backgroundColor={RULE_BG} />}
+                  <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} paddingLeft={D ? 1 : 0}>
+                    <Text dimColor wrap="wrap">
+                      {said.text}
+                    </Text>
+                    {said.hidden > 0 && (
+                      <Text dimColor size="caption">
+                        … {said.hidden} more {said.hidden === 1 ? "line" : "lines"}
+                      </Text>
+                    )}
+                    {D && isOpen && step.detail !== null && (
+                      <Box key={`step-said-copy-${step.seq}`}>
+                        <Box flexGrow={1} />
+                        <Button key={`copy-step-${step.seq}`} label="Copy" dimColor onPress={copyText(step.detail)} />
+                      </Box>
+                    )}
+                  </Box>
+                </Box>
+              );
+              // The row's one control: a one-glyph chevron, ▸ closed and ▾ open.
+              const chevron = openable && (
+                <Box key={`step-chevron-${step.seq}`} flexShrink={0}>
+                  <Button
+                    key={`step-detail-${step.seq}`}
+                    plain
+                    label={isOpen ? "▾" : "▸"}
+                    dimColor
+                    {...(D ? { hover: { dimColor: false } } : {})}
+                    onPress={toggle}
+                  />
+                </Box>
+              );
+              const panel =
+                isTool &&
+                isOpen &&
+                step.detail !== null &&
+                (() => {
+                  // Stored already redacted; shown as "$ command", its exit status and the output alone (the
+                  // detail as stored when it does not read as a command). Its last lines only, so one step
+                  // cannot push the pane off the screen. Copy copies the detail as stored.
+                  const parts = detailParts(step.detail);
+                  const { text, hidden } = detailTail(parts ? parts.output : step.detail);
+                  const exitText = parts?.exit != null ? `exit ${parts.exit}` : (step.status ?? "running");
+                  const failed =
+                    parts?.exit != null ? parts.exit !== "0" : step.status !== null && step.status !== "ok";
+                  const status = (
+                    <Text size="caption" {...(failed ? { color: D ? WARDBY.red : FAILED_COLOR } : { dimColor: true })}>
+                      {exitText}
+                    </Text>
+                  );
+                  return (
+                    <Box
+                      key={`step-text-${step.seq}`}
+                      flexDirection="column"
+                      marginLeft={D ? 5 : 2}
+                      {...(D ? { backgroundColor: WELL_BG, paddingX: 1 } : {})}
+                    >
+                      {(D || parts) && (
+                        <Box key={`step-head-${step.seq}`} gap={1} alignItems="center">
+                          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                            {parts && (
+                              <Text mono={D} size="footnote" wrap="wrap">
+                                {`$ ${parts.command}`}
+                              </Text>
+                            )}
+                          </Box>
+                          {status}
+                          {D && (
                             <Button
                               key={`copy-step-${step.seq}`}
                               label="Copy"
@@ -1276,50 +1485,55 @@ export const register: Register = (on, options) => {
                               onPress={copyText(step.detail)}
                             />
                           )}
-                          <Button
-                            key={`step-toggle-button-${step.seq}`}
-                            label={isOpen ? "Hide detail" : "Show detail"}
-                            onPress={toggle}
-                          />
                         </Box>
-                      </Box>
-                    )}
+                      )}
+                      {hidden > 0 && (
+                        <Text dimColor>
+                          … {hidden} more {hidden === 1 ? "line" : "lines"}
+                        </Text>
+                      )}
+                      {text !== "" && (
+                        <Text dimColor wrap="wrap" mono={D}>
+                          {text}
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                })();
+              return (
+                <Box key={`step-${step.seq}`} flexDirection="column">
+                  <Box
+                    key={`step-row-${step.seq}`}
+                    gap={1}
+                    alignItems={isTool ? "center" : "flex-start"}
+                    {...(D
+                      ? {
+                          hover: { backgroundColor: HIGHLIGHT_BG },
+                          ...(isOpen ? { backgroundColor: HIGHLIGHT_BG } : {}),
+                        }
+                      : {})}
+                  >
+                    {gutter}
+                    {content}
+                    {chevron}
                   </Box>
-                  {isOpen &&
-                    step.detail !== null &&
-                    (() => {
-                      // Stored already redacted; plain text only: a detail never becomes markdown or a link.
-                      // Its last lines only, so one step cannot push the pane off the screen.
-                      const { text, hidden } = detailTail(step.detail);
-                      return (
-                        <Box key={`step-text-${step.seq}`} flexDirection="column" paddingLeft={2}>
-                          {hidden > 0 && (
-                            <Text dimColor>
-                              … {hidden} more {hidden === 1 ? "line" : "lines"}
-                            </Text>
-                          )}
-                          <Text dimColor wrap="wrap" mono={D}>
-                            {text}
-                          </Text>
-                        </Box>
-                      );
-                    })()}
+                  {panel}
                 </Box>
               );
             })}
-            {!D && detailSeqs(stepsOf.steps).length > 0 && (
+            {!D && openSeqs.length > 0 && (
               <Box gap={2}>
                 <Button
                   key="step-prev"
                   label="Previous (k)"
                   hotkey="k"
-                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, detailSeqs(stepsOf.steps), -1))}
+                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, openSeqs, -1))}
                 />
                 <Button
                   key="step-next"
                   label="Next (j)"
                   hotkey="j"
-                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, detailSeqs(stepsOf.steps), 1))}
+                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, openSeqs, 1))}
                 />
                 <Button
                   key="step-open"
@@ -1327,8 +1541,8 @@ export const register: Register = (on, options) => {
                   hotkey="e"
                   onPress={() =>
                     void update($, openStep, (c) => {
-                      const seqs = detailSeqs(stepsOf.steps);
-                      const at = c?.runId === open.id && seqs.includes(c.seq) ? c : moveCursor(null, open.id, seqs, -1);
+                      const at =
+                        c?.runId === open.id && openSeqs.includes(c.seq) ? c : moveCursor(null, open.id, openSeqs, -1);
                       return at ? { ...at, open: !at.open } : c;
                     })
                   }
@@ -1431,26 +1645,30 @@ export const register: Register = (on, options) => {
               </Text>
             </Box>
           </Box>
-          {shown && (shown.error || shown.failureCategory) && (
-            // An error reads first, in a red box: what failed, then the plain message.
-            <Box
-              flexDirection="column"
-              {...(D ? { borderStyle: "round", borderColor: FAILED_COLOR, paddingX: 1 } : {})}
-            >
-              <Box alignItems="center">
-                <Text color={FAILED_COLOR} weight="semibold" bold>
-                  {shown.failureCategory ? shown.failureCategory.replaceAll("_", " ") : "Failed"}
-                </Text>
-                <Box flexGrow={1} />
-                {D && shown.error && <Button key="copy-error" label="Copy" dimColor onPress={copyText(shown.error)} />}
-              </Box>
-              {shown.error && <Text wrap="wrap">{shown.error}</Text>}
-            </Box>
-          )}
+          {shown &&
+            (shown.error || shown.failureCategory) &&
+            // An error reads first, in a red card: what failed, then the plain message.
+            card(
+              "error-card",
+              "error",
+              <>
+                <Box key="error-head" alignItems="center">
+                  <Text color={FAILED_COLOR} weight="semibold" bold>
+                    {shown.failureCategory ? shown.failureCategory.replaceAll("_", " ") : "Failed"}
+                  </Text>
+                  <Box flexGrow={1} />
+                  {D && shown.error && (
+                    <Button key="copy-error" label="Copy" dimColor onPress={copyText(shown.error)} />
+                  )}
+                </Box>
+                {shown.error && <Text wrap="wrap">{shown.error}</Text>}
+              </>,
+            )}
           {stepsOf?.mode === "recent" && stepsBlock}
           {(open.via || shown?.request || open.task) &&
             card(
               "started-card",
+              "started",
               <>
                 {headingRow("started", "Started by", shown?.request ?? open.task ?? null)}
                 {open.via && (
@@ -1480,6 +1698,7 @@ export const register: Register = (on, options) => {
           {(open.outcomes.length > 0 || (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
             card(
               "produced-card",
+              "produced",
               <>
                 {headingRow(
                   "produced",
@@ -1525,6 +1744,7 @@ export const register: Register = (on, options) => {
           {tree.length >= 2 &&
             card(
               "tree-card",
+              "tree",
               <>
                 {headingRow(
                   "tree",
@@ -1584,6 +1804,7 @@ export const register: Register = (on, options) => {
             shown.services.length > 0 &&
             card(
               "services-card",
+              "services",
               <>
                 {heading("Services")}
                 {shown.services.map((label, i) => {
@@ -1601,6 +1822,7 @@ export const register: Register = (on, options) => {
           {shown?.finalText &&
             card(
               "final-card",
+              "final",
               <>
                 {headingRow("final", "Final answer", shown.finalText)}
                 {folded("final", shown.finalText, true)}
@@ -1612,6 +1834,7 @@ export const register: Register = (on, options) => {
             Input &&
             card(
               "continue-card",
+              "continue",
               <>
                 {heading("Continue locally")}
                 {(() => {

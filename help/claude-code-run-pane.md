@@ -40,20 +40,24 @@ uninstall` removes the plugin and the rules install added. To continue a run
 from the pane, see `resume-runs-locally`.
 
 A running run's detail shows its **Recent steps** (the last 8 tool calls and
-messages, one line each, wrapped in full); a finished run's shows all its
+messages: a ✓ or the exit code of a failed command, then the tool and its
+command; what the model said wraps to about two lines); a finished run's shows all its
 **Steps**, 200 at a time. In the list, a running or failed run shows its newest
 step under its name. Against a server without `get_run_steps` the pane shows no
 steps and checks again every few refreshes; with run steps off it says "Steps
 are off on this server." See `run-steps`. Steps need Wardby 0.9.0 or later
-on the server. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
-terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
-appears only for the agent's owner and the run's starter (and the stdio
-operator), on a server at the detail level. An expanded detail shows its last
-40 lines, with a count of the lines above them.
+on the server. From 0.9.0, a step with detail, or a longer message, has a ▸ at
+its right that opens it; in the terminal, `j`/`k` also move between such steps
+and `e` shows or hides one. An open command shows "$ command", its exit status
+and its output, without Codex's framing lines. Detail appears only for the
+agent's owner and the run's starter (and the stdio operator), on a server at
+the detail level. An open detail shows its last 40 lines, with a count of the
+lines above them.
 
-Each section of a run's detail is a card. On the desktop each card, an error
-and an open step's detail have a **Copy** button that copies the full text as
-the server sent it; in the terminal, **Copy section** (`y`) copies the open
+Each section of a run's detail is a card, coloured by its kind (a bar on the
+desktop, the border in the terminal). On the desktop each card, an error and an
+open step's detail have a **Copy** button that copies the full text as the
+server sent it, an open step's detail included in full; in the terminal, **Copy section** (`y`) copies the open
 step's detail.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).
