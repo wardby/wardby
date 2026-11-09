@@ -131,6 +131,7 @@ import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
+import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { ReviewReadLedger } from "./review-reads.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
@@ -287,6 +288,7 @@ const DELEGATION_CHILD_SELECT = {
   budgetUsd: true,
   ownerId: true,
   nativeExecutionMode: true,
+  runSteps: true,
   codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true } },
 } as const satisfies Prisma.AgentSelect;
 
@@ -818,7 +820,14 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
   if (agent.nativeExecutionMode === "sandbox") {
     throw new Error(NATIVE_SANDBOX_NOT_CONFIGURED);
   }
-  return db.run.create({ data: { agentId: agent.id, trigger, nativeExecutionMode: agent.nativeExecutionMode } });
+  return db.run.create({
+    data: {
+      agentId: agent.id,
+      trigger,
+      nativeExecutionMode: agent.nativeExecutionMode,
+      runStepsLevel: dispatchRunStepsLevel(agent),
+    },
+  });
 }
 
 export interface LoadNativeRunOptions {
@@ -1683,6 +1692,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 taskOverride,
                 triggeredById: existingRun.triggeredById,
                 nativeExecutionMode: childAgent.nativeExecutionMode,
+                runStepsLevel: dispatchRunStepsLevel(childAgent),
               },
             });
           } catch (err) {

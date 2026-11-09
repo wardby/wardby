@@ -6,6 +6,7 @@ import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../prov
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import {
+  createRun,
   executeRun,
   loseNativeRun,
   runAgent,
@@ -37,6 +38,7 @@ interface FakeAgent {
   memoryEnabled?: boolean;
   effort?: string | null;
   nativeExecutionMode?: "control_plane" | "sandbox";
+  runSteps?: "off" | "summary" | "detail" | null;
   /** Defaults to FAKE_OWNER: the capability tests below are about scoping, not consent. */
   ownerId?: string | null;
 }
@@ -1701,6 +1703,23 @@ describe("native sandbox mode on a deployment without a native sandbox executor"
     const run = await runAgent("boxed", providers, db);
     expect(run.nativeExecutionMode).toBe("control_plane");
     expect(engineCalls).toEqual(["run"]);
+  });
+
+  it("createRun fixes the run's steps level at creation: summary when unset, the agent's value when set", async () => {
+    vi.stubEnv("WARDBY_RUN_STEPS", "detail");
+    try {
+      const unset = fakeDb([agent("control_plane")]);
+      const spy = vi.spyOn(unset.run, "create");
+      await createRun(unset, "boxed");
+      expect(spy.mock.calls[0][0].data).toMatchObject({ runStepsLevel: "summary" });
+
+      const off = fakeDb([{ ...agent("control_plane"), runSteps: "off" }]);
+      expect((await createRun(off, "boxed")).runStepsLevel).toBe("off");
+      const detail = fakeDb([{ ...agent("control_plane"), runSteps: "detail" }]);
+      expect((await createRun(detail, "boxed")).runStepsLevel).toBe("detail");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("executeRun fails a sandbox-snapshot run before any work, spending nothing", async () => {
