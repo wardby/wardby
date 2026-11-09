@@ -5,8 +5,9 @@
  * both in the text as written and in its whitespace-collapsed form (mapped back, so a secret the
  * model wrote with other spacing is masked while the text keeps its lines), the longest secret
  * start the text ends in (and, for an output whose head was cut, the longest secret end it starts
- * with), the same two checks at every line break inside it (an agent may elide an output's middle,
- * splitting a secret across lines), then token shapes (redactSecrets). Only then is it cut.
+ * with), the same two checks at every line break and ellipsis inside it (an agent may elide an
+ * output's middle, splitting a secret around its marker), then token shapes (redactSecrets). Only
+ * then is it cut.
  */
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { MIN_REDACTABLE_SECRET_LENGTH, maskSpans, mergeSpans, secretSpans } from "../secret-spans.js";
@@ -29,6 +30,36 @@ const WS = /\s/;
 const PEM_BEGIN_TO_END = /-----BEGIN (?:[A-Z ]{1,32} )?PRIVATE KEY-----[\s\S]*$/;
 const PEM_START_TO_END = /^[\s\S]*?-----END (?:[A-Z ]{1,32} )?PRIVATE KEY-----/;
 const reverse = (text: string): string => text.split("").reverse().join("");
+/** A line break, or a run of "…" or of three or more ".": where a text may have been elided. */
+const EDGE_BOUNDARY = /\n|…+|\.{3,}/g;
+const SPACE_OR_TAB = /[ \t]/;
+
+/**
+ * The [start, end) of each elision boundary in `text`: EDGE_BOUNDARY, widened over an opening
+ * bracket just before an ellipsis or a closing one just after it ("[... omitted ...]"), and over
+ * any spaces or tabs around it. Widened by hand, never past the previous boundary, so the scan is
+ * linear (a regex with leading `[ \t]*` backtracks quadratically on a long run of spaces).
+ */
+function edgeBoundaries(text: string): Array<[number, number]> {
+  const found: Array<[number, number]> = [];
+  let floor = 0;
+  for (const match of text.matchAll(EDGE_BOUNDARY)) {
+    let start = match.index;
+    let end = start + match[0].length;
+    if (match[0] !== "\n") {
+      if (start > floor && "[(<".includes(text[start - 1])) start--;
+      while (start > floor && SPACE_OR_TAB.test(text[start - 1])) start--;
+      if (end < text.length && "])>".includes(text[end])) end++;
+      while (end < text.length && SPACE_OR_TAB.test(text[end])) end++;
+    }
+    // A widened end may run into the next match; that match then starts at or after it.
+    if (start < floor) start = floor;
+    if (end <= floor) continue;
+    found.push([start, end]);
+    floor = end;
+  }
+  return found;
+}
 
 /**
  * `text` collapsed as summaries are (collapseWhitespace: runs of whitespace become one space,
@@ -128,30 +159,38 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
   const reversedByStart = byStart(reversedForms);
 
   /**
-   * The same edge checks at every line break inside `text`: the longest secret start each line
-   * ends in, and the longest secret end each later line starts with (at least
+   * The same edge checks at every boundary inside `text`: each line break, each run of "…", and
+   * each run of three or more "." (every known truncation marker holds one: "…N tokens
+   * truncated…", "[... omitted N of M lines ...]"). The longest secret start each piece ends in
+   * before a boundary, and the longest secret end each piece starts with after one (at least
    * MIN_REDACTABLE_SECRET_LENGTH, as at the text's own edges). A coding agent may elide the middle
-   * of a long output (or input) before the model sees it, leaving a delivered secret's start at
-   * the end of one line and its end at the start of a later one, neither an exact-value match.
-   * Each match is masked only where it was found, at that line's edge. A line is scanned only for
+   * of a long output (or input) before the model sees it, on its own line or mid-line, leaving a
+   * delivered secret's start before the marker and its end after it, neither an exact-value match.
+   * Each match is masked only where it was found, at that boundary. A piece is scanned only for
    * the forms whose first characters it holds (candidates), and no further back than its own start,
    * so the cost stays near linear in the text however many secret values the run has.
    */
-  const lineEdgeSpans = (text: string): Array<[number, number]> => {
+  const boundaryEdgeSpans = (text: string): Array<[number, number]> => {
     const spans: Array<[number, number]> = [];
+    const pieces: Array<[number, number]> = [];
     let start = 0;
-    for (let end = text.indexOf("\n"); ; end = text.indexOf("\n", start)) {
-      const last = end < 0;
-      const line = text.slice(start, last ? text.length : end);
-      if (start > 0) {
-        const reversed = reverse(line);
+    for (const [from, to] of edgeBoundaries(text)) {
+      pieces.push([start, from]);
+      start = to;
+    }
+    pieces.push([start, text.length]);
+    for (const [from, to] of pieces) {
+      if (to <= from) continue;
+      const piece = text.slice(from, to);
+      if (from > 0) {
+        const reversed = reverse(piece);
         const head = secretTail(reversed, candidates(reversed, reversedByStart), heads).length;
-        if (head > 0) spans.push([start, start + head]);
+        if (head > 0) spans.push([from, from + head]);
       }
-      if (last) break;
-      const tail = secretTail(line, candidates(line, formsByStart), tails).length;
-      if (tail > 0) spans.push([end - tail, end]);
-      start = end + 1;
+      if (to < text.length) {
+        const tail = secretTail(piece, candidates(piece, formsByStart), tails).length;
+        if (tail > 0) spans.push([to - tail, to]);
+      }
     }
     return spans;
   };
@@ -169,7 +208,7 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
       if (headWasCut) found.push(reverse(secretTail(reverse(subject), reversedForms, heads)));
       return found.filter(Boolean);
     };
-    const asWritten = [...secretSpans(text, [...forms, ...edges(text)], 1), ...lineEdgeSpans(text)];
+    const asWritten = [...secretSpans(text, [...forms, ...edges(text)], 1), ...boundaryEdgeSpans(text)];
     const viaCollapsed = secretSpans(collapsed, [...forms, ...edges(collapsed)], 1).map(
       ([start, end]): [number, number] => [from[start], to[end - 1]],
     );

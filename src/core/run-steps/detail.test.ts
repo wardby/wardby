@@ -335,6 +335,17 @@ describe("cost", () => {
     expect(worst).toBeLessThan(100);
   });
 
+  it("finds ellipsis boundaries in linear time, even in long runs of spaces and dots", () => {
+    const detail = stepDetailer(secrets);
+    for (const text of [" ".repeat(MAX_STEP_TEXT_CHARS), " .".repeat(MAX_STEP_TEXT_CHARS / 2), "… ".repeat(8192)]) {
+      const started = performance.now();
+      detail.step(said(text));
+      const elapsed = performance.now() - started;
+      console.info(`detail cost: ${JSON.stringify(text.slice(0, 4))}… x 16 KiB: ${elapsed.toFixed(1)} ms`);
+      expect(elapsed).toBeLessThan(100);
+    }
+  });
+
   it("stays linear on self-similar secrets at both edges of a cut text", () => {
     // Half end in the text's start (the head check), half start with its end (the tail check).
     const similar = Array.from({ length: 200 }, (_, i) =>
@@ -376,6 +387,29 @@ describe("a secret split around an elided middle", () => {
       expect(input).toBe(`printenv\nTOKEN=${REDACTED_TEXT}\n${marker}\n${REDACTED_TEXT} end`);
     });
   }
+
+  it("masks both parts around a mid-line Codex marker", () => {
+    const out = detail.output({ output: "TOKEN=hunter2-sec…120 tokens truncated…ret-value-xyz", outputCut: false });
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}TOKEN=${REDACTED_TEXT}…120 tokens truncated…${REDACTED_TEXT}`);
+    const input = detail.step(tool("echo TOKEN=hunter2-sec…120 tokens truncated…ret-value-xyz done"));
+    expect(input).toBe(`echo TOKEN=${REDACTED_TEXT}…120 tokens truncated…${REDACTED_TEXT} done`);
+  });
+
+  it("masks both parts around a mid-line [... omitted ...] marker", () => {
+    const out = detail.output({
+      output: "x TOKEN=hunter2-sec[... omitted 40 of 90 lines ...]ret-value-xyz end",
+      outputCut: false,
+    });
+    expect(out).toBe(
+      `${DETAIL_OUTPUT_HEADING}x TOKEN=${REDACTED_TEXT}[... omitted 40 of 90 lines ...]${REDACTED_TEXT} end`,
+    );
+    // With spaces around the marker too.
+    const spaced = detail.output({ output: "TOKEN=hunter2-sec ... ret-value-xyz", outputCut: false });
+    expect(spaced).toBe(`${DETAIL_OUTPUT_HEADING}TOKEN=${REDACTED_TEXT} ... ${REDACTED_TEXT}`);
+    // Two dots are not a boundary.
+    const two = detail.output({ output: "a hunter2-sec.. b", outputCut: false });
+    expect(two).toBe(`${DETAIL_OUTPUT_HEADING}a hunter2-sec.. b`);
+  });
 
   it("masks a part only at that line's edge, and leaves parts shorter than the minimum", () => {
     const out = detail.output({ output: "a hunter2-sec b\nhunter2-sec\nhunte\nxyz next", outputCut: false });
