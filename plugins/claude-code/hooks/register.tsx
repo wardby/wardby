@@ -1,7 +1,7 @@
 import { atom, read, update } from "claude-code";
 import type { Register } from "claude-code";
 
-import type { Filter, Poll, Resume, RunDetail, RunRow, Step, Steps } from "../types";
+import type { Filter, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps } from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -51,7 +51,9 @@ function taskUrl(task: string | null): string | null {
 const selected = atom({ plugin: "wardby-runs", key: "selected" } as const, null);
 const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-2" });
 // A run's steps as get_run_steps returned them (stored already redacted); drawn as plain text only.
-const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-1" });
+const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-2" });
+// The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail.
+const openStep = atom({ plugin: "wardby-runs", key: "openStep" } as const, null, { shape: "open-step-1" });
 const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-1" });
 // Continue locally: the folder to import into, and how the last import went. Never the download link.
 const resume = atom({ plugin: "wardby-runs", key: "resume" } as const, null, { shape: "resume-1" });
@@ -475,9 +477,22 @@ function toSteps(value: unknown): Step[] {
         tool: str(s.tool),
         summary: s.summary,
         status: str(s.status),
+        detail: typeof s.detail === "string" ? s.detail : null,
       },
     ];
   });
+}
+
+/** The seqs of steps that have detail, in order. */
+const detailSeqs = (steps: Step[]): number[] => steps.filter((s) => s.detail !== null).map((s) => s.seq);
+
+/** The cursor moved by `delta` among `seqs` (from the first or last when there is none). */
+function moveCursor(current: OpenStep | null, runId: string, seqs: number[], delta: 1 | -1): OpenStep | null {
+  if (seqs.length === 0) return current;
+  const at = current?.runId === runId ? seqs.indexOf(current.seq) : -1;
+  const next = at < 0 ? (delta > 0 ? 0 : seqs.length - 1) : Math.min(seqs.length - 1, Math.max(0, at + delta));
+  // An expanded step stays expanded as the cursor moves: the detail follows the cursor.
+  return { runId, seq: seqs[next], open: current?.runId === runId && current.open };
 }
 
 /** A step as one line, worded as the server's lastStep.line: "Bash: npm test (exit 1)", "said: …". */
@@ -1027,6 +1042,7 @@ export const register: Register = (on, options) => {
         info?.id === open.id ? info.finalText : null,
       ].some((text) => (text ?? "").length > 60);
       const shown = info && info.id === open.id ? info : null;
+      const cursor = await read($, openStep);
       const stepsState = await read($, runSteps);
       const stepsOf = stepsState?.runId === open.id ? stepsState : null;
       // Steps as stored (already redacted), as plain Text: a summary never becomes markdown or a link.
@@ -1063,14 +1079,73 @@ export const register: Register = (on, options) => {
             {heading(isRecent ? "Recent steps" : "Steps")}
             {stepsOf.steps.map((step) => {
               const { mark, failed } = stepMark(step);
+              const hasDetail = step.detail !== null;
+              const isCursor = cursor?.runId === open.id && cursor.seq === step.seq;
+              const isOpen = hasDetail && isCursor && cursor.open;
+              const line = (
+                <Text wrap="wrap">
+                  {!D && isCursor ? "› " : ""}
+                  <Text {...(failed ? { color: FAILED_COLOR } : { dimColor: true })}>{mark}</Text> {stepLine(step)}
+                  {hasDetail ? (isOpen ? " ▾" : " ▸") : ""}
+                </Text>
+              );
               return (
-                <Box key={`step-${step.seq}`}>
-                  <Text wrap="wrap">
-                    <Text {...(failed ? { color: FAILED_COLOR } : { dimColor: true })}>{mark}</Text> {stepLine(step)}
-                  </Text>
+                <Box key={`step-${step.seq}`} flexDirection="column">
+                  {hasDetail ? (
+                    <Button
+                      key={`step-detail-${step.seq}`}
+                      onPress={() =>
+                        void update($, openStep, (current): OpenStep => ({
+                          runId: open.id,
+                          seq: step.seq,
+                          open: !(current?.runId === open.id && current.seq === step.seq && current.open),
+                        }))
+                      }
+                    >
+                      {line}
+                    </Button>
+                  ) : (
+                    line
+                  )}
+                  {isOpen && (
+                    // Stored already redacted; plain text only: a detail never becomes markdown or a link.
+                    <Box key={`step-text-${step.seq}`} paddingLeft={2}>
+                      <Text dimColor wrap="wrap">
+                        {step.detail}
+                      </Text>
+                    </Box>
+                  )}
                 </Box>
               );
             })}
+            {!D && detailSeqs(stepsOf.steps).length > 0 && (
+              <Box gap={2}>
+                <Button
+                  key="step-prev"
+                  label="Previous (k)"
+                  hotkey="k"
+                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, detailSeqs(stepsOf.steps), -1))}
+                />
+                <Button
+                  key="step-next"
+                  label="Next (j)"
+                  hotkey="j"
+                  onPress={() => void update($, openStep, (c) => moveCursor(c, open.id, detailSeqs(stepsOf.steps), 1))}
+                />
+                <Button
+                  key="step-open"
+                  label="Show detail (e)"
+                  hotkey="e"
+                  onPress={() =>
+                    void update($, openStep, (c) => {
+                      const seqs = detailSeqs(stepsOf.steps);
+                      const at = c?.runId === open.id && seqs.includes(c.seq) ? c : moveCursor(null, open.id, seqs, -1);
+                      return at ? { ...at, open: !at.open } : c;
+                    })
+                  }
+                />
+              </Box>
+            )}
             {!isRecent && stepsOf.next !== null && (
               <Box>
                 <Button
@@ -1095,7 +1170,15 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" gap={1}>
           <Box>
-            <Button key="back" label="‹ Runs" {...hk("b")} onPress={() => void update($, selected, () => null)} />
+            <Button
+              key="back"
+              label="‹ Runs"
+              {...hk("b")}
+              onPress={() => {
+                void update($, selected, () => null);
+                void update($, openStep, () => null);
+              }}
+            />
           </Box>
           <Box flexDirection="column">
             <Box gap={1} alignItems="center">

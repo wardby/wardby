@@ -43,7 +43,12 @@ export type Step = {
   tool: string | null;
   summary: string;
   status: string | null;
+  /** The step's detail text (wardby 0.9.0+, detail level, owner and starter only); null otherwise. */
+  detail: string | null;
 };
+
+/** The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail. */
+export type OpenStep = { runId: string; seq: number; open: boolean };
 
 export type Steps = {
   runId: string;
@@ -82,6 +87,7 @@ declare module "claude-code" {
       selected: string | null;
       detail: Shaped<RunDetail | null>;
       steps: Shaped<Steps | null>;
+      openStep: Shaped<OpenStep | null>;
       poll: Shaped<Poll>;
       filter: Shaped<Filter>;
       resume: Shaped<Resume | null>;
