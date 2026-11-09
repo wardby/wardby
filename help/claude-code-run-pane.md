@@ -60,4 +60,11 @@ open step's detail have a **Copy** button that copies the full text as the
 server sent it, an open step's detail included in full; in the terminal, **Copy section** (`y`) copies the open
 step's detail.
 
+If the pane shows `list_runs: ... exceeds maximum allowed tokens`, the day's run
+list is larger than Claude Code's MCP output limit, usually because runs started
+from GitHub or Jira carry long issue text. Update the server to Wardby 0.9.2 or
+later, which shortens each run's task in that list. Until then, set
+`"env": { "MAX_MCP_OUTPUT_TOKENS": "100000" }` in Claude Code's
+`settings.json` and restart Claude Code.
+
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

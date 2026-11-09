@@ -205,9 +205,34 @@ server's name), and ship the allow rules above in the same managed settings.
 When managed settings set `allowManagedHooksOnly`, a plugin a user installs
 loads no hooks: install it through managed settings instead.
 
+## Troubleshooting
+
+### `list_runs: ... exceeds maximum allowed tokens`
+
+The pane shows an error like `wardby: list_runs: Error: result (65,921
+characters across 1 line) exceeds maximum allowed tokens`. Claude Code caps how
+much text an MCP tool may return (25,000 tokens by default), and the pane's full
+refresh lists up to 100 runs from the last day across all your agents. Runs
+started from GitHub or Jira carry the whole issue or review text, so a busy day
+can pass the cap, and the pane keeps failing until those runs age out.
+
+- **Fix:** update the Wardby server to 0.9.2 or later. Its cross-agent
+  `list_runs` cuts each run's task to its first 600 characters.
+- **Until then:** raise Claude Code's MCP output limit in its settings file
+  (`~/.claude/settings.json`, or the file under `CLAUDE_CONFIG_DIR`), then
+  restart Claude Code:
+
+  ```json
+  { "env": { "MAX_MCP_OUTPUT_TOKENS": "100000" } }
+  ```
+
+  Merge the `env` entry into the file's existing settings rather than
+  replacing them.
+
 ## Limits
 
 - Plugins draw in the Claude Code terminal, the desktop app's Code tab and VS
   Code; not in claude.ai/code, `claude -p`, the Agent SDK or WSL.
 - The pane polls; there is no push.
-- A run's live steps and a readable transcript are not shown yet.
+- A finished run's readable transcript is not shown; use Continue locally for
+  Claude Code runs with session resume.
