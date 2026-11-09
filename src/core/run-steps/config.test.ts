@@ -4,6 +4,7 @@ import {
   dispatchRunStepsLevel,
   loadRunStepRetentionDays,
   loadRunStepsLevel,
+  RUN_STEPS_LEVELS,
   recordedRunStepsLevel,
   runStepsAboveCeilingWarning,
   runStepsLevelFor,
@@ -24,26 +25,39 @@ describe("loadRunStepsLevel", () => {
   });
 });
 
+type L = "off" | "summary" | "detail";
+type Setting = L | null | undefined;
+const CEILINGS: readonly L[] = ["off", "summary", "detail"];
+const SETTINGS: readonly Setting[] = ["off", "summary", "detail", null, undefined];
+// Written out by hand: the level for [ceiling][setting]; an unset setting is summary.
+const EXPECTED: Record<L, Record<"off" | "summary" | "detail" | "unset", L>> = {
+  off: { off: "off", summary: "off", detail: "off", unset: "off" },
+  summary: { off: "off", summary: "summary", detail: "summary", unset: "summary" },
+  detail: { off: "off", summary: "summary", detail: "detail", unset: "summary" },
+};
+const key = (s: Setting) => s ?? "unset";
+
 describe("runStepsLevelFor", () => {
-  it("is the lower of the ceiling and the agent setting; unset agents are at summary", () => {
-    expect(runStepsLevelFor("detail", "detail")).toBe("detail");
-    expect(runStepsLevelFor("summary", "detail")).toBe("summary");
-    expect(runStepsLevelFor("off", "detail")).toBe("off");
-    expect(runStepsLevelFor("detail", "off")).toBe("off");
-    expect(runStepsLevelFor("detail", null)).toBe("summary");
-    expect(runStepsLevelFor("detail", undefined)).toBe("summary");
-    expect(runStepsLevelFor("off", null)).toBe("off");
+  it("covers every ceiling and setting", () => {
+    expect([...RUN_STEPS_LEVELS]).toEqual(CEILINGS);
+    for (const ceiling of RUN_STEPS_LEVELS)
+      for (const setting of SETTINGS)
+        expect(runStepsLevelFor(ceiling, setting), `${ceiling}/${String(setting)}`).toBe(
+          EXPECTED[ceiling][key(setting)],
+        );
   });
 });
 
 describe("recordedRunStepsLevel", () => {
-  it("is the run's level capped by the process ceiling; a run from before the field records at most summary", () => {
-    expect(recordedRunStepsLevel("detail", "detail")).toBe("detail");
+  it("is the run's level capped by the process ceiling; no recorded level is at most summary", () => {
+    for (const ceiling of RUN_STEPS_LEVELS)
+      for (const setting of SETTINGS)
+        expect(recordedRunStepsLevel(setting, ceiling), `${ceiling}/${String(setting)}`).toBe(
+          EXPECTED[ceiling][key(setting)],
+        );
     expect(recordedRunStepsLevel("detail", "summary")).toBe("summary");
     expect(recordedRunStepsLevel("detail", "off")).toBe("off");
-    expect(recordedRunStepsLevel("summary", "detail")).toBe("summary");
     expect(recordedRunStepsLevel(null, "detail")).toBe("summary");
-    expect(recordedRunStepsLevel(null, "off")).toBe("off");
   });
 });
 
@@ -56,13 +70,19 @@ describe("dispatchRunStepsLevel", () => {
 });
 
 describe("runStepsAboveCeilingWarning", () => {
+  // Warns iff the setting is above the ceiling, by hand.
+  const WARNS: Record<L, readonly L[]> = { off: ["summary", "detail"], summary: ["detail"], detail: [] };
   it("warns only when the setting asks for more than the instance allows", () => {
+    for (const ceiling of RUN_STEPS_LEVELS)
+      for (const setting of SETTINGS) {
+        const warned = setting != null && WARNS[ceiling].includes(setting);
+        const got = runStepsAboveCeilingWarning(setting, ceiling);
+        expect(got !== undefined, `${ceiling}/${String(setting)}`).toBe(warned);
+        if (warned) expect(got).toContain(`runSteps is ${setting} but this instance allows up to ${ceiling}`);
+      }
     expect(runStepsAboveCeilingWarning("detail", "summary")).toBe(
       "runSteps is detail but this instance allows up to summary (WARDBY_RUN_STEPS), so its runs record summary. See the run-steps help article.",
     );
-    expect(runStepsAboveCeilingWarning("summary", "off")).toMatch(/allows up to off/);
-    expect(runStepsAboveCeilingWarning("detail", "detail")).toBeUndefined();
-    expect(runStepsAboveCeilingWarning(null, "off")).toBeUndefined();
   });
 });
 

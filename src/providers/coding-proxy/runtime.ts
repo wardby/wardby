@@ -164,7 +164,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // Throws on an invalid setting, before anything listens.
   const runStepsUrl = loadRunStepsUrl(env);
   // Throws on an invalid WARDBY_RUN_STEPS. At off no step text leaves the proxy.
-  const runStepsLevel = loadRunStepsLevel(env);
+  const runStepsCeiling = loadRunStepsLevel(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -238,7 +238,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // Coding runs' steps go to the control plane only when WARDBY_RUN_STEPS_URL is set and
   // WARDBY_RUN_STEPS is not off; otherwise no
   // submitter is passed and the proxy does no step extraction.
-  const steps = runStepsUrl && runStepsLevel !== "off" ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
+  const steps = runStepsUrl && runStepsCeiling !== "off" ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
   const ledger = new PrismaProxyLedger(options.db);
   const proxy = new CodingProxy({
     ledger,

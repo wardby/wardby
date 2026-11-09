@@ -26,6 +26,7 @@ interface FakeRun {
   triggeredById: string | null;
   finishedAt: Date | null;
   stepsDropped: number;
+  runStepsLevel?: "off" | "summary" | "detail" | null;
   steps: FakeStep[];
 }
 
@@ -154,11 +155,21 @@ describe("get_run_steps", () => {
     expect(JSON.parse((await call({ runId: "recent" })).text)).not.toHaveProperty("expired");
   });
 
-  it("reports the level this release records: detail is recorded as summary", async () => {
+  it("a run with no recorded level reports summary at most, capped by the ceiling", async () => {
     const db = fakeStepsDb([run()]);
-    expect(JSON.parse((await (await setup(db, "trig", { level: "detail" }))({ runId: "r1" })).text).level).toBe(
-      "summary",
-    );
-    expect(JSON.parse((await (await setup(db, "trig", { level: "off" }))({ runId: "r1" })).text).level).toBe("off");
+    const level = async (ceiling: "off" | "summary" | "detail") =>
+      JSON.parse((await (await setup(db, "trig", { level: ceiling }))({ runId: "r1" })).text).level;
+    expect(await level("detail")).toBe("summary");
+    expect(await level("summary")).toBe("summary");
+    expect(await level("off")).toBe("off");
+  });
+
+  it("reports a run's own detail level, capped by the process ceiling", async () => {
+    const db = fakeStepsDb([run({ runStepsLevel: "detail" })]);
+    const level = async (ceiling: "off" | "summary" | "detail") =>
+      JSON.parse((await (await setup(db, "trig", { level: ceiling }))({ runId: "r1" })).text).level;
+    expect(await level("detail")).toBe("detail");
+    expect(await level("summary")).toBe("summary");
+    expect(await level("off")).toBe("off");
   });
 });
