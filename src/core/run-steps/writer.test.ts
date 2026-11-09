@@ -72,6 +72,28 @@ describe("RunStepWriter", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
   });
 
+  it("writes nothing when values are unreadable for a detail result-only batch", async () => {
+    const db = {
+      run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel: "detail" })) },
+      runStep: {},
+      $transaction: vi.fn(async () => undefined),
+    };
+    const warn = vi.fn();
+    const writer = new RunStepWriter({
+      db: db as unknown as RunStepWriterDb,
+      secretValues: async () => {
+        throw new Error(`cannot read ${FAKE_SECRET}`);
+      },
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await writer.record("r1", { steps: [], results: [{ callId: "c1", status: "ok", output: FAKE_SECRET }] });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
   it("does not read secret values for a batch of results only", async () => {
     const db = fakeDb();
     const secretValues = vi.fn(async () => [FAKE_SECRET]);

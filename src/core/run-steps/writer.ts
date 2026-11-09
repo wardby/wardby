@@ -11,7 +11,10 @@
  * no gaps or duplicates whichever process writes. Known limits: a dropped step may be counted again
  * after a process restart, after its run is evicted from the remembered set, past the per-run id
  * limit, or when two processes write the same run. A result is matched only to a stored callId, which
- * is already clean, so a result's callId is never persisted. Log lines
+ * is already clean, so a result's callId is never persisted. At the detail level (the run's
+ * Run.runStepsLevel, fixed at dispatch), each step's detail text is redacted the same way
+ * (stepDetailer) before it is cut and stored; below it, detail material in a batch is dropped
+ * unread. Log lines
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
 import { createHash } from "node:crypto";
@@ -19,10 +22,12 @@ import type { PrismaClient } from "#prisma";
 import { redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { loadRunStepRetentionDays, loadRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { loadRunStepRetentionDays, loadRunStepsLevel, recordedRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { joinDetail, stepDetailer, type StepDetailer } from "./detail.js";
 import { stepSummarizer } from "./summarize.js";
 import {
   MAX_RUN_STEPS,
+  MAX_STEP_DETAIL_CHARS,
   STEP_CALL_ID,
   STEP_STATUS,
   STEP_TOOL_NAME,
@@ -47,6 +52,7 @@ export interface RunStepWriterDeps {
   db: RunStepWriterDb;
   /** Every secret value of the agent (already with JSON-escaped forms); rejects when any can't be read. */
   secretValues: (agentId: string) => Promise<string[]>;
+  /** The process's ceiling: off stops this writer; otherwise used only for runs without a fixed level. */
   level: RunStepsLevel;
   retentionDays: number;
   /** Tests only; MAX_RUN_STEPS otherwise. */
@@ -124,16 +130,25 @@ export class RunStepWriter implements RunStepSink {
 
   private async write(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[]): Promise<void> {
     const { db } = this.deps;
-    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true, runStepsLevel: true } });
     if (!run) return;
+    const level = recordedRunStepsLevel(run.runStepsLevel, this.deps.level);
+    if (level === "off") return;
+    const detailed = level === "detail";
     const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
-    // Read fresh for every batch (never cached: a rotated or newly attached secret must be covered).
-    // Rejects (and the batch is dropped) when the values can't be read: never an unredacted write.
-    const own = steps.length > 0 ? await this.deps.secretValues(run.agentId) : [];
-    const extras = steps.length > 0 ? extraSecretValues.filter(Boolean) : [];
+    const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
+    const outputs = detailed && results.some((r) => typeof r.output === "string");
+    // Read fresh for every batch that stores text (steps, or outputs at detail), never cached: a
+    // rotated or newly attached secret must be covered. Rejects (and the batch is dropped) when the
+    // values can't be read: never an unredacted write.
+    const needsValues = steps.length > 0 || outputs;
+    const own = needsValues ? await this.deps.secretValues(run.agentId) : [];
+    const extras = needsValues ? extraSecretValues.filter(Boolean) : [];
     const values = [...own, ...extras];
     // The summary forms are built once per batch, on the first row.
     let summarize: ReturnType<typeof stepSummarizer> | undefined;
+    let detailer: StepDetailer | undefined;
+    const detailOf = (): StepDetailer => (detailer ??= stepDetailer(values));
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
@@ -143,10 +158,10 @@ export class RunStepWriter implements RunStepSink {
       tool: step.kind === "tool" ? safeToolName(step.tool, values) : null,
       callId: step.callId,
       summary: (summarize ??= stepSummarizer(values))(step),
+      detail: detailed ? detailOf().step(step).slice(0, MAX_STEP_DETAIL_CHARS) : null,
       at,
       expiresAt,
     }));
-    const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const maxSteps = this.deps.maxSteps ?? MAX_RUN_STEPS;
     const counted = this.droppedIds.get(runId) ?? new Set<string>();
     if (this.droppedIds.has(runId)) {
@@ -175,10 +190,24 @@ export class RunStepWriter implements RunStepSink {
         if (dropped > 0) await tx.run.update({ where: { id: runId }, data: { stepsDropped: { increment: dropped } } });
       }
       for (const result of results) {
-        // The first status wins: a result resent with the history, or replayed, changes nothing.
-        await tx.runStep.updateMany({
+        const output = outputs && typeof result.output === "string" ? result.output : undefined;
+        if (output === undefined) {
+          // The first status wins: a result resent with the history, or replayed, changes nothing.
+          await tx.runStep.updateMany({
+            where: { runId, callId: result.callId, kind: "tool", status: null },
+            data: { status: result.status },
+          });
+          continue;
+        }
+        const open = await tx.runStep.findFirst({
           where: { runId, callId: result.callId, kind: "tool", status: null },
-          data: { status: result.status },
+          select: { id: true, detail: true },
+        });
+        if (!open) continue;
+        const suffix = detailOf().output({ output, outputCut: result.outputCut });
+        await tx.runStep.update({
+          where: { id: open.id },
+          data: { status: result.status, detail: joinDetail(open.detail, suffix) },
         });
       }
     }, TX);

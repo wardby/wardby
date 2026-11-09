@@ -9,15 +9,16 @@ const agentIds: string[] = [];
 // Fake values only: never a real credential.
 const FAKE_SECRET = "wbFake-Secret-Value-7f3a91";
 const FAKE_TOKEN = "ghp_FAKEfakeFAKEfake0123456789abcd";
+const FAKE_CAPABILITY = `rrp_${"F".repeat(43)}`;
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-11-07T12:00:00.000Z");
 
-async function newRun() {
+async function newRun(runStepsLevel: "off" | "summary" | "detail" | null = null) {
   const agent = await db.agent.create({
     data: { name: `steps-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1 },
   });
   agentIds.push(agent.id);
-  return db.run.create({ data: { agentId: agent.id, status: "running" } });
+  return db.run.create({ data: { agentId: agent.id, status: "running", runStepsLevel } });
 }
 
 function writer(opts: { maxSteps?: number; level?: "off" | "summary" | "detail" } = {}) {
@@ -31,7 +32,7 @@ function writer(opts: { maxSteps?: number; level?: "off" | "summary" | "detail" 
   });
 }
 
-const tool = (callId: string, text: string): ExtractedStep => ({
+const tool = (callId: string, text: string): Extract<ExtractedStep, { kind: "tool" }> => ({
   kind: "tool",
   callId,
   tool: "Bash",
@@ -202,5 +203,80 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     const run = await newRun();
     await writer({ level: "off" }).record(run.id, { steps: [tool("c1", "ls")], results: [] });
     expect(await db.runStep.count({ where: { runId: run.id } })).toBe(0);
+  });
+  it("at detail stores the redacted input, then the redacted end of the output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(
+      run.id,
+      {
+        steps: [{ ...tool("c1", `echo ${FAKE_SECRET}`), input: `{"command":"echo ${FAKE_SECRET} ${FAKE_TOKEN}"}` }],
+        results: [],
+      },
+      [FAKE_CAPABILITY],
+    );
+    await w.record(
+      run.id,
+      {
+        steps: [],
+        results: [
+          { callId: "c1", status: "exit 1", output: `boom ${FAKE_SECRET}\n${FAKE_CAPABILITY}`, outputCut: false },
+        ],
+      },
+      [FAKE_CAPABILITY],
+    );
+    const [row] = await rowsOf(run.id);
+    expect(row.status).toBe("exit 1");
+    expect(row.detail).toContain('"command":"echo [REDACTED]');
+    expect(row.detail).toContain("--- output (end) ---\nboom [REDACTED]");
+    for (const fake of [FAKE_SECRET, FAKE_TOKEN, FAKE_CAPABILITY]) expect(row.detail).not.toContain(fake);
+    expect(row.detail!.length).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it("at detail redacts a said step's text and a result-only batch's output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(run.id, {
+      steps: [tool("c2", "ls"), { kind: "said", callId: "said:1", text: `key ${FAKE_SECRET}`, truncated: false }],
+      results: [],
+    });
+    await w.record(run.id, { steps: [], results: [{ callId: "c2", status: "ok", output: FAKE_SECRET }] });
+    const rows = await rowsOf(run.id);
+    expect(rows.map((r) => r.detail)).toEqual(["ls\n\n--- output (end) ---\n[REDACTED]", "key [REDACTED]"]);
+  });
+
+  it("below detail never stores detail, even when the batch carries it", async () => {
+    for (const level of ["summary", null] as const) {
+      const run = await newRun(level);
+      const w = writer({ level: "detail" });
+      await w.record(run.id, { steps: [{ ...tool("c1", "ls"), input: `{"command":"${FAKE_SECRET}"}` }], results: [] });
+      await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: FAKE_SECRET }] });
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).toBeNull();
+      expect(row.status).toBe("ok");
+    }
+  });
+
+  it("a run fixed at off records nothing; a summary ceiling caps a run fixed at detail", async () => {
+    const off = await newRun("off");
+    await writer({ level: "detail" }).record(off.id, { steps: [tool("c1", "ls")], results: [] });
+    expect(await rowsOf(off.id)).toHaveLength(0);
+    const detail = await newRun("detail");
+    await writer({ level: "summary" }).record(detail.id, {
+      steps: [{ ...tool("c1", "ls"), input: "{}" }],
+      results: [],
+    });
+    expect((await rowsOf(detail.id))[0].detail).toBeNull();
+  });
+
+  it("the first status wins: a replayed result appends no second output", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    await w.record(run.id, { steps: [{ ...tool("c1", "ls"), input: "{}" }], results: [] });
+    await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: "one" }] });
+    await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "error", output: "two" }] });
+    const [row] = await rowsOf(run.id);
+    expect(row.status).toBe("ok");
+    expect(row.detail).toBe("{}\n\n--- output (end) ---\none");
   });
 });
