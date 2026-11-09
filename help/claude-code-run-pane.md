@@ -3,7 +3,7 @@ id: claude-code-run-pane
 title: See your runs in Claude Code (the wardby-runs plugin)
 summary: Install the wardby-runs Claude Code plugin to see your runs beside the chat, grouped by pull request, with run details and Continue locally.
 audience: operator
-tags: [run steps, get_run_steps, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode, permissions, copy]
+tags: [run steps, get_run_steps, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode, permissions]
 appliesTo: >=0.8.0
 ---
 
