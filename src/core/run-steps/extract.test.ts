@@ -70,11 +70,11 @@ describe("AnthropicStreamSteps", () => {
 });
 
 describe("OpenAiStreamSteps", () => {
-  it("emits Codex's message, exec_command calls (cmd as a string and as argv) and code-mode exec", async () => {
+  it("emits Codex's message, its shell calls as Bash (cmd as a string and as argv) and code-mode exec", async () => {
     expect(feed(new OpenAiStreamSteps(), await fixture("codex-responses-stream.txt"))).toEqual([
       { kind: "said", callId: "said:msg_steps_1", text: "Running the tests now.", truncated: false },
-      { kind: "tool", callId: "call_steps_1", tool: "exec_command", text: "npm test", truncated: false },
-      { kind: "tool", callId: "call_steps_2", tool: "exec_command", text: "npm run lint", truncated: false },
+      { kind: "tool", callId: "call_steps_1", tool: "Bash", text: "npm test", truncated: false },
+      { kind: "tool", callId: "call_steps_2", tool: "Bash", text: "npm run lint", truncated: false },
       { kind: "tool", callId: "call_steps_3", tool: "exec", text: "git status --short", truncated: false },
     ]);
   });
@@ -220,7 +220,7 @@ describe("stepsFromJson", () => {
           { type: "function_call", call_id: "c9", name: "exec_command", arguments: '{"cmd":"make"}' },
         ],
       }),
-    ).toEqual([{ kind: "tool", callId: "c9", tool: "exec_command", text: "make", truncated: false }]);
+    ).toEqual([{ kind: "tool", callId: "c9", tool: "Bash", text: "make", truncated: false }]);
     expect(stepsFromJson("openai-responses", "not an object")).toEqual([]);
     expect(
       stepsFromJson("anthropic-messages", {

@@ -30,12 +30,20 @@ export function bounded(text: string): { text: string; truncated: boolean } {
     : { text, truncated: false };
 }
 
+/**
+ * Codex's shell tools (unified exec and the older shell tools). Shown as Bash, the name Claude Code's
+ * shell tool has, so every coding agent's commands read and filter the same (CLAUDE.md, "Common
+ * interfaces for like systems"). Only the bare names: a namespaced tool is another server's.
+ */
+const CODEX_SHELL_TOOLS = new Set(["exec_command", "shell", "local_shell", "shell_command"]);
+
 /** A tool's name as a step shows it; anything that isn't a plain name becomes "tool". */
 export function displayToolName(name: string, namespace?: string): string {
   let shown: string;
-  // Claude Code's one shell tool shows as the shell tool it stands for.
-  if (name === CLAUDE_COMMAND_TOOL || name === "run_command") shown = "Bash";
-  else if (name.startsWith(CLAUDE_MCP_TOOL_PREFIX)) shown = `mcp:${name.slice(CLAUDE_MCP_TOOL_PREFIX.length)}`;
+  // Claude Code's one shell tool, and Codex's, show as the shell tool they stand for.
+  if (name === CLAUDE_COMMAND_TOOL || name === "run_command" || (!namespace && CODEX_SHELL_TOOLS.has(name))) {
+    shown = "Bash";
+  } else if (name.startsWith(CLAUDE_MCP_TOOL_PREFIX)) shown = `mcp:${name.slice(CLAUDE_MCP_TOOL_PREFIX.length)}`;
   else if (namespace === CODEX_MCP_NAMESPACE) shown = `mcp:${name}`;
   else if (namespace) shown = `${namespace}.${name}`;
   else shown = name;

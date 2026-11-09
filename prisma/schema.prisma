@@ -668,7 +668,7 @@ model RunStep {
   at        DateTime @default(now())
   /// "tool" | "said"
   kind      String
-  /// The tool's display name (Bash, mcp:<name>, exec_command, ...); null for "said".
+  /// The tool's display name (Bash for every agent's shell tool, mcp:<name>, Edit, ...); null for "said".
   tool      String?
   /// The provider's call id (to attach the result), or a said:<key> id; never returned by MCP.
   callId    String?

@@ -22,8 +22,27 @@ describe("displayToolName", () => {
     expect(displayToolName("mcp__wardby_mcp__search_issues")).toBe("mcp:search_issues");
     expect(displayToolName("echo", "mcp__wardby_mcp")).toBe("mcp:echo");
     expect(displayToolName("list_agents", "collaboration")).toBe("collaboration.list_agents");
-    expect(displayToolName("exec_command")).toBe("exec_command");
+    // Codex's shell tools show as Bash, the name Claude Code's has: one name for the same tool.
+    expect(displayToolName("exec_command")).toBe("Bash");
+    expect(displayToolName("shell")).toBe("Bash");
+    expect(displayToolName("local_shell")).toBe("Bash");
+    expect(displayToolName("shell_command")).toBe("Bash");
+    // Only the bare names: a namespaced tool of the same name is someone else's.
+    expect(displayToolName("exec_command", "collaboration")).toBe("collaboration.exec_command");
+    // Code mode's exec runs JavaScript, not a shell command: it keeps its name.
+    expect(displayToolName("exec")).toBe("exec");
     expect(displayToolName("bad name!")).toBe("tool");
+  });
+});
+
+describe("toolStepText with Codex shell tools", () => {
+  it("keeps the command of a Codex shell call once it is named Bash", () => {
+    const tool = displayToolName("exec_command");
+    expect(toolStepText(tool, '{"cmd":["bash","-lc","npm test"]}')).toEqual({ text: "npm test", truncated: false });
+    expect(toolStepText(displayToolName("shell"), '{"command":["git","status"]}')).toEqual({
+      text: "git status",
+      truncated: false,
+    });
   });
 });
 
