@@ -4,6 +4,7 @@
  */
 import { z } from "zod";
 import {
+  MAX_RESULT_OUTPUT_CHARS,
   MAX_RESULTS_PER_POST,
   MAX_STEP_TEXT_CHARS,
   MAX_STEPS_PER_POST,
@@ -29,13 +30,26 @@ export const RunStepPostSchema = z
               tool: z.string().regex(STEP_TOOL_NAME),
               text,
               truncated: z.boolean(),
+              input: text.optional(),
+              inputTruncated: z.boolean().optional(),
             })
             .strict(),
           z.object({ kind: z.literal("said"), callId, text, truncated: z.boolean() }).strict(),
         ]),
       )
       .max(MAX_STEPS_PER_POST),
-    results: z.array(z.object({ callId, status: z.string().regex(STEP_STATUS) }).strict()).max(MAX_RESULTS_PER_POST),
+    results: z
+      .array(
+        z
+          .object({
+            callId,
+            status: z.string().regex(STEP_STATUS),
+            output: z.string().max(MAX_RESULT_OUTPUT_CHARS).optional(),
+            outputCut: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .max(MAX_RESULTS_PER_POST),
   })
   .strict();
 

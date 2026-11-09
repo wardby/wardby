@@ -51,6 +51,66 @@ describe("RunStepForwarder", () => {
     ]);
   });
 
+  it("splits detail-sized results by serialized size: every result once, no body over the cap", async () => {
+    const fetchImpl = accepted();
+    const forwarder = new RunStepForwarder({ url: URL_BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const results = Array.from({ length: 400 }, (_, n) => ({
+      callId: `c${n}`,
+      status: "ok" as const,
+      output: "x".repeat(4096),
+      outputCut: true,
+    }));
+    forwarder.submit(CAP, "r1", { steps: [], results });
+    await forwarder.flush();
+    const bodies = fetchImpl.mock.calls.map(([, init]) => init.body as string);
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_RUN_STEPS_POST_BYTES);
+    const ids = bodies.flatMap((body) => (JSON.parse(body) as RunStepBatch).results.map((r) => r.callId));
+    expect(ids).toEqual(results.map((r) => r.callId));
+  });
+
+  it("counts input and output bytes in the queue bound: detail-sized steps are dropped past 8 MiB", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => {
+      await gate;
+      return new Response(null, { status: 202 });
+    });
+    const info = vi.fn();
+    const forwarder = new RunStepForwarder({
+      url: URL_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      log: { info },
+    });
+    const big: RunStepBatch = {
+      steps: [
+        {
+          kind: "tool",
+          callId: "c1",
+          tool: "Bash",
+          text: "t".repeat(MAX_STEP_TEXT_CHARS),
+          truncated: false,
+          input: "i".repeat(MAX_STEP_TEXT_CHARS),
+          inputTruncated: false,
+        },
+      ],
+      results: [{ callId: "c1", status: "ok", output: "o".repeat(4096), outputCut: true }],
+    };
+    forwarder.submit(CAP, "r1", big); // taken at once, waiting on the gate
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let n = 0; n < 300; n += 1) forwarder.submit(CAP, "r1", big);
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue_full" }), expect.any(String));
+    release();
+    await forwarder.flush();
+    const queuedBodies = fetchImpl.mock.calls
+      .slice(1)
+      .filter(([, init]) => (init.body as string).includes('"steps":[{'));
+    const bytes = queuedBodies.reduce((sum, [, init]) => sum + Buffer.byteLength(init.body as string), 0);
+    expect(queuedBodies.length).toBeGreaterThan(10);
+    expect(queuedBodies.length).toBeLessThan(300);
+    expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+  });
+
   it("drops on a full queue and logs only a reason and a count", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
