@@ -978,3 +978,132 @@ test("list rows show the last step under the agent name for running and failed r
     await ui.unmount();
   }
 });
+
+/** A server with one run r1 whose steps are 1..state.last: Bash, ok except the newest (still running). */
+function stepsServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  state: { status: string; last: number; steps?: "off" | "unknown" | "refused" | "empty" },
+) {
+  const stepCalls: Record<string, unknown>[] = [];
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    const fail = (text: string) => ({ value: { content: [{ type: "text", text }], isError: true } });
+    const last = state.last > 0 ? lastStep(state.last, `Bash: step ${state.last}`) : undefined;
+    if (e.tool === "list_runs")
+      return reply([{ ...runRow("r1", state.status, 60_000), ...(last ? { lastStep: last } : {}) }]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status: state.status,
+        codingResult: { outcome: "changes_ready" },
+        ...(last ? { lastStep: last } : {}),
+      });
+    if (e.tool === "get_run_steps") {
+      stepCalls.push(e.args);
+      if (state.steps === "unknown") return fail("MCP error -32602: Tool get_run_steps not found");
+      if (state.steps === "refused") return fail("Claude Code auto mode refused mcp__wardby__get_run_steps");
+      if (state.steps === "off") return reply({ runId: "r1", level: "off", steps: [], next: null, dropped: 0 });
+      if (state.steps === "empty") return reply({ runId: "r1", level: "summary", steps: [], next: null, dropped: 0 });
+      const after = Number(e.args.after ?? 0);
+      const limit = Number(e.args.limit ?? 50);
+      const seqs = Array.from({ length: state.last }, (_, i) => i + 1).filter((s) => s > after);
+      const page = seqs.slice(0, limit);
+      return reply({
+        runId: "r1",
+        level: "summary",
+        steps: page.map((seq) => ({
+          seq,
+          at: iso(1000),
+          kind: "tool",
+          tool: "Bash",
+          summary: `step ${seq}`,
+          status: seq === state.last && state.status === "running" ? null : seq % 10 === 0 ? "exit 1" : "ok",
+        })),
+        next: seqs.length > limit ? page[page.length - 1] : null,
+        dropped: 0,
+      });
+    }
+    return reply({});
+  });
+  return { stepCalls };
+}
+
+const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) =>
+  (await ui.findAll({ type: "Text" })).map((el) => el.text).join("\n");
+
+test("a running run's detail shows its last 8 steps, read again each poll", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const state = { status: "running", last: 12 };
+  const { stepCalls } = stepsServer(on, state);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["terminal", "desktop"] as const) {
+    state.last = 12;
+    stepCalls.length = 0;
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    expect(stepCalls[0]).toEqual({ runId: "r1", after: 4, limit: 200 });
+    expect(await texts(ui)).toContain("Recent steps");
+    expect(await ui.find({ key: "step-4" })).toBeUndefined();
+    expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("Bash: step 5");
+    expect(JSON.stringify(await ui.find({ key: "step-10" }))).toContain("Bash: step 10 (exit 1)");
+    expect((await ui.find({ key: "step-12" }))?.type).toBe("Box");
+    state.last = 14;
+    await clock.advance(10_000);
+    expect(stepCalls.at(-1)).toEqual({ runId: "r1", after: 6, limit: 200 });
+    expect(await ui.find({ key: "step-6" })).toBeUndefined();
+    expect(await ui.find({ key: "step-14" })).toBeDefined();
+    await ui.press({ key: "back" });
+    await ui.unmount();
+  }
+});
+
+test("a finished run lists its steps 200 at a time, with More steps", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const { stepCalls } = stepsServer(on, { status: "succeeded", last: 205 });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(stepCalls).toEqual([{ runId: "r1", after: 0, limit: 200 }]);
+  expect(await texts(ui)).toMatch(/^Steps$/m);
+  expect(await ui.find({ key: "step-1" })).toBeDefined();
+  expect(await ui.find({ key: "step-200" })).toBeDefined();
+  expect(await ui.find({ key: "step-201" })).toBeUndefined();
+  await ui.press({ key: "more-steps" });
+  await clock.settle();
+  expect(stepCalls.at(-1)).toEqual({ runId: "r1", after: 200, limit: 200 });
+  expect(await ui.find({ key: "step-205" })).toBeDefined();
+  expect(await ui.find({ key: "more-steps" })).toBeUndefined();
+  // A finished run's list is read once: polls don't ask again.
+  await clock.advance(120_000);
+  expect(stepCalls).toHaveLength(2);
+  await ui.unmount();
+});
+
+test("a run that finishes while open turns Recent steps into Steps", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const state = { status: "running", last: 3 };
+  const { stepCalls } = stepsServer(on, state);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await texts(ui)).toContain("Recent steps");
+  state.status = "succeeded";
+  await clock.advance(10_000);
+  expect(stepCalls.at(-1)).toEqual({ runId: "r1", after: 0, limit: 200 });
+  expect(await texts(ui)).toMatch(/^Steps$/m);
+  await ui.unmount();
+});
