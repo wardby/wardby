@@ -1113,23 +1113,30 @@ export const register: Register = (on, options) => {
                   {hasDetail ? (isOpen ? " ▾" : " ▸") : ""}
                 </Text>
               );
+              const toggle = () =>
+                void update($, openStep, (current): OpenStep => ({
+                  runId: open.id,
+                  seq: step.seq,
+                  open: !(current?.runId === open.id && current.seq === step.seq && current.open),
+                }));
               return (
                 <Box key={`step-${step.seq}`} flexDirection="column">
                   {hasDetail ? (
-                    <Button
-                      key={`step-detail-${step.seq}`}
-                      onPress={() =>
-                        void update($, openStep, (current): OpenStep => ({
-                          runId: open.id,
-                          seq: step.seq,
-                          open: !(current?.runId === open.id && current.seq === step.seq && current.open),
-                        }))
-                      }
-                    >
+                    <Button key={`step-detail-${step.seq}`} onPress={toggle}>
                       {line}
                     </Button>
                   ) : (
                     line
+                  )}
+                  {D && hasDetail && (
+                    // The desktop has no j/k/e row: a labelled button says the step opens.
+                    <Box key={`step-toggle-${step.seq}`} paddingLeft={2}>
+                      <Button
+                        key={`step-toggle-button-${step.seq}`}
+                        label={isOpen ? "Hide detail" : "Show detail"}
+                        onPress={toggle}
+                      />
+                    </Box>
                   )}
                   {isOpen &&
                     step.detail !== null &&

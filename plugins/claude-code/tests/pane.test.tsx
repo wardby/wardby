@@ -1431,6 +1431,40 @@ for (const surface of ["desktop", "terminal"] as const) {
   });
 }
 
+test("desktop: a step with detail has a labelled Show detail button that opens and closes it", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Show detail");
+  await ui.press({ key: "step-toggle-button-1" });
+  expect(await texts(ui)).toContain("all [link](https://evil.invalid) passed");
+  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Hide detail");
+  await ui.press({ key: "step-toggle-button-1" });
+  expect(await texts(ui)).not.toContain("passed");
+  await ui.unmount();
+});
+
+test("terminal: no per-step detail buttons, the j/k/e row instead", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await ui.find({ key: "step-toggle-button-1" })).toBeUndefined();
+  expect(await ui.find({ key: "step-open" })).toBeDefined();
+  await ui.unmount();
+});
+
 test("terminal: j and k move between steps with detail, e opens one", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
