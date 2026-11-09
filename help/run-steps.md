@@ -3,7 +3,7 @@ id: run-steps
 title: See what a run is doing (run steps)
 summary: Wardby records each run's steps, one line per tool call or model message, so you can follow a running run and read what a finished one did with get_run_steps.
 audience: operator
-tags: [run steps, viewer, wardby-runs, pane, step event, claude code run steps, get_run_steps, what is my run doing, WARDBY_RUN_STEPS, WARDBY_RUN_STEPS_LISTEN]
+tags: [run steps, viewer, wardby-runs, pane, step event, get_run_steps, what is my run doing, WARDBY_RUN_STEPS]
 appliesTo: >=0.9.0
 ---
 
