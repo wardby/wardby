@@ -315,11 +315,43 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
             expect(row.summary).toContain("[REDACTED]");
             if (level === "detail") expect(row.detail).toContain("[REDACTED]");
           }
-          // A malformed sequence's own bytes may remain ("12"), never the value's.
-          if (level === "detail")
-            expect(rows[0].detail).toMatch(/--- output \(end\) ---\nout (?:12)?\[REDACTED\]\nend$/);
+          // A malformed sequence's own printable bytes may remain ("[", "[12", "("), never the value's.
+          if (level === "detail") {
+            expect(rows[0].detail).toMatch(/--- output \(end\) ---\nout (?:\[|\[12|\()?\[REDACTED\]\nend$/);
+          }
         }
       });
+    }
+  });
+
+  it("stores a value behind a bare ESC and split by a colour code as [REDACTED]", async () => {
+    // Fake value; a bare ESC before it and a colour code inside it.
+    const value = "Zq9vLmT4pXw2Rk7s";
+    const probe = "\u001bZq9v\u001b[31mLmT4pXw2Rk7s";
+    for (const level of ["summary", "detail"] as const) {
+      const run = await newRun(level);
+      const w = writer({ level: "detail" });
+      await w.record(
+        run.id,
+        {
+          steps: [
+            { ...tool("c1", `echo ${probe} done`), input: `echo ${probe} done` },
+            { kind: "said", callId: "said:1", text: `the value is ${probe} ok`, truncated: false },
+          ],
+          results: [],
+        },
+        [value],
+      );
+      await w.record(run.id, { steps: [], results: [{ callId: "c1", status: "ok", output: `out ${probe}\nend` }] }, [
+        value,
+      ]);
+      const rows = await rowsOf(run.id);
+      expect(rows.map((r) => r.summary)).toEqual(["echo [REDACTED] done", "the value is [REDACTED] ok"]);
+      expect(rows.map((r) => r.detail)).toEqual(
+        level === "detail"
+          ? ["echo [REDACTED] done\n\n--- output (end) ---\nout [REDACTED]\nend", "the value is [REDACTED] ok"]
+          : [null, null],
+      );
     }
   });
 

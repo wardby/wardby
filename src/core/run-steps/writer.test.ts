@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as controlChars from "./control-chars.js";
 import { traceLogCapture } from "./log-capture.test-support.js";
 import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
@@ -103,6 +104,31 @@ describe("RunStepWriter", () => {
     await failed.record("r1", batch);
     expect(warn).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
+  it("drops a tool's input before any redaction when the run's level is below detail", async () => {
+    const strip = vi.spyOn(controlChars, "stripControlSequences");
+    for (const runStepsLevel of ["summary", null]) {
+      const db = {
+        run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel })) },
+        runStep: {},
+        $transaction: vi.fn(async () => undefined),
+      };
+      const writer = new RunStepWriter({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => [FAKE_SECRET],
+        level: "detail",
+        retentionDays: 30,
+      });
+      await writer.record("r1", {
+        steps: [{ ...step, input: `{"command":"echo wbFake-input-only-3e1a ${FAKE_SECRET}"}` }],
+        results: [],
+      });
+      expect(db.$transaction).toHaveBeenCalledTimes(1);
+    }
+    const seen = strip.mock.calls.map(([text]) => text);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((text) => text.includes("wbFake-input-only-3e1a"))).toBe(false);
   });
 
   it("writes nothing when values are unreadable for a detail result-only batch", async () => {

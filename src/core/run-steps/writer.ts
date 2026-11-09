@@ -107,6 +107,13 @@ function plainOutput(raw: string, outputCut: boolean, premask: PremaskOf | undef
   return detailer.output({ output: plainText(source.text, premask, cut), outputCut: cut });
 }
 
+/** `step` without its detail-only input. */
+function withoutInput(step: ExtractedStep): ExtractedStep {
+  if (step.kind !== "tool" || step.input === undefined) return step;
+  const { input: _input, inputTruncated: _inputTruncated, ...rest } = step;
+  return rest;
+}
+
 /** A step's text and input as plainText. */
 function plainStep(step: ExtractedStep, premask: PremaskOf | undefined): ExtractedStep {
   if (step.kind === "said") return { ...step, text: plainText(step.text, premask) };
@@ -177,7 +184,10 @@ export class RunStepWriter implements RunStepSink {
     const level = recordedRunStepsLevel(run.runStepsLevel, this.deps.level);
     if (level === "off") return;
     const detailed = level === "detail";
-    const extracted = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
+    // Below detail a tool's input is never stored, so it is dropped here, before any redaction.
+    const extracted = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said")).map(
+      (step) => (detailed ? step : withoutInput(step)),
+    );
     const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const outputs = detailed && results.some((r) => typeof r.output === "string");
     // Read fresh for every batch that stores text (steps, or outputs at detail), never cached: a
