@@ -813,7 +813,9 @@ test("Strips: a card per pull request with its steps drawn, the active step show
   await ui.press({ key: "view-strips" });
 
   // A column per lead step, its drawing over its name: the builder is folded into its lead.
+  // The card's colour bar is in its group's state colour; the steps follow it.
   expect((await ui.findAll({ type: "Svg" })).map((el) => el.props.alt)).toEqual([
+    "running group",
     "opened succeeded",
     "review succeeded",
     "fix 1 running",
@@ -2186,7 +2188,10 @@ test("desktop: every detail card opens with a colour bar in its kind's wardby co
     expect(card.children[0].props.key, key).toBe(`${key}-bar`);
     const bar = JSON.stringify(await ui.find({ key: `${key}-bar` }));
     expect(bar, key).toContain('"type":"Svg"');
-    expect(bar, key).toContain(`fill=\\"${color}\\"`);
+    expect(bar, key).toContain(`stroke=\\"${color}\\"`);
+    // Round ends that stay round however wide the card: a round-capped stroke that does not scale.
+    expect(bar, key).toContain('stroke-linecap=\\"round\\"');
+    expect(bar, key).toContain("non-scaling-stroke");
     expect(bar, key).toContain('"height":3');
     // A surface draws an Svg only with alt text: an empty alt left a blank gap where the bar belongs.
     expect(bar, key).toMatch(/"alt":"[^"]+"/);

@@ -323,10 +323,15 @@ function groupColor(group: LedgerGroup): string {
   return state === "running" ? STATUS_COLOR.running : state === "failed" ? FAILED_COLOR : STATUS_COLOR.succeeded;
 }
 
-/** A group's state: running while any run is, else its latest lead run's outcome (rows are newest first). */
+/** A group's state: running while any run is, else its latest lead run's outcome (in either row order). */
 function groupTone(group: LedgerGroup): "running" | "failed" | "succeeded" {
   if (group.rows.some(({ row }) => ACTIVE.has(row.status))) return "running";
-  const latest = group.rows.find(({ depth }) => depth === 0)?.row;
+  const latest = group.rows
+    .filter(({ depth }) => depth === 0)
+    .reduce<RunRow | undefined>(
+      (best, { row }) => (!best || Date.parse(row.startedAt) > Date.parse(best.startedAt) ? row : best),
+      undefined,
+    );
   return latest && latest.status !== "succeeded" ? "failed" : "succeeded";
 }
 
@@ -716,11 +721,16 @@ const WELL_BG = "#a8a29e14";
 const CARD_BG = "#a8a29e12";
 const RULE_BG = "#a8a29e33";
 
-/** A card's colour bar for the desktop: a full-width strip, stretched to the width it is drawn at. */
+/**
+ * A card's colour bar for the desktop: a line stretched to the width it is drawn at, with round ends. The
+ * stroke does not scale (vector-effect), so its 3px width and round caps stay round however far it stretches;
+ * the ends sit a little in from each side so a cap is never cut off.
+ */
 function cardBarSvg(fill: string): string {
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="3" viewBox="0 0 2000 3" preserveAspectRatio="none">` +
-    `<rect width="2000" height="3" fill="${fill}" /></svg>`
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="3" viewBox="0 0 1000 3" preserveAspectRatio="none">` +
+    `<line x1="8" y1="1.5" x2="992" y2="1.5" stroke="${fill}" stroke-width="3" stroke-linecap="round" ` +
+    `vector-effect="non-scaling-stroke" /></svg>`
   );
 }
 /** A run status's tone: running blue, pending grey, succeeded green, anything else (failed, stopped, …) red. */
@@ -1278,7 +1288,7 @@ export const register: Register = (on, options) => {
       const card = (key: string, kind: CardKind, children: unknown) =>
         D && Svg ? (
           <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
-            <Box key={`${key}-bar`}>
+            <Box key={`${key}-bar`} paddingX={1}>
               <Svg source={cardBarSvg(CARD_COLOR[kind])} alt={`${CARD_ALT[kind]} card`} height={3} />
             </Box>
             <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
@@ -2081,114 +2091,116 @@ export const register: Register = (on, options) => {
                     const children = step ? group.rows.filter(({ row }) => row.parentRunId === step.row.id) : [];
                     const total = group.rows.reduce((sum, { row }) => sum + row.costUsd, 0);
                     return (
-                      <Box
-                        key={`strip-${group.key}`}
-                        flexDirection="column"
-                        borderStyle="round"
-                        {...(activeLead ? { borderColor: STATUS_COLOR.running } : { borderColor: BORDER_COLOR })}
-                        paddingX={1}
-                        marginTop={1}
-                      >
-                        <Box>
-                          {group.url ? (
-                            <Link href={group.url} label={group.label} />
-                          ) : (
-                            <Text weight="semibold">{group.label}</Text>
-                          )}
-                          <Text dimColor size="caption">
-                            {" "}
-                            {groupState(group)}
-                          </Text>
-                          <Box flexGrow={1} />
-                          <Text weight="semibold" tabular>
-                            {usd(total)}
-                          </Text>
-                        </Box>
-                        {/* A column per step: its drawing and, under it, its name as a link, so they line up. */}
-                        <Box marginTop={1}>
-                          {steps.map(({ row, event }, i) => {
-                            const href = `https://wardby.invalid/step/${encodeURIComponent(group.key)}/${encodeURIComponent(row.id)}`;
-                            const name = (stepLabel(row, event) || row.agentName).replace(/[[\]*_]/g, "");
-                            const isPicked = i === pickedIndex;
-                            return (
-                              <Box
-                                key={`step-${row.id}`}
-                                flexDirection="column"
-                                alignItems="center"
-                                width={STRIP_CELLS}
-                                overflow="hidden"
-                              >
-                                {Svg && (
-                                  <Svg
-                                    source={stepSvg(row.status, {
-                                      isFirst: i === 0,
-                                      isLast: i === steps.length - 1,
-                                      isPicked,
-                                      intoDone: i > 0 && steps[i - 1].row.status === "succeeded",
-                                    })}
-                                    alt={`${name} ${row.status.replaceAll("_", " ")}`}
-                                    width={STRIP_PX}
-                                    height={22}
-                                  />
-                                )}
-                                <Markdown
-                                  key={`step-link-${row.id}`}
-                                  text={isPicked ? `**${name}**` : `[${name}](${href})`}
-                                  {...(isPicked
-                                    ? {}
-                                    : {
-                                        pressableLinks: [href],
-                                        onLinkPress: () =>
-                                          void update($, picked, (current) => ({ ...current, [group.key]: row.id })),
-                                      })}
-                                />
-                              </Box>
-                            );
-                          })}
-                        </Box>
-                        {earlier > 0 && (
-                          <Markdown
-                            key={`earlier-${group.key}`}
-                            dimColor
-                            text={`[+${earlier} earlier steps](https://wardby.invalid/view/ledger)`}
-                            pressableLinks={["https://wardby.invalid/view/ledger"]}
-                            onLinkPress={() => void update($, view, () => "ledger")}
-                          />
-                        )}
-                        {step && (
-                          <Box flexDirection="column" marginTop={1}>
-                            <Box>
-                              <Text weight="semibold">{stepName(step.row, step.event)}</Text>
-                              <Text dimColor size="caption">
-                                {"  "}
-                                {ACTIVE.has(step.row.status)
-                                  ? `running ${took(step.row, now)}`
-                                  : `${step.row.status.replaceAll("_", " ")} in ${took(step.row, now)}`}
-                              </Text>
-                            </Box>
-                            <Markdown
-                              key={`run-${step.row.id}`}
-                              text={`[${step.row.agentName.replace(/[[\]]/g, "")}](${runHref(step.row.id)}) ${ACTIVE.has(step.row.status) ? "has spent" : "spent"} ${usd(step.row.costUsd)}${step.row.budgetUsd ? ` of ${usd(step.row.budgetUsd)}` : ""}.`}
-                              pressableLinks={[runHref(step.row.id)]}
-                              onLinkPress={() => {
-                                void update($, selected, () => step.row.id);
-                                void pane.loadDetail(step.row.id);
-                              }}
-                            />
-                            {children.map(({ row }) => (
-                              <Markdown
-                                key={`run-${row.id}`}
-                                text={`└ ${statusMark(row.status)} [${row.agentName.replace(/[[\]]/g, "")}](${runHref(row.id)}) ${usd(row.costUsd)}`}
-                                dimColor
-                                pressableLinks={[runHref(row.id)]}
-                                onLinkPress={() => {
-                                  void update($, selected, () => row.id);
-                                  void pane.loadDetail(row.id);
-                                }}
-                              />
-                            ))}
+                      // A faint panel with a colour bar flush on top, in the group's state colour, as the
+                      // ledger's groups are (strips are drawn on the desktop only, where SVG is).
+                      <Box key={`strip-${group.key}`} flexDirection="column" marginTop={1} backgroundColor={CARD_BG}>
+                        {Svg && (
+                          <Box key={`strip-${group.key}-bar`} paddingX={1}>
+                            <Svg source={cardBarSvg(groupBarHex(group))} alt={`${groupTone(group)} group`} height={3} />
                           </Box>
                         )}
+                        <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+                          <Box>
+                            {group.url ? (
+                              <Link href={group.url} label={group.label} />
+                            ) : (
+                              <Text weight="semibold">{group.label}</Text>
+                            )}
+                            <Text dimColor size="caption">
+                              {" "}
+                              {groupState(group)}
+                            </Text>
+                            <Box flexGrow={1} />
+                            <Text weight="semibold" tabular>
+                              {usd(total)}
+                            </Text>
+                          </Box>
+                          {/* A column per step: its drawing and, under it, its name as a link, so they line up. */}
+                          <Box marginTop={1}>
+                            {steps.map(({ row, event }, i) => {
+                              const href = `https://wardby.invalid/step/${encodeURIComponent(group.key)}/${encodeURIComponent(row.id)}`;
+                              const name = (stepLabel(row, event) || row.agentName).replace(/[[\]*_]/g, "");
+                              const isPicked = i === pickedIndex;
+                              return (
+                                <Box
+                                  key={`step-${row.id}`}
+                                  flexDirection="column"
+                                  alignItems="center"
+                                  width={STRIP_CELLS}
+                                  overflow="hidden"
+                                >
+                                  {Svg && (
+                                    <Svg
+                                      source={stepSvg(row.status, {
+                                        isFirst: i === 0,
+                                        isLast: i === steps.length - 1,
+                                        isPicked,
+                                        intoDone: i > 0 && steps[i - 1].row.status === "succeeded",
+                                      })}
+                                      alt={`${name} ${row.status.replaceAll("_", " ")}`}
+                                      width={STRIP_PX}
+                                      height={22}
+                                    />
+                                  )}
+                                  <Markdown
+                                    key={`step-link-${row.id}`}
+                                    text={isPicked ? `**${name}**` : `[${name}](${href})`}
+                                    {...(isPicked
+                                      ? {}
+                                      : {
+                                          pressableLinks: [href],
+                                          onLinkPress: () =>
+                                            void update($, picked, (current) => ({ ...current, [group.key]: row.id })),
+                                        })}
+                                  />
+                                </Box>
+                              );
+                            })}
+                          </Box>
+                          {earlier > 0 && (
+                            <Markdown
+                              key={`earlier-${group.key}`}
+                              dimColor
+                              text={`[+${earlier} earlier steps](https://wardby.invalid/view/ledger)`}
+                              pressableLinks={["https://wardby.invalid/view/ledger"]}
+                              onLinkPress={() => void update($, view, () => "ledger")}
+                            />
+                          )}
+                          {step && (
+                            <Box flexDirection="column" marginTop={1}>
+                              <Box>
+                                <Text weight="semibold">{stepName(step.row, step.event)}</Text>
+                                <Text dimColor size="caption">
+                                  {"  "}
+                                  {ACTIVE.has(step.row.status)
+                                    ? `running ${took(step.row, now)}`
+                                    : `${step.row.status.replaceAll("_", " ")} in ${took(step.row, now)}`}
+                                </Text>
+                              </Box>
+                              <Markdown
+                                key={`run-${step.row.id}`}
+                                text={`[${step.row.agentName.replace(/[[\]]/g, "")}](${runHref(step.row.id)}) ${ACTIVE.has(step.row.status) ? "has spent" : "spent"} ${usd(step.row.costUsd)}${step.row.budgetUsd ? ` of ${usd(step.row.budgetUsd)}` : ""}.`}
+                                pressableLinks={[runHref(step.row.id)]}
+                                onLinkPress={() => {
+                                  void update($, selected, () => step.row.id);
+                                  void pane.loadDetail(step.row.id);
+                                }}
+                              />
+                              {children.map(({ row }) => (
+                                <Markdown
+                                  key={`run-${row.id}`}
+                                  text={`└ ${statusMark(row.status)} [${row.agentName.replace(/[[\]]/g, "")}](${runHref(row.id)}) ${usd(row.costUsd)}`}
+                                  dimColor
+                                  pressableLinks={[runHref(row.id)]}
+                                  onLinkPress={() => {
+                                    void update($, selected, () => row.id);
+                                    void pane.loadDetail(row.id);
+                                  }}
+                                />
+                              ))}
+                            </Box>
+                          )}
+                        </Box>
                       </Box>
                     );
                   })}
@@ -2299,7 +2311,7 @@ export const register: Register = (on, options) => {
               const groupCard = (children: unknown) =>
                 Svg ? (
                   <Box key={`group-${group.key}`} flexDirection="column" marginTop={1} backgroundColor={CARD_BG}>
-                    <Box key={`group-${group.key}-bar`}>
+                    <Box key={`group-${group.key}-bar`} paddingX={1}>
                       <Svg source={cardBarSvg(groupBarHex(group))} alt={`${groupTone(group)} group`} height={3} />
                     </Box>
                     <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
