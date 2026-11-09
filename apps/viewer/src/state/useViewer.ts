@@ -182,12 +182,15 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
         case "event": {
           // Dropped, not thrown on: a newer server may send shapes this build predates.
           if (!isViewerEvent(frame.data)) break;
-          const unknown = frame.data.kind === "outcome" || !knownRuns.current.has(frame.data.runId);
-          // Today's spend comes only from the graph, so a finished run's final cost needs a refetch.
-          const finished = frame.data.kind === "run" && frame.data.finishedAt !== null;
-          if (unknown || finished) {
-            needSeq += 1;
-            schedule(Math.max(0, REFETCH_DEBOUNCE_MS - (Date.now() - lastFetchAt)), false);
+          // A step only marks a run's detail stale: it never needs the graph, even for a run not shown.
+          if (frame.data.kind !== "step") {
+            const unknown = frame.data.kind === "outcome" || !knownRuns.current.has(frame.data.runId);
+            // Today's spend comes only from the graph, so a finished run's final cost needs a refetch.
+            const finished = frame.data.kind === "run" && frame.data.finishedAt !== null;
+            if (unknown || finished) {
+              needSeq += 1;
+              schedule(Math.max(0, REFETCH_DEBOUNCE_MS - (Date.now() - lastFetchAt)), false);
+            }
           }
           dispatch({
             type: "event",

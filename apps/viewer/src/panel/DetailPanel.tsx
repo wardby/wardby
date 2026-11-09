@@ -7,6 +7,7 @@ import { formatElapsed, serviceChip, statusGlyph } from "../graph/nodes/RunNode"
 import { outcomeLabel } from "../graph/nodes/OutcomeNode";
 import { outcomeLink, triggerLink } from "../graph/links";
 import type { RunFocus } from "../graph/selection";
+import { stepLine } from "../format/steps";
 import { formatEventTime } from "../format/time";
 import { ErrorLine } from "../chrome/ErrorLine";
 import { exactUsd, formatUsd } from "../format/money";
@@ -28,6 +29,8 @@ export interface DetailPanelProps {
   focus?: RunFocus | null;
   /** Open this run's pod on the Infrastructure tab (coding runs only). */
   onOpenPod?: (runId: string) => void;
+  /** Step events seen for this run (from the model): a change refetches the detail. */
+  stepChanges?: number;
 }
 
 interface Loaded {
@@ -94,7 +97,15 @@ function RunLink({
 
 const focusClass = (on: boolean) => (on ? "focus-item focused" : "focus-item");
 
-export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOpenPod }: DetailPanelProps) {
+export function DetailPanel({
+  serverUrl,
+  run,
+  runs,
+  onSelect,
+  focus = null,
+  onOpenPod,
+  stepChanges = 0,
+}: DetailPanelProps) {
   const [loaded, setLoaded] = useState<Loaded>({ id: run.id, detail: null, error: null });
   const seq = useRef(0);
   const panelRef = useRef<HTMLElement>(null);
@@ -134,7 +145,7 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOp
   }, [load, discardPending]);
 
   // Refetch (debounced) when the selected run changes live: an event updated it.
-  const signature = JSON.stringify(run);
+  const signature = `${JSON.stringify(run)}#${stepChanges}`;
   const seen = useRef({ id: run.id, signature });
   useEffect(() => {
     const prev = seen.current;
@@ -338,6 +349,22 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOp
               </li>
             ))}
           </ul>
+        </Section>
+      )}
+
+      {detail && (detail.steps ?? []).length > 0 && (
+        <Section title="STEPS">
+          {(detail.stepsOmitted ?? 0) > 0 && <p className="muted">{detail.stepsOmitted} earlier steps not shown</p>}
+          <ol className="panel-list steps">
+            {(detail.steps ?? []).map((step) => (
+              <li key={step.seq} className={step.status && step.status !== "ok" ? "step failed" : "step"}>
+                {stepLine(step)}
+              </li>
+            ))}
+          </ol>
+          {(detail.stepsDropped ?? 0) > 0 && (
+            <p className="muted">{detail.stepsDropped} later steps were not recorded (the per-run limit)</p>
+          )}
         </Section>
       )}
 

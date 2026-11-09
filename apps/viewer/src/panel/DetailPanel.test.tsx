@@ -42,6 +42,9 @@ function makeDetail(overrides: Partial<RunDetail> = {}): RunDetail {
     error: null,
     finalText: null,
     childRunIds: ["run_child0000001"],
+    steps: [],
+    stepsOmitted: 0,
+    stepsDropped: 0,
     outcomes: [
       {
         kind: "pull_request",
@@ -324,5 +327,66 @@ describe("DetailPanel pod link", () => {
     unmount();
     render(<DetailPanel serverUrl="https://w" run={makeRun()} runs={new Map()} onSelect={vi.fn()} />);
     expect(screen.queryByRole("button", { name: /Pod/ })).not.toBeInTheDocument();
+  });
+
+  it("lists the run's steps as plain text, with what was left out, and refetches when a step arrives", async () => {
+    vi.useFakeTimers();
+    api.fetchRun.mockResolvedValue(
+      makeDetail({
+        steps: [
+          {
+            seq: 4,
+            at: "2026-01-01T00:00:00.000Z",
+            kind: "said",
+            tool: null,
+            summary: "Running the tests.",
+            status: null,
+          },
+          {
+            seq: 5,
+            at: "2026-01-01T00:00:01.000Z",
+            kind: "tool",
+            tool: "Bash",
+            summary: "[x](https://example.invalid)",
+            status: "exit 1",
+          },
+        ],
+        stepsOmitted: 3,
+        stepsDropped: 2,
+      }),
+    );
+    const props = { serverUrl: "https://w.example", run: makeRun(), runs: known, onSelect: vi.fn() };
+    const { rerender } = render(<DetailPanel {...props} stepChanges={0} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("STEPS")).toBeInTheDocument();
+    expect(screen.getByText("said: Running the tests.")).toBeInTheDocument();
+    // A summary is text, never a link.
+    expect(screen.getByText("Bash: [x](https://example.invalid) (exit 1)")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "x" })).toBeNull();
+    expect(screen.getByText("3 earlier steps not shown")).toBeInTheDocument();
+    expect(screen.getByText("2 later steps were not recorded (the per-run limit)")).toBeInTheDocument();
+    expect(api.fetchRun).toHaveBeenCalledTimes(1);
+    rerender(<DetailPanel {...props} stepChanges={1} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(api.fetchRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no STEPS section for a run without steps, or from a server that sends none", async () => {
+    setup();
+    await screen.findByText("CHILDREN");
+    expect(screen.queryByText("STEPS")).toBeNull();
+  });
+
+  it("does not crash on a detail from an older server without steps", async () => {
+    const d = makeDetail();
+    delete (d as Partial<RunDetail>).steps;
+    api.fetchRun.mockResolvedValue(d);
+    setup();
+    await screen.findByText("CHILDREN");
+    expect(screen.queryByText("STEPS")).toBeNull();
   });
 });

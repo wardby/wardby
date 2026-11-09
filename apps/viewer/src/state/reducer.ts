@@ -14,6 +14,8 @@ export interface ViewerModel {
   live: boolean;
   /** Newest first, max TICKER_MAX. */
   ticker: TickerItem[];
+  /** Step events seen per run in the model; the detail panel refetches when its run's count changes. */
+  stepChanges: Map<string, number>;
 }
 
 export type Action =
@@ -30,11 +32,15 @@ export const initialModel: ViewerModel = {
   truncated: false,
   live: false,
   ticker: [],
+  stepChanges: new Map(),
 };
 
 const short = (id: string): string => id.slice(-6);
 
-function tickerText(event: ViewerEvent, agentName?: (agentId: string) => string | undefined): string {
+function tickerText(
+  event: Exclude<ViewerEvent, { kind: "step" }>,
+  agentName?: (agentId: string) => string | undefined,
+): string {
   switch (event.kind) {
     case "run": {
       const name = agentName?.(event.agentId);
@@ -73,7 +79,11 @@ function upsertService(
  * Events with an unknown run or an outcome change nothing here: the hook sees
  * them first and refetches the graph, which is where they show up.
  */
-function applyEvent(model: ViewerModel, event: ViewerEvent, at: number): ViewerModel["runs"] {
+function applyEvent(
+  model: ViewerModel,
+  event: Exclude<ViewerEvent, { kind: "step" }>,
+  at: number,
+): ViewerModel["runs"] {
   if (event.kind === "outcome") return model.runs;
   const run = model.runs.get(event.runId);
   if (!run) return model.runs;
@@ -120,6 +130,15 @@ export function isViewerEvent(v: unknown): v is ViewerEvent {
       return isString(e.name) && isString(e.state) && isNullable(e.attempts, isNum);
     case "outcome":
       return isString(e.source);
+    case "step":
+      return (
+        isNum(e.seq) &&
+        (e.stepKind === "tool" || e.stepKind === "said") &&
+        isNullable(e.tool, isString) &&
+        isString(e.summary) &&
+        isNullable(e.status, isString) &&
+        isString(e.at)
+      );
     default:
       return false;
   }
@@ -136,8 +155,16 @@ export function reduce(model: ViewerModel, action: Action): ViewerModel {
       };
     case "event": {
       if (!isViewerEvent(action.event)) return model;
-      const runs = applyEvent(model, action.event, action.at);
-      const item: TickerItem = { at: action.at, text: tickerText(action.event, action.agentName) };
+      const event = action.event;
+      // A step changes no run field and is too frequent for the ticker: it only marks the run's detail stale.
+      if (event.kind === "step") {
+        if (!model.runs.has(event.runId)) return model;
+        const stepChanges = new Map(model.stepChanges);
+        stepChanges.set(event.runId, (stepChanges.get(event.runId) ?? 0) + 1);
+        return { ...model, stepChanges };
+      }
+      const runs = applyEvent(model, event, action.at);
+      const item: TickerItem = { at: action.at, text: tickerText(event, action.agentName) };
       return { ...model, runs, ticker: [item, ...model.ticker].slice(0, TICKER_MAX) };
     }
     case "status":

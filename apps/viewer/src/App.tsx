@@ -221,6 +221,7 @@ function Dashboard({
                     focus={focus}
                     onSelect={selectPanel}
                     onOpenPod={openPod}
+                    stepChanges={model.stepChanges.get(selectedRun.id) ?? 0}
                   />
                 )}
               </div>

@@ -293,7 +293,7 @@ fn frame_for(name: &str, data: &str) -> Option<StreamFrame> {
                 connected: c.connected,
             }),
         "resync" => Some(StreamFrame::Resync),
-        "run" | "service" | "outcome" => {
+        "run" | "service" | "outcome" | "step" => {
             serde_json::from_str(data)
                 .ok()
                 .map(|data| StreamFrame::Event {
@@ -390,6 +390,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn passes_step_frames_through() {
+        let frame = frame_for("step", r#"{"kind":"step","runId":"r1","seq":3}"#);
+        assert!(matches!(frame, Some(StreamFrame::Event { ref kind, .. }) if kind == "step"));
+        assert!(frame_for("mystery", "{}").is_none());
+    }
 
     fn fast() -> EventsConfig {
         EventsConfig {

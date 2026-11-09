@@ -345,4 +345,25 @@ describe("useViewer", () => {
     });
     expect(vi.mocked(client.fetchGraph).mock.calls.length).toBe(n + 3);
   });
+
+  it("never refetches the graph for a step event, whatever run it names", async () => {
+    renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    expect(fetches()).toBe(1);
+    const step = {
+      kind: "step",
+      runId: "unknown-run",
+      seq: 1,
+      stepKind: "said",
+      tool: null,
+      summary: "x",
+      status: null,
+      at: "2026-10-02T00:00:00.000Z",
+    } as ViewerEvent;
+    await send({ type: "event", kind: "step", data: step });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fetches()).toBe(1);
+  });
 });
