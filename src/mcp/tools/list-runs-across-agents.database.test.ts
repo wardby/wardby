@@ -219,6 +219,75 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     await mcp.close();
   });
 
+  it("pages with before: newest first, ties broken by id, no repeats and no gaps", async () => {
+    const owner = await principal();
+    const mine = await agent(owner.id, "paging");
+    const t = Date.now();
+    const same = new Date(t - 5000);
+    const made = [
+      await run(mine.id, { startedAt: new Date(t - 1000) }),
+      await run(mine.id, { startedAt: same }),
+      await run(mine.id, { startedAt: same }),
+      await run(mine.id, { startedAt: same }),
+      await run(mine.id, { startedAt: same }),
+      await run(mine.id, { startedAt: new Date(t - 9000) }),
+      await run(mine.id, { startedAt: new Date(t - 9000) }),
+    ];
+    const expected = [...made]
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+      .map((r) => r.id);
+    const c = await connect(owner);
+    expect((await c.list({ limit: 200 })).map((r) => r.id)).toEqual(expected);
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const rows = await c.list({ limit: 2, ...(before ? { before } : {}) });
+      seen.push(...rows.map((r) => r.id));
+      if (rows.length < 2) break;
+      before = rows[rows.length - 1].id;
+    }
+    expect(seen).toEqual(expected);
+    await c.close();
+  });
+
+  it("before combines with since and active, and keeps its place when the cursor run no longer matches", async () => {
+    const owner = await principal();
+    const mine = await agent(owner.id, "paging-filters");
+    const t = Date.now();
+    const old = new Date(t - 3 * 24 * 60 * 60 * 1000);
+    const r1 = await run(mine.id, { status: "running", startedAt: new Date(t - 1000) });
+    const r2 = await run(mine.id, { status: "succeeded", startedAt: new Date(t - 2000), finishedAt: new Date(t) });
+    const r3 = await run(mine.id, { status: "pending", startedAt: new Date(t - 3000) });
+    const r4 = await run(mine.id, { status: "succeeded", startedAt: new Date(t - 4000), finishedAt: new Date(t) });
+    await run(mine.id, { status: "succeeded", startedAt: old, finishedAt: old });
+    const since = new Date(t - 60 * 60 * 1000).toISOString();
+    const c = await connect(owner);
+    const ids = async (args: Record<string, unknown>) => (await c.list(args)).map((r) => r.id);
+    expect(await ids({ since, before: r1.id })).toEqual([r2.id, r3.id, r4.id]);
+    expect(await ids({ since, before: r2.id, limit: 1 })).toEqual([r3.id]);
+    expect(await ids({ active: true, before: r1.id })).toEqual([r3.id]);
+    // r2 isn't active, but still marks where the next page starts.
+    expect(await ids({ active: true, before: r2.id })).toEqual([r3.id]);
+    await c.close();
+  });
+
+  it("gives an empty page for a before that is unknown or names a run the caller can't read, and refuses it with agentId", async () => {
+    const owner = await principal();
+    const stranger = await principal();
+    const mine = await agent(owner.id, "paging-hidden");
+    const theirs = await agent(stranger.id, "paging-theirs");
+    await run(mine.id);
+    const hidden = await run(theirs.id, { startedAt: new Date(Date.now() + 60_000) });
+    const c = await connect(owner);
+    expect((await c.list({})).length).toBeGreaterThan(0);
+    expect(await c.list({ before: randomUUID() })).toEqual([]);
+    expect(await c.list({ before: hidden.id })).toEqual([]);
+    const refused = await c.raw({ agentId: mine.id, before: hidden.id });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/before pages the listing across agents; leave out agentId/);
+    await c.close();
+  });
+
   it("returns nothing for a caller who can see no agents", async () => {
     const stranger = await principal();
     const mcp = await connect(stranger);

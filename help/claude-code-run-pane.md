@@ -67,8 +67,15 @@ step's detail.
 If the pane shows `list_runs: ... exceeds maximum allowed tokens`, the day's run
 list is larger than Claude Code's MCP output limit, usually because runs started
 from GitHub or Jira carry long issue text. Update the server to Wardby 0.9.2 or
-later, which shortens each run's task in that list. Until then, set
-`"env": { "MAX_MCP_OUTPUT_TOKENS": "100000" }` in Claude Code's
+later: it shortens each run's task in that list and pages it, and the pane reads
+the day 25 runs at a time, so the error can't come back. Only for an older
+server, set `"env": { "MAX_MCP_OUTPUT_TOKENS": "100000" }` in Claude Code's
 `settings.json` and restart Claude Code.
+
+Against a server older than 0.8.0, the pane shows a notice at the top of the
+list: "This wardby server is older than 0.8.0, so the pane runs in a limited
+mode: no pull-request grouping, outcomes or run steps." It still lists each
+agent's latest runs. Upgrade the server to 0.8.0 or later; the notice goes away
+at the pane's next check.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

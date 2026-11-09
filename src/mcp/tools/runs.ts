@@ -131,7 +131,7 @@ function runFilters(args: { active?: boolean; since?: string }): Prisma.RunWhere
 async function listRunsAcrossAgents(
   ctx: McpRequestContext,
   filters: Prisma.RunWhereInput[],
-  opts: { status?: string; limit?: number; all: boolean },
+  opts: { status?: string; limit?: number; all: boolean; before?: string },
 ) {
   const [where, accessOf] = await Promise.all([
     opts.all ? Promise.resolve({}) : readableAgentsWhere(ctx),
@@ -148,15 +148,33 @@ async function listRunsAcrossAgents(
   const requested = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : ACROSS_AGENTS_DEFAULT_LIMIT;
   const take = Math.min(Math.max(1, requested), ACROSS_AGENTS_MAX_LIMIT);
   const status = opts.status;
+  const readable: Prisma.RunWhereInput = {
+    OR: [{ agentId: { in: owned } }, { agentId: { in: others }, triggeredById: ctx.principal.id }],
+  };
+  const clauses = [...filters];
+  if (opts.before !== undefined) {
+    // The page cursor must be a run this listing could show (the access rule only: a run that has since
+    // stopped matching `active` or `status` still marks its place). A run the caller can't read, or that
+    // doesn't exist, gives an empty page, so the reply never tells the two apart.
+    const cursor = await ctx.db.run.findFirst({
+      where: { AND: [readable, { id: opts.before }] },
+      select: { id: true, startedAt: true },
+    });
+    if (!cursor) return [];
+    clauses.push({
+      OR: [{ startedAt: { lt: cursor.startedAt } }, { startedAt: cursor.startedAt, id: { lt: cursor.id } }],
+    });
+  }
   const runs = await ctx.db.run.findMany({
     where: {
-      OR: [{ agentId: { in: owned } }, { agentId: { in: others }, triggeredById: ctx.principal.id }],
+      ...readable,
       ...(status ? { status: status as never } : {}),
-      ...(filters.length > 0 ? { AND: filters } : {}),
+      ...(clauses.length > 0 ? { AND: clauses } : {}),
     },
     omit: { finalText: true, pricingSnapshot: true },
     take,
-    orderBy: { startedAt: "desc" },
+    // id breaks startedAt ties, so `before` pages neither repeat nor skip runs that started together.
+    orderBy: [{ startedAt: "desc" }, { id: "desc" }],
   });
   const graph = await runGraphFields(
     ctx,
@@ -214,7 +232,9 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       `at most ${ACROSS_AGENTS_MAX_LIMIT}). You see all runs of agents you own and only the runs you triggered on others. ` +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
       "plus any still pending or running. all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
-      "Use get_run for one run's detail.",
+      "Pages are newest first (startedAt, then id): to get the next page without agentId, pass before: the last row's id; " +
+      "the reply holds only runs after that one, and is empty when before names no run you can see. before needs no agentId " +
+      "and is refused with one. Use get_run for one run's detail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -224,13 +244,28 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         since: { type: "string", description: "ISO date or time" },
         all: { type: "boolean" },
         limit: { type: "number" },
+        before: {
+          type: "string",
+          description: "A run id from the previous page (without agentId): list only the runs after it",
+        },
       },
     },
     handler: async (
-      args: { agentId?: string; status?: string; active?: boolean; since?: string; all?: boolean; limit?: number },
+      args: {
+        agentId?: string;
+        status?: string;
+        active?: boolean;
+        since?: string;
+        all?: boolean;
+        limit?: number;
+        before?: string;
+      },
       ctx,
     ) => {
       const filters = runFilters(args);
+      if (args.before !== undefined && args.agentId !== undefined) {
+        throw new McpError(400, "before pages the listing across agents; leave out agentId");
+      }
       if (args.all === true) {
         if (args.agentId !== undefined) throw new McpError(400, "all lists every agent's runs; leave out agentId");
         if (!ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
@@ -240,6 +275,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           status: args.status,
           limit: args.limit,
           all: args.all === true,
+          before: args.before,
         });
         return textResult(await withQueuedAt(ctx, runs));
       }

@@ -21,6 +21,14 @@ const TICK_MS = 5000;
 // every FULL_EVERY refreshes asks for the whole day again to correct any drift.
 const OVERLAP_MS = 30_000;
 const FULL_EVERY = 30;
+// A full refresh pages through the day: PAGE_SIZE runs a call (a cross-agent row is up to ~2 KB, and an
+// MCP client caps a tool result near 60,000 characters), at most MAX_PAGES calls.
+const PAGE_SIZE = 25;
+const MAX_PAGES = 12;
+/** Shown while the server is older than 0.8.0 and the pane lists runs one agent at a time. */
+const LIMITED_NOTICE =
+  "This wardby server is older than 0.8.0, so the pane runs in a limited mode: no pull-request grouping, " +
+  "outcomes or run steps. Upgrade the server to 0.8.0 or later.";
 // The longest a failing server waits between tries.
 const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
@@ -54,7 +62,7 @@ const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { s
 const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-2" });
 // The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail.
 const openStep = atom({ plugin: "wardby-runs", key: "openStep" } as const, null, { shape: "open-step-1" });
-const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-1" });
+const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-2" });
 // Continue locally: the folder to import into, and how the last import went. Never the download link.
 const resume = atom({ plugin: "wardby-runs", key: "resume" } as const, null, { shape: "resume-1" });
 // The run whose long fields (request, task, final text) are shown in full, not cut to a line.
@@ -899,7 +907,9 @@ export const register: Register = (on, options) => {
           try {
             const isFull = lastOkAt === 0 || polls % FULL_EVERY === 0;
             const since = new Date(isFull ? now - RECENT_MS : lastOkAt - OVERLAP_MS).toISOString();
-            const list = (await call("list_runs", { since, limit: 100 })) as Record<string, unknown>[];
+            const list = isFull
+              ? await fullDay(since)
+              : ((await call("list_runs", { since, limit: 100 })) as Record<string, unknown>[]);
             const changed = list.map((run) =>
               toRow(run, {
                 id: String(run.agentId),
@@ -931,7 +941,7 @@ export const register: Register = (on, options) => {
           }
         }
         await update($, runs, () => fresh);
-        await update($, poll, (): Poll => ({ at: now, error: null }));
+        await update($, poll, (): Poll => ({ at: now, error: null, limited: acrossAgents === false }));
         failures = 0;
         lastOkAt = now;
         const active = fresh.filter((row) => ACTIVE.has(row.status)).length;
@@ -950,13 +960,39 @@ export const register: Register = (on, options) => {
         const message = /auto mode/i.test(raw)
           ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run and mcp__${server}__get_run_steps in /permissions, then press r.`
           : raw;
-        await update($, poll, (): Poll => ({ at: now, error: message }));
+        await update($, poll, (p): Poll => ({ ...p, at: now, error: message }));
         failures += 1;
         // Back off a failing or rate-limiting server: double the wait each time, up to MAX_BACKOFF_MS.
         nextAt = now + Math.min(MAX_BACKOFF_MS, activeMs * 2 ** (failures - 1));
       } finally {
         isPolling = false;
       }
+    }
+
+    /**
+     * The whole day across agents, a page at a time (`before`: the previous page's last id; wardby 0.9.2+).
+     * Stops at a short page or after MAX_PAGES. An older server ignores `before` and sends the first page
+     * again: a page with an id already seen ends the listing, keeping what came before.
+     */
+    async function fullDay(since: string): Promise<Record<string, unknown>[]> {
+      const all: Record<string, unknown>[] = [];
+      const seen = new Set<string>();
+      let before: string | undefined;
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const list = (await call("list_runs", {
+          since,
+          limit: PAGE_SIZE,
+          ...(before === undefined ? {} : { before }),
+        })) as Record<string, unknown>[];
+        if (list.some((run) => seen.has(String(run.id)))) break;
+        for (const run of list) {
+          seen.add(String(run.id));
+          all.push(run);
+        }
+        if (list.length < PAGE_SIZE) break;
+        before = String(list[list.length - 1].id);
+      }
+      return all;
     }
 
     /** The older server's path: list_agents (summary when the server has it), then list_runs per agent. */
@@ -996,6 +1032,7 @@ export const register: Register = (on, options) => {
       } catch (err) {
         const now = await $.clock.now();
         await update($, poll, (p): Poll => ({
+          ...p,
           at: p.at || now,
           error: err instanceof Error ? err.message : "get_run failed",
         }));
@@ -1248,6 +1285,13 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
         {status.error && <Text color={FAILED_COLOR}>wardby: {status.error}</Text>}
+        {status.limited && (
+          <Box key="limited-notice">
+            <Text color={WARN_COLOR} wrap="wrap">
+              {LIMITED_NOTICE}
+            </Text>
+          </Box>
+        )}
       </Box>
     );
 
