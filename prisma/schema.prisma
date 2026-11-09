@@ -87,6 +87,9 @@ model Agent {
   /// single-use worker container/pod. Each Run snapshots this at creation
   /// (Run.nativeExecutionMode), so a change reaches only later runs.
   nativeExecutionMode NativeExecutionMode @default(control_plane)
+  /// The owner's run steps level for this agent's runs; null = unset (summary). A run records
+  /// min(WARDBY_RUN_STEPS, this), fixed at dispatch (Run.runStepsLevel). Owner-only.
+  runSteps RunStepsLevel?
 
   /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
   /// agent can be a parent (has children it can delegate to) and/or a
@@ -142,6 +145,15 @@ model BudgetGroup {
 enum AgentKind {
   native
   coding
+}
+
+/// Run steps level (docs/debugging-agent-runs.md#run-steps): off records nothing, summary one
+/// redacted line per step, detail also a redacted detail text (tool input, the tail of tool
+/// output, model text).
+enum RunStepsLevel {
+  off
+  summary
+  detail
 }
 
 /// Where a native agent's runs execute (Agent.nativeExecutionMode).
@@ -402,6 +414,9 @@ model Run {
   stopRequestReason    String?
   /// Run steps (RunStep) not recorded because the run already had MAX_RUN_STEPS (2,000).
   stepsDropped         Int                      @default(0)
+  /// The run steps level this run records, fixed at dispatch: min(WARDBY_RUN_STEPS, Agent.runSteps
+  /// or summary). Null on runs from before the field (they record at most summary).
+  runStepsLevel        RunStepsLevel?
   steps                RunStep[]
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
@@ -676,7 +691,8 @@ model RunStep {
   summary   String
   /// ok | error | exit N, set when the result arrives.
   status    String?
-  /// The detail level's text (PR 3); always null in this release.
+  /// The detail level's text: redacted tool input (~4 KB), then the last ~2 KB of its output once
+  /// the result is back, or the model's text (~8 KB). At most 16,384 characters. Null below detail.
   detail    String?
   expiresAt DateTime
 
@@ -942,6 +958,9 @@ model CodingProxySession {
   mcpTools                  Json?
   /// SHA-256 (base64url) of the run's MCP token; null when the run has no MCP tools.
   mcpTokenHash              String?                  @unique
+  /// The run's Run.runStepsLevel, copied at session creation: the proxy sends a tool result's
+  /// output tail to the run-steps listener only at detail. Null on older sessions (= summary).
+  runStepsLevel             RunStepsLevel?
   /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
   mcpCallCount              Int                      @default(0)
 
