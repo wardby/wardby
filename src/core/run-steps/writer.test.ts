@@ -72,6 +72,38 @@ describe("RunStepWriter", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
   });
 
+  it("logs neither a tool input nor an output when it fails closed on unreadable values or a failing write", async () => {
+    const batch = {
+      steps: [{ kind: "tool" as const, callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+      results: [{ callId: "c1", status: "ok" as const, output: FAKE_SECRET, outputCut: true }],
+    };
+    const unreadable = fakeDb();
+    const warn = vi.fn();
+    const closed = new RunStepWriter({
+      db: unreadable as unknown as RunStepWriterDb,
+      secretValues: async () => {
+        throw new Error(`vault down ${FAKE_SECRET}`);
+      },
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await closed.record("r1", batch);
+    expect(unreadable.$transaction).not.toHaveBeenCalled();
+    const failing = fakeDb();
+    failing.$transaction.mockRejectedValueOnce(new Error(`insert failed ${FAKE_SECRET}`));
+    const failed = new RunStepWriter({
+      db: failing as unknown as RunStepWriterDb,
+      secretValues: async () => [FAKE_SECRET],
+      level: "detail",
+      retentionDays: 30,
+      log: { warn },
+    });
+    await failed.record("r1", batch);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
   it("writes nothing when values are unreadable for a detail result-only batch", async () => {
     const db = {
       run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel: "detail" })) },

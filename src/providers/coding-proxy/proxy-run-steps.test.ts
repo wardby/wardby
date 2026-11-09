@@ -518,6 +518,28 @@ describe("CodingProxy run steps", () => {
       expect(JSON.stringify(audit.mock.calls)).not.toContain(FAKE_SECRET);
       expect(JSON.stringify(h.ledgerCalls)).not.toContain(FAKE_SECRET);
     });
+
+    it("writes no tool input or output to any log line at detail level", async () => {
+      const lines: string[] = [];
+      setLogLineFilter((line) => {
+        lines.push(line);
+        return "";
+      });
+      try {
+        const audit = vi.fn((event: Parameters<typeof logProxyAudit>[0]) => logProxyAudit(event));
+        const h = await harness("anthropic-messages", toolStream(`echo ${FAKE_SECRET}`), {
+          runStepsLevel: "detail",
+          runStepsCeiling: "detail",
+          audit,
+        });
+        await h.execute(await anthropicRequest(`x ${FAKE_SECRET}`), "k1");
+        // The input and output reach the submitter, so the log check below is not vacuous.
+        expect(JSON.stringify(h.submitted)).toContain(FAKE_SECRET);
+      } finally {
+        setLogLineFilter((line) => line);
+      }
+      expect(lines.join("")).not.toContain(FAKE_SECRET);
+    });
   });
 
   it("rejects an unknown run steps level when creating a session", async () => {

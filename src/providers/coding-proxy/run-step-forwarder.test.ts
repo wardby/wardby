@@ -217,6 +217,90 @@ describe("RunStepForwarder", () => {
     expect(logged).not.toContain("curl");
   });
 
+  describe("tool input and output tails", () => {
+    const detailBatch: RunStepBatch = {
+      steps: [
+        {
+          kind: "tool",
+          callId: "c1",
+          tool: "Bash",
+          text: "ls",
+          truncated: false,
+          input: `{"k":"${FAKE_SECRET}"}`,
+          inputTruncated: true,
+        },
+      ],
+      results: [{ callId: "c1", status: "ok", output: `out ${FAKE_SECRET}`, outputCut: true }],
+    };
+    const never = (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("x"))));
+
+    it.each([
+      [
+        "unreachable",
+        () => vi.fn(async (_u: string, init: RequestInit) => Promise.reject(new Error(`boom ${init.body as string}`))),
+      ],
+      [
+        "http_500",
+        () =>
+          vi.fn(async (_u: string, init: RequestInit) => new Response(`echo ${init.body as string}`, { status: 500 })),
+      ],
+      ["timeout", () => vi.fn(never)],
+    ])("keeps them out of every log call and thrown error on the %s path", async (reason, makeFetch) => {
+      const info = vi.fn();
+      const fetchImpl = makeFetch();
+      const forwarder = new RunStepForwarder({
+        url: URL_BASE,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        timeoutMs: 10,
+        log: { info },
+      });
+      expect(() => forwarder.submit(CAP, "r1", detailBatch)).not.toThrow();
+      await expect(forwarder.flush()).resolves.toBeUndefined();
+      // The body is raw by design: both parts were posted, so the check below is not vacuous.
+      const bodies = fetchImpl.mock.calls.map(([, init]) => init.body as string).join("");
+      expect(bodies).toContain(FAKE_SECRET);
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason }), expect.any(String));
+      expect(JSON.stringify(info.mock.calls)).not.toContain(FAKE_SECRET);
+      expect(JSON.stringify(info.mock.calls)).not.toContain(CAP);
+    });
+
+    it("keeps them out of the queue_full and serialize_failed log lines", async () => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const info = vi.fn();
+      const forwarder = new RunStepForwarder({
+        url: URL_BASE,
+        fetchImpl: async () => {
+          await gate;
+          return new Response(null, { status: 202 });
+        },
+        maxQueue: 1,
+        log: { info },
+      });
+      forwarder.submit(CAP, "r1", detailBatch);
+      await new Promise((resolve) => setImmediate(resolve));
+      forwarder.submit(CAP, "r1", detailBatch); // queued
+      forwarder.submit(CAP, "r1", detailBatch); // queue full
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue_full" }), expect.any(String));
+      release();
+      await forwarder.flush();
+      const cyclic: Record<string, unknown> = {
+        kind: "tool",
+        callId: "c9",
+        tool: "Bash",
+        text: "ls",
+        truncated: false,
+      };
+      cyclic.input = FAKE_SECRET;
+      cyclic.self = cyclic;
+      forwarder.submit(CAP, "r1", { steps: [cyclic as never], results: [] });
+      await forwarder.flush();
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason: "serialize_failed" }), expect.any(String));
+      expect(JSON.stringify(info.mock.calls)).not.toContain(FAKE_SECRET);
+    });
+  });
+
   it("flush is bounded: it returns even when a POST never settles", async () => {
     const fetchImpl = vi.fn(() => new Promise<Response>(() => {}));
     const forwarder = new RunStepForwarder({

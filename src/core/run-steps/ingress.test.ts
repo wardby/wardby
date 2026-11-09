@@ -24,6 +24,23 @@ const batch: RunStepBatch = {
 /** A POST body: the batch with the run it is for. */
 const postBody = (value: Record<string, unknown> = { ...batch }, runId = "r1") => JSON.stringify({ runId, ...value });
 
+/** A detail-level batch whose tool input and output tails hold the fake secret. */
+const detailBody = () =>
+  postBody({
+    steps: [
+      {
+        kind: "tool",
+        callId: "c1",
+        tool: "Bash",
+        text: "ls",
+        truncated: false,
+        input: `{"k":"${FAKE_SECRET}"}`,
+        inputTruncated: true,
+      },
+    ],
+    results: [{ callId: "c1", status: "ok", output: `out ${FAKE_SECRET}`, outputCut: true }],
+  });
+
 function deps(
   session: { runId: string; deadlineAt: Date } | null = { runId: "r1", deadlineAt: new Date(NOW.getTime() + 60_000) },
   opts: { lookupError?: Error; record?: RunStepSink["record"]; requestTimeoutMs?: number } = {},
@@ -109,6 +126,32 @@ describe("handleRunStepPost", () => {
       await handleRunStepPost(deps(null).value, `Bearer ${CAP}`, withSecret),
     ];
     for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(responses)).not.toContain(value);
+  });
+
+  it("never logs, echoes or errors with a tool input or output tail", async () => {
+    const warn = vi.fn();
+    const d = deps(undefined, {
+      record: async () => {
+        throw new Error(`writer failed on ${FAKE_SECRET}`);
+      },
+    });
+    const outcome = await handleRunStepPost({ ...d.value, log: { warn } }, `Bearer ${CAP}`, detailBody()).catch(
+      (err: unknown) => err,
+    );
+    // The writer's error propagates to the caller (the listener maps it to a fixed code): the
+    // handler itself must not log, and a resolved response never carries the values.
+    if (!(outcome instanceof Error)) expect(JSON.stringify(outcome)).not.toContain(FAKE_SECRET);
+    expect(warn).not.toHaveBeenCalled();
+    expect(d.record).toHaveBeenCalledTimes(1);
+    // The body reached the writer (so the assertions above are about a real detail batch).
+    expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+    const refused = await handleRunStepPost(
+      { ...d.value, log: { warn } },
+      `Bearer ${CAP}`,
+      detailBody().replace('"runId":"r1"', '"runId":"r2"'),
+    );
+    expect(refused).toEqual({ status: 403, body: { error: "run_mismatch" } });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -319,6 +362,33 @@ describe("startRunStepIngress", () => {
     expect(warn.mock.calls).toEqual([
       [{ event: "run_steps_ingress_failed", status: 500, errorName: "TypeError" }, "run steps request failed"],
     ]);
+  });
+
+  it("answers a fixed code and logs by name only when the writer fails on a tool input and output tail", async () => {
+    const d = deps(undefined, {
+      record: async () => {
+        throw new TypeError(`write failed: ${FAKE_SECRET}`);
+      },
+    });
+    const { post, warn } = await start(d);
+    const response = await post(RUN_STEPS_INGRESS_PATH, detailBody());
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe('{"error":"internal"}');
+    expect(d.record).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+    expect(warn.mock.calls).toEqual([
+      [{ event: "run_steps_ingress_failed", status: 500, errorName: "TypeError" }, "run steps request failed"],
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(FAKE_SECRET);
+  });
+
+  it("logs nothing and answers fixed text for an accepted batch with a tool input and output tail", async () => {
+    const d = deps();
+    const { post, warn } = await start(d);
+    const response = await post(RUN_STEPS_INGRESS_PATH, detailBody());
+    expect(response.status).toBe(202);
+    expect(await response.text()).toBe('{"ok":true}');
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("answers 503 timeout when a request takes longer than its limit", async () => {
