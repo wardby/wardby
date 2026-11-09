@@ -8,7 +8,8 @@ finished Claude Code run in your own terminal.
 The plugin lives in this repository under `plugins/claude-code/`, and the
 repository is its marketplace (`.claude-plugin/marketplace.json`). It talks only
 to the wardby MCP server your Claude Code session already has, through
-`list_runs`, `list_agents`, `get_run` and `get_run_transcript`, so it shows
+`list_runs`, `list_agents`, `get_run`, `get_run_steps` and
+`get_run_transcript`, so it shows
 exactly what those tools show you and needs no token of its own.
 
 ## Install
@@ -85,13 +86,15 @@ The pane reads only, with the caller's own access:
 | Run list             | `list_runs`          | `agents:read` | All runs of agents you own, and the runs you started on agents shared with you |
 | Agent names, budgets | `list_agents`        | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
 | Run detail           | `get_run`            | `agents:read` | Runs you started, or of agents you own                                         |
+| Recent steps, Steps  | `get_run_steps`      | `agents:read` | Same as `get_run`                                                              |
 | Continue locally     | `get_run_transcript` | `agents:read` | Same as `get_run`                                                              |
 
 Under Claude Code's auto mode, a plugin's MCP calls go through the same safety
 check as any other, and calls the pane makes on its own timer are refused
 unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
-`mcp__wardby__get_run` and `mcp__wardby__get_run_transcript`. The pane never
+`mcp__wardby__get_run`, `mcp__wardby__get_run_transcript` and
+`mcp__wardby__get_run_steps`. The pane never
 calls `stop_run` or any other tool that changes something. When a call is
 refused, the pane says which rules to add.
 
@@ -115,6 +118,25 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   final answer (as markdown; **Show full text** for all of it), services,
   errors, the run tree, and **Continue locally** for finished Claude Code runs
   with `sessionResume` on (see [Resume Claude Code runs locally](coding-agent-setup.md#resume-a-run-locally)).
+- **Recent steps** (a running run's detail): its last 8 steps, one line each
+  (the tool and its command or file, or what the model said, with `✗` and the
+  exit status when a command failed), refreshed with the run. Long lines wrap
+  rather than cut.
+- **Steps** (a finished run's detail): every recorded step, 200 at a time;
+  **More steps** loads the next 200.
+- **Last step**: in the list, a running or failed run shows its newest step
+  under the agent's name.
+
+Steps come from the server's run steps (see
+[Run steps](debugging-agent-runs.md#run-steps)): they need a server that has
+`get_run_steps` and records steps (Wardby 0.9.0 or later). Against an older
+server the pane shows no steps and checks again every few refreshes. When the
+server has steps off (`WARDBY_RUN_STEPS=off`) the detail says "Steps are off on
+this server." A run with no recorded steps shows none. If you installed the pane
+before run steps, run `wardby claude-plugin install` again (or allow
+`mcp__wardby__get_run_steps` in `/permissions`): under auto mode the pane
+otherwise shows which rule to add in place of the steps. `wardby claude-plugin
+status` and `wardby doctor` name the missing rule.
 
 The pane refreshes every 10 seconds while a run is active and every 60 seconds
 otherwise (the plugin's **pollSeconds** and **idleSeconds** options), asks only

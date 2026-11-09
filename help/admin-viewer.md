@@ -26,7 +26,7 @@ From an MCP client, an admin gets the same deployment-wide listing with
 Endpoints, all `GET`:
 
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.
-- `/admin/api/runs/<id>`: one run in full, including its final text and error.
+- `/admin/api/runs/<id>`: one run in full, including its final text and error and its newest 200 run steps (see `run-steps`).
 - `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 

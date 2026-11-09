@@ -2,12 +2,13 @@
 
 A pane beside the chat in Claude Code that lists your wardby agent runs and
 shows each run's details. It talks to the wardby MCP server your Claude Code
-session already has, through `list_runs`, `list_agents`, `get_run` and
-`get_run_transcript`, so it shows exactly what those tools show you.
+session already has, through `list_runs`, `list_agents`, `get_run`, `get_run_steps`
+and `get_run_transcript`, so it shows exactly what those tools show you.
 
 - Runs grouped by pull request (opened, review, fix rounds, sub-agent runs), as
   a ledger with time and cost columns or as one strip of steps per pull request.
 - A run's request, final answer, outcomes, services, errors and run tree.
+- A running run's recent steps, a finished run's steps, and each run's last step in the list.
 - Continue a finished Claude Code run in your own terminal with
   `wardby resume`.
 - Filters, adaptive refreshing, and a toast when a run finishes.
