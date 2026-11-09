@@ -107,7 +107,8 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
 - **Ledger** (desktop): runs grouped by pull request (or Jira issue), each group
   one row with its state and total cost, folded once every run in it finished.
   A pull request with one run is one line. Runs that touch no pull request are
-  under **Other**. Each line names its step (opened, review, fix 1, …), with
+  under **Other**. The newest run comes first: groups (Other too) are ordered by
+  their newest run, and so are the runs in a group. Each line names its step (opened, review, fix 1, …), with
   sub-agent runs under their lead, and shows the run's status as a coloured
   pill, its spend as "$x of $y", what started it, its task and how long it
   ran, over a thin budget bar.

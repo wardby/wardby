@@ -125,8 +125,8 @@ type ListEntry =
 
 /**
  * The run trees grouped into pull-request chains, as the admin viewer draws them: every tree whose lead
- * was started by a pull request, or opened one, sits under that pull request in the order it started,
- * the event that started it (review, mention) beside it. Trees that touch no pull request stand alone.
+ * was started by a pull request, or opened one, sits under that pull request, newest first, the event
+ * that started it (review, mention) beside it. Trees that touch no pull request stand alone.
  * Newest chain or tree first. Without triggerInfo and outcomes (an older server) every tree stands alone.
  */
 function asChains(rows: RunRow[]): ListEntry[] {
@@ -171,7 +171,7 @@ function asChains(rows: RunRow[]): ListEntry[] {
       return unit.trees.flat().map(({ row, depth }) => ({ kind: "run" as const, row, depth, event: null }));
     }
     const heading: ListEntry = { kind: "heading", pr: unit.key.pr, url: unit.key.url };
-    const sorted = [...unit.trees].sort((a, b) => Date.parse(a[0].row.startedAt) - Date.parse(b[0].row.startedAt));
+    const sorted = [...unit.trees].sort((a, b) => Date.parse(b[0].row.startedAt) - Date.parse(a[0].row.startedAt));
     return [
       heading,
       ...sorted.flat().map(({ row, depth }) => ({
@@ -205,10 +205,11 @@ function stepLabel(row: RunRow, event: string | null): string {
 
 /**
  * The runs as ledger groups: every tree that a pull request started or that opened one sits in that
- * pull request's group, in the order it ran, with its sub-agent runs under their lead; the rest go to
- * "other". Groups are ordered by their newest run, "other" last.
+ * pull request's group, with its sub-agent runs under their lead; the rest go to "other". Groups,
+ * "other" too, are ordered by their newest run, newest first. Within a group the trees are newest first
+ * for the ledger, or oldest first ("oldest") for a strip, which reads left to right.
  */
-function asLedger(rows: RunRow[]): LedgerGroup[] {
+function asLedger(rows: RunRow[], order: "newest" | "oldest" = "newest"): LedgerGroup[] {
   const groups = new Map<string, LedgerGroup & { newest: number; trees: { row: RunRow; depth: number }[][] }>();
   const trees: { row: RunRow; depth: number }[][] = [];
   for (const entry of asTrees(rows)) {
@@ -232,13 +233,15 @@ function asLedger(rows: RunRow[]): LedgerGroup[] {
     groups.set(key, group);
   }
   return [...groups.values()]
-    .sort((a, b) => (a.key === "other" ? 1 : b.key === "other" ? -1 : b.newest - a.newest))
+    .sort((a, b) => b.newest - a.newest)
     .map((group) => ({
       key: group.key,
       label: group.label,
       url: group.url,
       rows: [...group.trees]
-        .sort((a, b) => Date.parse(a[0].row.startedAt) - Date.parse(b[0].row.startedAt))
+        .sort(
+          (a, b) => (order === "newest" ? -1 : 1) * (Date.parse(a[0].row.startedAt) - Date.parse(b[0].row.startedAt)),
+        )
         .flat()
         .map(({ row, depth }) => ({ row, depth, event: depth === 0 ? (row.via?.event ?? null) : null })),
     }));
@@ -1798,7 +1801,7 @@ export const register: Register = (on, options) => {
           // Strips: a card per pull request, its steps as a row of dots, the picked step's detail below.
           <Box flexDirection="column">
             {(() => {
-              const groups = asLedger(shown);
+              const groups = asLedger(shown, "oldest");
               const prGroups = groups.filter((group) => group.key !== "other");
               const other = groups.find((group) => group.key === "other");
               return (
