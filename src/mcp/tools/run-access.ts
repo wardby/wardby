@@ -27,6 +27,23 @@ export async function canReadRun(
   );
 }
 
+/**
+ * Detail text (the run steps' detail level): only the agent's owner, the run's starter, or the
+ * stdio operator. Defence in depth, narrower than canReadRun on purpose: a reader who gets a run
+ * through an owner-level grant or admin role, without owning the agent or starting the run,
+ * still gets the step lines only.
+ */
+export async function canReadRunDetail(
+  db: Pick<PrismaClient, "agent">,
+  run: Pick<Run, "agentId" | "triggeredById">,
+  reader: RunReader,
+): Promise<boolean> {
+  if (reader.operator === true) return true;
+  if (run.triggeredById !== null && run.triggeredById === reader.principalId) return true;
+  const agent = await db.agent.findUnique({ where: { id: run.agentId }, select: { ownerId: true } });
+  return agent?.ownerId != null && agent.ownerId === reader.principalId;
+}
+
 /** The run, when the caller may read it (canReadRun); otherwise the same 404 a missing run gets. */
 export async function findReadableRun(ctx: McpRequestContext, runId: string): Promise<Run> {
   const run = await ctx.db.run.findUnique({ where: { id: runId } });

@@ -34,6 +34,18 @@ describe("loadLastSteps", () => {
     expect(got.has("r2")).toBe(false);
   });
 
+  it("never carries a stored detail text: exactly the LastStep keys", async () => {
+    const at = new Date("2026-11-07T12:00:00.000Z");
+    const $queryRaw = vi
+      .fn()
+      .mockResolvedValue([
+        { runId: "r1", seq: 1, at, kind: "tool", tool: "Bash", summary: "ls", status: "ok", detail: "SHOULD-NOT-SHOW" },
+      ]);
+    const got = (await loadLastSteps({ $queryRaw } as never, ["r1"])).get("r1");
+    expect(Object.keys(got!).sort()).toEqual(["at", "kind", "line", "seq", "status", "summary", "tool"]);
+    expect(JSON.stringify(got)).not.toContain("SHOULD-NOT-SHOW");
+  });
+
   it("returns an empty map and logs one warning without the error message when the query fails", async () => {
     const fakeSecret = "wbFake-Secret-Value-7f3a91";
     const $queryRaw = vi.fn().mockRejectedValue(new Error(`connection to ${fakeSecret} lost`));

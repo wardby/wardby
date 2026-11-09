@@ -115,7 +115,10 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer NOTIFY triggers (PostgreSQL)"
       at: "2030-01-01T00:00:00.000Z",
     });
 
-    await db.runStep.updateMany({ where: { runId, seq: 1 }, data: { status: "exit 1" } });
+    await db.runStep.updateMany({
+      where: { runId, seq: 1 },
+      data: { status: "exit 1", detail: "detail_text_never_sent_2" },
+    });
     await waitFor(() => events().some((e) => e.kind === "step" && e.status === "exit 1"), 2000);
 
     // A change the viewer can't see (retention) sends nothing.
@@ -129,6 +132,7 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer NOTIFY triggers (PostgreSQL)"
     for (const p of stepPayloads) {
       expect(p).not.toContain("call_notify_only_db");
       expect(p).not.toContain("detail_text_never_sent");
+      expect(p).not.toContain("detail_text_never_sent_2");
     }
   });
 
