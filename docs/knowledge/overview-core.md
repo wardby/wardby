@@ -9,11 +9,11 @@ sources:
   - id: schedule
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/scheduler.ts#L55-L82
   - id: dispatch
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/dispatch.ts#L634-L684
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/core/dispatch.ts#L708-L768
   - id: engine
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/engine-native.ts#L90-L156
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/core/engine-native.ts#L97-L163
   - id: finish
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L499-L516
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/core/runner.ts#L562-L579
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -29,23 +29,23 @@ wardby:
     - id: dispatch
       repo: github:wardby/wardby
       path: src/core/dispatch.ts
-      lines: [634, 684]
+      lines: [708, 768]
       symbol: dispatchRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:2e9f0d8d431b6e7d2571f0126a39763be2f87f8ff2f0147a17c7fb69f144054e
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
+      spanHash: sha256:4650877d8a1f00b77c003107d6096ae781b86fd22da4288afb24d578adec1b7e
     - id: engine
       repo: github:wardby/wardby
       path: src/core/engine-native.ts
-      lines: [90, 156]
+      lines: [97, 163]
       symbol: NativeEngine.run
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
       spanHash: sha256:c38a58677db93241b5ddb7ffd85cae0af88d69903f018d47ca6282c9bb402070
     - id: finish
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [499, 516]
+      lines: [562, 579]
       symbol: finishRunClaimed
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
       spanHash: sha256:258b0ccb1bf328fef95a5e459858eb3f02ecc3d600f6ff4a7aae562a6416936c
   confidence: high
 ---
@@ -65,8 +65,8 @@ Core orchestrates Run, delegation edges, budget reservations and integration sta
 
 [^schedule]: src/core/scheduler.ts, lines 55-82.
 
-[^dispatch]: src/core/dispatch.ts, lines 634-684.
+[^dispatch]: src/core/dispatch.ts, lines 708-768.
 
-[^engine]: src/core/engine-native.ts, lines 90-156.
+[^engine]: src/core/engine-native.ts, lines 97-163.
 
-[^finish]: src/core/runner.ts, lines 499-516.
+[^finish]: src/core/runner.ts, lines 562-579.
