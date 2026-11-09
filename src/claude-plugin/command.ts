@@ -353,7 +353,9 @@ export function pluginStatus(deps: ClaudePluginDeps, serverName = MCP_SERVER): n
     deps.out("✗ Claude Code (claude) wasn't found on PATH.");
     return 1;
   }
-  const plugin = pluginInstalled(deps);
+  const entries = pluginEntries(deps);
+  const plugin = entries.length > 0;
+  const off = entries.filter((e) => !e.enabled);
   const server = hasMcpServer(deps, serverName);
   const settingsPath = join(deps.claudeConfigDir, "settings.json");
   let allowed: string[] = [];
@@ -363,14 +365,17 @@ export function pluginStatus(deps: ClaudePluginDeps, serverName = MCP_SERVER): n
     deps.out(`! ${error instanceof Error ? error.message : String(error)}`);
   }
   const missing = paneTools(serverName).filter((rule) => !allowed.includes(rule));
-  deps.out(`${plugin ? "✓" : "✗"} ${PLUGIN} plugin ${plugin ? "installed" : "not installed"}`);
+  if (!plugin) deps.out(`✗ ${PLUGIN} plugin not installed`);
+  else if (off.length === 0) deps.out(`✓ ${PLUGIN} plugin installed and on`);
+  // An installed copy that is turned off never loads: the pane is missing as surely as if not installed.
+  for (const e of off) deps.out(`✗ ${e.id} is installed but turned off: run \`claude plugin enable ${e.id}\``);
   deps.out(`${server ? "✓" : "✗"} ${serverName} MCP server ${server ? "configured" : "not configured"}`);
   deps.out(
     missing.length === 0
       ? `✓ the pane's tools are allowed in ${settingsPath}`
       : `! not allowed in ${settingsPath} (auto mode refuses them): ${missing.join(", ")}. Re-run \`wardby claude-plugin install --allow-tools\` to add them.`,
   );
-  return plugin && server ? 0 : 1;
+  return plugin && off.length === 0 && server ? 0 : 1;
 }
 
 /**

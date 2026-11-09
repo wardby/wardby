@@ -38,10 +38,13 @@ alongside its other checks, without failing when the optional pane is missing.
 
 Install also turns the plugin on if Claude Code installed it turned off, which
 some versions do; a plugin that is installed but off never loads.
-`wardby claude-plugin status` reports whether the plugin is installed and on,
-and whether the MCP server and the allow rules are in place. `wardby claude-plugin uninstall` removes the
-plugin and only the settings install added: the rules it added and the
-fullscreen view if it switched it on. It leaves the MCP server in place.
+`wardby claude-plugin status` reports whether the plugin is installed and on
+(an installed copy that is off fails the check, with the command that turns it
+on), and whether the MCP server and the allow rules are in place.
+
+`wardby claude-plugin uninstall` removes the plugin and only the settings
+install added: the rules it added and the fullscreen view if it switched it
+on. It leaves the MCP server in place.
 
 The CLI writes to the settings file of the Claude Code it finds:
 `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`. It refuses a
