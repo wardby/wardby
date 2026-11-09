@@ -747,6 +747,8 @@ export const register: Register = (on, options) => {
       try {
         const run = (await call("get_run", { runId })) as Record<string, unknown>;
         const info = toDetail(run);
+        // A late reply for a run that is no longer open must not overwrite the open run's detail.
+        if ((await read($, selected)) !== runId) return;
         await update($, detail, () => info);
         await loadSteps(runId, ACTIVE.has(String(run.status)), info.lastStepSeq);
       } catch (err) {
@@ -765,6 +767,7 @@ export const register: Register = (on, options) => {
      * them, already redacted; the pane adds only fixed wording. Never throws: a failure here never
      * hides the run or sets the pane's error line.
      */
+    let moreInFlight = false;
     async function loadSteps(runId: string, isActive: boolean, lastSeq: number | null, more = false): Promise<void> {
       const mode: Steps["mode"] = isActive ? "recent" : "all";
       const blank: Steps = {
@@ -791,14 +794,28 @@ export const register: Register = (on, options) => {
         if (mode === "all" && same && !more && current.notice === null) return;
         const after =
           mode === "recent" ? Math.max(0, (lastSeq ?? 0) - RECENT_STEPS) : more && same ? (current.next ?? 0) : 0;
-        const reply = (await call("get_run_steps", { runId, after, limit: STEPS_PAGE })) as Record<string, unknown>;
+        if (more) {
+          // A second press before the first reply would read the same cursor and append the page twice.
+          if (moreInFlight) return;
+          moreInFlight = true;
+        }
+        let reply: Record<string, unknown>;
+        try {
+          reply = (await call("get_run_steps", { runId, after, limit: STEPS_PAGE })) as Record<string, unknown>;
+        } finally {
+          if (more) moreInFlight = false;
+        }
         stepsSupport = reply.level === "off" ? "off" : "yes";
+        // A late reply for a run that is no longer open is dropped: it must not replace the open run's steps.
+        if ((await read($, selected)) !== runId) return;
         const got = toSteps(reply.steps);
-        const kept = more && same ? current.steps : [];
+        const fresh = await read($, runSteps);
+        const kept = more && fresh?.runId === runId && fresh.mode === mode ? fresh.steps : [];
+        const seen = new Set(kept.map((st) => st.seq));
         await update($, runSteps, (): Steps => ({
           ...blank,
           level: str(reply.level),
-          steps: mode === "recent" ? got.slice(-RECENT_STEPS) : [...kept, ...got],
+          steps: mode === "recent" ? got.slice(-RECENT_STEPS) : [...kept, ...got.filter((st) => !seen.has(st.seq))],
           next: typeof reply.next === "number" ? reply.next : null,
           dropped: num(reply.dropped),
           expired: reply.expired === true,

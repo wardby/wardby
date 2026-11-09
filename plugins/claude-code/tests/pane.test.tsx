@@ -1089,6 +1089,62 @@ test("a finished run lists its steps 200 at a time, with More steps", async ($, 
   await ui.unmount();
 });
 
+test("a late steps reply for a run no longer open never replaces the open run's steps", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", async (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("rA", "succeeded", 60_000), runRow("rB", "succeeded", 70_000)]);
+    if (e.tool === "get_run") return reply({ id: e.args.runId, status: "succeeded" });
+    if (e.tool === "get_run_steps") {
+      const id = String(e.args.runId);
+      if (id === "rA") await gate;
+      const step = { seq: 1, at: iso(1000), kind: "tool", tool: "Bash", summary: `only ${id}`, status: "ok" };
+      return reply({ runId: id, level: "summary", steps: [step], next: null, dropped: 0 });
+    }
+    return reply({});
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "rA");
+  await ui.press({ key: "back" });
+  await openRun(ui, "terminal", "rB");
+  await clock.settle();
+  expect(await texts(ui)).toContain("Bash: only rB");
+  release();
+  await clock.settle();
+  const shown = await texts(ui);
+  expect(shown).toContain("Bash: only rB");
+  expect(shown).not.toContain("only rA");
+  await ui.unmount();
+});
+
+test("More steps pressed twice before the reply lists each step once", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const { stepCalls } = stepsServer(on, { status: "succeeded", last: 205 });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  await Promise.all([ui.press({ key: "more-steps" }), ui.press({ key: "more-steps" })]);
+  await clock.settle();
+  expect(stepCalls.filter((c) => c.after === 200)).toHaveLength(1);
+  expect(await ui.findAll({ key: "step-201" })).toHaveLength(1);
+  expect(await ui.findAll({ key: "step-205" })).toHaveLength(1);
+  await ui.unmount();
+});
+
 test("a run that finishes while open turns Recent steps into Steps", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
