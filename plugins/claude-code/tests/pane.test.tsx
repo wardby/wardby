@@ -527,7 +527,7 @@ test("sub-agent runs nest under their lead, and the detail shows the run tree", 
   await ui.unmount();
 });
 
-test("runs linked by a pull request sit under it in order, with the event that started each", async ($, on) => {
+test("runs linked by a pull request sit under it newest first, with the event that started each", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
   const pr = { kind: "code_host", provider: "github", repository: "your-org/api", number: 160 };
@@ -592,8 +592,8 @@ test("runs linked by a pull request sit under it in order, with the event that s
   const order = (await ui.findAll({ type: "Button" }))
     .map((el) => el.key)
     .filter((key): key is string => typeof key === "string" && key.startsWith("run-"));
-  // Newest first: the lone audit run, then the chain in the order it happened, the builder under its lead.
-  expect(order).toEqual(["run-solo", "run-open1", "run-rev1", "run-fix1", "run-bld1"]);
+  // Newest first: the lone audit run, then the chain newest first, the builder still under its lead.
+  expect(order).toEqual(["run-solo", "run-fix1", "run-bld1", "run-rev1", "run-open1"]);
   expect((await ui.find({ key: "run-rev1" }))?.text).toContain("review → ");
   expect((await ui.find({ key: "run-fix1" }))?.text).toContain("mention → ");
   expect(await ui.find({ type: "Text", text: /check completed/ })).toBeDefined();
@@ -604,6 +604,64 @@ test("runs linked by a pull request sit under it in order, with the event that s
   expect((await ui.find({ type: "Link", text: /your-org\/api#160/ }))?.props.href).toBe(
     "https://github.com/your-org/api/pull/160",
   );
+  await ui.unmount();
+});
+
+test('the desktop ledger puts the newest run first: groups, "other" too, and the runs inside a group', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const pr = { kind: "code_host", provider: "github", repository: "your-org/api", number: 160 };
+  const opener = {
+    ...runRow("open1", "succeeded", 600_000),
+    agentName: "smoke",
+    trigger: "manual",
+    triggerInfo: { kind: "manual" },
+    outcomes: [
+      {
+        kind: "pull_request",
+        provider: "github",
+        repository: "your-org/api",
+        number: 160,
+        url: "https://github.com/your-org/api/pull/160",
+      },
+    ],
+  };
+  const review = {
+    ...runRow("rev1", "running", 400_000),
+    agentName: "pr-reviewer",
+    trigger: "host_event",
+    triggerInfo: { ...pr, event: "review" },
+    outcomes: [],
+  };
+  // (rev1 is running, so its group is open.) A manual run with no pull request, started last and still running: it belongs at the top.
+  const solo = {
+    ...runRow("solo", "running", 30_000),
+    agentName: "coder",
+    trigger: "manual",
+    triggerInfo: { kind: "manual" },
+    outcomes: [],
+  };
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([opener, review, solo]);
+    if (e.tool === "get_run") return reply({ id: e.args.runId, status: "succeeded" });
+    return reply({});
+  });
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  const groups = (await ui.findAll({ type: "Box" }))
+    .map((el) => el.key)
+    .filter((key): key is string => typeof key === "string" && key.startsWith("group-"));
+  expect(groups[0]).toBe("group-other");
+  const runs = (await ui.findAll({ type: "Markdown" }))
+    .map((el) => el.key)
+    .filter((key): key is string => typeof key === "string" && key.startsWith("run-"));
+  expect(runs).toEqual(["run-solo", "run-rev1", "run-open1"]);
   await ui.unmount();
 });
 
