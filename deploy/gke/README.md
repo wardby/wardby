@@ -181,6 +181,22 @@ bucket and what is in it. `up.sh` stops if the variable is `true` but no bucket
 exists. No extra database grant is needed: the control plane's role already
 covers the `RunTranscript` table.
 
+## Run steps
+
+Deploy with `WARDBY_RUN_STEPS` (`off`, `summary` or `detail`) to set the most
+detail any run's steps are recorded at, and `RUN_STEP_RETENTION_DAYS` (a whole
+number from 1 to 3650) to set how long a step is kept:
+
+```bash
+WARDBY_RUN_STEPS=detail RUN_STEP_RETENTION_DAYS=14 deploy/gke/up.sh
+```
+
+`up.sh` adds the ceiling to the control plane, the coding proxy and the native
+gateway, and the retention to the control plane and the native gateway (the
+proxy does not read it). Leaving one unset keeps the server default (`summary`,
+30 days). Pass them on every run. See
+[Run steps](../../docs/debugging-agent-runs.md#run-steps).
+
 ## Coding workspace disk
 
 A coding run's workspace is 2048 MiB unless the agent sets `workspaceDiskMb`,

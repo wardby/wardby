@@ -218,6 +218,13 @@ App replying to say why a mention started nothing; pass it to `up.sh` on every
 run, the same way. See
 [What a linked review agent does](code-review-agents.md#what-a-linked-review-agent-does).
 
+`WARDBY_RUN_STEPS` (`off`, `summary` or `detail`) and `RUN_STEP_RETENTION_DAYS`
+(1 to 3650) are optional, not secrets. Pass them to `up.sh` on every run, the
+same way; unset keeps the server defaults (`summary`, 30 days). `up.sh` adds the
+ceiling to the control plane, the coding proxy and the native gateway, and the
+retention to the control plane and the native gateway. See
+[Run steps](debugging-agent-runs.md#run-steps).
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh
