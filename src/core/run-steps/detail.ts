@@ -88,10 +88,17 @@ function candidates(subject: string, index: ReadonlyMap<string, readonly string[
   return found.sort((a, b) => b.length - a.length);
 }
 
-/** What follows the first line break; nothing when there is none (a cut head leaves a partial first line). */
-const afterFirstLine = (text: string): string => {
+/** The most a cut head's partial first line drop takes (afterCutHead). */
+export const CUT_HEAD_DROP_CHARS = 256;
+
+/**
+ * A text cut at its head, without its partial first line: up to and including the first line
+ * break when one falls within CUT_HEAD_DROP_CHARS of the cut, else exactly that many characters
+ * (a single-line output, such as a JSON result, keeps the rest of its end).
+ */
+const afterCutHead = (text: string): string => {
   const at = text.indexOf("\n");
-  return at < 0 ? "" : text.slice(at + 1);
+  return at >= 0 && at < CUT_HEAD_DROP_CHARS ? text.slice(at + 1) : text.slice(CUT_HEAD_DROP_CHARS);
 };
 
 const headCut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
@@ -183,12 +190,13 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
       const headWasCut = result.outputCut === true || source.cut;
       // Redacted on everything available first. A text cut at its head then starts mid-line, where
       // a token shape's anchor (a label, a scheme, a BEGIN line) may be gone, so the partial first
-      // line is dropped, after the 2 KiB cut as well as after the source's.
+      // line (at most CUT_HEAD_DROP_CHARS of it) is dropped, after the 2 KiB cut as well as after
+      // the source's.
       let text = redact(source.text, headWasCut);
       let cut = headWasCut;
-      if (cut) text = afterFirstLine(text);
+      if (cut) text = afterCutHead(text);
       if (text.length > DETAIL_OUTPUT_CHARS - 1) {
-        text = afterFirstLine(text.slice(text.length - (DETAIL_OUTPUT_CHARS - 1)));
+        text = afterCutHead(text.slice(text.length - (DETAIL_OUTPUT_CHARS - 1)));
         cut = true;
       }
       return `${DETAIL_OUTPUT_HEADING}${cut ? "…" : ""}${text}`;

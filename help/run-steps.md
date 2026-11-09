@@ -26,7 +26,9 @@ Wardby records the steps of a run while it runs:
 
 At `summary`, the default, tool output is never recorded. At `detail` each step
 also keeps a **detail** text, at most 16 KB. When the output is cut at the
-start, the first partial line is dropped.
+start, the partial first line is dropped if it ends within 256 characters;
+otherwise only the first 256 characters are dropped, so a long single-line
+output, such as a JSON result, keeps about its last 1.8 KB.
 
 A run's level is the lower of two settings, fixed when the run is dispatched (a
 change reaches later runs only; lowering the ceiling also stops detail for runs

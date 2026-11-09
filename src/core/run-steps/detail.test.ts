@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { collapseWithMap, joinDetail, stepDetailer } from "./detail.js";
+import { collapseWithMap, CUT_HEAD_DROP_CHARS, joinDetail, stepDetailer } from "./detail.js";
+import { nativeResultOutput } from "./native.js";
 import { collapseWhitespace, stepSummarizer } from "./summarize.js";
 import {
   DETAIL_INPUT_CHARS,
@@ -286,8 +287,9 @@ describe("cost", () => {
     expect(text.length).toBe(MAX_STEP_TEXT_CHARS);
     expect(step.startsWith(`${REDACTED_TEXT}\n`)).toBe(true);
     expect(input.startsWith(`${REDACTED_TEXT}\n`)).toBe(true);
-    // The 2 KiB cut lands mid-line in the filler, so that partial line is dropped.
-    expect(tail).toBe(`${DETAIL_OUTPUT_HEADING}…${REDACTED_TEXT}`);
+    // The 2 KiB cut lands mid-line in a long filler line, far from its end: a fixed prefix is dropped.
+    const kept = DETAIL_OUTPUT_CHARS - 1 - CUT_HEAD_DROP_CHARS - REDACTED_TEXT.length - 1;
+    expect(tail).toBe(`${DETAIL_OUTPUT_HEADING}…${text.slice(-91 - kept, -91)}\n${REDACTED_TEXT}`);
     expect(head.startsWith(`${DETAIL_OUTPUT_HEADING}…`)).toBe(true);
     const short = detail.output({ output: output.slice(0, 200), outputCut: true });
     expect(short).toBe(`${DETAIL_OUTPUT_HEADING}…${output.slice(91, 200)}`);
@@ -387,6 +389,26 @@ describe("cut heads and PEM edges", () => {
   const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCFAKEFAKEFAKE";
   const pem = `-----BEGIN PRIVATE KEY-----\n${`${body}\n`.repeat(40)}-----END PRIVATE KEY-----\n`;
 
+  it("keeps about the last 1.8 KB of a single-line output over 2 KiB (a JSON result)", () => {
+    const items = Array.from({ length: 120 }, (_, i) => ({ id: i, name: `item-${i}`, ok: true }));
+    const json = JSON.stringify({ items, total: 120, note: "x".repeat(4213) }).slice(0, 4213 - 2) + '"}';
+    expect(json.length).toBe(4213);
+    expect(json).not.toContain("\n");
+    const out = detail.output({ output: json, outputCut: false });
+    const kept = DETAIL_OUTPUT_CHARS - 1 - CUT_HEAD_DROP_CHARS;
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…${json.slice(-kept)}`);
+    expect(kept).toBeGreaterThan(1750);
+    // The same for a native tool's result, after the source's own 4 KiB cut.
+    expect(detail.output(nativeResultOutput(json))).toBe(out);
+  });
+
+  it("drops up to the first line break only when it falls within CUT_HEAD_DROP_CHARS of the cut", () => {
+    const near = `${"p".repeat(CUT_HEAD_DROP_CHARS - 1)}\nnext line`;
+    expect(detail.output({ output: near, outputCut: true })).toBe(`${DETAIL_OUTPUT_HEADING}…next line`);
+    const far = `${"p".repeat(CUT_HEAD_DROP_CHARS)}\nnext line`;
+    expect(detail.output({ output: far, outputCut: true })).toBe(`${DETAIL_OUTPUT_HEADING}…\nnext line`);
+  });
+
   it("shows no key body when the output's head cut removed the BEGIN line", () => {
     const out = detail.output({ output: `${pem.slice(100)}after`, outputCut: true });
     expect(out).not.toContain(body);
@@ -426,11 +448,18 @@ describe("cut heads and PEM edges", () => {
   });
 
   it("drops the partial first line after the 2 KiB cut too, within the bound", () => {
-    const output = `${"x".repeat(3000)}\nrest one\nrest two`;
+    const output = `${"x".repeat(3000)}\n${"rest line\n".repeat(300)}end`;
     const out = detail.output({ output, outputCut: false });
-    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…rest one\nrest two`);
+    // The cut lands mid-line, within CUT_HEAD_DROP_CHARS of a line break: that partial line is dropped.
+    const last = output.slice(-(DETAIL_OUTPUT_CHARS - 1));
+    expect(last.indexOf("\n")).toBeLessThan(CUT_HEAD_DROP_CHARS);
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…${last.slice(last.indexOf("\n") + 1)}`);
+    expect(out.endsWith("rest line\nend")).toBe(true);
+    // The line break is past CUT_HEAD_DROP_CHARS of the 2 KiB cut: a fixed prefix is dropped instead.
+    const far = detail.output({ output: `${"x".repeat(3000)}\nrest`, outputCut: false });
+    expect(far).toBe(`${DETAIL_OUTPUT_HEADING}…${"x".repeat(DETAIL_OUTPUT_CHARS - 1 - 5 - CUT_HEAD_DROP_CHARS)}\nrest`);
     const long = detail.output({ output: `${"x".repeat(3000)}`, outputCut: false });
-    expect(long).toBe(`${DETAIL_OUTPUT_HEADING}…`);
+    expect(long).toBe(`${DETAIL_OUTPUT_HEADING}…${"x".repeat(DETAIL_OUTPUT_CHARS - 1 - CUT_HEAD_DROP_CHARS)}`);
     const lines = detail.output({ output: "line\n".repeat(1000), outputCut: false });
     expect(lines.length).toBeLessThanOrEqual(DETAIL_OUTPUT_HEADING.length + DETAIL_OUTPUT_CHARS);
   });
