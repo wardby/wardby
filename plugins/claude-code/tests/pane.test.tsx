@@ -1107,3 +1107,192 @@ test("a run that finishes while open turns Recent steps into Steps", async ($, o
   expect(await texts(ui)).toMatch(/^Steps$/m);
   await ui.unmount();
 });
+
+const offNotices = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) =>
+  (await ui.findAll({ type: "Text" })).filter((el) => el.text === "Steps are off on this server.");
+
+test("an older server without get_run_steps: no steps UI, no error, asked again every 6 polls", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const { stepCalls } = stepsServer(on, { status: "running", last: 5, steps: "unknown" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(stepCalls).toHaveLength(1);
+  const shown = await texts(ui);
+  expect(shown).not.toMatch(/steps/i);
+  expect(shown).not.toMatch(/not found|wardby:/);
+  expect(await ui.find({ key: "step-5" })).toBeUndefined();
+  expect(await ui.find({ key: "steps-notice" })).toBeUndefined();
+  // Polls keep refreshing the run but don't ask for steps...
+  await clock.advance(50_000);
+  expect(stepCalls).toHaveLength(1);
+  // ...until the re-probe (every AGENTS_EVERY = 6 polls).
+  await clock.advance(20_000);
+  expect(stepCalls).toHaveLength(2);
+  await ui.unmount();
+});
+
+test("an older server that gains get_run_steps shows the steps at the next re-probe", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const state = { status: "running", last: 5, steps: "unknown" as "unknown" | undefined };
+  const { stepCalls } = stepsServer(on, state);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await texts(ui)).not.toMatch(/steps/i);
+  state.steps = undefined;
+  await clock.advance(50_000);
+  expect(stepCalls).toHaveLength(1);
+  expect(await texts(ui)).not.toMatch(/steps/i);
+  await clock.advance(10_000);
+  expect(stepCalls).toHaveLength(2);
+  expect(await texts(ui)).toContain("Recent steps");
+  expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("Bash: step 5");
+  await ui.unmount();
+});
+
+test("an older server without lastStep: list rows show nothing extra", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fakeServer(on, { status: "running" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    expect(await ui.find({ key: "last-r1" })).toBeUndefined();
+    // The row itself is still drawn.
+    expect(await ui.find({ key: "run-r1" })).toBeDefined();
+    await ui.unmount();
+  }
+});
+
+test("steps off on the server: one line, and no more calls until the re-probe", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const { stepCalls } = stepsServer(on, { status: "running", last: 0, steps: "off" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  expect(await offNotices(ui)).toHaveLength(1);
+  expect(await texts(ui)).not.toContain("Recent steps");
+  await clock.advance(30_000);
+  expect(stepCalls).toHaveLength(1);
+  expect(await offNotices(ui)).toHaveLength(1);
+  // The re-probe asks once more, and the notice is still shown once.
+  await clock.advance(40_000);
+  expect(stepCalls).toHaveLength(2);
+  expect(await offNotices(ui)).toHaveLength(1);
+  await ui.unmount();
+});
+
+test("an empty step list on a coding run shows nothing, running or finished", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const state = { status: "running", last: 0, steps: "empty" as const };
+  stepsServer(on, state);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await texts(ui)).not.toMatch(/step/i);
+  state.status = "succeeded";
+  await clock.advance(10_000);
+  expect(await texts(ui)).not.toMatch(/step/i);
+  expect(await ui.find({ key: "steps-notice" })).toBeUndefined();
+  expect(await ui.find({ key: "steps-off" })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("auto mode refusing get_run_steps alone shows which rule to add, not an error", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  stepsServer(on, { status: "running", last: 4, steps: "refused" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  const notice = JSON.stringify(await ui.find({ key: "steps-notice" }));
+  expect(notice).toContain("Allow mcp__wardby__get_run_steps in /permissions to see this run's steps.");
+  const shown = await texts(ui);
+  expect(shown).not.toMatch(/^wardby:/m);
+  expect(shown).not.toContain("refused");
+  expect(await ui.find({ key: "step-4" })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("a step summary is drawn as plain text: never markdown, never a link", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  stepsReply(on, "[click](https://example.invalid) **b**");
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  const row = await ui.find({ key: "step-1" });
+  expect(row?.type).toBe("Box");
+  expect(JSON.stringify(row)).toContain("said: [click](https://example.invalid) **b**");
+  expect(await ui.find({ type: "Link", text: /click/ })).toBeUndefined();
+  expect((await ui.findAll({ type: "Markdown" })).some((el) => String(el.props.text).includes("example.invalid"))).toBe(
+    false,
+  );
+  await ui.unmount();
+});
+
+test("a long step summary wraps: every stored character is drawn, on both surfaces", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const long = `${"alpha beta gamma delta ".repeat(40)}END-OF-SUMMARY`;
+  stepsReply(on, long);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openRun(ui, surface, "r1");
+    await clock.settle();
+    const row = JSON.stringify(await ui.find({ key: "step-1" }));
+    expect(row).toContain(long);
+    expect(row).toContain("END-OF-SUMMARY");
+    expect(row).not.toContain("truncate");
+    expect(row).toContain('"wrap":"wrap"');
+    await ui.press({ key: "back" });
+    await ui.unmount();
+  }
+});
+
+/** A server with one running run r1 and one `said` step whose summary is `summary`. */
+function stepsReply(on: Parameters<Parameters<typeof test>[1]>[1], summary: string) {
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([runRow("r1", "running", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "running", lastStep: lastStep(1, "x") });
+    if (e.tool === "get_run_steps")
+      return reply({
+        level: "summary",
+        steps: [{ seq: 1, at: iso(0), kind: "said", tool: null, summary, status: null }],
+        next: null,
+        dropped: 0,
+      });
+    return reply({});
+  });
+}

@@ -1048,7 +1048,7 @@ export const register: Register = (on, options) => {
               const { mark, failed } = stepMark(step);
               return (
                 <Box key={`step-${step.seq}`}>
-                  <Text wrap="truncate-end">
+                  <Text wrap="wrap">
                     <Text {...(failed ? { color: FAILED_COLOR } : { dimColor: true })}>{mark}</Text> {stepLine(step)}
                   </Text>
                 </Box>
