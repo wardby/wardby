@@ -13,11 +13,15 @@ The `wardby-runs` plugin opens a pane in Claude Code that lists your wardby
 runs, grouped by pull request, and shows each run's details. It uses the
 `wardby` MCP server your session already has and only reads.
 
-Install it, and allow its read-only tools for auto mode, with:
+Install it, allow its read-only tools for auto mode, and switch the terminal
+to the fullscreen view the side pane needs, with:
 
 ```sh
-npx @wardby/cli@latest claude-plugin install
+npx @wardby/cli@latest claude-plugin install --allow-tools --fullscreen
 ```
+
+Fullscreen applies to every Claude Code session; leave it out if you use only
+the desktop app. Without the flags, install asks about each.
 
 Add `--server-url https://<your wardby host>/mcp` if Claude Code has no MCP
 server named `wardby` yet. Or install it yourself with
@@ -59,5 +63,12 @@ desktop, the border in the terminal). On the desktop each card, an error and an
 open step's detail have a **Copy** button that copies the full text as the
 server sent it, an open step's detail included in full; in the terminal, **Copy section** (`y`) copies the open
 step's detail.
+
+If the pane shows `list_runs: ... exceeds maximum allowed tokens`, the day's run
+list is larger than Claude Code's MCP output limit, usually because runs started
+from GitHub or Jira carry long issue text. Update the server to Wardby 0.9.2 or
+later, which shortens each run's task in that list. Until then, set
+`"env": { "MAX_MCP_OUTPUT_TOKENS": "100000" }` in Claude Code's
+`settings.json` and restart Claude Code.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).
