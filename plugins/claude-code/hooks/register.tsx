@@ -699,6 +699,8 @@ const SHELL_TOOLS = new Set(["Bash", "shell", "exec", "exec_command", "run_comma
 const FAIL_TINT = "#e33d3724";
 // The open step's inset panel, and a said step's quiet left rule.
 const WELL_BG = "#a8a29e14";
+// A desktop card's panel: a faint see-through grey that reads on light and dark, in place of a border.
+const CARD_BG = "#a8a29e12";
 const RULE_BG = "#a8a29e33";
 
 /** A card's colour bar for the desktop: a full-width strip, stretched to the width it is drawn at. */
@@ -1257,16 +1259,24 @@ export const register: Register = (on, options) => {
        * thin bar along the card's top (the theme's prompt-box border stays, visible in light and dark); on
        * the terminal, which draws no SVG, the card's rounded border in that colour.
        */
-      const card = (key: string, kind: CardKind, children: unknown) => (
-        <Box key={key} flexDirection="column" {...GROUP_BOX} {...(D && Svg ? {} : { borderColor: CARD_COLOR[kind] })}>
-          {D && Svg && (
-            <Box key={`${key}-bar`} marginBottom="sm">
+      // Desktop: a soft panel with no border, so its colour bar sits flush on the top edge (a border's
+      // inset would leave a row of space above it); the content has its own padding below the bar.
+      // Terminal: the rounded border, in the card's colour.
+      const card = (key: string, kind: CardKind, children: unknown) =>
+        D && Svg ? (
+          <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
+            <Box key={`${key}-bar`}>
               <Svg source={cardBarSvg(CARD_COLOR[kind])} alt={`${CARD_ALT[kind]} card`} height={3} />
             </Box>
-          )}
-          {children as never}
-        </Box>
-      );
+            <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+              {children as never}
+            </Box>
+          </Box>
+        ) : (
+          <Box key={key} flexDirection="column" {...GROUP_BOX} borderColor={CARD_COLOR[kind]}>
+            {children as never}
+          </Box>
+        );
       /** A card's heading row: the heading, and on the desktop a small Copy button at its right. */
       const headingRow = (key: string, text: string, copy: string | null) =>
         D && copy !== null ? (

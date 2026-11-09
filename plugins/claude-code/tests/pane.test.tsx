@@ -2175,7 +2175,9 @@ test("desktop: every detail card opens with a colour bar in its kind's wardby co
       children: { props: { key?: string } }[];
     };
     expect(card, key).toBeDefined();
-    expect(card.props.borderColor, key).toBe("promptBorder");
+    // A borderless panel, so the bar sits flush on its top edge (a border's inset left a gap above it).
+    expect(card.props.borderStyle, key).toBeUndefined();
+    expect(card.props.backgroundColor, key).toBeDefined();
     // The bar is the card's first child: a 3 px SVG strip in the card's colour.
     expect(card.children[0].props.key, key).toBe(`${key}-bar`);
     const bar = JSON.stringify(await ui.find({ key: `${key}-bar` }));
