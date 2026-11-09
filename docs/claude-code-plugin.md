@@ -36,8 +36,10 @@ read-only tools for auto mode (see [Permissions](#permissions)). Options:
 and `wardby doctor` lists the plugin, the MCP server and the allow rules
 alongside its other checks, without failing when the optional pane is missing.
 
-`wardby claude-plugin status` reports whether the plugin, the MCP server and
-the allow rules are in place. `wardby claude-plugin uninstall` removes the
+Install also turns the plugin on if Claude Code installed it turned off, which
+some versions do; a plugin that is installed but off never loads.
+`wardby claude-plugin status` reports whether the plugin is installed and on,
+and whether the MCP server and the allow rules are in place. `wardby claude-plugin uninstall` removes the
 plugin and only the settings install added: the rules it added and the
 fullscreen view if it switched it on. It leaves the MCP server in place.
 

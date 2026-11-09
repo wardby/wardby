@@ -155,8 +155,30 @@ function hasMcpServer(deps: ClaudePluginDeps, server = MCP_SERVER): boolean {
 }
 
 function pluginInstalled(deps: ClaudePluginDeps): boolean {
+  return pluginEntries(deps).length > 0;
+}
+
+/**
+ * The installed copies of the plugin, as `claude plugin list` prints them: each id (`wardby-runs@<marketplace>`)
+ * and whether it is turned on. A copy whose list entry has no Status line counts as on (older Claude Code).
+ */
+export function pluginEntries(deps: ClaudePluginDeps): { id: string; enabled: boolean }[] {
   const list = deps.run("claude", ["plugin", "list"]);
-  return list.status === 0 && new RegExp(`\\b${PLUGIN}@`).test(list.stdout);
+  if (list.status !== 0) return [];
+  const entries: { id: string; enabled: boolean }[] = [];
+  // Each plugin's block starts with its id (`name@marketplace`); a Status line belongs to the block it is in.
+  let current: { id: string; enabled: boolean } | null = null;
+  for (const line of list.stdout.split("\n")) {
+    const header = /(?:^|\s)([\w.-]+@[\w.-]+)\s*$/.exec(line)?.[1];
+    if (header) {
+      current = header.startsWith(`${PLUGIN}@`) ? { id: header, enabled: true } : null;
+      if (current) entries.push(current);
+      continue;
+    }
+    const status = /^\s*Status:\s*(.*)$/i.exec(line)?.[1];
+    if (status !== undefined && current) current.enabled = !/disabled/i.test(status);
+  }
+  return entries;
 }
 
 /** The first line of a failed command's output, for the message. */
@@ -232,6 +254,15 @@ export async function installPlugin(
     return 1;
   }
   deps.out(`✓ Installed the ${PLUGIN} plugin from ${options.marketplace}.`);
+  // Claude Code may leave a newly installed plugin turned off, and then it never loads: turn it on.
+  for (const entry of pluginEntries(deps).filter((e) => !e.enabled)) {
+    const enabled = deps.run("claude", ["plugin", "enable", entry.id]);
+    deps.out(
+      enabled.status === 0
+        ? `✓ Turned on ${entry.id}.`
+        : `! ${entry.id} is installed but turned off, and turning it on failed: ${firstLine(enabled)}. Run /plugin in Claude Code and enable it.`,
+    );
+  }
 
   // 3. Allow rules for auto mode, and the fullscreen view: each only when asked for or agreed to.
   const record: InstallRecord = readRecord(deps) ?? { settingsPath, rules: [], tui: false };
@@ -374,7 +405,14 @@ export function claudePluginDoctorLines(deps: ClaudePluginDeps, serverName = MCP
   if (!pluginInstalled(deps)) {
     return [`○ Claude Code runs pane not installed (optional: npx @wardby/cli@latest claude-plugin install)`];
   }
-  const lines = [`✓ ${PLUGIN} Claude Code plugin installed`];
+  const off = pluginEntries(deps).filter((e) => !e.enabled);
+  const lines =
+    off.length === 0
+      ? [`✓ ${PLUGIN} Claude Code plugin installed`]
+      : off.map(
+          (e) =>
+            `! ${e.id} is installed but turned off, so the pane never loads (claude plugin enable ${e.id}, or re-run claude-plugin install)`,
+        );
   lines.push(
     hasMcpServer(deps, serverName)
       ? `✓ ${serverName} MCP server configured in Claude Code`
