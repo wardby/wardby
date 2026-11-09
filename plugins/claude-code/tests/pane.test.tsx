@@ -1008,12 +1008,14 @@ test("dark mode: nothing the pane draws uses a fixed light fill or a fixed hex t
   await ui.press({ key: "status-failed" });
   expect((await ui.find({ key: "status-failed" }))?.props.variant).toBe("primary");
   await ui.press({ key: "status-all" });
-  // Group boxes use the theme's prompt-box border, which stays visible in dark mode.
-  const bordered = (await ui.findAll({ type: "Box" })).filter((el) => el.props.borderStyle === "round");
-  expect(bordered.length).toBeGreaterThan(0);
-  expect(bordered.every((el) => el.props.borderColor === "promptBorder" || el.props.borderColor === "error")).toBe(
-    true,
+  // Groups are panels with a see-through background (checked above) and a colour bar on top, not a border.
+  const groups = (await ui.findAll({ type: "Box" })).filter(
+    (el) => /^group-/.test(String(el.key ?? "")) && !String(el.key).endsWith("-bar"),
   );
+  expect(groups.length).toBeGreaterThan(0);
+  expect(groups.every((el) => el.props.borderStyle === undefined && el.props.backgroundColor !== undefined)).toBe(true);
+  const groupBars = (await ui.findAll({ type: "Svg" })).filter((el) => String(el.props.alt).endsWith(" group"));
+  expect(groupBars.map((el) => el.props.alt).sort()).toEqual(["failed group", "running group"]);
   await openRun(ui, "desktop", "c");
   await clock.settle();
   await check();
@@ -1919,7 +1921,9 @@ test("list rows show the spend as $x of $y at the right, and the desktop a thin 
   for (const surface of ["terminal", "desktop"] as const) {
     const ui = await $.ui.mount({ ...PANE, surface });
     expect(await ui.find({ type: "Text", text: /^ ?\$0\.21 of \$1\.00$/ })).toBeDefined();
-    const bars = (await ui.findAll({ type: "Svg" })).map((el) => el.props.alt);
+    const bars = (await ui.findAll({ type: "Svg" }))
+      .map((el) => el.props.alt)
+      .filter((alt) => !String(alt).endsWith(" group"));
     expect(bars).toEqual(surface === "desktop" ? ["$0.21 of $1.00 budget"] : []);
     await ui.unmount();
   }

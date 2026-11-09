@@ -319,9 +319,22 @@ function groupState(group: LedgerGroup): string {
 
 /** A group's state as a colour, for the bar at its row's left edge: running, failed or done. */
 function groupColor(group: LedgerGroup): string {
-  if (group.rows.some(({ row }) => ACTIVE.has(row.status))) return STATUS_COLOR.running;
-  const last = group.rows.filter(({ depth }) => depth === 0).pop()?.row;
-  return last && last.status !== "succeeded" ? FAILED_COLOR : STATUS_COLOR.succeeded;
+  const state = groupTone(group);
+  return state === "running" ? STATUS_COLOR.running : state === "failed" ? FAILED_COLOR : STATUS_COLOR.succeeded;
+}
+
+/** A group's state: running while any run is, else its latest lead run's outcome (rows are newest first). */
+function groupTone(group: LedgerGroup): "running" | "failed" | "succeeded" {
+  if (group.rows.some(({ row }) => ACTIVE.has(row.status))) return "running";
+  const latest = group.rows.find(({ depth }) => depth === 0)?.row;
+  return latest && latest.status !== "succeeded" ? "failed" : "succeeded";
+}
+
+/** A ledger group's colour bar, in the wardby palette: sky running, red failed, mint done; Other in slate. */
+function groupBarHex(group: LedgerGroup): string {
+  if (group.key === "other") return WARDBY.slate;
+  const state = groupTone(group);
+  return state === "running" ? WARDBY.sky : state === "failed" ? WARDBY.red : WARDBY.mint;
 }
 
 /** The drawing of a depth: nothing at the top, then an indent and a branch mark. */
@@ -2281,21 +2294,36 @@ export const register: Register = (on, options) => {
                   </Box>
                 );
               };
-              // A pull request with one run needs no group row: one line, the pull request beside the agent.
-              if (group.rows.length === 1 && group.key !== "other") {
-                return (
+              // Each group is a faint panel with a colour bar flush on top, in its state's wardby colour,
+              // as the run detail's cards are; without SVG, the rounded border it had before.
+              const groupCard = (children: unknown) =>
+                Svg ? (
+                  <Box key={`group-${group.key}`} flexDirection="column" marginTop={1} backgroundColor={CARD_BG}>
+                    <Box key={`group-${group.key}-bar`}>
+                      <Svg source={cardBarSvg(groupBarHex(group))} alt={`${groupTone(group)} group`} height={3} />
+                    </Box>
+                    <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+                      {children as never}
+                    </Box>
+                  </Box>
+                ) : (
                   <Box key={`group-${group.key}`} flexDirection="column" marginTop={1} {...GROUP_BOX}>
-                    {runLine(group.rows[0], true)}
+                    {children as never}
                   </Box>
                 );
+              // A pull request with one run needs no group row: one line, the pull request beside the agent.
+              if (group.rows.length === 1 && group.key !== "other") {
+                return groupCard(runLine(group.rows[0], true));
               }
-              return (
-                <Box key={`group-${group.key}`} flexDirection="column" marginTop={1} {...GROUP_BOX}>
-                  {/* One line: a bar in the group's state colour, its name (which folds it), its link, its state. */}
+              return groupCard(
+                <>
+                  {/* One line: its name (which folds it), its link, its state; the bar above says its state. */}
                   <Box alignItems="center">
-                    <Text color={groupColor(group)} bold>
-                      ▍
-                    </Text>
+                    {!Svg && (
+                      <Text color={groupColor(group)} bold>
+                        ▍
+                      </Text>
+                    )}
                     <Box flexGrow={1}>
                       <Markdown
                         key={`toggle-${group.key}`}
@@ -2313,7 +2341,7 @@ export const register: Register = (on, options) => {
                     </Box>
                   </Box>
                   {isOpen && group.rows.map((entry) => runLine(entry))}
-                </Box>
+                </>,
               );
             })}
           </Box>
