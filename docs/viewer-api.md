@@ -104,7 +104,7 @@ check is still pending).
 ### `GET /admin/api/runs/<id>`
 
 One run in full: the graph fields plus the run's final text and error, and its
-newest steps. `steps` lists at most the newest 200, oldest first, each with
+newest steps (Wardby 0.9.0 and later). `steps` lists at most the newest 200, oldest first, each with
 `seq`, `at`, `kind` (`tool` or `said`), `tool`, `summary` and `status`;
 `stepsOmitted` counts earlier steps not listed and `stepsDropped` counts steps
 past the per-run limit that were never recorded. A step's summary is redacted
@@ -151,7 +151,7 @@ turn and token counts, cost and finish time. A `service` event carries the
 service name, its state and the attempt count. An `outcome` event carries only
 the run id and the outcome source (`pull_request`, `host_status`,
 `issue_status` or `host_check`), so refetch the run to see what changed.
-A `step` event carries the run id and the step's `seq`, `stepKind` (`tool` or
+From Wardby 0.9.0, a `step` event carries the run id and the step's `seq`, `stepKind` (`tool` or
 `said`), `tool`, `summary`, `status` and `at`. It is sent when a step is
 recorded and again when its status arrives, so apply it by `seq`. Steps are
 not in the graph: fetch the run to list them.

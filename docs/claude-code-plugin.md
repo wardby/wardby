@@ -8,9 +8,8 @@ finished Claude Code run in your own terminal.
 The plugin lives in this repository under `plugins/claude-code/`, and the
 repository is its marketplace (`.claude-plugin/marketplace.json`). It talks only
 to the wardby MCP server your Claude Code session already has, through
-`list_runs`, `list_agents`, `get_run`, `get_run_steps` and
-`get_run_transcript`, so it shows
-exactly what those tools show you and needs no token of its own.
+`list_runs`, `list_agents`, `get_run`, `get_run_steps` and `get_run_transcript`,
+so it shows exactly what those tools show you and needs no token of its own.
 
 ## Install
 
@@ -94,9 +93,9 @@ check as any other, and calls the pane makes on its own timer are refused
 unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
 `mcp__wardby__get_run`, `mcp__wardby__get_run_transcript` and
-`mcp__wardby__get_run_steps`. The pane never
-calls `stop_run` or any other tool that changes something. When a call is
-refused, the pane says which rules to add.
+`mcp__wardby__get_run_steps`. The pane never calls `stop_run` or any other tool
+that changes something. When a call is refused, the pane says which rules to
+add.
 
 Plugins are not sandboxed: they run as you. **Continue locally** runs
 `npx @wardby/cli@latest resume - --print` in the folder you give it, passing the

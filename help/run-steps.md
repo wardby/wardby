@@ -20,10 +20,11 @@ Tool output is never recorded, and neither is the full text of a command or
 message.
 
 Steps are recorded for native runs (in the control plane and on the native
-sandbox) and for Claude Code and Codex runs. Every agent's shell command shows as `Bash`: a native agent's `run_command`,
-Claude Code's command tool, and Codex's `exec_command`, `shell`, `local_shell`
-and `shell_command`. Another tool shows under its own name (for example
-`apply_patch`), and a remote MCP tool as `mcp:<tool>`.
+sandbox) and for Claude Code and Codex runs. Every agent's shell command shows
+as `Bash`: a native agent's `run_command`, Claude Code's command tool, and
+Codex's `exec_command`, `shell`, `local_shell` and `shell_command`. Another tool
+shows under its own name (for example `apply_patch`), and a remote MCP tool as
+`mcp:<tool>`.
 
 A Claude Code or Codex run's final answer is one `said` step: the start of the
 summary it returned (the pull request description), or `Finished` with the
@@ -34,8 +35,8 @@ model's replies after relaying them and posts them to the server, which needs a
 listener for them: `WARDBY_RUN_STEPS_LISTEN` on `wardby serve` and
 `WARDBY_RUN_STEPS_URL` on the proxy. The reference GKE manifests set both; the
 kind overlay sets only `WARDBY_RUN_STEPS_URL`, so set
-`WARDBY_RUN_STEPS_LISTEN` on the host's `wardby serve`. Without either, coding runs record no steps; native runs are not
-affected. A slow or unreachable listener loses steps; it never slows the run.
+`WARDBY_RUN_STEPS_LISTEN` on the host's `wardby serve`. Without either, coding
+runs record no steps; native runs are not affected. A slow or unreachable listener loses steps; it never slows the run.
 
 ## Read the steps
 
@@ -45,7 +46,6 @@ affected. A slow or unreachable listener loses steps; it never slows the run.
   the last `seq` you have.
 - `get_run` and `list_runs` (without `agentId`) include `lastStep`, the run's
   newest step as one line, for example `Bash: npm test (exit 1)`.
-
 - The `wardby-runs` Claude Code pane shows a running run's last steps and a
   finished run's steps; see `claude-code-run-pane`.
 - The admin viewer API sends a `step` event on `/admin/api/events` for each
