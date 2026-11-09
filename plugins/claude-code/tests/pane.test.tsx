@@ -935,3 +935,42 @@ test("dark mode: nothing the pane draws uses a fixed light fill or a fixed hex t
   await check();
   await ui.unmount();
 });
+
+const lastStep = (seq: number, line: string) => ({
+  seq,
+  at: iso(1000),
+  kind: "tool",
+  tool: "Bash",
+  summary: line,
+  status: null,
+  line,
+});
+
+test("list rows show the last step under the agent name for running and failed runs only", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const rows = [
+    { ...runRow("a", "running", 60_000), lastStep: lastStep(3, "Bash: npm test") },
+    { ...runRow("b", "failed", 120_000), lastStep: lastStep(9, "Edit: src/app.ts (error)") },
+    { ...runRow("c", "succeeded", 180_000), lastStep: lastStep(4, "said: Finished: changes ready") },
+    // An older server, or a run without steps: no lastStep, nothing extra.
+    runRow("d", "running", 240_000),
+  ];
+  on("mcp.call", (_, e) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(e.tool === "list_runs" ? rows : {}) }], isError: false },
+  }));
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    // The test kit drops `key` on Text, so each key sits on a wrapping Box and the Text child is asserted.
+    const a = await ui.find({ key: "last-a" });
+    expect(a?.type).toBe("Box");
+    expect(JSON.stringify(a)).toContain("Bash: npm test");
+    expect(JSON.stringify(await ui.find({ key: "last-b" }))).toContain("Edit: src/app.ts (error)");
+    expect(await ui.find({ key: "last-c" })).toBeUndefined();
+    expect(await ui.find({ key: "last-d" })).toBeUndefined();
+    await ui.unmount();
+  }
+});

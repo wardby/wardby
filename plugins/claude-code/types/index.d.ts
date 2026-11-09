@@ -16,6 +16,8 @@ export type RunRow = {
   via: { pr: string; url: string | null; event: string } | null;
   /** What the run produced (wardby 0.8.0+): opened a pull request, commented, a check. */
   outcomes: { kind: string; text: string; url: string | null; pr: string | null }[];
+  /** The run's newest step as one line ("Bash: npm test"), from cross-agent list_runs (wardby 0.9.0+); null otherwise. */
+  lastLine: string | null;
 };
 
 export type RunDetail = {

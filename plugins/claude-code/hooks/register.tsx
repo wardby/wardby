@@ -21,7 +21,7 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
 // Change a tag when that value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const runs = atom({ plugin: "wardby-runs", key: "runs" } as const, [], { shape: "runs-3" });
+const runs = atom({ plugin: "wardby-runs", key: "runs" } as const, [], { shape: "runs-4" });
 
 // How each Run.trigger value reads in the pane.
 const TRIGGER_LABELS: Record<string, string> = {
@@ -402,6 +402,15 @@ function toOutcomes(value: unknown): RunRow["outcomes"] {
   });
 }
 
+/** The line the server wrote for a run's newest step (lastStep.line, wardby 0.9.0+); null without one. */
+function lastLineOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  return str((value as Record<string, unknown>).line);
+}
+
+/** A row's last step is shown while it runs and after it failed (where it went wrong), not after success. */
+const showsLastLine = (row: RunRow): boolean => row.lastLine !== null && row.status !== "succeeded";
+
 function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
   return {
     id: String(run.id),
@@ -420,6 +429,7 @@ function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
     parentRunId: str(run.parentRunId),
     via: toVia(run.triggerInfo),
     outcomes: toOutcomes(run.outcomes),
+    lastLine: lastLineOf(run.lastStep),
   };
 }
 
@@ -1432,41 +1442,50 @@ export const register: Register = (on, options) => {
                       ? `  ${clean(group.label)}`
                       : "";
                 return (
-                  <Box key={row.id}>
-                    <Box width={2}>
-                      <Text color={statusColor(row.status)} weight="semibold">
-                        {statusMark(row.status)}
-                      </Text>
+                  <Box key={row.id} flexDirection="column">
+                    <Box>
+                      <Box width={2}>
+                        <Text color={statusColor(row.status)} weight="semibold">
+                          {statusMark(row.status)}
+                        </Text>
+                      </Box>
+                      <Box flexGrow={1} marginLeft={depth > 0 ? 3 : 1}>
+                        <Markdown
+                          key={`run-${row.id}`}
+                          text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}${failed ? `  ${row.status.replaceAll("_", " ")}` : ""}`}
+                          pressableLinks={[runHref(row.id)]}
+                          onLinkPress={() => {
+                            void update($, selected, () => row.id);
+                            void pane.loadDetail(row.id);
+                          }}
+                        />
+                      </Box>
+                      <Box width={8} justifyContent="flex-end">
+                        <Text
+                          tabular
+                          size="caption"
+                          {...(ACTIVE.has(row.status) ? { color: statusColor(row.status) } : { dimColor: true })}
+                        >
+                          {took(row, now)}
+                        </Text>
+                      </Box>
+                      <Box width={8} justifyContent="flex-end">
+                        <Text
+                          tabular
+                          size="caption"
+                          {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
+                        >
+                          {usd(row.costUsd)}
+                        </Text>
+                      </Box>
                     </Box>
-                    <Box flexGrow={1} marginLeft={depth > 0 ? 3 : 1}>
-                      <Markdown
-                        key={`run-${row.id}`}
-                        text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}${failed ? `  ${row.status.replaceAll("_", " ")}` : ""}`}
-                        pressableLinks={[runHref(row.id)]}
-                        onLinkPress={() => {
-                          void update($, selected, () => row.id);
-                          void pane.loadDetail(row.id);
-                        }}
-                      />
-                    </Box>
-                    <Box width={8} justifyContent="flex-end">
-                      <Text
-                        tabular
-                        size="caption"
-                        {...(ACTIVE.has(row.status) ? { color: statusColor(row.status) } : { dimColor: true })}
-                      >
-                        {took(row, now)}
-                      </Text>
-                    </Box>
-                    <Box width={8} justifyContent="flex-end">
-                      <Text
-                        tabular
-                        size="caption"
-                        {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
-                      >
-                        {usd(row.costUsd)}
-                      </Text>
-                    </Box>
+                    {showsLastLine(row) && (
+                      <Box key={`last-${row.id}`} marginLeft={depth > 0 ? 5 : 3}>
+                        <Text dimColor size="caption" wrap="truncate-end">
+                          {row.lastLine}
+                        </Text>
+                      </Box>
+                    )}
                   </Box>
                 );
               };
@@ -1547,6 +1566,15 @@ export const register: Register = (on, options) => {
                       )}
                       <Text color={color}>{icon}</Text> {row.agentName} <Text dimColor>{row.status}</Text>
                     </Button>
+                    {showsLastLine(row) && (
+                      // The server's line, as plain text: it is never markdown or a link.
+                      <Box key={`last-${row.id}`}>
+                        <Text dimColor wrap="truncate-end">
+                          {"  "}
+                          {"  ".repeat(depth)}↳ {row.lastLine}
+                        </Text>
+                      </Box>
+                    )}
                     <Box>
                       <Text dimColor wrap="truncate-end">
                         {"  "}
