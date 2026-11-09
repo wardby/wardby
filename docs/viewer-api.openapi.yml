@@ -122,7 +122,7 @@ paths:
       operationId: getRun
       summary: Run detail
       description: |-
-        Full detail for one run, including final text.
+        Full detail for one run, including final text and its newest steps.
 
         Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
       security:
@@ -297,6 +297,7 @@ paths:
         - `retry: 3000`: suggested client reconnect delay in milliseconds.
         - `event: hello`: sent first. Data is `{"connected": <bool>}`, whether the server's live-event connection is up.
         - `event: run`, `event: service`, `event: outcome`: a run, coding-run service, or outcome changed. Each carries an `id:` line. Payloads match the `viewer-event` schema (see `x-event-schema`).
+        - `event: step`: a run recorded a step, or a step's status arrived. Carries an `id:` line. Data: the step's `seq`, `stepKind` (`tool` or `said`), `tool`, `summary` (redacted when it was recorded), `status` and `at`, never tool output.
         - `event: status`: the server's live-event connection changed. Data is `{"connected": <bool>}`.
         - `event: resync`: the live-event connection is up (again). Events may have been missed: refetch the graph.
         - `: ping`: comment sent every 15 seconds to keep the connection open.
@@ -1107,6 +1108,42 @@ components:
           type: array
           items:
             type: string
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              seq:
+                type: integer
+              at:
+                type: string
+              kind:
+                type: string
+                enum:
+                  - tool
+                  - said
+              tool:
+                type:
+                  - string
+                  - "null"
+              summary:
+                type: string
+              status:
+                type:
+                  - string
+                  - "null"
+            required:
+              - seq
+              - at
+              - kind
+              - tool
+              - summary
+              - status
+            additionalProperties: false
+        stepsOmitted:
+          type: integer
+        stepsDropped:
+          type: integer
         coding:
           anyOf:
             - type: object
@@ -1184,6 +1221,9 @@ components:
         - error
         - finalText
         - childRunIds
+        - steps
+        - stepsOmitted
+        - stepsDropped
         - coding
       additionalProperties: false
     viewer-event:

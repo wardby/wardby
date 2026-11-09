@@ -19,6 +19,9 @@ function serviceDetails(snapshot: unknown): CodingDetail["services"] {
   }));
 }
 
+/** The most steps a run detail carries: the newest, oldest first. */
+export const RUN_DETAIL_STEPS = 200;
+
 export async function loadRunDetail(
   db: PrismaClient,
   runId: string,
@@ -26,12 +29,13 @@ export async function loadRunDetail(
 ): Promise<RunDetail | null> {
   const [graphRun] = await loadGraphRuns(db, [runId], issueSites);
   if (!graphRun) return null;
-  const [row, children] = await Promise.all([
+  const [row, children, newest, stepCount] = await Promise.all([
     db.run.findUniqueOrThrow({
       where: { id: runId },
       select: {
         error: true,
         finalText: true,
+        stepsDropped: true,
         codingRun: {
           select: {
             provider: true,
@@ -50,13 +54,35 @@ export async function loadRunDetail(
       select: { id: true },
       orderBy: [{ startedAt: "asc" }, { id: "asc" }],
     }),
+    // Stored already redacted; the call id and the detail text are never selected.
+    db.runStep.findMany({
+      where: { runId },
+      orderBy: { seq: "desc" },
+      take: RUN_DETAIL_STEPS,
+      select: { seq: true, at: true, kind: true, tool: true, summary: true, status: true },
+    }),
+    db.runStep.count({ where: { runId } }),
   ]);
+  const steps = newest
+    .reverse()
+    .filter((s): s is typeof s & { kind: "tool" | "said" } => s.kind === "tool" || s.kind === "said")
+    .map((s) => ({
+      seq: s.seq,
+      at: s.at.toISOString(),
+      kind: s.kind,
+      tool: s.tool,
+      summary: s.summary,
+      status: s.status,
+    }));
   const coding = row.codingRun;
   return {
     ...graphRun,
     error: row.error,
     finalText: row.finalText,
     childRunIds: children.map((c) => c.id),
+    steps,
+    stepsOmitted: Math.max(0, stepCount - newest.length),
+    stepsDropped: row.stepsDropped,
     coding: coding
       ? {
           provider: coding.provider,

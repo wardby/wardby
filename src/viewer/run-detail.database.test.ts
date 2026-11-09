@@ -79,6 +79,22 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     await db.run.create({
       data: { id: ids.R4, agentId: ids.C, status: "succeeded", startedAt: ago(1 * MIN) },
     });
+    // R1 recorded 203 steps (one with a call id and detail text that must never be sent), 4 more dropped.
+    await db.run.update({ where: { id: ids.R1 }, data: { stepsDropped: 4 } });
+    await db.runStep.createMany({
+      data: Array.from({ length: 203 }, (_, i) => ({
+        runId: ids.R1,
+        seq: i + 1,
+        kind: i % 2 === 0 ? "tool" : "said",
+        tool: i % 2 === 0 ? "Bash" : null,
+        callId: `call_detail_${i + 1}`,
+        summary: `step ${i + 1}`,
+        status: i === 202 ? "exit 1" : i % 2 === 0 ? "ok" : null,
+        detail: i === 202 ? "detail_text_never_sent" : null,
+        at: ago(10 * MIN - i * 1000),
+        expiresAt: ago(-30 * 24 * 60 * MIN),
+      })),
+    });
   });
 
   afterAll(async () => {
@@ -124,6 +140,36 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
       coding: null,
     });
     expect(detail!.childRunIds).toEqual([ids.R2, ids.R3]);
+  });
+
+  it("lists the newest 200 steps oldest first, counts the rest, never a call id or detail", async () => {
+    const detail = await loadRunDetail(db, ids.R1);
+    expect(RunDetailSchema.parse(detail)).toEqual(detail);
+    expect(detail!.steps).toHaveLength(200);
+    expect(detail!.steps[0]).toMatchObject({ seq: 4, summary: "step 4" });
+    expect(detail!.steps.at(-1)).toEqual({
+      seq: 203,
+      at: ago(10 * MIN - 202 * 1000).toISOString(),
+      kind: "tool",
+      tool: "Bash",
+      summary: "step 203",
+      status: "exit 1",
+    });
+    expect(detail!.stepsOmitted).toBe(3);
+    expect(detail!.stepsDropped).toBe(4);
+    for (const step of detail!.steps) {
+      expect(Object.keys(step).sort()).toEqual(["at", "kind", "seq", "status", "summary", "tool"]);
+    }
+    const json = JSON.stringify(detail);
+    expect(json).not.toContain("call_detail_");
+    expect(json).not.toContain("detail_text_never_sent");
+    expect(json).not.toContain("callId");
+    expect(json).not.toContain('"detail"');
+  });
+
+  it("a run without steps has none, and nothing omitted or dropped", async () => {
+    const detail = await loadRunDetail(db, ids.R3);
+    expect(detail).toMatchObject({ steps: [], stepsOmitted: 0, stepsDropped: 0 });
   });
 
   it("exposes the run's native execution mode snapshot, null when none was recorded", async () => {

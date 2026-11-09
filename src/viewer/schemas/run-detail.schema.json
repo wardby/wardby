@@ -500,6 +500,57 @@
             "type": "string"
           }
         },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seq": {
+                "type": "integer"
+              },
+              "at": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tool",
+                  "said"
+                ]
+              },
+              "tool": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "seq",
+              "at",
+              "kind",
+              "tool",
+              "summary",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "stepsOmitted": {
+          "type": "integer"
+        },
+        "stepsDropped": {
+          "type": "integer"
+        },
         "coding": {
           "anyOf": [
             {
@@ -603,6 +654,9 @@
         "error",
         "finalText",
         "childRunIds",
+        "steps",
+        "stepsOmitted",
+        "stepsDropped",
         "coding"
       ],
       "additionalProperties": false

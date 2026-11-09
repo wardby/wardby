@@ -151,6 +151,12 @@ export const RunDetailSchema = GraphRunSchema.extend({
   error: z.string().nullable(),
   finalText: z.string().nullable(),
   childRunIds: z.array(z.string()),
+  /** The run's newest steps (at most 200), oldest first; see `stepsOmitted` for earlier ones. */
+  steps: z.array(RunStepSchema),
+  /** Earlier recorded steps not included in `steps`. */
+  stepsOmitted: z.number().int(),
+  /** Steps past the per-run limit, never recorded. */
+  stepsDropped: z.number().int(),
   coding: z
     .object({
       provider: z.string(),

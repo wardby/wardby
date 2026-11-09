@@ -73,7 +73,7 @@ export const VIEWER_ROUTES: readonly ViewerRoute[] = [
     path: "/admin/api/runs/{id}",
     operationId: "getRun",
     summary: "Run detail",
-    description: "Full detail for one run, including final text.",
+    description: "Full detail for one run, including final text and its newest steps.",
     parameters: [{ name: "id", in: "path", required: true, description: "Run id.", schema: { type: "string" } }],
     responses: {
       "200": { description: "The run.", content: { "application/json": { schema: ref("run-detail") } } },
@@ -99,6 +99,7 @@ export const VIEWER_ROUTES: readonly ViewerRoute[] = [
       "- `retry: 3000`: suggested client reconnect delay in milliseconds.",
       '- `event: hello`: sent first. Data is `{"connected": <bool>}`, whether the server\'s live-event connection is up.',
       "- `event: run`, `event: service`, `event: outcome`: a run, coding-run service, or outcome changed. Each carries an `id:` line. Payloads match the `viewer-event` schema (see `x-event-schema`).",
+      "- `event: step`: a run recorded a step, or a step's status arrived. Carries an `id:` line. Data: the step's `seq`, `stepKind` (`tool` or `said`), `tool`, `summary` (redacted when it was recorded), `status` and `at`, never tool output.",
       '- `event: status`: the server\'s live-event connection changed. Data is `{"connected": <bool>}`.',
       "- `event: resync`: the live-event connection is up (again). Events may have been missed: refetch the graph.",
       `- \`: ping\`: comment sent every ${SSE_HEARTBEAT_MS / 1000} seconds to keep the connection open.`,
