@@ -1,8 +1,8 @@
 /**
  * Run steps from the model traffic the coding proxy relays: one extractor per wire format, one
  * output shape (ExtractedStep / ExtractedResult). Nothing here throws for any input; a frame or body
- * it can't read gives no step. A tool result's content is never kept: its status comes from its
- * first lines only. Each request resends the whole history, so results are read from the newest turn
+ * it can't read gives no step. A tool result's content is never kept below the detail level; at
+ * detail only its end (MAX_RESULT_OUTPUT_CHARS) is. Its status comes from its first lines. Each request resends the whole history, so results are read from the newest turn
  * only.
  */
 import {
@@ -14,7 +14,12 @@ import {
   toolStepText,
 } from "./summarize.js";
 import type { ExtractedResult, ExtractedStep, StepStatus } from "./types.js";
-import { MAX_STEP_TEXT_CHARS } from "./types.js";
+import { MAX_RESULT_OUTPUT_CHARS, MAX_STEP_TEXT_CHARS, tailOf } from "./types.js";
+
+/** What an extractor keeps beyond the summary: the detail level's raw input and output tails. Off by default. */
+export interface StepCaptureOptions {
+  detail?: boolean;
+}
 
 export type StepWireProtocol = "openai-responses" | "anthropic-messages";
 
@@ -91,7 +96,7 @@ function resultStep(callId: string, argsJson: string, cut: boolean): ExtractedSt
   return { kind: "said", callId, text: answer.text, truncated: answer.truncated || cut };
 }
 
-function closeBlock(block: OpenBlock): ExtractedStep | undefined {
+function closeBlock(block: OpenBlock, options?: StepCaptureOptions): ExtractedStep | undefined {
   if (block.kind === "said") {
     return block.buffer.trim()
       ? { kind: "said", callId: block.id, text: block.buffer, truncated: block.truncated }
@@ -100,7 +105,14 @@ function closeBlock(block: OpenBlock): ExtractedStep | undefined {
   if (block.name === CLAUDE_RESULT_TOOL) return resultStep(block.id, block.buffer || "{}", block.truncated);
   const tool = displayToolName(block.name);
   const text = toolStepText(tool, block.buffer || "{}");
-  return { kind: "tool", callId: block.id, tool, text: text.text, truncated: text.truncated || block.truncated };
+  return {
+    kind: "tool",
+    callId: block.id,
+    tool,
+    text: text.text,
+    truncated: text.truncated || block.truncated,
+    ...(options?.detail ? { input: block.buffer || "{}", inputTruncated: block.truncated } : {}),
+  };
 }
 
 let streamCount = 0;
@@ -113,6 +125,8 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
   private done: ExtractedStep[] = [];
   private stopped = false;
   private cutStop = false;
+
+  constructor(private readonly options?: StepCaptureOptions) {}
 
   consume(frame: string): void {
     try {
@@ -134,7 +148,7 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
       for (const [index, open] of [...this.blocks].sort(([a], [b]) => a - b)) {
         this.blocks.delete(index);
         if (open.kind !== "said") continue;
-        const step = closeBlock({ ...open, truncated: true });
+        const step = closeBlock({ ...open, truncated: true }, this.options);
         if (step) this.done.push(step);
       }
       return markCut(this.take(), cut);
@@ -193,7 +207,7 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
         const open = index === undefined ? undefined : this.blocks.get(index);
         if (!open || index === undefined) return;
         this.blocks.delete(index);
-        const step = closeBlock(open);
+        const step = closeBlock(open, this.options);
         if (step) this.done.push(step);
         return;
       }
@@ -204,7 +218,7 @@ export class AnthropicStreamSteps implements StreamStepExtractor {
 }
 
 /** One Responses output item as a step: function_call, custom_tool_call, or an assistant message. */
-export function openAiItemStep(value: unknown): ExtractedStep | undefined {
+export function openAiItemStep(value: unknown, options?: StepCaptureOptions): ExtractedStep | undefined {
   const item = obj(value);
   if (!item) return undefined;
   const callId = str(item.call_id);
@@ -213,7 +227,16 @@ export function openAiItemStep(value: unknown): ExtractedStep | undefined {
     case "function_call": {
       if (!callId || !name) return undefined;
       const tool = displayToolName(name, str(item.namespace));
-      return { kind: "tool", callId, tool, ...toolStepText(tool, str(item.arguments) ?? "{}") };
+      const args = str(item.arguments) ?? "{}";
+      return {
+        kind: "tool",
+        callId,
+        tool,
+        ...toolStepText(tool, args),
+        ...(options?.detail
+          ? { input: args.slice(0, MAX_STEP_TEXT_CHARS), inputTruncated: args.length > MAX_STEP_TEXT_CHARS }
+          : {}),
+      };
     }
     case "custom_tool_call": {
       if (!callId || !name) return undefined;
@@ -228,6 +251,9 @@ export function openAiItemStep(value: unknown): ExtractedStep | undefined {
         tool,
         text: text.text,
         truncated: text.truncated || input.length > MAX_STEP_TEXT_CHARS,
+        ...(options?.detail
+          ? { input: input.slice(0, MAX_STEP_TEXT_CHARS), inputTruncated: input.length > MAX_STEP_TEXT_CHARS }
+          : {}),
       };
     }
     case "message": {
@@ -259,6 +285,8 @@ export class OpenAiStreamSteps implements StreamStepExtractor {
   private done: ExtractedStep[] = [];
   private completed = false;
 
+  constructor(private readonly options?: StepCaptureOptions) {}
+
   consume(frame: string): void {
     try {
       if (!frame.includes("response.output_item.done") && !frame.includes("response.completed")) return;
@@ -268,7 +296,7 @@ export class OpenAiStreamSteps implements StreamStepExtractor {
         return;
       }
       if (event?.type !== "response.output_item.done") return;
-      const step = openAiItemStep(event.item);
+      const step = openAiItemStep(event.item, this.options);
       if (step) this.done.push(step);
     } catch {
       // A step is dropped, never the relay.
@@ -291,17 +319,23 @@ export class OpenAiStreamSteps implements StreamStepExtractor {
   }
 }
 
-export function streamStepExtractor(protocol: StepWireProtocol): StreamStepExtractor {
-  return protocol === "anthropic-messages" ? new AnthropicStreamSteps() : new OpenAiStreamSteps();
+export function streamStepExtractor(protocol: StepWireProtocol, options?: StepCaptureOptions): StreamStepExtractor {
+  return protocol === "anthropic-messages" ? new AnthropicStreamSteps(options) : new OpenAiStreamSteps(options);
 }
 
 /** A whole (non-stream) reply's steps. */
-export function stepsFromJson(protocol: StepWireProtocol, value: unknown): ExtractedStep[] {
+export function stepsFromJson(
+  protocol: StepWireProtocol,
+  value: unknown,
+  options?: StepCaptureOptions,
+): ExtractedStep[] {
   try {
     const body = obj(value);
     if (!body) return [];
     if (protocol === "openai-responses") {
-      const steps = (Array.isArray(body.output) ? body.output : []).flatMap((item) => openAiItemStep(item) ?? []);
+      const steps = (Array.isArray(body.output) ? body.output : []).flatMap(
+        (item) => openAiItemStep(item, options) ?? [],
+      );
       return markCut(steps, body.status === "incomplete" || obj(body.incomplete_details) !== undefined);
     }
     const messageId = str(body.id) ?? "msg";
@@ -315,7 +349,16 @@ export function stepsFromJson(protocol: StepWireProtocol, value: unknown): Extra
         steps.push(resultStep(id, JSON.stringify(block.input ?? {}), false));
       } else if (block?.type === "tool_use" && id && name) {
         const tool = displayToolName(name);
-        steps.push({ kind: "tool", callId: id, tool, ...toolStepText(tool, JSON.stringify(block.input ?? {})) });
+        const inputJson = JSON.stringify(block.input ?? {});
+        steps.push({
+          kind: "tool",
+          callId: id,
+          tool,
+          ...toolStepText(tool, inputJson),
+          ...(options?.detail
+            ? { input: inputJson.slice(0, MAX_STEP_TEXT_CHARS), inputTruncated: inputJson.length > MAX_STEP_TEXT_CHARS }
+            : {}),
+        });
       } else if (block?.type === "text" && text?.trim()) {
         steps.push({ kind: "said", callId: `said:${messageId}:${index}`, ...bounded(text) });
       }
@@ -351,8 +394,37 @@ function contentHead(content: unknown): string {
   return head.slice(0, STATUS_HEAD_CHARS);
 }
 
+/** The end of a result's text parts (images and other parts skipped), for the detail level. */
+function contentTail(content: unknown): { output: string; outputCut: boolean } | undefined {
+  if (typeof content === "string") {
+    const tail = tailOf(content);
+    return { output: tail.text, outputCut: tail.cut };
+  }
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  let size = 0;
+  let cut = false;
+  for (let index = content.length - 1; index >= 0; index--) {
+    const text = str(obj(content[index])?.text);
+    if (text === undefined) continue;
+    if (size >= MAX_RESULT_OUTPUT_CHARS) {
+      cut = true;
+      break;
+    }
+    parts.unshift(text);
+    size += text.length + 1;
+  }
+  if (parts.length === 0) return undefined;
+  const tail = tailOf(parts.join("\n"));
+  return { output: tail.text, outputCut: cut || tail.cut };
+}
+
 /** The results a request carries for the turn before it: the newest part of the history only. */
-export function resultsFromRequest(protocol: StepWireProtocol, value: unknown): ExtractedResult[] {
+export function resultsFromRequest(
+  protocol: StepWireProtocol,
+  value: unknown,
+  options?: StepCaptureOptions,
+): ExtractedResult[] {
   try {
     const body = obj(value);
     if (!body) return [];
@@ -369,7 +441,11 @@ export function resultsFromRequest(protocol: StepWireProtocol, value: unknown): 
           const block = obj(message.content[at]);
           const callId = str(block?.tool_use_id);
           if (block?.type !== "tool_result" || !callId) continue;
-          results.push({ callId, status: statusFromOutput(contentHead(block.content), block.is_error === true) });
+          results.push({
+            callId,
+            status: statusFromOutput(contentHead(block.content), block.is_error === true),
+            ...(options?.detail ? (contentTail(block.content) ?? {}) : {}),
+          });
         }
       }
       return results.slice(0, MAX_RESULTS_PER_REQUEST).reverse();
@@ -389,7 +465,13 @@ export function resultsFromRequest(protocol: StepWireProtocol, value: unknown): 
       const type = str(item?.type);
       if (type && OUTPUT_ITEMS.has(type)) {
         const callId = str(item?.call_id);
-        if (callId) results.push({ callId, status: statusFromOutput(contentHead(item?.output), false) });
+        if (callId) {
+          results.push({
+            callId,
+            status: statusFromOutput(contentHead(item?.output), false),
+            ...(options?.detail ? (contentTail(item?.output) ?? {}) : {}),
+          });
+        }
       } else if (!type || !CALL_ITEMS.has(type)) break;
     }
     return results.reverse();

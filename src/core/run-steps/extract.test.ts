@@ -11,7 +11,7 @@ import {
   streamStepExtractor,
   type StreamStepExtractor,
 } from "./extract.js";
-import { MAX_STEP_TEXT_CHARS } from "./types.js";
+import { MAX_RESULT_OUTPUT_CHARS, MAX_STEP_TEXT_CHARS } from "./types.js";
 
 const fixture = (name: string) => readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const frame = (type: string, body: Record<string, unknown>) =>
@@ -467,5 +467,110 @@ describe("a coding run's final answer", () => {
     // Any other message is said as written.
     const plain = { ...item, content: [{ type: "output_text", text: '{"a":1}' }] };
     expect(openAiItemStep(plain)).toMatchObject({ kind: "said", text: '{"a":1}' });
+  });
+});
+
+describe("detail capture", () => {
+  const toolReply = (id: string, input: Record<string, unknown>, name = "mcp__wardby_tools__run_command") => ({
+    id: "msg_d",
+    content: [{ type: "tool_use", id, name, input }],
+  });
+  const resultRequest = (id: string, content: unknown) => ({
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id, name: "x", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: id, content }] },
+    ],
+  });
+  const toolFrames = (id: string, json: string) => [
+    frame("content_block_start", {
+      index: 0,
+      content_block: { type: "tool_use", id, name: "mcp__wardby_tools__run_command", input: {} },
+    }),
+    frame("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: json } }),
+    frame("content_block_stop", { index: 0 }),
+  ];
+
+  it("without detail, no input or output is kept (unchanged shapes)", () => {
+    const steps = stepsFromJson("anthropic-messages", toolReply("c1", { command: "npm test" }));
+    expect(steps[0]).not.toHaveProperty("input");
+    const results = resultsFromRequest("anthropic-messages", resultRequest("c1", "out\nExit code: 1"));
+    expect(results[0]).toEqual({ callId: "c1", status: "exit 1" });
+    const x = streamStepExtractor("anthropic-messages");
+    for (const f of toolFrames("c1", '{"command":"npm test"}')) x.consume(f);
+    expect(x.finish()[0]).not.toHaveProperty("input");
+  });
+
+  it("Anthropic: the raw input of a streamed or whole tool call, and the end of a tool_result", () => {
+    const x = streamStepExtractor("anthropic-messages", { detail: true });
+    for (const f of toolFrames("c1", '{"command":"npm test"}')) x.consume(f);
+    expect(x.finish()[0]).toMatchObject({ input: '{"command":"npm test"}', inputTruncated: false });
+    expect(
+      stepsFromJson("anthropic-messages", toolReply("c1", { command: "npm test" }), { detail: true })[0],
+    ).toMatchObject({ input: '{"command":"npm test"}', inputTruncated: false });
+    const big = `${"y".repeat(9000)}TAIL`;
+    const [result] = resultsFromRequest("anthropic-messages", resultRequest("c1", [{ type: "text", text: big }]), {
+      detail: true,
+    });
+    expect(result.output!.endsWith("TAIL")).toBe(true);
+    expect(result.output!.length).toBe(MAX_RESULT_OUTPUT_CHARS);
+    expect(result.outputCut).toBe(true);
+  });
+
+  it("flags an over-long input as truncated", () => {
+    const [step] = stepsFromJson("anthropic-messages", toolReply("c1", { command: "x".repeat(20_000) }), {
+      detail: true,
+    });
+    expect(step.kind === "tool" && step.input!.length).toBe(MAX_STEP_TEXT_CHARS);
+    expect(step.kind === "tool" && step.inputTruncated).toBe(true);
+  });
+
+  it("Responses: function_call arguments, custom_tool_call input, and function_call_output", () => {
+    expect(
+      openAiItemStep(
+        { type: "function_call", call_id: "c1", name: "exec_command", arguments: '{"cmd":"ls"}' },
+        { detail: true },
+      ),
+    ).toMatchObject({ tool: "Bash", input: '{"cmd":"ls"}', inputTruncated: false });
+    expect(
+      openAiItemStep(
+        { type: "custom_tool_call", call_id: "c2", name: "apply_patch", input: "*** Begin Patch" },
+        { detail: true },
+      ),
+    ).toMatchObject({ input: "*** Begin Patch", inputTruncated: false });
+    expect(
+      openAiItemStep({ type: "function_call", call_id: "c1", name: "exec_command", arguments: "{}" }),
+    ).not.toHaveProperty("input");
+    const [result] = resultsFromRequest(
+      "openai-responses",
+      {
+        input: [
+          { type: "function_call", call_id: "c1" },
+          { type: "function_call_output", call_id: "c1", output: "Exit code: 0\nok" },
+        ],
+      },
+      { detail: true },
+    );
+    expect(result).toEqual({ callId: "c1", status: "ok", output: "Exit code: 0\nok", outputCut: false });
+  });
+
+  it("an image-only result has no output; a StructuredOutput answer step carries no input", () => {
+    const [result] = resultsFromRequest("anthropic-messages", resultRequest("c1", [{ type: "image", source: {} }]), {
+      detail: true,
+    });
+    expect(result).not.toHaveProperty("output");
+    const x = streamStepExtractor("anthropic-messages", { detail: true });
+    for (const f of [
+      frame("content_block_start", {
+        index: 0,
+        content_block: { type: "tool_use", id: "s1", name: "StructuredOutput", input: {} },
+      }),
+      frame("content_block_delta", {
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"summary":"done"}' },
+      }),
+      frame("content_block_stop", { index: 0 }),
+    ])
+      x.consume(f);
+    expect(x.finish()[0]).not.toHaveProperty("input");
   });
 });
