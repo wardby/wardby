@@ -51,4 +51,9 @@ appears only for the agent's owner and the run's starter (and the stdio
 operator), on a server at the detail level. An expanded detail shows its last
 40 lines, with a count of the lines above them.
 
+Each section of a run's detail is a card. On the desktop each card, an error
+and an open step's detail have a **Copy** button that copies the full text as
+the server sent it; in the terminal, **Copy section** (`y`) copies the open
+step's detail.
+
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

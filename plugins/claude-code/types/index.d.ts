@@ -31,6 +31,10 @@ export type RunDetail = {
   pullRequestUrl: string | null;
   resultBranch: string | null;
   services: string[];
+  /** Each service's start-up state by name (pending, probing, ready, failed), from serviceReadiness. */
+  serviceStates: Record<string, string>;
+  /** The model the run was billed at (pricingSnapshot.modelId); null when the server didn't record one. */
+  model: string | null;
   parentRunId: string | null;
   /** The newest step's seq from get_run's lastStep (wardby 0.9.0+); null without one. */
   lastStepSeq: number | null;

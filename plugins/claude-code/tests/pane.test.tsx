@@ -518,10 +518,12 @@ test("sub-agent runs nest under their lead, and the detail shows the run tree", 
   await ui.press({ key: "run-kid2" });
   await clock.settle();
   expect(await ui.find({ type: "Text", text: /^Run tree$/ })).toBeDefined();
-  expect((await ui.find({ type: "Text", text: /\(this run\)/ }))?.text).toContain("client-updater");
+  expect((await ui.find({ type: "Text", text: /lead · this run|sub-agent · this run/ }))?.text).toContain(
+    "client-updater",
+  );
   await ui.press({ key: "tree-lead" });
   await clock.settle();
-  expect((await ui.find({ type: "Text", text: /\(this run\)/ }))?.text).toContain("builder");
+  expect((await ui.find({ type: "Text", text: /lead · this run|sub-agent · this run/ }))?.text).toContain("builder");
   await ui.unmount();
 });
 
@@ -772,12 +774,13 @@ test("Strips: a card per pull request with its steps drawn, the active step show
 
   // And back to the ledger.
   await ui.press({ key: "view-ledger" });
-  expect(await ui.find({ type: "Svg" })).toBeUndefined();
+  // The strips' step drawings are gone (the ledger draws only thin budget bars).
+  expect((await ui.findAll({ type: "Svg" })).map((el) => el.props.alt)).not.toContain("fix 1 running");
   expect(await ui.find({ key: "toggle-your-org/api#160" })).toBeDefined();
   await ui.unmount();
 });
 
-test("the final text is drawn as markdown, cut at a line break until expanded", async ($, on) => {
+test("the final text is drawn as markdown, about three lines until expanded", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
   const lines = Array.from({ length: 40 }, (_, i) => `- \`tests/test_${i}.py\`: updated the expected count`);
@@ -799,10 +802,13 @@ test("the final text is drawn as markdown, cut at a line break until expanded", 
   await clock.settle();
   const cut = (await ui.find({ key: "final-text" }))?.props.text as string;
   expect(cut.startsWith("## Summary")).toBe(true);
-  // It ends on a whole list item, then an ellipsis, not mid-word.
-  expect(cut).toMatch(/updated the expected count\n\n…$/);
+  // About three lines: the heading, the sentence, and the first item cut at a word with an ellipsis.
+  expect(cut.split("\n").filter((line) => line.trim() !== "")).toHaveLength(3);
+  expect(cut).toMatch(/updated the expected…$/);
+  expect(JSON.stringify(await ui.find({ key: "final-more" }))).toMatch(/… \d+ more lines/);
   await ui.press({ key: "expand" });
   expect((await ui.find({ key: "final-text" }))?.props.text).toBe(finalText);
+  expect(await ui.find({ key: "final-more" })).toBeUndefined();
   await ui.unmount();
 });
 
@@ -829,17 +835,16 @@ test("colour carries meaning: amber past 80% of budget, a red error, no key badg
   await $.command.run({ command: "wardby-runs", args: "" });
   await clock.settle();
   const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
-  // In the ledger, the cost of a run at 85% of its budget is amber.
-  // (the group's total, also $0.85, stays neutral)
-  const costs = (await ui.findAll({ type: "Text", text: /^\$0\.85$/ })).map((el) => el.props.color);
-  expect(costs).toContain("warning");
+  // In the ledger, the spend of a run at 85% of its budget is amber.
+  expect((await ui.find({ type: "Text", text: /^\$0\.85 of \$1\.00$/ }))?.props.color).toBe("warning");
   await openRun(ui, "desktop", "h1");
   await clock.settle();
-  // The detail: the status in its theme colour (no light fill, for dark mode), a plain sentence, the error first.
-  const chip = await ui.find({ type: "Text", text: /^✗ failed$/ });
+  // The detail: the status as a pill, its word in the theme colour on a see-through tint (never a fixed
+  // light fill, for dark mode); a dim line of how long it ran and when it finished; the error first.
+  const chip = await ui.find({ type: "Text", text: /^ failed $/ });
   expect(chip?.props.color).toBe("error");
-  expect(chip?.props.backgroundColor).toBeUndefined();
-  expect(await ui.find({ type: "Text", text: /^Started by hand\. Ran / })).toBeDefined();
+  expect(chip?.props.backgroundColor).toBe("#ef444429");
+  expect(await ui.find({ type: "Text", text: /^1m 0s · finished 0s ago$/ })).toBeDefined();
   expect((await ui.find({ type: "Text", text: /^worker start$/ }))?.props.color).toBe("error");
   expect((await ui.find({ type: "Text", text: /\$0\.85 of \$1\.00/ }))?.props.color).toBe("warning");
   // Desktop buttons carry no key badges.
@@ -927,7 +932,9 @@ test("dark mode: nothing the pane draws uses a fixed light fill or a fixed hex t
   const check = async () => {
     for (const type of ["Box", "Text"]) {
       for (const el of await ui.findAll({ type })) {
-        expect(el.props.backgroundColor, `${type} ${el.text}`).toBeUndefined();
+        // A pill's tint is see-through (alpha under 25%), so it darkens with a dark panel: never a fixed fill.
+        const bg = el.props.backgroundColor;
+        if (bg !== undefined) expect(String(bg), `${type} ${el.text}`).toMatch(/^#[0-9a-f]{6}[0-3][0-9a-f]$/i);
         for (const prop of ["color", "borderColor"]) {
           const value = el.props[prop];
           if (typeof value === "string") expect(value.startsWith("#"), `${type} ${prop} ${value}`).toBe(false);
@@ -1073,7 +1080,8 @@ test("a running run's detail shows its last 8 steps, read again each poll", asyn
     expect(await texts(ui)).toContain("Recent steps");
     expect(await ui.find({ key: "step-4" })).toBeUndefined();
     expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("Bash: step 5");
-    expect(JSON.stringify(await ui.find({ key: "step-10" }))).toContain("Bash: step 10 (exit 1)");
+    // The result is a pill beside the line: "exit 1", then "Bash: step 10".
+    expect((await ui.find({ key: "step-10" }))?.text).toMatch(/exit 1.*Bash: step 10/);
     expect((await ui.find({ key: "step-12" }))?.type).toBe("Box");
     state.last = 14;
     await clock.advance(10_000);
@@ -1326,7 +1334,8 @@ test("a step summary is drawn as plain text: never markdown, never a link", asyn
   await clock.settle();
   const row = await ui.find({ key: "step-1" });
   expect(row?.type).toBe("Box");
-  expect(JSON.stringify(row)).toContain("said: [click](https://example.invalid) **b**");
+  // A "said" pill, then the summary as written.
+  expect(row?.text).toMatch(/said\s+\[click\]\(https:\/\/example\.invalid\) \*\*b\*\*/);
   expect(await ui.find({ type: "Link", text: /click/ })).toBeUndefined();
   expect((await ui.findAll({ type: "Markdown" })).some((el) => String(el.props.text).includes("example.invalid"))).toBe(
     false,
@@ -1587,5 +1596,290 @@ test("a step stored by an older server with escape sequences is drawn without th
   expect(shown).not.toContain("\r");
   expect(shown).not.toContain("evil.invalid");
   expect(shown).not.toContain("ZmFrZQ");
+  await ui.unmount();
+});
+
+/** A server with one finished run r1 that has every section: request, outcomes, services, steps, final text. */
+function fullServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  extra: { request?: string; finalText?: string; error?: string; status?: string } = {},
+) {
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  const status = extra.status ?? "succeeded";
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs")
+      return reply([
+        {
+          ...runRow("r1", status, 60_000),
+          costUsd: "0.21",
+          outcomes: [
+            {
+              kind: "pull_request",
+              provider: "github",
+              repository: "your-org/api",
+              number: 9,
+              url: "https://github.com/your-org/api/pull/9",
+            },
+          ],
+        },
+        { ...runRow("k1", "succeeded", 30_000), agentName: "helper", parentRunId: "r1", trigger: "subagent" },
+      ]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status,
+        request: extra.request ?? "Rename the accounts API.",
+        finalText: extra.finalText ?? "Done.",
+        ...(extra.error ? { error: extra.error, failureCategory: "worker_start" } : {}),
+        pricingSnapshot: { modelId: "test-model-1" },
+        codingResult: {
+          outcome: "pull_request_opened",
+          repository: "your-org/api",
+          pullRequestUrl: "https://github.com/your-org/api/pull/9",
+        },
+        services: ["postgres 16"],
+        serviceReadiness: [{ name: "postgres", state: "ready", attempts: 1 }],
+      });
+    if (e.tool === "get_run_steps")
+      return reply({
+        runId: "r1",
+        level: "detail",
+        steps: [
+          {
+            seq: 1,
+            at: iso(1000),
+            kind: "tool",
+            tool: "Bash",
+            summary: "npm test",
+            status: "ok",
+            detail: "npm test\n--- output (end) ---\nall passed",
+          },
+        ],
+        next: null,
+        dropped: 0,
+      });
+    return reply({});
+  });
+}
+
+/** Opens fullServer's r1: on the desktop its finished pull request's group starts folded, so unfold it first. */
+async function openFull(
+  ui: { press: (t: { key: string; link?: { href: string } }) => Promise<unknown> },
+  surface: "desktop" | "terminal",
+) {
+  if (surface === "desktop") {
+    const key = "your-org/api#9";
+    await ui.press({ key: `toggle-${key}`, link: { href: `https://wardby.invalid/group/${encodeURIComponent(key)}` } });
+  }
+  await openRun(ui, surface, "r1");
+}
+
+test("pills: a soft tint and the theme colour on the desktop, coloured text on the terminal", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fullServer(on);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["desktop", "terminal"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openFull(ui, surface);
+    await clock.settle();
+    const status = await ui.find({ type: "Text", text: surface === "desktop" ? /^ succeeded $/ : /^✓ succeeded$/ });
+    expect(status?.props.color).toBe("success");
+    const words =
+      surface === "desktop" ? [" PR ", " ready ", " detail ", " ok "] : ["[PR]", "[ready]", "[detail]", "[ok]"];
+    for (const word of words) {
+      const el = (await ui.findAll({ type: "Text" })).find((t) => t.text === word);
+      expect(el, word).toBeDefined();
+      if (surface === "desktop") expect(String(el?.props.backgroundColor)).toMatch(/^#[0-9a-f]{8}$/);
+      else expect(el?.props.backgroundColor).toBeUndefined();
+    }
+    // The header: the short run id, and a dim line with the repository and model.
+    expect(await ui.find({ type: "Text", text: /^your-org\/api · test-model-1 · / })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /^\$0\.21 of \$1\.00 budget$/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /^turn 1$/ })).toBeDefined();
+    await ui.press({ key: "back" });
+    await ui.unmount();
+  }
+});
+
+test("the terminal never gets a tint, an SVG or a hex colour", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fullServer(on, { error: "boom" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  const check = async () => {
+    expect(await ui.findAll({ type: "Svg" })).toHaveLength(0);
+    for (const type of ["Box", "Text"]) {
+      for (const el of await ui.findAll({ type })) {
+        expect(el.props.backgroundColor, `${type} ${el.text}`).toBeUndefined();
+        const color = el.props.color;
+        if (typeof color === "string") expect(color.startsWith("#"), `${type} ${color}`).toBe(false);
+      }
+    }
+  };
+  await check();
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  await ui.press({ key: "step-detail-1" });
+  await check();
+  // Pills are words in brackets on the terminal, coloured but never tinted.
+  for (const word of ["[PR]", "[ready]", "[detail]", "[ok]"]) {
+    expect(
+      (await ui.findAll({ type: "Text" })).some((t) => t.text === word),
+      word,
+    ).toBe(true);
+  }
+  // The budget is a text bar on the terminal.
+  expect(await texts(ui)).toMatch(/[▓░]{10,}/);
+  await ui.unmount();
+});
+
+for (const surface of ["desktop", "terminal"] as const) {
+  test(`${surface}: a long request and final answer show about three lines and how many more`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    engine(on, []);
+    const many = (word: string) => Array.from({ length: 10 }, (_, i) => `${word} line ${i + 1}`).join("\n");
+    fullServer(on, { request: many("request"), finalText: many("answer") });
+    await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+    await $.command.run({ command: "wardby-runs", args: "" });
+    await clock.settle();
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openFull(ui, surface);
+    await clock.settle();
+    const suffix = surface === "desktop" ? "" : " (m)";
+    for (const [key, word] of [
+      ["request", "request"],
+      ["final", "answer"],
+    ]) {
+      expect((await ui.find({ key: `${key}-text` }))?.props.text).toBe(
+        `${word} line 1\n${word} line 2\n${word} line 3`,
+      );
+      expect((await ui.find({ key: `${key}-more` }))?.text).toBe(`… 7 more lines${suffix}`);
+    }
+    await ui.press({ key: "expand" });
+    expect((await ui.find({ key: "request-text" }))?.props.text).toBe(many("request"));
+    expect(await ui.find({ key: "request-more" })).toBeUndefined();
+    await ui.unmount();
+  });
+}
+
+test("the action row comes last: the pull request first, then Show full text and Copy run id", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fullServer(on, { request: Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n") });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["desktop", "terminal"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await openFull(ui, surface);
+    await clock.settle();
+    const row = (await ui.find({ key: "actions" })) as unknown as {
+      children: { type: string; props: { key?: string; label?: string } }[];
+    };
+    expect(row.children.map((c) => (c.type === "Link" ? `Link:${c.props.label}` : c.props.key))).toEqual([
+      "Link:Open pull request #9",
+      "expand",
+      "copy-id",
+    ]);
+    // The action row is the detail's last element: after every card.
+    const tree = JSON.stringify((await ui.findAll({ type: "Box" }))[0]);
+    expect(tree.lastIndexOf('"key":"actions"')).toBeGreaterThan(tree.lastIndexOf('"key":"final-card"'));
+    await ui.press({ key: "back" });
+    await ui.unmount();
+  }
+});
+
+test("list rows show the spend as $x of $y at the right, and the desktop a thin budget bar", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  fakeServer(on, { status: "running" });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    expect(await ui.find({ type: "Text", text: /^ ?\$0\.21 of \$1\.00$/ })).toBeDefined();
+    const bars = (await ui.findAll({ type: "Svg" })).map((el) => el.props.alt);
+    expect(bars).toEqual(surface === "desktop" ? ["$0.21 of $1.00 budget"] : []);
+    await ui.unmount();
+  }
+});
+
+test("desktop: each section's Copy button copies its full, uncut text and says so", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  const request = Array.from({ length: 12 }, (_, i) => `request line ${i + 1}`).join("\n");
+  const finalText = Array.from({ length: 12 }, (_, i) => `answer line ${i + 1}`).join("\n");
+  fullServer(on, { request, finalText, error: "the worker could not start", status: "failed" });
+  const copies: string[] = [];
+  let isCopied = true;
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: isCopied ? { isCopied: true } : { isCopied: false, reason: "no clipboard" } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  for (const key of ["copy-started", "copy-produced", "copy-tree", "copy-final", "copy-error"]) {
+    expect((await ui.find({ key }))?.props.label, key).toBe("Copy");
+  }
+  await ui.press({ key: "copy-started" });
+  expect(copies.at(-1)).toBe(request);
+  expect(toasts.at(-1)).toBe("Copied");
+  await ui.press({ key: "copy-final" });
+  expect(copies.at(-1)).toBe(finalText);
+  await ui.press({ key: "copy-produced" });
+  expect(copies.at(-1)).toBe("opened PR #9 https://github.com/your-org/api/pull/9");
+  await ui.press({ key: "copy-tree" });
+  expect(copies.at(-1)).toBe("builder failed r1 $0.21\n  helper succeeded k1 $0.01");
+  await ui.press({ key: "copy-error" });
+  expect(copies.at(-1)).toBe("the worker could not start");
+  // An open step's detail: Copy beside Hide detail, the detail as stored.
+  expect(await ui.find({ key: "copy-step-1" })).toBeUndefined();
+  await ui.press({ key: "step-toggle-button-1" });
+  await ui.press({ key: "copy-step-1" });
+  expect(copies.at(-1)).toBe("npm test\n--- output (end) ---\nall passed");
+  isCopied = false;
+  await ui.press({ key: "copy-final" });
+  expect(toasts.at(-1)).toBe("Couldn't copy");
+  await ui.unmount();
+});
+
+test("terminal: one Copy section key (y) copies the open step's detail", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  fullServer(on);
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  // No per-card copy buttons on the terminal, and nothing to copy until a step is open.
+  expect(await ui.find({ key: "copy-final" })).toBeUndefined();
+  expect(await ui.find({ key: "copy-section" })).toBeUndefined();
+  await ui.press({ key: "step-open" });
+  expect((await ui.find({ key: "copy-section" }))?.props.hotkey).toBe("y");
+  await ui.press({ key: "copy-section" });
+  expect(copies).toEqual(["npm test\n--- output (end) ---\nall passed"]);
+  expect(toasts.at(-1)).toBe("Copied");
   await ui.unmount();
 });

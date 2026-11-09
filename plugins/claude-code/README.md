@@ -7,8 +7,10 @@ session already has, through `list_runs`, `list_agents`, `get_run`,
 show you.
 
 - Runs grouped by pull request (opened, review, fix rounds, sub-agent runs), as
-  a ledger with time and cost columns or as one strip of steps per pull request.
-- A run's request, final answer, outcomes, services, errors and run tree.
+  a ledger (each run with a status pill, its spend against its budget and a
+  thin budget bar) or as one strip of steps per pull request.
+- A run's request, final answer, outcomes, services, errors and run tree, each
+  in its own card, with a **Copy** button on the desktop.
 - A running run's recent steps, a finished run's steps, and each run's last
   step in the list. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
   terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail

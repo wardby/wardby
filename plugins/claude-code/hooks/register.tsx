@@ -1,5 +1,5 @@
 import { atom, read, update } from "claude-code";
-import type { Register } from "claude-code";
+import type { Register, UiCopyArgs } from "claude-code";
 
 import type { Filter, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps } from "../types";
 
@@ -49,7 +49,7 @@ function taskUrl(task: string | null): string | null {
   return `https://github.com/${match[3]}/${kind}/${match[2]}`;
 }
 const selected = atom({ plugin: "wardby-runs", key: "selected" } as const, null);
-const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-2" });
+const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-3" });
 // A run's steps as get_run_steps returned them (stored already redacted); drawn as plain text only.
 const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-2" });
 // The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail.
@@ -404,7 +404,9 @@ function toOutcomes(value: unknown): RunRow["outcomes"] {
           },
         ];
       case "issue_comment":
-        return [{ kind: "comment", text: `commented on ${String(outcome.issueKey)}`, url: str(outcome.url), pr: null }];
+        return [
+          { kind: "issue_comment", text: `commented on ${String(outcome.issueKey)}`, url: str(outcome.url), pr: null },
+        ];
       default:
         return [];
     }
@@ -446,6 +448,17 @@ function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
 function toDetail(run: Record<string, unknown>): RunDetail {
   const coding = (run.codingResult ?? {}) as Record<string, unknown>;
   const lastStep = (run.lastStep ?? {}) as Record<string, unknown>;
+  const pricing = (run.pricingSnapshot ?? {}) as Record<string, unknown>;
+  // Each service's start-up state (serviceReadiness, wardby 0.8.0+), by name; none from an older server.
+  const readiness = Array.isArray(run.serviceReadiness) ? (run.serviceReadiness as unknown[]) : [];
+  const serviceStates: Record<string, string> = {};
+  for (const item of readiness) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const name = str(entry.name);
+    const state = str(entry.state);
+    if (name && state) serviceStates[name] = state;
+  }
   return {
     id: String(run.id),
     request: str(run.request),
@@ -457,6 +470,9 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     pullRequestUrl: str(coding.pullRequestUrl),
     resultBranch: str(run.resultBranch),
     services: Array.isArray(run.services) ? run.services.map(String) : [],
+    serviceStates,
+    // The model the run was billed at (its catalog entry), when the server recorded one.
+    model: str(pricing.modelId),
     parentRunId: str(run.parentRunId),
     lastStepSeq: typeof lastStep.seq === "number" ? lastStep.seq : null,
   };
@@ -519,17 +535,16 @@ function moveCursor(current: OpenStep | null, runId: string, seqs: number[], del
   return { runId, seq: seqs[next], open: current?.runId === runId && current.open };
 }
 
-/** A step as one line, worded as the server's lastStep.line: "Bash: npm test (exit 1)", "said: …". */
-function stepLine(step: Step): string {
-  const head = step.kind === "tool" ? `${step.tool ?? "tool"}: ${step.summary}` : `said: ${step.summary}`;
-  return step.status && step.status !== "ok" ? `${head} (${step.status})` : head;
+/** A step's text beside its result pill: "Bash: npm test" for a tool, what the model said for the rest. */
+function stepText(step: Step): string {
+  return step.kind === "tool" ? `${step.tool ?? "tool"}: ${step.summary}` : step.summary;
 }
 
-/** A step's mark: › said, … a tool still running, ✓ ok, ✗ error or a non-zero exit (the only coloured one). */
-function stepMark(step: Step): { mark: string; failed: boolean } {
-  if (step.kind !== "tool") return { mark: "›", failed: false };
-  if (step.status === null) return { mark: "…", failed: false };
-  return step.status === "ok" ? { mark: "✓", failed: false } : { mark: "✗", failed: true };
+/** A step's result as a pill: ok, error or the exit status, running for a tool still going, said in grey. */
+function stepPill(step: Step): { label: string; tone: Tone } {
+  if (step.kind !== "tool") return { label: step.kind || "said", tone: "grey" };
+  if (step.status === null) return { label: "running", tone: "blue" };
+  return step.status === "ok" ? { label: "ok", tone: "green" } : { label: step.status, tone: "red" };
 }
 
 /** Runs that are active, or finished within RECENT_MS, newest first. */
@@ -554,19 +569,11 @@ function took(row: RunRow, now: number): string {
 
 const usd = (value: number): string => `$${value.toFixed(2)}`;
 
-function badge(status: string): { icon: string; color: string } {
-  if (status === "running") return { icon: "●", color: "suggestion" };
-  if (status === "pending") return { icon: "○", color: "inactive" };
-  if (status === "succeeded") return { icon: "✓", color: "success" };
-  return { icon: "✗", color: "error" };
-}
-
 // The desktop palette: colour carries a run's status, and nothing else is coloured.
 // Text colours are the theme's own names, so they follow light and dark mode.
 const STATUS_COLOR: Record<string, string> = { running: "suggestion", succeeded: "success", pending: "inactive" };
 const FAILED_COLOR = "error";
 const WARN_COLOR = "warning";
-const HEADING_COLOR = "subtle";
 // SVG can't take theme names: mid-tone colours that read on light and dark, and a see-through grey track.
 const SVG_STATUS: Record<string, string> = { running: "#3b82f6", succeeded: "#22c55e", pending: "#a8a29e" };
 const SVG_FAILED = "#ef4444";
@@ -577,6 +584,76 @@ const svgStatus = (status: string): string => SVG_STATUS[status] ?? SVG_FAILED;
 // The theme's prompt-box border: visible in light and dark, where a dim border all but disappears.
 const BORDER_COLOR = "promptBorder";
 const GROUP_BOX = { borderStyle: "round", borderColor: BORDER_COLOR, paddingX: 1 } as const;
+
+// Pills: a word on a soft tint of its colour. The word takes a theme name, so it follows light and dark
+// mode; the tint is the same hue at 16% opacity, so it reads as a pale wash on a light panel and a deep
+// one on a dark panel, never a fixed light fill. Only the desktop paints the tint; the terminal draws the
+// word in its colour alone.
+type Tone = "blue" | "green" | "red" | "amber" | "grey";
+const TONES: Record<Tone, { fg: string; bg: string }> = {
+  blue: { fg: "suggestion", bg: "#3b82f629" },
+  green: { fg: "success", bg: "#22c55e29" },
+  red: { fg: "error", bg: "#ef444429" },
+  amber: { fg: "warning", bg: "#f59e0b29" },
+  grey: { fg: "inactive", bg: "#a8a29e29" },
+};
+// The current run's row in a run tree: a faint wash, the same on light and dark.
+const HIGHLIGHT_BG = "#a8a29e1f";
+/** A run status's tone: running blue, pending grey, succeeded green, anything else (failed, stopped, …) red. */
+const statusTone = (status: string): Tone =>
+  status === "running" ? "blue" : status === "pending" ? "grey" : status === "succeeded" ? "green" : "red";
+
+/** What a run produced, as a pill: a pull request, a comment, a check or a Jira comment. */
+function outcomeTag(kind: string, text: string): { label: string; tone: Tone } {
+  if (kind === "pull_request") return { label: "PR", tone: "blue" };
+  if (kind === "check") return { label: "check", tone: text.includes("pending") ? "amber" : "green" };
+  if (kind === "issue_comment") return { label: "Jira", tone: "blue" };
+  return { label: kind || "comment", tone: "grey" };
+}
+
+/** A coding-run service's state as a pill: ready, starting (pending or probing), failed. */
+function serviceTag(state: string): { label: string; tone: Tone } | null {
+  if (state === "ready") return { label: "ready", tone: "green" };
+  if (state === "pending" || state === "probing") return { label: "starting", tone: "amber" };
+  if (state === "failed") return { label: "failed", tone: "red" };
+  return null;
+}
+
+/** A run id cut to its ends for the detail header: "cmw8…xqqw". */
+const shortId = (id: string): string => (id.length > 10 ? `${id.slice(0, 4)}…${id.slice(-4)}` : id);
+
+/**
+ * Text cut to about `max` rows of `width` columns, for a collapsed Request or Final answer: whole lines
+ * while they fit, then the next one cut at a word, and how many rows are left. A row is a line, or a
+ * width's worth of a long one; blank lines are kept between shown lines but not counted.
+ */
+function collapse(text: string, width: number, max = 3): { text: string; more: number } {
+  const cols = Math.max(20, width);
+  const rowsOf = (line: string) => Math.max(1, Math.ceil(line.length / cols));
+  const lines = text.split("\n");
+  const total = lines.reduce((sum, line) => sum + (line.trim() === "" ? 0 : rowsOf(line)), 0);
+  const out: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (line.trim() === "") {
+      if (out.length > 0) out.push("");
+      continue;
+    }
+    const rows = rowsOf(line);
+    if (used + rows <= max) {
+      out.push(line);
+      used += rows;
+      if (used === max) break;
+      continue;
+    }
+    const room = (max - used) * cols;
+    const cut = line.lastIndexOf(" ", room);
+    out.push(`${line.slice(0, cut > room / 2 ? cut : room).trimEnd()}…`);
+    used = max;
+    break;
+  }
+  return { text: out.join("\n").trimEnd(), more: Math.max(0, total - used) };
+}
 
 /** The share of its budget a run has spent (0 without a budget). */
 const budgetShare = (row: RunRow): number => (row.budgetUsd ? row.costUsd / row.budgetUsd : 0);
@@ -597,22 +674,18 @@ function budgetHex(row: RunRow): string {
   return svgStatus(row.status);
 }
 
-/** A run in one plain sentence: what started it, how long it ran, and when it was last active. */
-function runSentence(row: RunRow, now: number): string {
-  const start: Record<string, string> = {
-    manual: "Started by hand",
-    scheduled: "Started on its schedule",
-    webhook: "Started by a webhook",
-    subagent: "Started by a lead run",
-    host_event: "Started by a GitHub or Jira event",
-  };
-  const ran = ACTIVE.has(row.status)
-    ? `Running for ${took(row, now)}, ${row.turns} ${row.turns === 1 ? "turn" : "turns"} so far`
-    : `Ran ${took(row, now)} over ${row.turns} ${row.turns === 1 ? "turn" : "turns"}`;
-  const last = row.heartbeatAt ? `, last active ${ago(row.heartbeatAt, now)} ago` : "";
-  return `${start[row.trigger] ?? "Started"}. ${ran}${last}.`;
-}
 const statusColor = (status: string): string => STATUS_COLOR[status] ?? FAILED_COLOR;
+
+/** A list row's spend: "$0.21 of $1.00", or "$0.21" without a budget. */
+const costOf = (row: RunRow): string =>
+  row.budgetUsd ? `${usd(row.costUsd)} of ${usd(row.budgetUsd)}` : usd(row.costUsd);
+
+/** A desktop list row's meta line: what started it, its task as one short line, and how long it ran. */
+function metaOf(row: RunRow, now: number): string {
+  const trigger = `${triggerLabel(row.trigger)}${row.parentRunId ? " (from a lead run)" : ""}`;
+  const task = taskLine(row.task);
+  return [trigger.charAt(0).toUpperCase() + trigger.slice(1), task, took(row, now)].filter(Boolean).join(" · ");
+}
 const statusMark = (status: string): string =>
   status === "running" ? "●" : status === "pending" ? "○" : status === "succeeded" ? "✓" : "✗";
 
@@ -635,21 +708,17 @@ function taskLine(task: string | null, max = 90): string | null {
 }
 
 /** A budget bar as SVG for the desktop: a rounded track and the share spent, in the run's status colour. */
-function budgetSvg(cost: number, budget: number, widthPx: number, fill: string): string {
+function budgetSvg(cost: number, budget: number, widthPx: number, fill: string, heightPx = 6): string {
   const share = Math.max(0, Math.min(1, cost / budget));
   const filled = share > 0 ? Math.max(3, Math.round(share * widthPx)) : 0;
+  const r = heightPx / 2;
+  // Stretched to the width it is drawn at: drawn without a width, it takes the room it has.
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="6" viewBox="0 0 ${widthPx} 6">` +
-    `<rect width="${widthPx}" height="6" rx="3" fill="${SVG_TRACK}" />` +
-    `<rect width="${filled}" height="6" rx="3" fill="${fill}" /></svg>`
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" ` +
+    `viewBox="0 0 ${widthPx} ${heightPx}" preserveAspectRatio="none">` +
+    `<rect width="${widthPx}" height="${heightPx}" rx="${r}" fill="${SVG_TRACK}" />` +
+    `<rect width="${filled}" height="${heightPx}" rx="${r}" fill="${fill}" /></svg>`
   );
-}
-
-/** Markdown cut to about `max` characters at a line break, so a list or a paragraph isn't cut mid-word. */
-function cutMarkdown(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const cut = text.lastIndexOf("\n", max);
-  return `${text.slice(0, cut > max / 2 ? cut : max).trimEnd()}\n\n…`;
 }
 
 function bar(cost: number, budget: number | null, width: number): string {
@@ -1013,6 +1082,19 @@ export const register: Register = (on, options) => {
     const openId = await read($, selected);
     const rows = await read($, runs);
     const width = Math.max(24, (e.props.bodyColumns ?? 40) - 2);
+    const isDesktop = e.surface === "desktop";
+    /**
+     * A status pill: on the desktop a word on a soft tint of its colour; on the terminal, which paints no
+     * tint, the word in its colour, after `mark` when given ("● running") or in brackets ("[ready]").
+     */
+    const pill = (label: string, tone: Tone, mark?: string) =>
+      isDesktop ? (
+        <Text backgroundColor={TONES[tone].bg} color={TONES[tone].fg} weight="medium" size="caption">
+          {` ${label || mark || ""} `}
+        </Text>
+      ) : (
+        <Text color={TONES[tone].fg}>{mark ? (label ? `${mark} ${label}` : mark) : `[${label}]`}</Text>
+      );
 
     const header = (
       <Box flexDirection="column">
@@ -1040,32 +1122,73 @@ export const register: Register = (on, options) => {
       const info = await read($, detail);
       const resumeState = await read($, resume);
       const isFull = (await read($, expanded)) === open.id;
-      const D = e.surface === "desktop";
+      const D = isDesktop;
       // Keys are for the terminal, where the keyboard is the way in; the desktop takes clicks.
       const hk = (key: string) => (D ? {} : { hotkey: key });
-      // Section headings: small, sentence case, one quiet colour.
+      // Section headings: plain, semibold, sentence case.
       const heading = (text: string) =>
         D ? (
-          <Text weight="semibold" size="caption" color={HEADING_COLOR}>
+          <Text weight="semibold" size="footnote">
             {text}
           </Text>
         ) : (
-          <Text dimColor bold>
-            {text}
-          </Text>
+          <Text bold>{text}</Text>
         );
-      // Long text: the whole of it, wrapped, when expanded; else one line cut at the edge.
-      const long = (text: string) =>
-        isFull ? <Text wrap="wrap">{text}</Text> : <Text wrap="truncate-end">{text.slice(0, 400)}</Text>;
-      // Text written as markdown (the request, the run's final answer): drawn as markdown, whole when expanded.
-      const prose = (key: string, text: string) =>
-        Markdown ? <Markdown key={key} text={isFull ? text : cutMarkdown(text, 700)} /> : long(text);
-      const hasLong = [
-        open.task,
-        info?.id === open.id ? info.request : null,
-        info?.id === open.id ? info.finalText : null,
-      ].some((text) => (text ?? "").length > 60);
+      /**
+       * Copies text the pane already holds (as the server sent it, already redacted) and says how it went.
+       * Never adds a field: each section copies exactly what it was given.
+       */
+      const copyText = (text: string) => (press: { surface: UiCopyArgs["surface"] }) =>
+        void $.ui
+          .copy({ text, surface: press.surface })
+          .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
+          .catch(() => $.ui.toast("Couldn't copy"));
+      // Each section is a rounded card: the theme's prompt-box border, visible in light and dark.
+      const card = (key: string, children: unknown) => (
+        <Box key={key} flexDirection="column" {...GROUP_BOX}>
+          {children as never}
+        </Box>
+      );
+      /** A card's heading row: the heading, and on the desktop a small Copy button at its right. */
+      const headingRow = (key: string, text: string, copy: string | null) =>
+        D && copy !== null ? (
+          <Box key={`${key}-head`} alignItems="center">
+            {heading(text)}
+            <Box flexGrow={1} />
+            <Button key={`copy-${key}`} label="Copy" dimColor onPress={copyText(copy)} />
+          </Box>
+        ) : (
+          heading(text)
+        );
+      // The room inside a card, for cutting collapsed text to about three rows.
+      const inner = Math.max(20, width - 4);
+      /** Collapsed long text: about three rows, then how many are left; the whole of it when expanded. */
+      const folded = (key: string, text: string, asMarkdown: boolean, dim = false) => {
+        const cut = isFull ? { text, more: 0 } : collapse(text, inner);
+        return (
+          <Box key={key} flexDirection="column">
+            {asMarkdown && Markdown ? (
+              <Markdown key={`${key}-text`} text={cut.text} {...(dim ? { dimColor: true } : {})} />
+            ) : (
+              <Text wrap="wrap" {...(dim ? { dimColor: true } : {})}>
+                {cut.text}
+              </Text>
+            )}
+            {cut.more > 0 && (
+              <Box key={`${key}-more`}>
+                <Text color={TONES.blue.fg} size="caption">
+                  … {cut.more} more {cut.more === 1 ? "line" : "lines"}
+                  {D ? "" : " (m)"}
+                </Text>
+              </Box>
+            )}
+          </Box>
+        );
+      };
       const shown = info && info.id === open.id ? info : null;
+      // The long texts the detail shows, and whether any is cut: that is when Show full text has work to do.
+      const longTexts = [shown?.request ?? open.task, shown?.finalText].filter((text): text is string => !!text);
+      const hasLong = longTexts.some((text) => collapse(text, inner).more > 0);
       const cursor = await read($, openStep);
       const stepsState = await read($, runSteps);
       const stepsOf = stepsState?.runId === open.id ? stepsState : null;
@@ -1098,18 +1221,25 @@ export const register: Register = (on, options) => {
           ) : null;
         }
         const isRecent = stepsOf.mode === "recent";
-        return (
-          <Box flexDirection="column">
-            {heading(isRecent ? "Recent steps" : "Steps")}
+        return card(
+          "steps-card",
+          <>
+            <Box key="steps-head">
+              {heading(isRecent ? "Recent steps" : "Steps")}
+              <Box flexGrow={1} />
+              {stepsOf.level &&
+                stepsOf.level !== "off" &&
+                pill(stepsOf.level, stepsOf.level === "detail" ? "amber" : "grey")}
+            </Box>
             {stepsOf.steps.map((step) => {
-              const { mark, failed } = stepMark(step);
+              const result = stepPill(step);
               const hasDetail = step.detail !== null;
               const isCursor = cursor?.runId === open.id && cursor.seq === step.seq;
               const isOpen = hasDetail && isCursor && cursor.open;
               const line = (
                 <Text wrap="wrap">
                   {!D && isCursor ? "› " : ""}
-                  <Text {...(failed ? { color: FAILED_COLOR } : { dimColor: true })}>{mark}</Text> {stepLine(step)}
+                  {pill(result.label, result.tone)} {stepText(step)}
                   {hasDetail ? (isOpen ? " ▾" : " ▸") : ""}
                 </Text>
               );
@@ -1121,23 +1251,37 @@ export const register: Register = (on, options) => {
                 }));
               return (
                 <Box key={`step-${step.seq}`} flexDirection="column">
-                  {hasDetail ? (
-                    <Button key={`step-detail-${step.seq}`} onPress={toggle}>
-                      {line}
-                    </Button>
-                  ) : (
-                    line
-                  )}
-                  {D && hasDetail && (
-                    // The desktop has no j/k/e row: a labelled button says the step opens.
-                    <Box key={`step-toggle-${step.seq}`} paddingLeft={2}>
-                      <Button
-                        key={`step-toggle-button-${step.seq}`}
-                        label={isOpen ? "Hide detail" : "Show detail"}
-                        onPress={toggle}
-                      />
+                  <Box key={`step-line-${step.seq}`} alignItems="flex-start">
+                    <Box flexGrow={1} flexShrink={1}>
+                      {hasDetail ? (
+                        <Button key={`step-detail-${step.seq}`} onPress={toggle}>
+                          {line}
+                        </Button>
+                      ) : (
+                        line
+                      )}
                     </Box>
-                  )}
+                    {D && hasDetail && (
+                      // The desktop has no j/k/e row: a labelled button at the line's right says the step opens.
+                      <Box key={`step-toggle-${step.seq}`} flexShrink={0} paddingLeft={1}>
+                        <Box gap={1}>
+                          {isOpen && step.detail !== null && (
+                            <Button
+                              key={`copy-step-${step.seq}`}
+                              label="Copy"
+                              dimColor
+                              onPress={copyText(step.detail)}
+                            />
+                          )}
+                          <Button
+                            key={`step-toggle-button-${step.seq}`}
+                            label={isOpen ? "Hide detail" : "Show detail"}
+                            onPress={toggle}
+                          />
+                        </Box>
+                      </Box>
+                    )}
+                  </Box>
                   {isOpen &&
                     step.detail !== null &&
                     (() => {
@@ -1151,7 +1295,7 @@ export const register: Register = (on, options) => {
                               … {hidden} more {hidden === 1 ? "line" : "lines"}
                             </Text>
                           )}
-                          <Text dimColor wrap="wrap">
+                          <Text dimColor wrap="wrap" mono={D}>
                             {text}
                           </Text>
                         </Box>
@@ -1186,6 +1330,14 @@ export const register: Register = (on, options) => {
                     })
                   }
                 />
+                {(() => {
+                  // The terminal's one copy key: the open step's detail, as stored.
+                  const at = cursor?.runId === open.id && cursor.open ? cursor.seq : null;
+                  const text = stepsOf.steps.find((st) => st.seq === at)?.detail ?? null;
+                  return text !== null ? (
+                    <Button key="copy-section" label="Copy section (y)" hotkey="y" onPress={copyText(text)} />
+                  ) : null;
+                })()}
               </Box>
             )}
             {!isRecent && stepsOf.next !== null && (
@@ -1203,62 +1355,318 @@ export const register: Register = (on, options) => {
                 <Text dimColor>{`${stepsOf.dropped} later steps were not recorded (the per-run limit).`}</Text>
               </Box>
             )}
-          </Box>
+          </>,
         );
       })();
       const prOutcome = open.outcomes.find((o) => o.kind === "pull_request" && o.url);
       const prUrl = shown?.pullRequestUrl ?? prOutcome?.url ?? null;
       const prNumber = prUrl ? /\/pull\/(\d+)/.exec(prUrl)?.[1] : null;
+      // One dim line under the header: where, which model, how long, and when it finished or was last active.
+      const when = open.finishedAt
+        ? `finished ${ago(open.finishedAt, now)} ago`
+        : open.heartbeatAt
+          ? `last active ${ago(open.heartbeatAt, now)} ago`
+          : "";
+      const meta = [shown?.repository ?? null, shown?.model ?? null, took(open, now), when]
+        .filter((part): part is string => !!part)
+        .join(" · ");
+      const budgetText = open.budgetUsd
+        ? `${usd(open.costUsd)} of ${usd(open.budgetUsd)} budget`
+        : `${usd(open.costUsd)} spent`;
+      const tree = treeOf(rows, open.id);
       return (
         <Box flexDirection="column" gap={1}>
-          <Box>
-            <Button
-              key="back"
-              label="‹ Runs"
-              {...hk("b")}
-              onPress={() => {
-                void update($, selected, () => null);
-                void update($, openStep, () => null);
-              }}
-            />
-          </Box>
           <Box flexDirection="column">
+            {/* The header: back, the agent, its status, and the short run id at the right. */}
             <Box gap={1} alignItems="center">
-              <Text size="heading" weight="semibold" bold={!D}>
+              <Button
+                key="back"
+                label="‹ Runs"
+                {...hk("b")}
+                {...(D ? { dimColor: true } : {})}
+                onPress={() => {
+                  void update($, selected, () => null);
+                  void update($, openStep, () => null);
+                }}
+              />
+              <Text size="heading" weight="semibold" bold={!D} wrap="truncate-end">
                 {open.agentName}
               </Text>
-              <Text color={statusColor(open.status)} weight="semibold" bold={!D}>
-                {statusMark(open.status)} {open.status.replaceAll("_", " ")}
+              {pill(open.status.replaceAll("_", " "), statusTone(open.status), statusMark(open.status))}
+              <Box flexGrow={1} />
+              <Text dimColor mono size="caption">
+                {shortId(open.id)}
               </Text>
             </Box>
-            <Text dimColor size="caption">
-              {runSentence(open, now)}
+            <Text dimColor size="caption" wrap="wrap">
+              {meta}
             </Text>
-          </Box>
-          {D && open.budgetUsd && Svg ? (
-            <Box gap={1} alignItems="center">
-              <Svg
-                source={budgetSvg(open.costUsd, open.budgetUsd, 200, budgetHex(open))}
-                alt={`${usd(open.costUsd)} of ${usd(open.budgetUsd)} budget`}
-                width={200}
-                height={6}
-              />
+            {open.budgetUsd ? (
+              D && Svg ? (
+                <Svg
+                  source={budgetSvg(open.costUsd, open.budgetUsd, 480, budgetHex(open))}
+                  alt={`${usd(open.costUsd)} of ${usd(open.budgetUsd)} budget`}
+                  height={6}
+                />
+              ) : (
+                <Text>
+                  <Text color={budgetColor(open)}>{bar(open.costUsd, open.budgetUsd, Math.min(40, width - 2))}</Text>
+                </Text>
+              )
+            ) : null}
+            <Box>
               <Text
                 size="caption"
                 tabular
                 {...(budgetShare(open) >= 0.8 ? { color: budgetColor(open) } : { dimColor: true })}
               >
-                {usd(open.costUsd)} of {usd(open.budgetUsd)}
+                {budgetText}
+              </Text>
+              <Box flexGrow={1} />
+              <Text dimColor size="caption" tabular>
+                turn {open.turns}
               </Text>
             </Box>
-          ) : (
-            <Text>
-              {bar(open.costUsd, open.budgetUsd, 20)} {usd(open.costUsd)}
-              {open.budgetUsd ? ` of ${usd(open.budgetUsd)}` : ""}
-            </Text>
+          </Box>
+          {shown && (shown.error || shown.failureCategory) && (
+            // An error reads first, in a red box: what failed, then the plain message.
+            <Box
+              flexDirection="column"
+              {...(D ? { borderStyle: "round", borderColor: FAILED_COLOR, paddingX: 1 } : {})}
+            >
+              <Box alignItems="center">
+                <Text color={FAILED_COLOR} weight="semibold" bold>
+                  {shown.failureCategory ? shown.failureCategory.replaceAll("_", " ") : "Failed"}
+                </Text>
+                <Box flexGrow={1} />
+                {D && shown.error && <Button key="copy-error" label="Copy" dimColor onPress={copyText(shown.error)} />}
+              </Box>
+              {shown.error && <Text wrap="wrap">{shown.error}</Text>}
+            </Box>
           )}
-          {/* Actions: the pull request first, then quiet ones. */}
-          <Box gap={2} alignItems="center" flexWrap="wrap">
+          {stepsOf?.mode === "recent" && stepsBlock}
+          {(open.via || shown?.request || open.task) &&
+            card(
+              "started-card",
+              <>
+                {headingRow("started", "Started by", shown?.request ?? open.task ?? null)}
+                {open.via && (
+                  <Box gap={1}>
+                    <Text>
+                      {open.via.event === "mention"
+                        ? "A mention on"
+                        : open.via.event === "review"
+                          ? "A review of"
+                          : "Issue"}
+                    </Text>
+                    {open.via.url ? (
+                      <Link href={open.via.url} label={open.via.pr.replace(/^issue:/, "")} />
+                    ) : (
+                      <Text>{open.via.pr.replace(/^issue:/, "")}</Text>
+                    )}
+                  </Box>
+                )}
+                {/* What it was asked: the request once loaded (markdown), else the task. */}
+                {shown?.request
+                  ? folded("request", shown.request, true)
+                  : open.task
+                    ? folded("task", open.task, false, true)
+                    : null}
+              </>,
+            )}
+          {(open.outcomes.length > 0 || (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
+            card(
+              "produced-card",
+              <>
+                {headingRow(
+                  "produced",
+                  "What it produced",
+                  open.outcomes.length > 0
+                    ? open.outcomes.map((o) => (o.url ? `${o.text} ${o.url}` : o.text)).join("\n")
+                    : shown?.pullRequestUrl
+                      ? `Pull request ${shown.pullRequestUrl}`
+                      : null,
+                )}
+                {open.outcomes.map((outcome, i) => {
+                  const tag = outcomeTag(outcome.kind, outcome.text);
+                  return (
+                    <Box key={`outcome-${i}`} gap={1}>
+                      {pill(tag.label, tag.tone)}
+                      {outcome.url ? (
+                        <Link
+                          href={outcome.url}
+                          label={`${outcome.text.replace(/^opened /, "Opened ")}${outcome.pr ? ` in ${outcome.pr.replace(/#\d+$/, "")}` : ""}`}
+                        />
+                      ) : (
+                        <Text>{outcome.text.charAt(0).toUpperCase() + outcome.text.slice(1)}</Text>
+                      )}
+                    </Box>
+                  );
+                })}
+                {open.outcomes.length === 0 && shown?.pullRequestUrl && (
+                  <Box gap={1}>
+                    {pill("PR", "blue")}
+                    <Link
+                      href={shown.pullRequestUrl}
+                      label={`Pull request${prNumber ? ` #${prNumber}` : ""}${shown.repository ? ` in ${shown.repository}` : ""}`}
+                    />
+                  </Box>
+                )}
+                {!shown?.pullRequestUrl && shown?.resultBranch && <Text>Pushed branch {shown.resultBranch}</Text>}
+                {shown?.outcome && !shown.pullRequestUrl && !shown.resultBranch && (
+                  <Text dimColor>{shown.outcome.replaceAll("_", " ")}</Text>
+                )}
+              </>,
+            )}
+          {!shown && <Text dimColor>Loading details…</Text>}
+          {tree.length >= 2 &&
+            card(
+              "tree-card",
+              <>
+                {headingRow(
+                  "tree",
+                  "Run tree",
+                  tree
+                    .map(
+                      ({ row, depth }) =>
+                        `${"  ".repeat(depth)}${[row.agentName, row.status.replaceAll("_", " "), row.id, usd(row.costUsd)].join(" ")}`,
+                    )
+                    .join("\n"),
+                )}
+                {tree.map(({ row, depth }) => {
+                  const isThis = row.id === open.id;
+                  const role = `${depth === 0 ? "lead" : "sub-agent"}${isThis ? " · this run" : ""}`;
+                  const indent = depth === 0 ? "" : `${"  ".repeat(depth - 1)}└ `;
+                  const mark = pill("", statusTone(row.status), statusMark(row.status));
+                  const name = (
+                    <Text>
+                      <Text dimColor>{indent}</Text>
+                      {mark} {isThis ? <Text weight="semibold">{row.agentName}</Text> : row.agentName}{" "}
+                      <Text dimColor>{role}</Text>
+                    </Text>
+                  );
+                  return (
+                    <Box
+                      key={`tree-row-${row.id}`}
+                      {...(D && isThis ? { backgroundColor: HIGHLIGHT_BG } : {})}
+                      paddingLeft={depth > 0 && D ? 1 : 0}
+                    >
+                      <Box flexGrow={1} flexShrink={1}>
+                        {isThis ? (
+                          <Text bold={!D} wrap="truncate-end">
+                            {name}
+                          </Text>
+                        ) : (
+                          <Button
+                            key={`tree-${row.id}`}
+                            onPress={() => {
+                              void update($, selected, () => row.id);
+                              void pane.loadDetail(row.id);
+                            }}
+                          >
+                            {name}
+                          </Button>
+                        )}
+                      </Box>
+                      <Text dimColor size="caption" tabular>
+                        {" "}
+                        {usd(row.costUsd)} · {took(row, now)}
+                      </Text>
+                    </Box>
+                  );
+                })}
+              </>,
+            )}
+          {shown &&
+            shown.services.length > 0 &&
+            card(
+              "services-card",
+              <>
+                {heading("Services")}
+                {shown.services.map((label, i) => {
+                  const tag = serviceTag(shown.serviceStates[label.split(" ")[0]] ?? "");
+                  return (
+                    <Box key={`service-${i}`} gap={1}>
+                      {tag && pill(tag.label, tag.tone)}
+                      <Text>{label}</Text>
+                    </Box>
+                  );
+                })}
+              </>,
+            )}
+          {stepsOf?.mode === "all" && stepsBlock}
+          {shown?.finalText &&
+            card(
+              "final-card",
+              <>
+                {headingRow("final", "Final answer", shown.finalText)}
+                {folded("final", shown.finalText, true)}
+              </>,
+            )}
+          {shown &&
+            !ACTIVE.has(open.status) &&
+            (shown.outcome || shown.resultBranch) &&
+            Input &&
+            card(
+              "continue-card",
+              <>
+                {heading("Continue locally")}
+                {(() => {
+                  const state = resumeState?.runId === open.id ? resumeState : null;
+                  const dir = state?.dir ?? suggestedDir(shown.repository);
+                  return (
+                    <Box flexDirection="column">
+                      <Input
+                        key="resume-dir"
+                        label="Clone of the repository"
+                        value={dir}
+                        onInput={(value: string) =>
+                          void update($, resume, (old): Resume => ({
+                            runId: open.id,
+                            dir: value,
+                            phase: old?.runId === open.id ? old.phase : "idle",
+                            output: old?.runId === open.id ? old.output : "",
+                            command: old?.runId === open.id ? old.command : null,
+                          }))
+                        }
+                        onSubmit={(value: string) => void pane.continueLocally(open.id, value)}
+                      />
+                      <Box gap={1}>
+                        <Button
+                          key="continue-locally"
+                          label={state?.phase === "running" ? "Importing…" : "Continue locally"}
+                          {...hk("c")}
+                          onPress={() => {
+                            if (state?.phase !== "running") void pane.continueLocally(open.id, dir);
+                          }}
+                        />
+                        {state?.command && (
+                          <Button
+                            key="copy-command"
+                            label="Copy command"
+                            onPress={(press) =>
+                              void $.ui.copy({ text: state.command as string, surface: press.surface })
+                            }
+                          />
+                        )}
+                      </Box>
+                      {state?.phase === "done" && state.command && (
+                        <Text>Imported. Run this in a terminal to continue the session:</Text>
+                      )}
+                      {state?.command && (
+                        <Text mono wrap="truncate-end">
+                          {state.command.length > 160 ? `${state.command.slice(0, 160)}…` : state.command}
+                        </Text>
+                      )}
+                      {state?.phase === "error" && <Text color={FAILED_COLOR}>{state.output.slice(-600)}</Text>}
+                      {state?.phase === "done" && !state.command && <Text dimColor>{state.output.slice(-600)}</Text>}
+                    </Box>
+                  );
+                })()}
+              </>,
+            )}
+          {/* Actions: the pull request first, then the quiet ones. */}
+          <Box key="actions" gap={2} alignItems="center" flexWrap="wrap">
             {prUrl && <Link href={prUrl} label={prNumber ? `Open pull request #${prNumber}` : "Open pull request"} />}
             {hasLong && (
               <Button
@@ -1273,195 +1681,22 @@ export const register: Register = (on, options) => {
               label="Copy run id"
               onPress={(press) => void $.ui.copy({ text: open.id, surface: press.surface })}
             />
+            {shown?.parentRunId && !rows.some((row) => row.id === shown.parentRunId) && (
+              <Button
+                key="parent"
+                label="Open lead run"
+                onPress={() => {
+                  void update($, selected, () => shown.parentRunId);
+                  void pane.loadDetail(shown.parentRunId as string);
+                }}
+              />
+            )}
           </Box>
-          {shown && (shown.error || shown.failureCategory) && (
-            // An error reads first, in a pale red box: what failed, then the plain message.
-            <Box
-              flexDirection="column"
-              {...(D ? { borderStyle: "round", borderColor: FAILED_COLOR, paddingX: 1 } : {})}
-            >
-              <Text color={FAILED_COLOR} weight="semibold" bold>
-                {shown.failureCategory ? shown.failureCategory.replaceAll("_", " ") : "Failed"}
-              </Text>
-              {shown.error && <Text wrap="wrap">{shown.error}</Text>}
-            </Box>
-          )}
-          {stepsOf?.mode === "recent" && stepsBlock}
-          {open.via && (
-            <Box flexDirection="column">
-              {heading("Started by")}
-              <Box gap={1}>
-                <Text>
-                  {open.via.event === "mention"
-                    ? "A mention on"
-                    : open.via.event === "review"
-                      ? "A review of"
-                      : "Issue"}
-                </Text>
-                {open.via.url ? (
-                  <Link href={open.via.url} label={open.via.pr.replace(/^issue:/, "")} />
-                ) : (
-                  <Text>{open.via.pr.replace(/^issue:/, "")}</Text>
-                )}
-              </Box>
-            </Box>
-          )}
-          {(open.outcomes.length > 0 || (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) && (
-            <Box flexDirection="column">
-              {heading("What it produced")}
-              {open.outcomes.map((outcome, i) =>
-                outcome.url ? (
-                  <Link
-                    key={`outcome-${i}`}
-                    href={outcome.url}
-                    label={`${outcome.text.replace(/^opened /, "Opened ")}${outcome.pr ? ` in ${outcome.pr.replace(/#\d+$/, "")}` : ""}`}
-                  />
-                ) : (
-                  <Text key={`outcome-${i}`}>{outcome.text.charAt(0).toUpperCase() + outcome.text.slice(1)}</Text>
-                ),
-              )}
-              {open.outcomes.length === 0 && shown?.pullRequestUrl && (
-                <Link
-                  href={shown.pullRequestUrl}
-                  label={`Pull request${prNumber ? ` #${prNumber}` : ""}${shown.repository ? ` in ${shown.repository}` : ""}`}
-                />
-              )}
-              {!shown?.pullRequestUrl && shown?.resultBranch && <Text>Pushed branch {shown.resultBranch}</Text>}
-              {shown?.outcome && !shown.pullRequestUrl && !shown.resultBranch && (
-                <Text dimColor>{shown.outcome.replaceAll("_", " ")}</Text>
-              )}
-            </Box>
-          )}
-          {!shown && <Text dimColor>Loading details…</Text>}
-          {open.task && !shown?.request && (
-            <Box flexDirection="column">
-              {heading("Task")}
-              {long(open.task)}
-            </Box>
-          )}
-          {shown?.request && (
-            <Box flexDirection="column">
-              {heading("Request")}
-              {prose("request-text", shown.request)}
-            </Box>
-          )}
-          {shown && shown.services.length > 0 && (
-            <Box flexDirection="column">
-              {heading("Services")}
-              <Text>{shown.services.join(", ")}</Text>
-            </Box>
-          )}
-          {shown?.finalText && (
-            <Box flexDirection="column">
-              {heading("Final answer")}
-              {prose("final-text", shown.finalText)}
-            </Box>
-          )}
-          {stepsOf?.mode === "all" && stepsBlock}
-          {shown && !ACTIVE.has(open.status) && (shown.outcome || shown.resultBranch) && Input && (
-            <Box flexDirection="column">
-              {heading("Continue locally")}
-              {(() => {
-                const state = resumeState?.runId === open.id ? resumeState : null;
-                const dir = state?.dir ?? suggestedDir(shown.repository);
-                return (
-                  <Box flexDirection="column">
-                    <Input
-                      key="resume-dir"
-                      label="Clone of the repository"
-                      value={dir}
-                      onInput={(value: string) =>
-                        void update($, resume, (old): Resume => ({
-                          runId: open.id,
-                          dir: value,
-                          phase: old?.runId === open.id ? old.phase : "idle",
-                          output: old?.runId === open.id ? old.output : "",
-                          command: old?.runId === open.id ? old.command : null,
-                        }))
-                      }
-                      onSubmit={(value: string) => void pane.continueLocally(open.id, value)}
-                    />
-                    <Box gap={1}>
-                      <Button
-                        key="continue-locally"
-                        label={state?.phase === "running" ? "Importing…" : "Continue locally"}
-                        {...hk("c")}
-                        onPress={() => {
-                          if (state?.phase !== "running") void pane.continueLocally(open.id, dir);
-                        }}
-                      />
-                      {state?.command && (
-                        <Button
-                          key="copy-command"
-                          label="Copy command"
-                          onPress={(press) => void $.ui.copy({ text: state.command as string, surface: press.surface })}
-                        />
-                      )}
-                    </Box>
-                    {state?.phase === "done" && state.command && (
-                      <Text>Imported. Run this in a terminal to continue the session:</Text>
-                    )}
-                    {state?.command && (
-                      <Text mono wrap="truncate-end">
-                        {state.command.length > 160 ? `${state.command.slice(0, 160)}…` : state.command}
-                      </Text>
-                    )}
-                    {state?.phase === "error" && <Text color={FAILED_COLOR}>{state.output.slice(-600)}</Text>}
-                    {state?.phase === "done" && !state.command && <Text dimColor>{state.output.slice(-600)}</Text>}
-                  </Box>
-                );
-              })()}
-            </Box>
-          )}
-          {(() => {
-            const tree = treeOf(rows, open.id);
-            if (tree.length < 2) return null;
-            return (
-              <Box flexDirection="column">
-                {heading("Run tree")}
-                {tree.map(({ row, depth }) => {
-                  const markColor = statusColor(row.status);
-                  return row.id === open.id ? (
-                    <Text key={`tree-${row.id}`} bold>
-                      {branch(depth)}
-                      {statusMark(row.status)} {row.agentName} (this run) {usd(row.costUsd)}, {took(row, now)}
-                    </Text>
-                  ) : (
-                    <Button
-                      key={`tree-${row.id}`}
-                      onPress={() => {
-                        void update($, selected, () => row.id);
-                        void pane.loadDetail(row.id);
-                      }}
-                    >
-                      <Text dimColor>{branch(depth)}</Text>
-                      <Text color={markColor}>{statusMark(row.status)}</Text> {row.agentName}{" "}
-                      <Text dimColor>
-                        {usd(row.costUsd)}, {took(row, now)}
-                      </Text>
-                    </Button>
-                  );
-                })}
-              </Box>
-            );
-          })()}
-          {shown?.parentRunId && !rows.some((row) => row.id === shown.parentRunId) && (
-            <Button
-              key="parent"
-              label="Open lead run"
-              onPress={() => {
-                void update($, selected, () => shown.parentRunId);
-                void pane.loadDetail(shown.parentRunId as string);
-              }}
-            />
-          )}
         </Box>
       );
     }
 
     const active = rows.filter((row) => ACTIVE.has(row.status)).length;
-    // The desktop draws the mockup's cards, chips, tiles and SVG bars; the terminal keeps text rows.
-    const isDesktop = e.surface === "desktop";
     const spent = rows.reduce((sum, row) => sum + row.costUsd, 0);
     const f = await read($, filter);
     const groupToggles = await read($, groupOpen);
@@ -1728,23 +1963,6 @@ export const register: Register = (on, options) => {
         {isDesktop && currentView === "ledger" && (
           // The ledger: a group row per pull request, collapsible, then one line per run.
           <Box flexDirection="column">
-            <Box>
-              <Box width={2} />
-              <Text dimColor size="caption">
-                Run
-              </Text>
-              <Box flexGrow={1} />
-              <Box width={8} justifyContent="flex-end">
-                <Text dimColor size="caption">
-                  Time
-                </Text>
-              </Box>
-              <Box width={8} justifyContent="flex-end">
-                <Text dimColor size="caption">
-                  Cost
-                </Text>
-              </Box>
-            </Box>
             {asLedger(shown).map((group) => {
               const total = group.rows.reduce((sum, { row }) => sum + row.costUsd, 0);
               const isActive = group.rows.some(({ row }) => ACTIVE.has(row.status));
@@ -1757,25 +1975,22 @@ export const register: Register = (on, options) => {
               /** One run as a ledger line; `withPr` adds the pull request's link (a one-run group's only line). */
               const runLine = ({ row, depth, event }: LedgerGroup["rows"][number], withPr = false) => {
                 const label = depth === 0 ? stepLabel(row, event) : "└";
-                const failed = !ACTIVE.has(row.status) && row.status !== "succeeded";
                 const pr =
                   withPr && group.url
                     ? `  [${clean(group.label)} ↗](${group.url})`
                     : withPr
                       ? `  ${clean(group.label)}`
                       : "";
+                const indent = depth > 0 ? 3 : 0;
                 return (
-                  <Box key={row.id} flexDirection="column">
-                    <Box>
-                      <Box width={2}>
-                        <Text color={statusColor(row.status)} weight="semibold">
-                          {statusMark(row.status)}
-                        </Text>
-                      </Box>
-                      <Box flexGrow={1} marginLeft={depth > 0 ? 3 : 1}>
+                  <Box key={row.id} flexDirection="column" marginTop={1}>
+                    {/* The status pill and the agent, "$x of $y" at the right. */}
+                    <Box alignItems="center" marginLeft={indent}>
+                      {pill(row.status.replaceAll("_", " "), statusTone(row.status))}
+                      <Box flexGrow={1} flexShrink={1} marginLeft={1}>
                         <Markdown
                           key={`run-${row.id}`}
-                          text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}${failed ? `  ${row.status.replaceAll("_", " ")}` : ""}`}
+                          text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}`}
                           pressableLinks={[runHref(row.id)]}
                           onLinkPress={() => {
                             void update($, selected, () => row.id);
@@ -1783,32 +1998,35 @@ export const register: Register = (on, options) => {
                           }}
                         />
                       </Box>
-                      <Box width={8} justifyContent="flex-end">
-                        <Text
-                          tabular
-                          size="caption"
-                          {...(ACTIVE.has(row.status) ? { color: statusColor(row.status) } : { dimColor: true })}
-                        >
-                          {took(row, now)}
-                        </Text>
-                      </Box>
-                      <Box width={8} justifyContent="flex-end">
-                        <Text
-                          tabular
-                          size="caption"
-                          {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
-                        >
-                          {usd(row.costUsd)}
-                        </Text>
-                      </Box>
+                      <Text
+                        tabular
+                        size="caption"
+                        {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
+                      >
+                        {costOf(row)}
+                      </Text>
                     </Box>
                     {showsLastLine(row) && (
-                      <Box key={`last-${row.id}`} marginLeft={depth > 0 ? 5 : 3}>
+                      <Box key={`last-${row.id}`} marginLeft={indent}>
                         <Text dimColor size="caption" wrap="truncate-end">
-                          {row.lastLine}
+                          ↳ {row.lastLine}
                         </Text>
                       </Box>
                     )}
+                    <Box marginLeft={indent}>
+                      <Text dimColor size="caption" wrap="truncate-end">
+                        {metaOf(row, now)}
+                      </Text>
+                    </Box>
+                    {Svg && row.budgetUsd ? (
+                      <Box marginLeft={indent}>
+                        <Svg
+                          source={budgetSvg(row.costUsd, row.budgetUsd, 480, budgetHex(row), 3)}
+                          alt={`${usd(row.costUsd)} of ${usd(row.budgetUsd)} budget`}
+                          height={3}
+                        />
+                      </Box>
+                    ) : null}
                   </Box>
                 );
               };
@@ -1866,29 +2084,37 @@ export const register: Register = (on, options) => {
                   );
                 }
                 const { row, depth, event } = entry;
-                const { icon, color } = badge(row.status);
                 // Keys 1-9 open the first nine runs: in the classic terminal the keyboard is the only way in.
                 const index = runIndex++;
                 const hotkey = index < 9 ? String(index + 1) : undefined;
                 const done = row.outcomes.map((o) => o.text).join(" · ");
                 return (
                   <Box key={row.id} flexDirection="column">
-                    <Button
-                      key={`run-${row.id}`}
-                      {...(hotkey ? { hotkey } : {})}
-                      onPress={() => {
-                        void update($, selected, () => row.id);
-                        void pane.loadDetail(row.id);
-                      }}
-                    >
-                      {hotkey ? <Text dimColor>{hotkey} </Text> : ""}
-                      {depth > 0 ? (
-                        <Text dimColor>{event ? `${"   ".repeat(depth)}${event} → ` : branch(depth)}</Text>
-                      ) : (
-                        ""
-                      )}
-                      <Text color={color}>{icon}</Text> {row.agentName} <Text dimColor>{row.status}</Text>
-                    </Button>
+                    {/* The status pill and the agent, "$x of $y" at the right. */}
+                    <Box>
+                      <Button
+                        key={`run-${row.id}`}
+                        {...(hotkey ? { hotkey } : {})}
+                        onPress={() => {
+                          void update($, selected, () => row.id);
+                          void pane.loadDetail(row.id);
+                        }}
+                      >
+                        {hotkey ? <Text dimColor>{hotkey} </Text> : ""}
+                        {depth > 0 ? (
+                          <Text dimColor>{event ? `${"   ".repeat(depth)}${event} → ` : branch(depth)}</Text>
+                        ) : (
+                          ""
+                        )}
+                        {pill(row.status.replaceAll("_", " "), statusTone(row.status), statusMark(row.status))}{" "}
+                        <Text bold>{row.agentName}</Text>
+                      </Button>
+                      <Box flexGrow={1} />
+                      <Text tabular {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}>
+                        {" "}
+                        {costOf(row)}
+                      </Text>
+                    </Box>
                     {showsLastLine(row) && (
                       // The server's line, as plain text: it is never markdown or a link.
                       <Box key={`last-${row.id}`}>
@@ -1898,6 +2124,7 @@ export const register: Register = (on, options) => {
                         </Text>
                       </Box>
                     )}
+                    {/* The meta line: what started it, the task as one line, how long it ran, what it produced. */}
                     <Box>
                       <Text dimColor wrap="truncate-end">
                         {"  "}
@@ -1916,14 +2143,12 @@ export const register: Register = (on, options) => {
                           </Text>
                         )
                       )}
+                      <Text dimColor wrap="truncate-end">
+                        {" · "}
+                        {took(row, now)}
+                        {done ? ` · ${done}` : ""}
+                      </Text>
                     </Box>
-                    <Text dimColor wrap="truncate-end">
-                      {"  "}
-                      {took(row, now)} · {usd(row.costUsd)}
-                      {row.budgetUsd ? ` of ${usd(row.budgetUsd)}` : ""}{" "}
-                      {ACTIVE.has(row.status) ? bar(row.costUsd, row.budgetUsd, Math.min(12, width - 30)) : ""}
-                      {done ? ` · ${done}` : ""}
-                    </Text>
                   </Box>
                 );
               });
