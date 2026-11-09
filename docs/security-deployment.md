@@ -647,7 +647,11 @@ cut to one short line) for `get_run_steps`; see
 [Run steps](debugging-agent-runs.md#run-steps). Only the control plane and the
 native gateway write them, and only after removing every secret value of the
 run's agent and every token-shaped value; a step whose agent secrets can't be
-read is not stored. Tool output is never recorded. Set `WARDBY_RUN_STEPS=off` to
+read is not stored. At `summary` tool output is never recorded. At `detail` (the instance and the
+agent's owner must both choose it) the end of each tool's output is stored,
+redacted as above; a secret that only exists in a file the run read, and that
+matches no known shape, can remain. Detail is returned only to the agent's owner
+and the run's starter, never to the admin viewer. Set `WARDBY_RUN_STEPS=off` to
 record nothing.
 
 **Claude Code and Codex runs.** The coding proxy holds no secret values, so it
@@ -656,7 +660,9 @@ sends step text to the control plane's run-steps listener
 unmasked. Neither side logs, stores or echoes that text or a request body; the
 control plane redacts it by exact value (the same path as native runs) before
 writing. The proxy sends nothing unless `WARDBY_RUN_STEPS_URL` is set and
-`WARDBY_RUN_STEPS` is not `off`.
+`WARDBY_RUN_STEPS` is not `off`. It sends tool output (its last 4 KB) only for a
+run at `detail`, and only when its own `WARDBY_RUN_STEPS` is `detail`; the same
+listener conditions apply.
 
 The listener is authenticated by the run's capability. The run's worker holds
 that capability too (it is the worker's model API key), so it limits a caller to

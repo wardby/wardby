@@ -1000,6 +1000,9 @@ alone does nothing: coding runs' steps need a `wardby serve` with
 environment (for example `http://host.docker.internal:8792`); see
 [Run steps](debugging-agent-runs.md#run-steps) and, for binding the listener
 safely, [Run steps in Security deployment](security-deployment.md#run-steps).
+For a coding agent whose owner sets `runSteps` to `detail`, also set
+`WARDBY_RUN_STEPS=detail` on the proxy, or no tool output is sent; see
+[Run steps](debugging-agent-runs.md#run-steps).
 
 ## Stop the setup
 
