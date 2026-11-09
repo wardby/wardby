@@ -346,11 +346,17 @@ describe("cost", () => {
   it("finds ellipsis boundaries in linear time, even in long runs of spaces and dots", () => {
     const detail = stepDetailer(secrets);
     for (const text of [" ".repeat(MAX_STEP_TEXT_CHARS), " .".repeat(MAX_STEP_TEXT_CHARS / 2), "… ".repeat(8192)]) {
-      const started = performance.now();
-      detail.step(said(text));
-      const elapsed = performance.now() - started;
-      console.info(`detail cost: ${JSON.stringify(text.slice(0, 4))}… x 16 KiB: ${elapsed.toFixed(1)} ms`);
-      expect(elapsed).toBeLessThan(100);
+      const times: number[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        const started = performance.now();
+        detail.step(said(text));
+        times.push(performance.now() - started);
+      }
+      // The median, so one call slowed by a loaded machine does not fail the run; a quadratic scan is
+      // seconds on these inputs, far past the bound on every call.
+      const median = [...times].sort((a, b) => a - b)[2];
+      console.info(`detail cost: ${JSON.stringify(text.slice(0, 4))}… x 16 KiB: median ${median.toFixed(1)} ms`);
+      expect(median).toBeLessThan(100);
     }
   });
 
