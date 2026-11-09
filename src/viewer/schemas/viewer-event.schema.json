@@ -136,6 +136,57 @@
             "source"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "step"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "seq": {
+              "type": "integer"
+            },
+            "stepKind": {
+              "type": "string",
+              "enum": [
+                "tool",
+                "said"
+              ]
+            },
+            "tool": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "seq",
+            "stepKind",
+            "tool",
+            "summary",
+            "status",
+            "at"
+          ],
+          "additionalProperties": false
         }
       ]
     }

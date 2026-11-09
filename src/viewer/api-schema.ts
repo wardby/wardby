@@ -132,6 +132,21 @@ export const GraphSnapshotSchema = z.object({
   spend: z.object({ todayUsd: z.number(), groups: z.array(BudgetGroupSpendSchema) }),
 });
 
+/**
+ * One recorded run step (docs/viewer-api.md): a tool call or what the model said, one line. Stored
+ * already redacted (src/core/run-steps/writer.ts); a step's call id and detail text are never sent.
+ */
+export const RunStepSchema = z.object({
+  seq: z.number().int(),
+  at: z.string(),
+  kind: z.enum(["tool", "said"]),
+  /** The tool's display name (`Bash`, `Edit`, `mcp:<tool>`); null for said. */
+  tool: z.string().nullable(),
+  summary: z.string(),
+  /** `ok`, `error` or `exit N` once the result is back; null until then and for said. */
+  status: z.string().nullable(),
+});
+
 export const RunDetailSchema = GraphRunSchema.extend({
   error: z.string().nullable(),
   finalText: z.string().nullable(),
@@ -182,6 +197,17 @@ export const ViewerEventSchema = z.discriminatedUnion("kind", [
     /** Which table changed (the viewer NOTIFY trigger names them). */
     source: z.enum(["pull_request", "host_status", "issue_status", "host_check"]),
   }),
+  /** A run recorded a step, or a step's status arrived (the RunStep NOTIFY trigger). */
+  z.object({
+    kind: z.literal("step"),
+    runId: z.string(),
+    seq: RunStepSchema.shape.seq,
+    stepKind: RunStepSchema.shape.kind,
+    tool: RunStepSchema.shape.tool,
+    summary: RunStepSchema.shape.summary,
+    status: RunStepSchema.shape.status,
+    at: RunStepSchema.shape.at,
+  }),
 ]);
 
 export type RunTriggerInfo = z.infer<typeof RunTriggerSchema>;
@@ -190,6 +216,7 @@ export type ServiceStatus = z.infer<typeof ServiceStatusSchema>;
 export type GraphRun = z.infer<typeof GraphRunSchema>;
 export type GraphSnapshot = z.infer<typeof GraphSnapshotSchema>;
 export type RunDetail = z.infer<typeof RunDetailSchema>;
+export type RunStepView = z.infer<typeof RunStepSchema>;
 export type ViewerEvent = z.infer<typeof ViewerEventSchema>;
 
 /** How this deployment runs coding jobs, for the desktop viewer's Infrastructure view (GET /admin/api/infra). */
