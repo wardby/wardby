@@ -177,6 +177,139 @@ test("an older server without cross-agent listing falls back to one call per age
   await ui.unmount();
 });
 
+/**
+ * A server holding `total` runs (newest first) that pages list_runs with `before`, or ignores it as a
+ * server before 0.9.2 does. Records each list_runs call's arguments.
+ */
+function pagingServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  total: number,
+  opts: { ignoresBefore?: boolean } = {},
+) {
+  const calls: Record<string, unknown>[] = [];
+  const all = Array.from({ length: total }, (_, i) => runRow(`r${i}`, "succeeded", 60_000 + i * 1000));
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool !== "list_runs") return reply({});
+    calls.push({ ...e.args });
+    const limit = Number(e.args.limit ?? 50);
+    const at = e.args.before === undefined || opts.ignoresBefore ? 0 : all.findIndex((r) => r.id === e.args.before) + 1;
+    return reply(all.slice(at, at + limit));
+  });
+  return calls;
+}
+
+test("a full refresh pages through the day 25 runs at a time and lists them all", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const calls = pagingServer(on, 60);
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  expect(calls.map((c) => [c.limit, c.before])).toEqual([
+    [25, undefined],
+    [25, "r24"],
+    [25, "r49"],
+  ]);
+  expect(new Set(calls.map((c) => c.since)).size).toBe(1);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect((await ui.find({ type: "Text", text: /in the last day/ }))?.text).toMatch(/60 in the last day/);
+  expect(await ui.find({ type: "Text", text: /older than 0\.8\.0/ })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("a full refresh stops after 12 pages", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const calls = pagingServer(on, 400);
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  expect(calls).toHaveLength(12);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect((await ui.find({ type: "Text", text: /in the last day/ }))?.text).toMatch(/300 in the last day/);
+  await ui.unmount();
+});
+
+test("a server that ignores before gives one page, with no error and no repeats", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const calls = pagingServer(on, 60, { ignoresBefore: true });
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  // The second call returns the first page again: the pane stops there.
+  expect(calls).toHaveLength(2);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect((await ui.find({ type: "Text", text: /in the last day/ }))?.text).toMatch(/25 in the last day/);
+  expect(await ui.find({ type: "Text", text: /^wardby: / })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("an incremental refresh is still one call of up to 100 runs", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const calls = pagingServer(on, 60);
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  expect(calls).toHaveLength(3);
+  await clock.advance(60_000);
+  expect(calls).toHaveLength(4);
+  expect(calls[3]).toEqual({ since: new Date(NOW - 30_000).toISOString(), limit: 100 });
+});
+
+test("a server before 0.8.0 shows the upgrade notice over the per-agent list, until it answers again", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  let upgraded = false;
+  const calls: string[] = [];
+  on("mcp.call", (_, e) => {
+    calls.push(`${e.tool}${e.args.agentId ? ":" + String(e.args.agentId) : ""}`);
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs" && e.args.agentId === undefined && !upgraded)
+      return { value: { content: [{ type: "text", text: "MCP error -32602: agentId is required" }], isError: true } };
+    if (e.tool === "list_agents") return reply([{ id: "a1", name: "builder", budgetUsd: "1.0000" }]);
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    return reply({});
+  });
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  expect(calls).toEqual(["list_runs", "list_agents", "list_runs:a1"]);
+  const notice =
+    "This wardby server is older than 0.8.0, so the pane runs in a limited mode: no pull-request grouping, " +
+    "outcomes or run steps. Upgrade the server to 0.8.0 or later.";
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    expect((await ui.find({ type: "Text", text: /older than 0\.8\.0/ }))?.text).toBe(notice);
+    expect(await ui.find({ type: "Text", text: /^wardby: / })).toBeUndefined();
+    // The list is still there under it.
+    expect(await ui.find({ key: "run-r1" })).toBeDefined();
+    await ui.unmount();
+  }
+
+  // Upgraded: the next re-probe (every 6 polls) lists across agents again and the notice goes.
+  upgraded = true;
+  await clock.advance(10 * 60_000);
+  expect(calls.filter((c) => c === "list_runs").length).toBeGreaterThan(1);
+  for (const surface of ["terminal", "desktop"] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    expect(await ui.find({ type: "Text", text: /older than 0\.8\.0/ })).toBeUndefined();
+    expect(await ui.find({ key: "run-r1" })).toBeDefined();
+    await ui.unmount();
+  }
+});
+
 test("a server error shows in the pane instead of the list", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);

@@ -11,6 +11,12 @@ to the wardby MCP server your Claude Code session already has, through
 `list_runs`, `list_agents`, `get_run`, `get_run_steps` and `get_run_transcript`,
 so it shows exactly what those tools show you and needs no token of its own.
 
+Against a server older than 0.8.0, which can't list runs across agents, the pane
+lists each agent's latest runs one agent at a time and shows a notice at the top
+of the list: it runs in a limited mode, with no pull-request grouping, outcomes
+or run steps. The notice goes away once the server is upgraded to 0.8.0 or
+later; the pane checks again every few refreshes.
+
 ## Install
 
 ### With the wardby CLI
@@ -215,14 +221,17 @@ loads no hooks: install it through managed settings instead.
 
 The pane shows an error like `wardby: list_runs: Error: result (65,921
 characters across 1 line) exceeds maximum allowed tokens`. Claude Code caps how
-much text an MCP tool may return (25,000 tokens by default), and the pane's full
-refresh lists up to 100 runs from the last day across all your agents. Runs
-started from GitHub or Jira carry the whole issue or review text, so a busy day
-can pass the cap, and the pane keeps failing until those runs age out.
+much text an MCP tool may return (25,000 tokens by default). Against a server
+older than 0.9.2, the pane's full refresh lists up to 100 runs from the last day
+across all your agents in one call. Runs started from GitHub or Jira carry the
+whole issue or review text, so a busy day can pass the cap, and the pane keeps
+failing until those runs age out.
 
 - **Fix:** update the Wardby server to 0.9.2 or later. Its cross-agent
-  `list_runs` cuts each run's task to its first 600 characters.
-- **Until then:** raise Claude Code's MCP output limit in its settings file
+  `list_runs` cuts each run's task to its first 600 characters and pages the
+  list (`before`), and the pane reads the day 25 runs at a time (up to 300
+  runs), so no reply comes near the cap and this error can't come back.
+- **Only for a server older than 0.9.2:** raise Claude Code's MCP output limit in its settings file
   (`~/.claude/settings.json`, or the file under `CLAUDE_CONFIG_DIR`), then
   restart Claude Code:
 

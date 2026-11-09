@@ -22,6 +22,10 @@ show you.
   `wardby resume`.
 - Filters, adaptive refreshing, and a toast when a run finishes.
 
+Against a server older than 0.8.0 the pane runs in a limited mode (each agent's
+latest runs, no pull-request grouping, outcomes or run steps) and says so at the
+top of the list.
+
 ## Install
 
 The quickest way is the wardby CLI, which also offers the permission rules the

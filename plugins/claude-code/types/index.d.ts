@@ -70,7 +70,12 @@ export type Steps = {
   notice: string | null;
 };
 
-export type Poll = { at: number; error: string | null };
+export type Poll = {
+  at: number;
+  error: string | null;
+  /** The server is older than 0.8.0 (no list_runs without an agentId): the pane runs in a limited mode. */
+  limited?: boolean;
+};
 
 export type Resume = {
   runId: string;
