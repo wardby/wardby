@@ -2,6 +2,7 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { AddressInfo } from "node:net";
 import { request, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { traceLogCapture } from "./log-capture.test-support.js";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
 import {
   handleRunStepPost,
@@ -128,30 +129,23 @@ describe("handleRunStepPost", () => {
     for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(responses)).not.toContain(value);
   });
 
-  it("never logs, echoes or errors with a tool input or output tail", async () => {
-    const warn = vi.fn();
+  it("answers a writer failure quoting a tool input or output tail with no secret in the response", async () => {
     const d = deps(undefined, {
       record: async () => {
         throw new Error(`writer failed on ${FAKE_SECRET}`);
       },
     });
-    const outcome = await handleRunStepPost({ ...d.value, log: { warn } }, `Bearer ${CAP}`, detailBody()).catch(
-      (err: unknown) => err,
-    );
-    // The writer's error propagates to the caller (the listener maps it to a fixed code): the
-    // handler itself must not log, and a resolved response never carries the values.
-    if (!(outcome instanceof Error)) expect(JSON.stringify(outcome)).not.toContain(FAKE_SECRET);
-    expect(warn).not.toHaveBeenCalled();
-    expect(d.record).toHaveBeenCalledTimes(1);
-    // The body reached the writer (so the assertions above are about a real detail batch).
+    // The handler lets the writer's error propagate (the listener maps it to a fixed code and logs
+    // its name only: the HTTP cases below prove that); the refusals it builds itself are fixed.
+    const failure = await handleRunStepPost(d.value, `Bearer ${CAP}`, detailBody()).catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(Error);
     expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
     const refused = await handleRunStepPost(
-      { ...d.value, log: { warn } },
+      d.value,
       `Bearer ${CAP}`,
       detailBody().replace('"runId":"r1"', '"runId":"r2"'),
     );
     expect(refused).toEqual({ status: 403, body: { error: "run_mismatch" } });
-    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -421,4 +415,57 @@ describe("startRunStepIngress", () => {
     expect(warn.mock.calls[1][0]).toEqual({ event: "run_steps_ingress_late_failure", errorName: "TypeError" });
     for (const value of [CAP, FAKE_SECRET]) expect(JSON.stringify(warn.mock.calls)).not.toContain(value);
   });
+});
+
+describe("startRunStepIngress, through its default logger at trace level and console", () => {
+  const capture = traceLogCapture();
+  const servers: Server[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => new Promise((resolve) => s.close(resolve))));
+    capture.restore();
+  });
+
+  it.each([
+    ["an accepted detail batch", undefined, 202],
+    [
+      "a writer failing on a detail batch",
+      async () => {
+        throw new TypeError(`write failed: ${FAKE_SECRET}`);
+      },
+      500,
+    ],
+    ["a write that outlasts the request limit", () => new Promise<void>(() => {}), 503],
+    [
+      "a write failing after the timeout answer",
+      () => new Promise<void>((_, reject) => setTimeout(() => reject(new TypeError(`late: ${FAKE_SECRET}`)), 150)),
+      503,
+    ],
+  ] as const)(
+    "keeps a tool input and output tail out of every log line and console call: %s",
+    async (_name, record, status) => {
+      const { startRunStepIngress: startIngress } = await capture.load(() => import("./ingress.js"));
+      const d = deps(undefined, { record: record as RunStepSink["record"] | undefined });
+      const server = await startIngress(
+        { host: "127.0.0.1", port: 0 },
+        { ...d.value, ...(status === 503 ? { requestTimeoutMs: 40 } : {}) },
+      );
+      servers.push(server);
+      const port = (server.address() as AddressInfo).port;
+      const response = await fetch(`http://127.0.0.1:${port}${RUN_STEPS_INGRESS_PATH}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${CAP}`, "content-type": "application/json" },
+        body: detailBody(),
+      });
+      expect(response.status).toBe(status);
+      expect(await response.text()).not.toContain(FAKE_SECRET);
+      expect(d.record).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(d.record.mock.calls)).toContain(FAKE_SECRET);
+      if (status !== 202) await vi.waitFor(() => expect(capture.lineCount()).toBeGreaterThan(0), { timeout: 2_000 });
+      if (_name.includes("after the timeout")) {
+        await vi.waitFor(() => expect(capture.text()).toContain("run_steps_ingress_late_failure"), { timeout: 2_000 });
+      }
+      expect(capture.text()).not.toContain(FAKE_SECRET);
+      expect(capture.text()).not.toContain(CAP);
+    },
+  );
 });

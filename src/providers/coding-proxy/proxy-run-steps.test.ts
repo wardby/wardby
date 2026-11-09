@@ -12,6 +12,11 @@ import { RunStepForwarder } from "./run-step-forwarder.js";
 import { logProxyAudit, startCodingProxyServer } from "./server.js";
 import type { ProxyAuditEvent, ProxyLedger, ProxyProtocol } from "./types.js";
 
+// Trace level for this file, so a log line below info is captured by the no-logging tests.
+vi.hoisted(() => {
+  process.env.LOG_LEVEL = "trace";
+});
+
 /** Faults the tests inject into the real extractors (passed through otherwise). */
 const faults = vi.hoisted(() => ({
   stepsFromJson: false,
@@ -519,27 +524,51 @@ describe("CodingProxy run steps", () => {
       expect(JSON.stringify(h.ledgerCalls)).not.toContain(FAKE_SECRET);
     });
 
-    it("writes no tool input or output to any log line at detail level", async () => {
-      const lines: string[] = [];
-      setLogLineFilter((line) => {
-        lines.push(line);
-        return "";
-      });
-      try {
-        const audit = vi.fn((event: Parameters<typeof logProxyAudit>[0]) => logProxyAudit(event));
-        const h = await harness("anthropic-messages", toolStream(`echo ${FAKE_SECRET}`), {
-          runStepsLevel: "detail",
-          runStepsCeiling: "detail",
-          audit,
+    it.each(["anthropic-messages", "openai-responses"] as const)(
+      "writes no tool input or output to any log line or console call at trace level (%s)",
+      async (protocol) => {
+        const lines: string[] = [];
+        const consoleCalls: unknown[][] = [];
+        for (const method of ["log", "info", "warn", "error", "debug", "trace"] as const) {
+          vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void consoleCalls.push(args));
+        }
+        setLogLineFilter((line) => {
+          lines.push(line);
+          return "";
         });
-        await h.execute(await anthropicRequest(`x ${FAKE_SECRET}`), "k1");
-        // The input and output reach the submitter, so the log check below is not vacuous.
-        expect(JSON.stringify(h.submitted)).toContain(FAKE_SECRET);
-      } finally {
-        setLogLineFilter((line) => line);
-      }
-      expect(lines.join("")).not.toContain(FAKE_SECRET);
-    });
+        try {
+          const audit = vi.fn((event: Parameters<typeof logProxyAudit>[0]) => logProxyAudit(event));
+          const h =
+            protocol === "anthropic-messages"
+              ? await harness("anthropic-messages", toolStream(`echo ${FAKE_SECRET}`), {
+                  runStepsLevel: "detail",
+                  runStepsCeiling: "detail",
+                  audit,
+                })
+              : await harness(
+                  "openai-responses",
+                  sse((await stepsFixture("codex-responses-stream.txt")).replaceAll("npm test", `echo ${FAKE_SECRET}`)),
+                  { runStepsLevel: "detail", runStepsCeiling: "detail", audit },
+                );
+          await h.execute(
+            protocol === "anthropic-messages"
+              ? await anthropicRequest(`x ${FAKE_SECRET}`)
+              : responsesRequest(`x ${FAKE_SECRET}`),
+            "k1",
+          );
+          // Both fields reach the submitter, so the log check below is not vacuous.
+          const tools = h.submitted.flatMap((s) => s.batch.steps).filter((s) => s.kind === "tool");
+          expect(tools.some((s) => s.input?.includes(FAKE_SECRET))).toBe(true);
+          expect(h.submitted.flatMap((s) => s.batch.results).some((r) => r.output?.includes(FAKE_SECRET))).toBe(true);
+        } finally {
+          setLogLineFilter((line) => line);
+        }
+        // Trace level (LOG_LEVEL is set for this file), so a debug or trace line would show here.
+        expect(lines.length).toBeGreaterThan(0);
+        expect(lines.join("")).not.toContain(FAKE_SECRET);
+        expect(JSON.stringify(consoleCalls)).not.toContain(FAKE_SECRET);
+      },
+    );
   });
 
   it("rejects an unknown run steps level when creating a session", async () => {

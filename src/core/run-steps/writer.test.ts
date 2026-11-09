@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { traceLogCapture } from "./log-capture.test-support.js";
 import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
 
@@ -224,4 +225,33 @@ describe("RunStepWriter", () => {
       expect.any(String),
     );
   });
+});
+
+describe("RunStepWriter, through its default logger at trace level and console", () => {
+  const capture = traceLogCapture();
+  afterEach(() => capture.restore());
+
+  it.each(["secret values unreadable", "write failing"] as const)(
+    "keeps a tool input and output out of every log line and console call: %s",
+    async (path) => {
+      const { RunStepWriter: Writer } = await capture.load(() => import("./writer.js"));
+      const db = fakeDb();
+      if (path === "write failing") db.$transaction.mockRejectedValueOnce(new Error(`insert failed ${FAKE_SECRET}`));
+      const writer = new Writer({
+        db: db as unknown as RunStepWriterDb,
+        secretValues: async () => {
+          if (path === "secret values unreadable") throw new Error(`vault down ${FAKE_SECRET}`);
+          return [FAKE_SECRET];
+        },
+        level: "detail",
+        retentionDays: 30,
+      });
+      await writer.record("r1", {
+        steps: [{ kind: "tool", callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+        results: [{ callId: "c1", status: "ok", output: FAKE_SECRET, outputCut: true }],
+      });
+      expect(capture.text()).toContain("run_steps_write_failed");
+      expect(capture.text()).not.toContain(FAKE_SECRET);
+    },
+  );
 });

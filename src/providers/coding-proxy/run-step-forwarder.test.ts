@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { traceLogCapture } from "../../core/run-steps/log-capture.test-support.js";
 import { RunStepForwarder } from "./run-step-forwarder.js";
 import { MAX_RUN_STEPS_POST_BYTES, MAX_STEP_TEXT_CHARS, type RunStepBatch } from "../../core/run-steps/types.js";
 
@@ -263,6 +264,79 @@ describe("RunStepForwarder", () => {
       expect(info).toHaveBeenCalledWith(expect.objectContaining({ reason }), expect.any(String));
       expect(JSON.stringify(info.mock.calls)).not.toContain(FAKE_SECRET);
       expect(JSON.stringify(info.mock.calls)).not.toContain(CAP);
+    });
+
+    describe("through the default logger at trace level and console", () => {
+      const capture = traceLogCapture();
+      afterEach(() => capture.restore());
+
+      it.each(["unreachable", "http_500", "queue_full", "closed", "submit_failed", "serialize_failed"] as const)(
+        "keeps input and output out of every log line and console call on the %s path",
+        async (reason) => {
+          const { RunStepForwarder: Forwarder } = await capture.load(() => import("./run-step-forwarder.js"));
+          const posted: string[] = [];
+          let release = () => {};
+          const gate = new Promise<void>((resolve) => (release = resolve));
+          const fetchImpl = vi.fn(async (_u: string, init: RequestInit) => {
+            posted.push(init.body as string);
+            if (reason === "unreachable") throw new Error(`boom ${init.body as string}`);
+            if (reason === "http_500") return new Response(`echo ${init.body as string}`, { status: 500 });
+            await gate;
+            return new Response(null, { status: 202 });
+          });
+          const forwarder = new Forwarder({
+            url: URL_BASE,
+            fetchImpl: fetchImpl as unknown as typeof fetch,
+            maxQueue: 1,
+            flushTimeoutMs: 20,
+          });
+          if (reason === "submit_failed") {
+            // A batch whose size estimate throws: the bound is on the submit path itself.
+            const hostile = {
+              steps: [{ kind: "tool", callId: "c1", tool: "Bash", text: "ls", truncated: false, input: FAKE_SECRET }],
+              get results(): never {
+                throw new Error(`getter ${FAKE_SECRET}`);
+              },
+            };
+            forwarder.submit(CAP, "r1", hostile as unknown as RunStepBatch);
+          } else if (reason === "serialize_failed") {
+            const cyclic: Record<string, unknown> = {
+              kind: "tool",
+              callId: "c9",
+              tool: "Bash",
+              text: "ls",
+              truncated: false,
+              input: FAKE_SECRET,
+            };
+            cyclic.self = cyclic;
+            forwarder.submit(CAP, "r1", {
+              steps: [cyclic as never],
+              results: [{ callId: "c9", status: "ok", output: FAKE_SECRET, outputCut: true }],
+            });
+          } else {
+            forwarder.submit(CAP, "r1", detailBatch);
+            await new Promise((resolve) => setImmediate(resolve));
+            if (reason === "queue_full" || reason === "closed") {
+              forwarder.submit(CAP, "r1", detailBatch); // queued
+              forwarder.submit(CAP, "r1", detailBatch); // queue full
+            }
+            if (reason === "closed") {
+              const closing = forwarder.close();
+              forwarder.submit(CAP, "r1", detailBatch);
+              await closing;
+            }
+          }
+          release();
+          await forwarder.flush();
+          await forwarder.close();
+          expect(capture.text()).toContain(reason);
+          if (reason !== "submit_failed" && reason !== "serialize_failed") {
+            expect(posted.join("")).toContain(FAKE_SECRET);
+          }
+          expect(capture.text()).not.toContain(FAKE_SECRET);
+          expect(capture.text()).not.toContain(CAP);
+        },
+      );
     });
 
     it("keeps them out of the queue_full and serialize_failed log lines", async () => {
