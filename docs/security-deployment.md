@@ -650,8 +650,8 @@ run's agent and every token-shaped value; a step whose agent secrets can't be
 read is not stored. At `summary` tool output is never recorded. At `detail` (the instance and the
 agent's owner must both choose it) the end of each tool's output is stored,
 redacted as above; a secret that only exists in a file the run read, and that
-matches no known shape, can remain. Detail is returned only to the agent's owner
-and the run's starter, never to the admin viewer. Set `WARDBY_RUN_STEPS=off` to
+matches no known shape, can remain. Detail is returned only to the agent's owner,
+the run's starter and the stdio operator, never to the admin viewer. Set `WARDBY_RUN_STEPS=off` to
 record nothing.
 
 **Claude Code and Codex runs.** The coding proxy holds no secret values, so it

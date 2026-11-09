@@ -138,16 +138,16 @@ The gateway is the same Wardby build as the server, started with the
 `native-gateway` command. It needs the server's database, LLM, secrets, and
 integration settings, and **no Docker access**.
 
-| Gateway variable                                                  | Purpose                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_GATEWAY_LISTEN`                                           | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
-| `DATABASE_URL`                                                    | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
-| LLM provider keys                                                 | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
-| `SECRET_APP_KEY`                                                  | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
-| Integration settings                                              | The same repository-host and issue-tracker settings as the server. The gateway records at each run's own level, so                                                                                                                                         |
-| `WARDBY_RUN_STEPS` there is the same ceiling (`detail` included). |
-| `WARDBY_TOOL_MAX_TIMEOUT_MS`                                      | Same value as the server, if you set it: the longest time limit a tool may use ([details](security-deployment.md#tool-time-limits)).                                                                                                                       |
-| `WARDBY_MCP_MAX_CALLS_PER_RUN`                                    | Same value as the server, if you set it: the most remote MCP tool calls one coding run may make (default `100`; [details](security-deployment.md#remote-mcp-servers)).                                                                                     |
+| Gateway variable               | Purpose                                                                                                                                                                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_GATEWAY_LISTEN`        | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
+| `DATABASE_URL`                 | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
+| LLM provider keys              | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
+| `SECRET_APP_KEY`               | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
+| Integration settings           | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
+| `WARDBY_RUN_STEPS`             | Same value as the server, if you set it: the ceiling for run steps. The gateway records at each run's own level, so set `detail` here too if agents use it ([details](debugging-agent-runs.md#run-steps)).                                                 |
+| `WARDBY_TOOL_MAX_TIMEOUT_MS`   | Same value as the server, if you set it: the longest time limit a tool may use ([details](security-deployment.md#tool-time-limits)).                                                                                                                       |
+| `WARDBY_MCP_MAX_CALLS_PER_RUN` | Same value as the server, if you set it: the most remote MCP tool calls one coding run may make (default `100`; [details](security-deployment.md#remote-mcp-servers)).                                                                                     |
 
 For local development, the repository ships a compose overlay
 (`deploy/local/docker-compose.native-sandbox.yml`) that runs the gateway next to
@@ -553,8 +553,8 @@ set on the gateway, not the server.
 
 The gateway also records sandbox runs' steps (see
 [Run steps](debugging-agent-runs.md#run-steps)), so when you change
-`WARDBY_RUN_STEPS` or `RUN_STEP_RETENTION_DAYS`, set them on the gateway as well
-as the server.
+`WARDBY_RUN_STEPS` (including `detail`) or `RUN_STEP_RETENTION_DAYS`, set them on
+the gateway as well as the server.
 
 ## Limits and deadline
 

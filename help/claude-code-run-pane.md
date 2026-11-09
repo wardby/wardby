@@ -45,6 +45,9 @@ messages, one line each, wrapped in full); a finished run's shows all its
 step under its name. Against a server without `get_run_steps` the pane shows no
 steps and checks again every few refreshes; with run steps off it says "Steps
 are off on this server." See `run-steps`. Steps need Wardby 0.9.0 or later
-on the server. A step with detail (marked ▸) expands: click it on the desktop; in the terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail appears only for the agent's owner and the run's starter, on a server at the detail level.
+on the server. From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
+terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
+appears only for the agent's owner and the run's starter (and the stdio
+operator), on a server at the detail level.
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

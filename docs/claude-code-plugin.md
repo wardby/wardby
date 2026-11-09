@@ -123,7 +123,10 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   rather than cut.
 - **Steps** (a finished run's detail): every recorded step, 200 at a time;
   **More steps** loads the next 200.
-- **Step detail**: A step with detail (marked ▸) expands: click it on the desktop; in the terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail appears only for the agent's owner and the run's starter, on a server at the detail level.
+- **Step detail**: From 0.9.0, a step with detail (marked ▸) expands: click it on the desktop; in the
+  terminal, `j`/`k` move between such steps and `e` shows or hides one. Detail
+  appears only for the agent's owner and the run's starter (and the stdio
+  operator), on a server at the detail level.
 - **Last step**: in the list, a running or failed run shows its newest step
   under the agent's name.
 

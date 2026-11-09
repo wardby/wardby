@@ -84,8 +84,8 @@ runs record no steps; native runs are not affected. A slow or unreachable listen
   section of a run's detail.
 
 At `detail`, `get_run_steps` also returns each step's `detail` to the agent's
-owner and to the person who started the run; anyone else, including an admin who
-does not own the agent, gets the lines only. `lastStep`, the admin viewer API
+owner and to the person who started the run (and to the stdio operator); anyone
+else, including an admin who does not own the agent, gets the lines only. `lastStep`, the admin viewer API
 and its `step` events never include detail.
 
 You can read a run's steps when you can read the run with `get_run`.
