@@ -51,6 +51,9 @@ describe("generated API types", () => {
       finalText: null,
       childRunIds: [],
       coding: null,
+      steps: [],
+      stepsOmitted: 0,
+      stepsDropped: 0,
     } satisfies RunDetail;
     const event = { kind: "outcome", runId: "r1", source: "pull_request" } satisfies ViewerEvent;
     expect([snapshot.runs.length, detail.id, event.kind]).toEqual([1, "r1", "outcome"]);

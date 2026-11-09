@@ -81,7 +81,7 @@ describe("published viewer OpenAPI document", () => {
     const doc = build();
     const ok = doc.paths["/admin/api/events"].get.responses["200"] as { content: Obj };
     expect(Object.keys(ok.content)).toEqual(["text/event-stream"]);
-    for (const frame of ["hello", "run", "service", "outcome", "status", "resync", "ping"]) {
+    for (const frame of ["hello", "run", "service", "outcome", "step", "status", "resync", "ping"]) {
       expect(doc.paths["/admin/api/events"].get.description).toContain(frame);
     }
     expect(doc.paths["/admin/api/events"].get.description).toMatch(/no replay/i);
@@ -157,7 +157,16 @@ const SNAPSHOT = {
   runs: [RUN],
   spend: { todayUsd: 0.01, groups: [] },
 };
-const DETAIL = { ...RUN, error: null, finalText: "done", childRunIds: [], coding: null };
+const DETAIL = {
+  ...RUN,
+  error: null,
+  finalText: "done",
+  childRunIds: [],
+  steps: [],
+  stepsOmitted: 0,
+  stepsDropped: 0,
+  coding: null,
+};
 
 const fakeBus = (): ViewerEventBus => ({
   subscribe: () => () => {},

@@ -27,6 +27,7 @@ Endpoints, all `GET`:
 
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.
 - `/admin/api/runs/<id>`: one run in full, including its final text and error.
+  From Wardby 0.9.0 it also lists the run's newest 200 steps (see `run-steps`).
 - `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 

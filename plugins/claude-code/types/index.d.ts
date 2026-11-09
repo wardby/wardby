@@ -16,6 +16,8 @@ export type RunRow = {
   via: { pr: string; url: string | null; event: string } | null;
   /** What the run produced (wardby 0.8.0+): opened a pull request, commented, a check. */
   outcomes: { kind: string; text: string; url: string | null; pr: string | null }[];
+  /** The run's newest step as one line ("Bash: npm test"), from cross-agent list_runs (wardby 0.9.0+); null otherwise. */
+  lastLine: string | null;
 };
 
 export type RunDetail = {
@@ -30,6 +32,33 @@ export type RunDetail = {
   resultBranch: string | null;
   services: string[];
   parentRunId: string | null;
+  /** The newest step's seq from get_run's lastStep (wardby 0.9.0+); null without one. */
+  lastStepSeq: number | null;
+};
+
+export type Step = {
+  seq: number;
+  at: string;
+  kind: string;
+  tool: string | null;
+  summary: string;
+  status: string | null;
+};
+
+export type Steps = {
+  runId: string;
+  /** recent: a running run's last few, read again each poll; all: a finished run's, page by page. */
+  mode: "recent" | "all";
+  /** The server's level: "off" records none; null when the server didn't say. */
+  level: string | null;
+  steps: Step[];
+  /** The `after` for the next page (mode "all"), or null when there is none. */
+  next: number | null;
+  dropped: number;
+  /** The run's steps were deleted after the retention period. */
+  expired: boolean;
+  /** A fixed hint shown instead of steps (auto mode refused get_run_steps). */
+  notice: string | null;
 };
 
 export type Poll = { at: number; error: string | null };
@@ -52,6 +81,7 @@ declare module "claude-code" {
       runs: Shaped<RunRow[]>;
       selected: string | null;
       detail: Shaped<RunDetail | null>;
+      steps: Shaped<Steps | null>;
       poll: Shaped<Poll>;
       filter: Shaped<Filter>;
       resume: Shaped<Resume | null>;

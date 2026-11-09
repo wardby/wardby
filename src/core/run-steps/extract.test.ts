@@ -4,6 +4,7 @@ import {
   AnthropicStreamSteps,
   MAX_RESULTS_PER_REQUEST,
   OpenAiStreamSteps,
+  openAiItemStep,
   resultsFromRequest,
   statusFromOutput,
   stepsFromJson,
@@ -70,11 +71,11 @@ describe("AnthropicStreamSteps", () => {
 });
 
 describe("OpenAiStreamSteps", () => {
-  it("emits Codex's message, exec_command calls (cmd as a string and as argv) and code-mode exec", async () => {
+  it("emits Codex's message, its shell calls as Bash (cmd as a string and as argv) and code-mode exec", async () => {
     expect(feed(new OpenAiStreamSteps(), await fixture("codex-responses-stream.txt"))).toEqual([
       { kind: "said", callId: "said:msg_steps_1", text: "Running the tests now.", truncated: false },
-      { kind: "tool", callId: "call_steps_1", tool: "exec_command", text: "npm test", truncated: false },
-      { kind: "tool", callId: "call_steps_2", tool: "exec_command", text: "npm run lint", truncated: false },
+      { kind: "tool", callId: "call_steps_1", tool: "Bash", text: "npm test", truncated: false },
+      { kind: "tool", callId: "call_steps_2", tool: "Bash", text: "npm run lint", truncated: false },
       { kind: "tool", callId: "call_steps_3", tool: "exec", text: "git status --short", truncated: false },
     ]);
   });
@@ -220,7 +221,7 @@ describe("stepsFromJson", () => {
           { type: "function_call", call_id: "c9", name: "exec_command", arguments: '{"cmd":"make"}' },
         ],
       }),
-    ).toEqual([{ kind: "tool", callId: "c9", tool: "exec_command", text: "make", truncated: false }]);
+    ).toEqual([{ kind: "tool", callId: "c9", tool: "Bash", text: "make", truncated: false }]);
     expect(stepsFromJson("openai-responses", "not an object")).toEqual([]);
     expect(
       stepsFromJson("anthropic-messages", {
@@ -399,4 +400,72 @@ describe("resultsFromRequest over real Codex 0.160.1 request recordings", () => 
       }
     },
   );
+});
+
+describe("a coding run's final answer", () => {
+  const answer = (summary: string) =>
+    JSON.stringify({ schemaVersion: 1, runId: "r1", outcome: "changes_ready", summary, tag: null, tests: [] });
+  const streamTool = (extractor: AnthropicStreamSteps, name: string, input: string) => {
+    extractor.consume(
+      frame("content_block_start", { index: 0, content_block: { type: "tool_use", id: "toolu_r", name, input: {} } }),
+    );
+    for (let at = 0; at < input.length; at += 1000) {
+      extractor.consume(
+        frame("content_block_delta", {
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: input.slice(at, at + 1000) },
+        }),
+      );
+    }
+    extractor.consume(frame("content_block_stop", { index: 0 }));
+    return extractor.take();
+  };
+
+  it("Claude Code's StructuredOutput call is one said step with the answer's summary", () => {
+    expect(streamTool(new AnthropicStreamSteps(), "StructuredOutput", answer("Added the jokes page."))).toEqual([
+      { kind: "said", callId: "toolu_r", text: "Added the jokes page.", truncated: false },
+    ]);
+  });
+
+  it("a StructuredOutput call past 16 KiB keeps the summary's start, marked cut", () => {
+    const [step] = streamTool(new AnthropicStreamSteps(), "StructuredOutput", answer("x".repeat(40_000)));
+    expect(step).toMatchObject({ kind: "said", callId: "toolu_r", truncated: true });
+    expect(step.text.startsWith("xxx")).toBe(true);
+    expect(step.text.length).toBeLessThanOrEqual(MAX_STEP_TEXT_CHARS);
+  });
+
+  it("a StructuredOutput call that isn't an answer is still one Finished line, never its arguments", () => {
+    expect(streamTool(new AnthropicStreamSteps(), "StructuredOutput", '{"note":"x"}')).toEqual([
+      { kind: "said", callId: "toolu_r", text: "Finished", truncated: false },
+    ]);
+  });
+
+  it("the same from a whole (non-stream) Anthropic reply", () => {
+    const body = {
+      id: "msg_1",
+      content: [{ type: "tool_use", id: "toolu_j", name: "StructuredOutput", input: JSON.parse(answer("Done.")) }],
+    };
+    expect(stepsFromJson("anthropic-messages", body)).toEqual([
+      { kind: "said", callId: "toolu_j", text: "Done.", truncated: false },
+    ]);
+  });
+
+  it("Codex's final JSON message is one said step with the answer's summary", () => {
+    const item = {
+      type: "message",
+      id: "msg_final",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: answer("Renamed the route.") }],
+    };
+    expect(openAiItemStep(item)).toEqual({
+      kind: "said",
+      callId: "said:msg_final",
+      text: "Renamed the route.",
+      truncated: false,
+    });
+    // Any other message is said as written.
+    const plain = { ...item, content: [{ type: "output_text", text: '{"a":1}' }] };
+    expect(openAiItemStep(plain)).toMatchObject({ kind: "said", text: '{"a":1}' });
+  });
 });

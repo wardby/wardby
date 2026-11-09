@@ -147,9 +147,13 @@ tool, and its command, file or first argument, cut to about 100 characters) with
 its status once the result is back (`ok`, `error`, or `exit N`), and one line for
 what the model said (cut to about 120 characters). Tool output and full text are
 never recorded. Steps are recorded for native runs (in the control plane and on
-the native sandbox) and for Claude Code and Codex runs. A command shows as `Bash`
-or the tool's own name (for example `exec_command`), and a remote MCP tool as
-`mcp:<tool>`.
+the native sandbox) and for Claude Code and Codex runs. Every agent's
+shell command shows as `Bash` (a native `run_command`, Claude Code's command tool,
+Codex's `exec_command`, `shell`, `local_shell` and `shell_command`), another tool
+under its own name (for example `apply_patch`), and a remote MCP tool as
+`mcp:<tool>`. A Claude Code or Codex run's final answer is one `said` step: the
+start of the summary it returned, or `Finished` with the outcome (for example
+`Finished: changes ready`) when it returned none.
 
 For Claude Code and Codex, the coding proxy reads the steps from the model's
 replies after relaying them and posts them to the server's run-steps listener
@@ -162,7 +166,11 @@ listener, which only `wardby serve` runs.
 them oldest first, 50 at a time and at most 200; pass the last `seq` you have as
 `after` to get only newer ones. `get_run` and `list_runs` without `agentId`
 include `lastStep`, the newest step as one line. Access is the same as
-`get_run`'s.
+`get_run`'s. The `wardby-runs` Claude Code pane shows them (see
+[Claude Code plugin](claude-code-plugin.md#using-the-pane)); the admin viewer API
+sends a `step` event for each one and lists a run's newest 200 in its detail
+(see [Viewer API](viewer-api.md)), and the Wardby Viewer app shows them in a
+**Steps** section.
 
 **Limits.** A run records at most 2,000 steps; `dropped` in `get_run_steps`
 counts the rest.

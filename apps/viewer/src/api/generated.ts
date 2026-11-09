@@ -210,6 +210,16 @@ export interface RunDetail {
   error: string | null;
   finalText: string | null;
   childRunIds: string[];
+  steps: {
+    seq: number;
+    at: string;
+    kind: "tool" | "said";
+    tool: string | null;
+    summary: string;
+    status: string | null;
+  }[];
+  stepsOmitted: number;
+  stepsDropped: number;
   coding: {
     provider: string;
     repository: string;
@@ -250,6 +260,16 @@ export type ViewerEvent =
       kind: "outcome";
       runId: string;
       source: "pull_request" | "host_status" | "issue_status" | "host_check";
+    }
+  | {
+      kind: "step";
+      runId: string;
+      seq: number;
+      stepKind: "tool" | "said";
+      tool: string | null;
+      summary: string;
+      status: string | null;
+      at: string;
     };
 
 export interface InfraInfo {

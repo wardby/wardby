@@ -6,6 +6,7 @@
  * text ends in, then token shapes. The summary is cut only after redaction, so a cut never
  * splits a secret and leaves half of it visible.
  */
+import { CODING_PROTOCOL_VERSION } from "../../coding/protocol.js";
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { CLAUDE_MCP_TOOL_PREFIX, WORKER_MCP_SERVER_KEY } from "../../coding/mcp-token.js";
 import { MIN_REDACTABLE_SECRET_LENGTH, withEscapedForms } from "../secret-spans.js";
@@ -30,12 +31,20 @@ export function bounded(text: string): { text: string; truncated: boolean } {
     : { text, truncated: false };
 }
 
+/**
+ * Codex's shell tools (unified exec and the older shell tools). Shown as Bash, the name Claude Code's
+ * shell tool has, so every coding agent's commands read and filter the same (CLAUDE.md, "Common
+ * interfaces for like systems"). Only the bare names: a namespaced tool is another server's.
+ */
+const CODEX_SHELL_TOOLS = new Set(["exec_command", "shell", "local_shell", "shell_command"]);
+
 /** A tool's name as a step shows it; anything that isn't a plain name becomes "tool". */
 export function displayToolName(name: string, namespace?: string): string {
   let shown: string;
-  // Claude Code's one shell tool shows as the shell tool it stands for.
-  if (name === CLAUDE_COMMAND_TOOL || name === "run_command") shown = "Bash";
-  else if (name.startsWith(CLAUDE_MCP_TOOL_PREFIX)) shown = `mcp:${name.slice(CLAUDE_MCP_TOOL_PREFIX.length)}`;
+  // Claude Code's one shell tool, and Codex's, show as the shell tool they stand for.
+  if (name === CLAUDE_COMMAND_TOOL || name === "run_command" || (!namespace && CODEX_SHELL_TOOLS.has(name))) {
+    shown = "Bash";
+  } else if (name.startsWith(CLAUDE_MCP_TOOL_PREFIX)) shown = `mcp:${name.slice(CLAUDE_MCP_TOOL_PREFIX.length)}`;
   else if (namespace === CODEX_MCP_NAMESPACE) shown = `mcp:${name}`;
   else if (namespace) shown = `${namespace}.${name}`;
   else shown = name;
@@ -129,18 +138,22 @@ function plainInputText(tool: string, input: unknown): string {
 }
 
 /**
- * The leading string field of cut-off JSON; `open` when the string never closed (it ran to the end
- * of the input). Only an escape the cut left unfinished is dropped (an unpaired trailing backslash,
- * or a partial `\\u` escape); a field that still won't decode is `undefined` text, never raw escapes.
+ * A string field of cut-off JSON (the first match of `field`, whose group 1 is the raw string
+ * body); `open` when the string never closed (it ran to the end of the input). Only an escape the
+ * cut left unfinished is dropped (an unpaired trailing backslash, or a partial `\\u` escape); a
+ * field that still won't decode is `undefined` text, never raw escapes.
  */
-function leadingStringField(json: string): { text: string | undefined; open: boolean } | undefined {
-  const match = LEADING_FIELD.exec(json);
+function stringField(json: string, field: RegExp): { text: string | undefined; open: boolean } | undefined {
+  const match = field.exec(json);
   if (!match) return undefined;
   const open = json[match.index + match[0].length] !== '"';
   const raw = match[1].replace(/(?<!\\)((?:\\\\)*)(?:\\u[0-9a-fA-F]{0,3}|\\)$/, "$1");
   const decoded = parseJson(`"${raw}"`);
   return { text: typeof decoded === "string" ? decoded : undefined, open };
 }
+
+/** The leading command, path or pattern field of cut-off tool arguments. */
+const leadingStringField = (json: string) => stringField(json, LEADING_FIELD);
 
 /** A tool step's text from its JSON arguments (complete or cut off). */
 export function toolStepText(tool: string, argsJson: string): { text: string; truncated: boolean } {
@@ -159,6 +172,48 @@ export function toolStepText(tool: string, argsJson: string): { text: string; tr
     // An unclosed string was cut off by the provider or by us: it may end in the start of a secret.
     truncated: out.truncated || argsJson.length > MAX_STEP_TEXT_CHARS || !!leading?.open,
   };
+}
+
+/** Claude Code's tool for a coding run's final answer (the coding proxy allows it by this name). */
+export const CLAUDE_RESULT_TOOL = "StructuredOutput";
+/** A final answer's step when it has no summary of its own. */
+export const FINISHED_STEP_TEXT = "Finished";
+const RESULT_VERSION_FIELD = new RegExp(`"schemaVersion"\\s*:\\s*${CODING_PROTOCOL_VERSION}(?![0-9.])`);
+const RESULT_SUMMARY_FIELD = /"summary"\s*:\s*"((?:[^"\\]|\\.)*)/;
+const FINISHED_BY_OUTCOME = new Map([
+  ["changes_ready", "Finished: changes ready"],
+  ["no_changes", "Finished: no changes"],
+  ["budget_exhausted", "Finished: budget exhausted"],
+]);
+const finishedLine = (outcome: unknown): string =>
+  (typeof outcome === "string" ? FINISHED_BY_OUTCOME.get(outcome) : undefined) ?? FINISHED_STEP_TEXT;
+
+/**
+ * A coding run's final structured answer (`{"schemaVersion":1,...,"summary":"..."}`: Claude Code's
+ * StructuredOutput input, Codex's last message) as the text of one said step: the answer's own
+ * summary, else a fixed Finished line. `undefined` when the text is not such an answer. A cut answer
+ * gives its summary as far as it goes, marked truncated. The text is redacted later, with every
+ * other step's, by stepSummarizer.
+ */
+export function codingResultStepText(json: string): { text: string; truncated: boolean } | undefined {
+  const text = json.trimStart();
+  if (!text.startsWith("{")) return undefined;
+  const parsed = text.length <= MAX_PARSE_CHARS ? parseJson(text) : undefined;
+  if (parsed !== undefined) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const answer = parsed as Record<string, unknown>;
+    if (answer.schemaVersion !== CODING_PROTOCOL_VERSION) return undefined;
+    if (typeof answer.summary === "string" && answer.summary.trim()) return bounded(answer.summary);
+    return { text: finishedLine(answer.outcome), truncated: false };
+  }
+  // Cut off (a block past 16 KiB, a reply that stopped early): an answer only if it says so.
+  const head = text.slice(0, MAX_STEP_TEXT_CHARS);
+  if (!RESULT_VERSION_FIELD.test(head)) return undefined;
+  const summary = stringField(head, RESULT_SUMMARY_FIELD);
+  if (!summary) return { text: FINISHED_STEP_TEXT, truncated: false };
+  // A field that won't decode could show a secret in escaped form: nothing of it is shown.
+  if (summary.text === undefined) return { text: REDACTED, truncated: true };
+  return { text: bounded(summary.text).text, truncated: true };
 }
 
 const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();

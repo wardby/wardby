@@ -53,6 +53,17 @@ function deepFreeze(model: ViewerModel): ViewerModel {
   return Object.freeze(model);
 }
 
+const stepEvent = (runId = "run-abcdef123456"): ViewerEvent => ({
+  kind: "step",
+  runId,
+  seq: 1,
+  stepKind: "tool",
+  tool: "Bash",
+  summary: "npm test",
+  status: null,
+  at: "2026-01-01T00:00:00.000Z",
+});
+
 const loaded = (runs: GraphRun[] = [makeRun("run-abcdef123456")]) =>
   reduce(initialModel, { type: "snapshot", snapshot: makeSnapshot(runs) });
 
@@ -238,5 +249,21 @@ describe("reduce", () => {
     expect(model.runs.get("run-abcdef123456")).toBe(originalRun);
     expect(model).toEqual(before);
     expect(model.runs.size).toBe(2);
+  });
+
+  it("a step event counts a change for its known run, without a ticker line", () => {
+    const model = deepFreeze(loaded());
+    const next = reduce(model, { type: "event", event: stepEvent(), at: 1 });
+    expect(next.stepChanges.get("run-abcdef123456")).toBe(1);
+    expect(reduce(next, { type: "event", event: stepEvent(), at: 2 }).stepChanges.get("run-abcdef123456")).toBe(2);
+    expect(next.ticker).toEqual(model.ticker);
+    expect(next.runs).toBe(model.runs);
+  });
+
+  it("a step event for an unknown run changes nothing, and a malformed one is dropped", () => {
+    const model = loaded();
+    expect(reduce(model, { type: "event", event: stepEvent("other"), at: 1 })).toBe(model);
+    const bad = { ...stepEvent(), seq: "1" } as unknown as ViewerEvent;
+    expect(reduce(model, { type: "event", event: bad, at: 1 })).toBe(model);
   });
 });

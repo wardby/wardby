@@ -1,7 +1,7 @@
 import { atom, read, update } from "claude-code";
 import type { Register } from "claude-code";
 
-import type { Filter, Poll, Resume, RunDetail, RunRow } from "../types";
+import type { Filter, Poll, Resume, RunDetail, RunRow, Step, Steps } from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -10,6 +10,11 @@ const PER_AGENT = 5;
 const RECENT_MS = 24 * 60 * 60 * 1000;
 // The agent list (names, budgets) changes rarely: refresh it every this many polls.
 const AGENTS_EVERY = 6;
+// Run steps (wardby 0.9.0+): a running run's last RECENT_STEPS, re-read each poll; a finished run's, a page at a time.
+const RECENT_STEPS = 8;
+const STEPS_PAGE = 200;
+// What a server without get_run_steps answers (the MCP SDK's "Tool <name> not found").
+const UNKNOWN_TOOL = /\btool\b[^\n]*\bnot found\b|unknown tool|no such tool/i;
 // The timer ticks this often; each tick refreshes only when one is due.
 const TICK_MS = 5000;
 // An incremental refresh asks for changes since the last one, less this overlap for clock skew;
@@ -21,7 +26,7 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
 // Change a tag when that value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const runs = atom({ plugin: "wardby-runs", key: "runs" } as const, [], { shape: "runs-3" });
+const runs = atom({ plugin: "wardby-runs", key: "runs" } as const, [], { shape: "runs-4" });
 
 // How each Run.trigger value reads in the pane.
 const TRIGGER_LABELS: Record<string, string> = {
@@ -44,7 +49,9 @@ function taskUrl(task: string | null): string | null {
   return `https://github.com/${match[3]}/${kind}/${match[2]}`;
 }
 const selected = atom({ plugin: "wardby-runs", key: "selected" } as const, null);
-const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-1" });
+const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-2" });
+// A run's steps as get_run_steps returned them (stored already redacted); drawn as plain text only.
+const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-1" });
 const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-1" });
 // Continue locally: the folder to import into, and how the last import went. Never the download link.
 const resume = atom({ plugin: "wardby-runs", key: "resume" } as const, null, { shape: "resume-1" });
@@ -402,6 +409,16 @@ function toOutcomes(value: unknown): RunRow["outcomes"] {
   });
 }
 
+/** The line the server wrote for a run's newest step (lastStep.line, wardby 0.9.0+); null without one. */
+function lastLineOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  return str((value as Record<string, unknown>).line);
+}
+
+/** A row's last step is shown on running and failed rows only (where it is or where it went wrong). */
+const showsLastLine = (row: RunRow): boolean =>
+  row.lastLine != null && (row.status === "running" || row.status === "failed");
+
 function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
   return {
     id: String(run.id),
@@ -420,11 +437,13 @@ function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
     parentRunId: str(run.parentRunId),
     via: toVia(run.triggerInfo),
     outcomes: toOutcomes(run.outcomes),
+    lastLine: lastLineOf(run.lastStep),
   };
 }
 
 function toDetail(run: Record<string, unknown>): RunDetail {
   const coding = (run.codingResult ?? {}) as Record<string, unknown>;
+  const lastStep = (run.lastStep ?? {}) as Record<string, unknown>;
   return {
     id: String(run.id),
     request: str(run.request),
@@ -437,7 +456,41 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     resultBranch: str(run.resultBranch),
     services: Array.isArray(run.services) ? run.services.map(String) : [],
     parentRunId: str(run.parentRunId),
+    lastStepSeq: typeof lastStep.seq === "number" ? lastStep.seq : null,
   };
+}
+
+/** get_run_steps' steps, keeping only well-formed ones. */
+function toSteps(value: unknown): Step[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== "object" || item === null) return [];
+    const s = item as Record<string, unknown>;
+    if (typeof s.seq !== "number" || typeof s.summary !== "string") return [];
+    return [
+      {
+        seq: s.seq,
+        at: String(s.at ?? ""),
+        kind: String(s.kind ?? ""),
+        tool: str(s.tool),
+        summary: s.summary,
+        status: str(s.status),
+      },
+    ];
+  });
+}
+
+/** A step as one line, worded as the server's lastStep.line: "Bash: npm test (exit 1)", "said: …". */
+function stepLine(step: Step): string {
+  const head = step.kind === "tool" ? `${step.tool ?? "tool"}: ${step.summary}` : `said: ${step.summary}`;
+  return step.status && step.status !== "ok" ? `${head} (${step.status})` : head;
+}
+
+/** A step's mark: › said, … a tool still running, ✓ ok, ✗ error or a non-zero exit (the only coloured one). */
+function stepMark(step: Step): { mark: string; failed: boolean } {
+  if (step.kind !== "tool") return { mark: "›", failed: false };
+  if (step.status === null) return { mark: "…", failed: false };
+  return step.status === "ok" ? { mark: "✓", failed: false } : { mark: "✗", failed: true };
 }
 
 /** Runs that are active, or finished within RECENT_MS, newest first. */
@@ -576,6 +629,9 @@ export const register: Register = (on, options) => {
   let isPolling = false;
   // Whether the server lists runs across agents: unknown until the first poll.
   let acrossAgents: boolean | null = null;
+  // Whether the server has get_run_steps and records steps: unknown until asked, and asked again
+  // every AGENTS_EVERY polls after a no or an off, since a server may be upgraded or reset.
+  let stepsSupport: "unknown" | "yes" | "no" | "off" = "unknown";
   // When the next refresh is due, and the last successful one's time (the next `since`).
   let nextAt = 0;
   let lastOkAt = 0;
@@ -595,6 +651,7 @@ export const register: Register = (on, options) => {
         let rows: RunRow[];
         // An older server may be upgraded under the pane: ask again now and then.
         if (acrossAgents === false && polls % AGENTS_EVERY === 0) acrossAgents = null;
+        if ((stepsSupport === "no" || stepsSupport === "off") && polls % AGENTS_EVERY === 0) stepsSupport = "unknown";
         if (acrossAgents !== false) {
           // One call: list_runs without an agentId (wardby 0.8.0+).
           try {
@@ -639,13 +696,17 @@ export const register: Register = (on, options) => {
         nextAt = now + (active > 0 ? activeMs : idleMs);
         $.ui.status(active > 0 ? `wardby: ${active} running` : undefined);
         const open = await read($, selected);
-        if (open && fresh.some((row) => row.id === open && ACTIVE.has(row.status))) await loadDetail(open);
+        // The open run: while it runs, and once more when it has just finished (its final answer, its steps).
+        const openRow = open ? fresh.find((row) => row.id === open) : undefined;
+        if (openRow && (ACTIVE.has(openRow.status) || ACTIVE.has(before.get(openRow.id) ?? ""))) {
+          await loadDetail(openRow.id);
+        }
       } catch (err) {
         const now = await $.clock.now();
         const raw = err instanceof Error ? err.message : "could not reach the wardby server";
         // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools.
         const message = /auto mode/i.test(raw)
-          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents and mcp__${server}__get_run in /permissions, then press r.`
+          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run and mcp__${server}__get_run_steps in /permissions, then press r.`
           : raw;
         await update($, poll, (): Poll => ({ at: now, error: message }));
         failures += 1;
@@ -685,13 +746,93 @@ export const register: Register = (on, options) => {
     async function loadDetail(runId: string): Promise<void> {
       try {
         const run = (await call("get_run", { runId })) as Record<string, unknown>;
-        await update($, detail, () => toDetail(run));
+        const info = toDetail(run);
+        // A late reply for a run that is no longer open must not overwrite the open run's detail.
+        if ((await read($, selected)) !== runId) return;
+        await update($, detail, () => info);
+        await loadSteps(runId, ACTIVE.has(String(run.status)), info.lastStepSeq);
       } catch (err) {
         const now = await $.clock.now();
         await update($, poll, (p): Poll => ({
           at: p.at || now,
           error: err instanceof Error ? err.message : "get_run failed",
         }));
+      }
+    }
+
+    /**
+     * A run's steps, through get_run_steps. A running run: the window of its last RECENT_STEPS, from
+     * its newest seq, read again on every poll so a status that arrives later shows. A finished run:
+     * from the start, a page at a time (`more` asks for the next). Steps are drawn as the server stored
+     * them, already redacted; the pane adds only fixed wording. Never throws: a failure here never
+     * hides the run or sets the pane's error line.
+     */
+    let moreInFlight = false;
+    async function loadSteps(runId: string, isActive: boolean, lastSeq: number | null, more = false): Promise<void> {
+      const mode: Steps["mode"] = isActive ? "recent" : "all";
+      const blank: Steps = {
+        runId,
+        mode,
+        level: null,
+        steps: [],
+        next: null,
+        dropped: 0,
+        expired: false,
+        notice: null,
+      };
+      try {
+        if (stepsSupport === "no") {
+          await update($, runSteps, () => null);
+          return;
+        }
+        if (stepsSupport === "off") {
+          await update($, runSteps, (): Steps => ({ ...blank, level: "off" }));
+          return;
+        }
+        const current = await read($, runSteps);
+        const same = current?.runId === runId && current.mode === mode;
+        if (mode === "all" && same && !more && current.notice === null) return;
+        const after =
+          mode === "recent" ? Math.max(0, (lastSeq ?? 0) - RECENT_STEPS) : more && same ? (current.next ?? 0) : 0;
+        if (more) {
+          // A second press before the first reply would read the same cursor and append the page twice.
+          if (moreInFlight) return;
+          moreInFlight = true;
+        }
+        let reply: Record<string, unknown>;
+        try {
+          reply = (await call("get_run_steps", { runId, after, limit: STEPS_PAGE })) as Record<string, unknown>;
+        } finally {
+          if (more) moreInFlight = false;
+        }
+        stepsSupport = reply.level === "off" ? "off" : "yes";
+        // A late reply for a run that is no longer open is dropped: it must not replace the open run's steps.
+        if ((await read($, selected)) !== runId) return;
+        const got = toSteps(reply.steps);
+        const fresh = await read($, runSteps);
+        const kept = more && fresh?.runId === runId && fresh.mode === mode ? fresh.steps : [];
+        const seen = new Set(kept.map((st) => st.seq));
+        await update($, runSteps, (): Steps => ({
+          ...blank,
+          level: str(reply.level),
+          steps: mode === "recent" ? got.slice(-RECENT_STEPS) : [...kept, ...got.filter((st) => !seen.has(st.seq))],
+          next: typeof reply.next === "number" ? reply.next : null,
+          dropped: num(reply.dropped),
+          expired: reply.expired === true,
+        }));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "";
+        if (/auto mode/i.test(message)) {
+          await update($, runSteps, (): Steps => ({
+            ...blank,
+            notice: `Allow mcp__${server}__get_run_steps in /permissions to see this run's steps.`,
+          })).catch(() => {});
+        } else if (UNKNOWN_TOOL.test(message)) {
+          // An older server: no steps UI for it until the next re-probe.
+          stepsSupport = "no";
+          await update($, runSteps, () => null).catch(() => {});
+        }
+        // Anything else (a network blip): keep what is shown; the next poll asks again.
       }
     }
 
@@ -750,6 +891,7 @@ export const register: Register = (on, options) => {
     // Only for suggesting where to import; the pane works without it.
     pane.cwd = await $.session.cwd().catch(() => "");
     pane.loadDetail = loadDetail;
+    pane.loadMoreSteps = (runId) => loadSteps(runId, false, null, true);
     pane.refresh = refresh;
     pane.start = () => {
       timer ??= $.clock.every(TICK_MS, () => {
@@ -770,12 +912,14 @@ export const register: Register = (on, options) => {
   // Set in session.start, where the MCP call is bound; the pane's buttons reach it here.
   const pane: {
     loadDetail: (runId: string) => Promise<void>;
+    loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
     start: () => void;
     continueLocally: (runId: string, dir: string) => Promise<void>;
     cwd: string;
   } = {
     loadDetail: async () => {},
+    loadMoreSteps: async () => {},
     refresh: async () => {},
     start: () => {},
     continueLocally: async () => {},
@@ -883,6 +1027,68 @@ export const register: Register = (on, options) => {
         info?.id === open.id ? info.finalText : null,
       ].some((text) => (text ?? "").length > 60);
       const shown = info && info.id === open.id ? info : null;
+      const stepsState = await read($, runSteps);
+      const stepsOf = stepsState?.runId === open.id ? stepsState : null;
+      // Steps as stored (already redacted), as plain Text: a summary never becomes markdown or a link.
+      // Each key sits on a wrapping Box (the test kit drops `key` on Text).
+      const stepsBlock = (() => {
+        if (!stepsOf) return null;
+        if (stepsOf.notice) {
+          return (
+            <Box key="steps-notice">
+              <Text dimColor wrap="wrap">
+                {stepsOf.notice}
+              </Text>
+            </Box>
+          );
+        }
+        if (stepsOf.level === "off") {
+          return (
+            <Box key="steps-off">
+              <Text dimColor>Steps are off on this server.</Text>
+            </Box>
+          );
+        }
+        if (stepsOf.steps.length === 0) {
+          // Nothing recorded (yet, or not for this kind of run on this server): say nothing rather than guess.
+          return stepsOf.expired ? (
+            <Box key="steps-expired">
+              <Text dimColor>This run's steps were deleted after the retention period.</Text>
+            </Box>
+          ) : null;
+        }
+        const isRecent = stepsOf.mode === "recent";
+        return (
+          <Box flexDirection="column">
+            {heading(isRecent ? "Recent steps" : "Steps")}
+            {stepsOf.steps.map((step) => {
+              const { mark, failed } = stepMark(step);
+              return (
+                <Box key={`step-${step.seq}`}>
+                  <Text wrap="wrap">
+                    <Text {...(failed ? { color: FAILED_COLOR } : { dimColor: true })}>{mark}</Text> {stepLine(step)}
+                  </Text>
+                </Box>
+              );
+            })}
+            {!isRecent && stepsOf.next !== null && (
+              <Box>
+                <Button
+                  key="more-steps"
+                  label={D ? "More steps" : "More steps (n)"}
+                  {...hk("n")}
+                  onPress={() => void pane.loadMoreSteps(open.id)}
+                />
+              </Box>
+            )}
+            {stepsOf.dropped > 0 && (
+              <Box key="steps-dropped">
+                <Text dimColor>{`${stepsOf.dropped} later steps were not recorded (the per-run limit).`}</Text>
+              </Box>
+            )}
+          </Box>
+        );
+      })();
       const prOutcome = open.outcomes.find((o) => o.kind === "pull_request" && o.url);
       const prUrl = shown?.pullRequestUrl ?? prOutcome?.url ?? null;
       const prNumber = prUrl ? /\/pull\/(\d+)/.exec(prUrl)?.[1] : null;
@@ -955,6 +1161,7 @@ export const register: Register = (on, options) => {
               {shown.error && <Text wrap="wrap">{shown.error}</Text>}
             </Box>
           )}
+          {stepsOf?.mode === "recent" && stepsBlock}
           {open.via && (
             <Box flexDirection="column">
               {heading("Started by")}
@@ -1025,6 +1232,7 @@ export const register: Register = (on, options) => {
               {prose("final-text", shown.finalText)}
             </Box>
           )}
+          {stepsOf?.mode === "all" && stepsBlock}
           {shown && !ACTIVE.has(open.status) && (shown.outcome || shown.resultBranch) && Input && (
             <Box flexDirection="column">
               {heading("Continue locally")}
@@ -1432,41 +1640,50 @@ export const register: Register = (on, options) => {
                       ? `  ${clean(group.label)}`
                       : "";
                 return (
-                  <Box key={row.id}>
-                    <Box width={2}>
-                      <Text color={statusColor(row.status)} weight="semibold">
-                        {statusMark(row.status)}
-                      </Text>
+                  <Box key={row.id} flexDirection="column">
+                    <Box>
+                      <Box width={2}>
+                        <Text color={statusColor(row.status)} weight="semibold">
+                          {statusMark(row.status)}
+                        </Text>
+                      </Box>
+                      <Box flexGrow={1} marginLeft={depth > 0 ? 3 : 1}>
+                        <Markdown
+                          key={`run-${row.id}`}
+                          text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}${failed ? `  ${row.status.replaceAll("_", " ")}` : ""}`}
+                          pressableLinks={[runHref(row.id)]}
+                          onLinkPress={() => {
+                            void update($, selected, () => row.id);
+                            void pane.loadDetail(row.id);
+                          }}
+                        />
+                      </Box>
+                      <Box width={8} justifyContent="flex-end">
+                        <Text
+                          tabular
+                          size="caption"
+                          {...(ACTIVE.has(row.status) ? { color: statusColor(row.status) } : { dimColor: true })}
+                        >
+                          {took(row, now)}
+                        </Text>
+                      </Box>
+                      <Box width={8} justifyContent="flex-end">
+                        <Text
+                          tabular
+                          size="caption"
+                          {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
+                        >
+                          {usd(row.costUsd)}
+                        </Text>
+                      </Box>
                     </Box>
-                    <Box flexGrow={1} marginLeft={depth > 0 ? 3 : 1}>
-                      <Markdown
-                        key={`run-${row.id}`}
-                        text={`${label ? `${label}  ` : ""}${openId === row.id ? "**" : ""}[${clean(row.agentName)}](${runHref(row.id)})${openId === row.id ? "**" : ""}${pr}${failed ? `  ${row.status.replaceAll("_", " ")}` : ""}`}
-                        pressableLinks={[runHref(row.id)]}
-                        onLinkPress={() => {
-                          void update($, selected, () => row.id);
-                          void pane.loadDetail(row.id);
-                        }}
-                      />
-                    </Box>
-                    <Box width={8} justifyContent="flex-end">
-                      <Text
-                        tabular
-                        size="caption"
-                        {...(ACTIVE.has(row.status) ? { color: statusColor(row.status) } : { dimColor: true })}
-                      >
-                        {took(row, now)}
-                      </Text>
-                    </Box>
-                    <Box width={8} justifyContent="flex-end">
-                      <Text
-                        tabular
-                        size="caption"
-                        {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
-                      >
-                        {usd(row.costUsd)}
-                      </Text>
-                    </Box>
+                    {showsLastLine(row) && (
+                      <Box key={`last-${row.id}`} marginLeft={depth > 0 ? 5 : 3}>
+                        <Text dimColor size="caption" wrap="truncate-end">
+                          {row.lastLine}
+                        </Text>
+                      </Box>
+                    )}
                   </Box>
                 );
               };
@@ -1547,6 +1764,15 @@ export const register: Register = (on, options) => {
                       )}
                       <Text color={color}>{icon}</Text> {row.agentName} <Text dimColor>{row.status}</Text>
                     </Button>
+                    {showsLastLine(row) && (
+                      // The server's line, as plain text: it is never markdown or a link.
+                      <Box key={`last-${row.id}`}>
+                        <Text dimColor wrap="truncate-end">
+                          {"  "}
+                          {"  ".repeat(depth)}↳ {row.lastLine}
+                        </Text>
+                      </Box>
+                    )}
                     <Box>
                       <Text dimColor wrap="truncate-end">
                         {"  "}

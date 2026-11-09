@@ -221,8 +221,8 @@ describe("CodingProxy run steps", () => {
     expect(sink.text()).toBe(stream);
     expect(h.stepBatches()[0].batch.steps.map((s) => (s.kind === "tool" ? `${s.tool}: ${s.text}` : s.text))).toEqual([
       "Running the tests now.",
-      "exec_command: npm test",
-      "exec_command: npm run lint",
+      "Bash: npm test",
+      "Bash: npm run lint",
       "exec: git status --short",
     ]);
     expect(h.stepBatches()[0].batch.steps.every((s) => !s.truncated)).toBe(true);

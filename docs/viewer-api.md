@@ -103,9 +103,14 @@ check is still pending).
 
 ### `GET /admin/api/runs/<id>`
 
-One run in full: the graph fields plus the run's final text and error. For
-coding runs, services report the **names** of their environment variables
-only, never values. An unknown id returns `404`.
+One run in full: the graph fields plus the run's final text and error, and its
+newest steps (Wardby 0.9.0 and later). `steps` lists at most the newest 200, oldest first, each with
+`seq`, `at`, `kind` (`tool` or `said`), `tool`, `summary` and `status`;
+`stepsOmitted` counts earlier steps not listed and `stepsDropped` counts steps
+past the per-run limit that were never recorded. A step's summary is redacted
+when it is recorded; tool output is never included. For coding runs, services
+report the **names** of their environment variables only, never values. An
+unknown id returns `404`.
 
 ### `GET /admin/api/infra`
 
@@ -131,21 +136,25 @@ run claims them.
 
 A Server-Sent Events stream (`text/event-stream`) of live changes. Frames:
 
-| Frame                                            | Meaning                                                                                        |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `retry: 3000`                                    | Suggested client reconnect delay in milliseconds.                                              |
-| `event: hello`                                   | Sent first. Data is `{"connected": <bool>}`: whether the server's live-event connection is up. |
-| `event: run`, `event: service`, `event: outcome` | A run, coding-run service, or outcome changed. Each carries an `id:` line.                     |
-| `event: status`                                  | The server's live-event connection changed. Data is `{"connected": <bool>}`.                   |
-| `event: resync`                                  | The live-event connection is up (again). Events may have been missed: refetch the graph.       |
-| `: ping`                                         | Comment sent every 15 seconds to keep the connection open.                                     |
+| Frame                                                           | Meaning                                                                                        |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `retry: 3000`                                                   | Suggested client reconnect delay in milliseconds.                                              |
+| `event: hello`                                                  | Sent first. Data is `{"connected": <bool>}`: whether the server's live-event connection is up. |
+| `event: run`, `event: service`, `event: outcome`, `event: step` | A run, coding-run service, outcome or run step changed. Each carries an `id:` line.            |
+| `event: status`                                                 | The server's live-event connection changed. Data is `{"connected": <bool>}`.                   |
+| `event: resync`                                                 | The live-event connection is up (again). Events may have been missed: refetch the graph.       |
+| `: ping`                                                        | Comment sent every 15 seconds to keep the connection open.                                     |
 
-Event payloads are small and never include final text; fetch
+Event payloads are small and never include final text or tool output; fetch
 `/admin/api/runs/<id>` for detail. A `run` event carries the run's status,
 turn and token counts, cost and finish time. A `service` event carries the
 service name, its state and the attempt count. An `outcome` event carries only
 the run id and the outcome source (`pull_request`, `host_status`,
 `issue_status` or `host_check`), so refetch the run to see what changed.
+From Wardby 0.9.0, a `step` event carries the run id and the step's `seq`, `stepKind` (`tool` or
+`said`), `tool`, `summary`, `status` and `at`. It is sent when a step is
+recorded and again when its status arrives, so apply it by `seq`. Steps are
+not in the graph: fetch the run to list them.
 
 **There is no replay.** Open the event stream first, then load
 `/admin/api/graph` and apply events on top of it. Refetch `/admin/api/graph` on

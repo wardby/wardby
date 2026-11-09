@@ -226,10 +226,20 @@ describe("buildHelpCatalog", () => {
     "coding run steps",
     "codex run steps",
     "claude code run steps",
+    "viewer step event",
     "WARDBY_RUN_STEPS_LISTEN",
     "WARDBY_RUN_STEPS_URL",
   ])("ranks the run steps article first for %s", async (query) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     expect(searchHelp(catalog, query)[0]?.page.id).toBe("run-steps");
+  });
+
+  it.each(["pane steps", "recent steps pane"])("finds the run pane article for %s", async (query) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, query)
+        .slice(0, 2)
+        .map((r) => r.page.id),
+    ).toContain("claude-code-run-pane");
   });
 });

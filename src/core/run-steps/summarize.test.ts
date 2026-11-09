@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bounded,
+  codingResultStepText,
   displayToolName,
   secretForms,
   stepSummarizer,
@@ -22,8 +23,27 @@ describe("displayToolName", () => {
     expect(displayToolName("mcp__wardby_mcp__search_issues")).toBe("mcp:search_issues");
     expect(displayToolName("echo", "mcp__wardby_mcp")).toBe("mcp:echo");
     expect(displayToolName("list_agents", "collaboration")).toBe("collaboration.list_agents");
-    expect(displayToolName("exec_command")).toBe("exec_command");
+    // Codex's shell tools show as Bash, the name Claude Code's has: one name for the same tool.
+    expect(displayToolName("exec_command")).toBe("Bash");
+    expect(displayToolName("shell")).toBe("Bash");
+    expect(displayToolName("local_shell")).toBe("Bash");
+    expect(displayToolName("shell_command")).toBe("Bash");
+    // Only the bare names: a namespaced tool of the same name is someone else's.
+    expect(displayToolName("exec_command", "collaboration")).toBe("collaboration.exec_command");
+    // Code mode's exec runs JavaScript, not a shell command: it keeps its name.
+    expect(displayToolName("exec")).toBe("exec");
     expect(displayToolName("bad name!")).toBe("tool");
+  });
+});
+
+describe("toolStepText with Codex shell tools", () => {
+  it("keeps the command of a Codex shell call once it is named Bash", () => {
+    const tool = displayToolName("exec_command");
+    expect(toolStepText(tool, '{"cmd":["bash","-lc","npm test"]}')).toEqual({ text: "npm test", truncated: false });
+    expect(toolStepText(displayToolName("shell"), '{"command":["git","status"]}')).toEqual({
+      text: "git status",
+      truncated: false,
+    });
   });
 });
 
@@ -458,5 +478,58 @@ describe("cost", () => {
       REDACTED_TEXT,
     );
     expect(performance.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe("codingResultStepText", () => {
+  it("reads a coding run's final answer as its own summary, else a Finished line", () => {
+    const answer = { schemaVersion: 1, runId: "r1", outcome: "changes_ready", tag: null, tests: [] };
+    expect(codingResultStepText(JSON.stringify({ ...answer, summary: "Fixed the route." }))).toEqual({
+      text: "Fixed the route.",
+      truncated: false,
+    });
+    expect(codingResultStepText(JSON.stringify({ ...answer, outcome: "no_changes", summary: "  " }))).toEqual({
+      text: "Finished: no changes",
+      truncated: false,
+    });
+    expect(codingResultStepText('{"schemaVersion":1,"outcome":"__proto__"}')).toEqual({
+      text: "Finished",
+      truncated: false,
+    });
+  });
+
+  it("is not an answer without the coding protocol's version", () => {
+    expect(codingResultStepText('{"schemaVersion":2,"summary":"x"}')).toBeUndefined();
+    expect(codingResultStepText('{"summary":"not an answer"}')).toBeUndefined();
+    expect(codingResultStepText("Running the tests now.")).toBeUndefined();
+    expect(codingResultStepText("[1,2]")).toBeUndefined();
+  });
+
+  it("reads a cut-off answer's summary as far as it goes", () => {
+    expect(codingResultStepText('{"schemaVersion":1,"runId":"r","summary":"Half of the sto')).toEqual({
+      text: "Half of the sto",
+      truncated: true,
+    });
+    expect(codingResultStepText('{"schemaVersion":1,"runId":"r","outco')).toEqual({
+      text: "Finished",
+      truncated: false,
+    });
+    // An escape the cut left unreadable shows nothing of the field.
+    expect(codingResultStepText('{"schemaVersion":1,"summary":"a\\x')).toEqual({ text: "[REDACTED]", truncated: true });
+  });
+
+  it("is redacted like any step: fake secrets in the answer never reach the stored line", () => {
+    const quoted = 'wbFake"Quoted\\Secret-91c2';
+    const json = JSON.stringify({ schemaVersion: 1, summary: `Set ${FAKE_SECRET}, ${quoted} and ${FAKE_TOKEN}.` });
+    const out = stepSummary({ kind: "said", ...codingResultStepText(json)! }, [FAKE_SECRET, quoted]);
+    expect(leaks(out, FAKE_SECRET)).toBeUndefined();
+    expect(leaks(out, quoted)).toBeUndefined();
+    expect(leaks(out, FAKE_TOKEN)).toBeUndefined();
+    expect(out).toContain(REDACTED_TEXT);
+    // Cut inside the secret: the start that is left is masked too.
+    const cut = JSON.stringify({ schemaVersion: 1, summary: `token ${FAKE_SECRET}` }).slice(0, -12);
+    const partial = codingResultStepText(cut)!;
+    expect(partial.truncated).toBe(true);
+    expect(leaks(stepSummary({ kind: "said", ...partial }, [FAKE_SECRET]), FAKE_SECRET)).toBeUndefined();
   });
 });

@@ -89,6 +89,49 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer NOTIFY triggers (PostgreSQL)"
     await waitFor(() => events().some((e) => e.kind === "run" && e.finishedAt === instant.toISOString()), 2000);
   });
 
+  it("emits a step event when a step is recorded and when its status arrives, never its callId or detail", async () => {
+    await db.runStep.create({
+      data: {
+        runId,
+        seq: 1,
+        kind: "tool",
+        tool: "Bash",
+        callId: "call_notify_only_db",
+        summary: "npm test",
+        detail: "detail_text_never_sent",
+        at: new Date("2030-01-01T00:00:00.000Z"),
+        expiresAt: new Date("2031-01-01T00:00:00.000Z"),
+      },
+    });
+    await waitFor(() => events().some((e) => e.kind === "step" && e.seq === 1), 2000);
+    expect(events().find((e) => e.kind === "step")).toEqual({
+      kind: "step",
+      runId,
+      seq: 1,
+      stepKind: "tool",
+      tool: "Bash",
+      summary: "npm test",
+      status: null,
+      at: "2030-01-01T00:00:00.000Z",
+    });
+
+    await db.runStep.updateMany({ where: { runId, seq: 1 }, data: { status: "exit 1" } });
+    await waitFor(() => events().some((e) => e.kind === "step" && e.status === "exit 1"), 2000);
+
+    // A change the viewer can't see (retention) sends nothing.
+    const before = events().length;
+    await db.runStep.updateMany({ where: { runId, seq: 1 }, data: { expiresAt: new Date("2032-01-01T00:00:00Z") } });
+    await sleep(300);
+    expect(events().length).toBe(before);
+
+    const stepPayloads = raw.filter((p) => p.includes(runId) && p.includes('"step"'));
+    expect(stepPayloads.length).toBe(2);
+    for (const p of stepPayloads) {
+      expect(p).not.toContain("call_notify_only_db");
+      expect(p).not.toContain("detail_text_never_sent");
+    }
+  });
+
   it("emits only schema-valid payloads for the fixture run", () => {
     const own = raw.map((p) => JSON.parse(p) as { runId?: string }).filter((p) => p.runId === runId);
     expect(own.length).toBeGreaterThan(0);
