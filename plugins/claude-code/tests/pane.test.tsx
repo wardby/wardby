@@ -1139,7 +1139,7 @@ test("a running run's detail shows its last 8 steps, read again each poll", asyn
     expect(await ui.find({ key: "step-4" })).toBeUndefined();
     expect(JSON.stringify(await ui.find({ key: "step-5" }))).toContain("step 5");
     // The result is the row's gutter: the exit code "1", then the tool and "step 10".
-    expect((await ui.find({ key: "step-10" }))?.text).toMatch(/^\s*1\s*Bash:?\s*step 10/);
+    expect((await ui.find({ key: "step-10" }))?.text).toMatch(/^\s*1\s*(Bash:\s*)?step 10/);
     expect((await ui.find({ key: "step-12" }))?.type).toBe("Box");
     state.last = 14;
     await clock.advance(10_000);
@@ -1502,6 +1502,42 @@ for (const surface of ["desktop", "terminal"] as const) {
     await ui.unmount();
   });
 }
+
+test("desktop: a shell step shows its command alone; another tool keeps its name", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded" });
+    if (e.tool === "get_run_steps") {
+      return reply({
+        runId: "r1",
+        level: "summary",
+        steps: [
+          { seq: 1, at: iso(1000), kind: "tool", tool: "Bash", summary: "ls -la", status: "ok" },
+          { seq: 2, at: iso(1000), kind: "tool", tool: "Edit", summary: "src/app.ts", status: "ok" },
+        ],
+        next: null,
+        dropped: 0,
+      });
+    }
+    return reply({});
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  const shell = (await ui.find({ key: "step-1" }))?.text ?? "";
+  expect(shell).toContain("ls -la");
+  expect(shell).not.toContain("Bash");
+  expect((await ui.find({ key: "step-2" }))?.text).toMatch(/Edit\s*src\/app\.ts/);
+  await ui.unmount();
+});
 
 test("desktop: no Show detail button, and the row's one chevron opens and closes the step", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
@@ -2146,6 +2182,8 @@ test("desktop: every detail card opens with a colour bar in its kind's wardby co
     expect(bar, key).toContain('"type":"Svg"');
     expect(bar, key).toContain(`fill=\\"${color}\\"`);
     expect(bar, key).toContain('"height":3');
+    // A surface draws an Svg only with alt text: an empty alt left a blank gap where the bar belongs.
+    expect(bar, key).toMatch(/"alt":"[^"]+"/);
   }
   await ui.unmount();
 });

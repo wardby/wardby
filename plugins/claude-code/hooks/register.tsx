@@ -682,6 +682,19 @@ const CARD_COLOR = {
   continue: WARDBY.slate,
 } as const;
 type CardKind = keyof typeof CARD_COLOR;
+// What each card's bar stands for, as its SVG's alt (the element needs one to be drawn).
+const CARD_ALT: Record<CardKind, string> = {
+  started: "Started by",
+  produced: "What it produced",
+  tree: "Run tree",
+  final: "Final answer",
+  services: "Services",
+  steps: "Steps",
+  error: "Error",
+  continue: "Continue locally",
+};
+// Shell tools: their rows show the command alone, since nearly every step is one.
+const SHELL_TOOLS = new Set(["Bash", "shell", "exec", "exec_command", "run_command", "local_shell"]);
 // A failed step's exit code sits on a soft tint of wardby red (14%, see-through on light and dark).
 const FAIL_TINT = "#e33d3724";
 // The open step's inset panel, and a said step's quiet left rule.
@@ -1248,7 +1261,7 @@ export const register: Register = (on, options) => {
         <Box key={key} flexDirection="column" {...GROUP_BOX} {...(D && Svg ? {} : { borderColor: CARD_COLOR[kind] })}>
           {D && Svg && (
             <Box key={`${key}-bar`} marginBottom="sm">
-              <Svg source={cardBarSvg(CARD_COLOR[kind])} alt="" height={3} />
+              <Svg source={cardBarSvg(CARD_COLOR[kind])} alt={`${CARD_ALT[kind]} card`} height={3} />
             </Box>
           )}
           {children as never}
@@ -1360,11 +1373,11 @@ export const register: Register = (on, options) => {
               const markColor = (failed: boolean, mark: string) =>
                 failed ? (D ? WARDBY.red : FAILED_COLOR) : mark === "✓" ? (D ? WARDBY.mint : "success") : TONES.blue.fg;
               const gutter = D ? (
-                <Box key={`step-mark-${step.seq}`} width={5} flexShrink={0} justifyContent="center">
+                <Box key={`step-mark-${step.seq}`} width={4} flexShrink={0} justifyContent="center">
                   {result &&
                     (result.failed ? (
                       <Text mono size="caption" weight="semibold" color={WARDBY.red} backgroundColor={FAIL_TINT}>
-                        {` ${result.mark} `}
+                        {result.mark}
                       </Text>
                     ) : (
                       <Text weight="semibold" color={markColor(false, result.mark)}>
@@ -1390,11 +1403,13 @@ export const register: Register = (on, options) => {
                 D ? (
                   // The tool small and dim, the command in mono on one line, cut with … rather than overflowing.
                   <Box flexGrow={1} flexShrink={1} minWidth={0} gap={1} alignItems="center">
-                    <Box flexShrink={0}>
-                      <Text size="caption" dimColor>
-                        {step.tool ?? "tool"}
-                      </Text>
-                    </Box>
+                    {!SHELL_TOOLS.has(step.tool ?? "") && (
+                      <Box flexShrink={0}>
+                        <Text size="caption" dimColor>
+                          {step.tool ?? "tool"}
+                        </Text>
+                      </Box>
+                    )}
                     <Box flexGrow={1} flexShrink={1} minWidth={0}>
                       <Text mono size="footnote" wrap="truncate-end">
                         {step.summary}
@@ -1595,7 +1610,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="column">
             {/* The header: back, the agent, its status, and the short run id at the right. */}
-            <Box gap={1} alignItems="center">
+            <Box gap={1} alignItems="center" flexWrap="wrap">
               <Button
                 key="back"
                 label="‹ Runs"
@@ -1606,7 +1621,7 @@ export const register: Register = (on, options) => {
                   void update($, openStep, () => null);
                 }}
               />
-              <Text size="heading" weight="semibold" bold={!D} wrap="truncate-end">
+              <Text size="heading" weight="semibold" bold={!D} wrap="wrap">
                 {open.agentName}
               </Text>
               {pill(open.status.replaceAll("_", " "), statusTone(open.status), statusMark(open.status))}
