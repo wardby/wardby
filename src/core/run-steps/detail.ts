@@ -23,6 +23,10 @@ import {
 } from "./types.js";
 
 const WS = /\s/;
+// A PEM private key's lone edges: complete pairs are masked by redactSecrets first, so what
+// matches here is a BEGIN whose END is not in the text, or an END whose BEGIN was cut away.
+const PEM_BEGIN_TO_END = /-----BEGIN (?:[A-Z ]{1,32} )?PRIVATE KEY-----[\s\S]*$/;
+const PEM_START_TO_END = /^[\s\S]*?-----END (?:[A-Z ]{1,32} )?PRIVATE KEY-----/;
 const reverse = (text: string): string => text.split("").reverse().join("");
 
 /**
@@ -59,9 +63,13 @@ export function tailOf(text: string, max = MAX_RESULT_OUTPUT_CHARS): { text: str
   return text.length > max ? { text: text.slice(text.length - max), cut: true } : { text, cut: false };
 }
 
+/** What follows the first line break; nothing when there is none (a cut head leaves a partial first line). */
+const afterFirstLine = (text: string): string => {
+  const at = text.indexOf("\n");
+  return at < 0 ? "" : text.slice(at + 1);
+};
+
 const headCut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
-const tailCut = (text: string, max: number): string =>
-  text.length > max ? `…${text.slice(text.length - max + 1)}` : text;
 
 /** A tool step's stored detail with its output appended, within MAX_STEP_DETAIL_CHARS. */
 export function joinDetail(existing: string | null, suffix: string): string {
@@ -104,7 +112,9 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
     );
     const masked = maskSpans(text, mergeSpans([...asWritten, ...viaCollapsed]), REDACTED);
     // Token shapes (and Bearer values) after the exact values, as redactSecrets does for summaries.
-    return redactSecrets(masked);
+    const shaped = redactSecrets(masked);
+    const open = shaped.replace(PEM_BEGIN_TO_END, REDACTED);
+    return headWasCut ? open.replace(PEM_START_TO_END, REDACTED) : open;
   };
 
   return {
@@ -114,8 +124,18 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
     },
     output(result) {
       const source = tailOf(result.output);
-      const text = redact(source.text, result.outputCut === true || source.cut);
-      return `${DETAIL_OUTPUT_HEADING}${tailCut(text, DETAIL_OUTPUT_CHARS)}`;
+      const headWasCut = result.outputCut === true || source.cut;
+      // Redacted on everything available first. A text cut at its head then starts mid-line, where
+      // a token shape's anchor (a label, a scheme, a BEGIN line) may be gone, so the partial first
+      // line is dropped, after the 2 KiB cut as well as after the source's.
+      let text = redact(source.text, headWasCut);
+      let cut = headWasCut;
+      if (cut) text = afterFirstLine(text);
+      if (text.length > DETAIL_OUTPUT_CHARS - 1) {
+        text = afterFirstLine(text.slice(text.length - (DETAIL_OUTPUT_CHARS - 1)));
+        cut = true;
+      }
+      return `${DETAIL_OUTPUT_HEADING}${cut ? "…" : ""}${text}`;
     },
   };
 }

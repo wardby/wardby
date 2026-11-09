@@ -133,16 +133,20 @@ describe("stepDetailer", () => {
   });
 
   it("masks a secret's end at the start of an output whose head was cut (the head check)", () => {
-    const out = detail.output({ output: `${FAKE_SECRET.slice(-14)} done`, outputCut: true });
+    const out = detail.output({ output: `${FAKE_SECRET.slice(-14)} done\nnext`, outputCut: true });
     expect(out).not.toContain(FAKE_SECRET.slice(-14));
-    expect(out).toContain("done");
-    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}${REDACTED_TEXT} done`);
+    // The partial first line is dropped; only the cut marker stands in for it.
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…next`);
+    // With no line break after the cut, nothing but the marker is shown.
+    expect(detail.output({ output: `${FAKE_SECRET.slice(-14)} done`, outputCut: true })).toBe(
+      `${DETAIL_OUTPUT_HEADING}…`,
+    );
   });
 
   it("the head check finds a multi-line secret's end written with other whitespace", () => {
     const out = detail.output({ output: "-4c2d \t\n wbFake-line-two-9e1b\nok", outputCut: true });
     expectNoFragment(out, all);
-    expect(out.endsWith("\nok")).toBe(true);
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…ok`);
   });
 
   it("the head check runs when the source sent more than MAX_RESULT_OUTPUT_CHARS", () => {
@@ -172,7 +176,7 @@ describe("stepDetailer", () => {
   it("masks secrets glued to other text and to each other", () => {
     const text = `pre${FAKE_SECRET}${FAKE_CAPABILITY}mid${FAKE_SECRET}${FAKE_SECRET}post`;
     expect(detail.step(said(text))).toBe(`pre${REDACTED_TEXT}mid${REDACTED_TEXT}post`);
-    expect(detail.output({ output: text, outputCut: true })).toBe(
+    expect(detail.output({ output: text, outputCut: false })).toBe(
       `${DETAIL_OUTPUT_HEADING}pre${REDACTED_TEXT}mid${REDACTED_TEXT}post`,
     );
   });
@@ -190,7 +194,11 @@ describe("stepDetailer", () => {
     const text = "line one\n\n  indented two\tand a tab\r\nlast line \n";
     expect(detail.step(said(text))).toBe(text);
     expect(detail.step(tool(text))).toBe(text);
-    expect(detail.output({ output: text, outputCut: true })).toBe(`${DETAIL_OUTPUT_HEADING}${text}`);
+    expect(detail.output({ output: text, outputCut: false })).toBe(`${DETAIL_OUTPUT_HEADING}${text}`);
+    // A cut head loses its partial first line only.
+    expect(detail.output({ output: text, outputCut: true })).toBe(
+      `${DETAIL_OUTPUT_HEADING}…${text.slice(text.indexOf("\n") + 1)}`,
+    );
   });
 
   it("redacts at least what the summary redacts for the same text", () => {
@@ -218,8 +226,8 @@ describe("stepDetailer against the agent's values and the run's extras", () => {
   it("masks both, whole and across each cut", () => {
     expect(detail.step(said(`${FAKE_SECRET} ${FAKE_EXTRA}`))).toBe(`${REDACTED_TEXT} ${REDACTED_TEXT}`);
     expect(detail.step(tool(`x ${FAKE_EXTRA.slice(0, 12)}`, true))).toBe(`x ${REDACTED_TEXT}`);
-    expect(detail.output({ output: `${FAKE_EXTRA.slice(-12)} y`, outputCut: true })).toBe(
-      `${DETAIL_OUTPUT_HEADING}${REDACTED_TEXT} y`,
+    expect(detail.output({ output: `${FAKE_EXTRA.slice(-12)} y\nz`, outputCut: true })).toBe(
+      `${DETAIL_OUTPUT_HEADING}…z`,
     );
   });
 });
@@ -277,10 +285,11 @@ describe("cost", () => {
     expect(text.length).toBe(MAX_STEP_TEXT_CHARS);
     expect(step.startsWith(`${REDACTED_TEXT}\n`)).toBe(true);
     expect(input.startsWith(`${REDACTED_TEXT}\n`)).toBe(true);
-    expect(tail.endsWith(`\n${REDACTED_TEXT}`)).toBe(true);
+    // The 2 KiB cut lands mid-line in the filler, so that partial line is dropped.
+    expect(tail).toBe(`${DETAIL_OUTPUT_HEADING}…${REDACTED_TEXT}`);
     expect(head.startsWith(`${DETAIL_OUTPUT_HEADING}…`)).toBe(true);
     const short = detail.output({ output: output.slice(0, 200), outputCut: true });
-    expect(short).toBe(`${DETAIL_OUTPUT_HEADING}${REDACTED_TEXT}\n${output.slice(91, 200)}`);
+    expect(short).toBe(`${DETAIL_OUTPUT_HEADING}…${output.slice(91, 200)}`);
     for (const out of [step, input, tail, head]) expectNoFragment(out, [secrets[3], secrets[5], secrets[7]]);
     console.info(`detail cost: 200 x 4 KiB secrets, 16 KiB text, 4 calls: ${elapsed.toFixed(1)} ms`);
     // Generous for a loaded CI machine; it runs in a few milliseconds.
@@ -295,7 +304,7 @@ describe("cost", () => {
     const detail = stepDetailer(similar);
     const started = performance.now();
     expect(detail.output({ output: "a".repeat(MAX_RESULT_OUTPUT_CHARS), outputCut: true })).toBe(
-      `${DETAIL_OUTPUT_HEADING}${REDACTED_TEXT}`,
+      `${DETAIL_OUTPUT_HEADING}…`,
     );
     // The longest secret start it ends in is masked wherever it occurs, as summaries mask it.
     expect(detail.step(tool(`${"b".repeat(100)}${"a".repeat(MAX_STEP_TEXT_CHARS - 100)}`, true))).toBe(
@@ -304,5 +313,59 @@ describe("cost", () => {
     const elapsed = performance.now() - started;
     console.info(`detail cost: 200 self-similar 16 KiB secrets, both edges: ${elapsed.toFixed(1)} ms`);
     expect(elapsed).toBeLessThan(5000);
+  });
+});
+
+describe("cut heads and PEM edges", () => {
+  const detail = stepDetailer([FAKE_SECRET]);
+  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCFAKEFAKEFAKE";
+  const pem = `-----BEGIN PRIVATE KEY-----\n${`${body}\n`.repeat(40)}-----END PRIVATE KEY-----\n`;
+
+  it("shows no key body when the output's head cut removed the BEGIN line", () => {
+    const out = detail.output({ output: `${pem.slice(100)}after`, outputCut: true });
+    expect(out).not.toContain(body);
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…after`);
+    const spaced = detail.output({ output: `${pem.slice(100)}ok\nnext`, outputCut: true });
+    expect(spaced).not.toContain(body);
+    expect(spaced).toBe(`${DETAIL_OUTPUT_HEADING}…ok\nnext`);
+  });
+
+  it("masks a dangling END from the text's start even when the first line break is inside the key", () => {
+    const out = detail.output({ output: `${pem.slice(60)}\nafter`, outputCut: true });
+    expect(out).not.toContain(body);
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…\nafter`);
+  });
+
+  it("masks a BEGIN with no END through the end of an input", () => {
+    const input = `cat key\n${pem.slice(0, 600)}`;
+    const out = detail.step(tool(input));
+    expect(out).not.toContain(body);
+    expect(out).toBe(`cat key\n${REDACTED_TEXT}`);
+    expect(detail.output({ output: `x\n${pem.slice(0, 600)}`, outputCut: false })).toBe(
+      `${DETAIL_OUTPUT_HEADING}x\n${REDACTED_TEXT}`,
+    );
+  });
+
+  it("shows no AWS secret key value when its label was cut off", () => {
+    const line = "aws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY";
+    const out = detail.output({ output: `${line.slice(10)}\nnext`, outputCut: true });
+    expect(out).not.toContain("wJalrXUtnFEMI");
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…next`);
+  });
+
+  it("shows no URL credentials when the scheme was cut off", () => {
+    const out = detail.output({ output: "ser:pa55word@host.invalid/x\nnext", outputCut: true });
+    expect(out).not.toContain("pa55word");
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…next`);
+  });
+
+  it("drops the partial first line after the 2 KiB cut too, within the bound", () => {
+    const output = `${"x".repeat(3000)}\nrest one\nrest two`;
+    const out = detail.output({ output, outputCut: false });
+    expect(out).toBe(`${DETAIL_OUTPUT_HEADING}…rest one\nrest two`);
+    const long = detail.output({ output: `${"x".repeat(3000)}`, outputCut: false });
+    expect(long).toBe(`${DETAIL_OUTPUT_HEADING}…`);
+    const lines = detail.output({ output: "line\n".repeat(1000), outputCut: false });
+    expect(lines.length).toBeLessThanOrEqual(DETAIL_OUTPUT_HEADING.length + DETAIL_OUTPUT_CHARS);
   });
 });
