@@ -6,7 +6,7 @@ import {
   startupTestSimulators,
 } from "../../config/test-simulators.js";
 import { logger } from "../../core/logger.js";
-import { effectiveRunStepsLevel, loadRunStepsLevel } from "../../core/run-steps/config.js";
+import { loadRunStepsLevel } from "../../core/run-steps/config.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
@@ -164,7 +164,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // Throws on an invalid setting, before anything listens.
   const runStepsUrl = loadRunStepsUrl(env);
   // Throws on an invalid WARDBY_RUN_STEPS. At off no step text leaves the proxy.
-  const runStepsLevel = effectiveRunStepsLevel(loadRunStepsLevel(env));
+  const runStepsLevel = loadRunStepsLevel(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;

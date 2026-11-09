@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RUN_STEP_RETENTION_DAYS,
-  effectiveRunStepsLevel,
+  dispatchRunStepsLevel,
   loadRunStepRetentionDays,
   loadRunStepsLevel,
+  recordedRunStepsLevel,
+  runStepsAboveCeilingWarning,
+  runStepsLevelFor,
 } from "./config.js";
 
 describe("loadRunStepsLevel", () => {
@@ -19,11 +22,47 @@ describe("loadRunStepsLevel", () => {
       "WARDBY_RUN_STEPS must be off, summary or detail.",
     );
   });
+});
 
-  it("records detail as summary in this release", () => {
-    expect(effectiveRunStepsLevel("detail")).toBe("summary");
-    expect(effectiveRunStepsLevel("summary")).toBe("summary");
-    expect(effectiveRunStepsLevel("off")).toBe("off");
+describe("runStepsLevelFor", () => {
+  it("is the lower of the ceiling and the agent setting; unset agents are at summary", () => {
+    expect(runStepsLevelFor("detail", "detail")).toBe("detail");
+    expect(runStepsLevelFor("summary", "detail")).toBe("summary");
+    expect(runStepsLevelFor("off", "detail")).toBe("off");
+    expect(runStepsLevelFor("detail", "off")).toBe("off");
+    expect(runStepsLevelFor("detail", null)).toBe("summary");
+    expect(runStepsLevelFor("detail", undefined)).toBe("summary");
+    expect(runStepsLevelFor("off", null)).toBe("off");
+  });
+});
+
+describe("recordedRunStepsLevel", () => {
+  it("is the run's level capped by the process ceiling; a run from before the field records at most summary", () => {
+    expect(recordedRunStepsLevel("detail", "detail")).toBe("detail");
+    expect(recordedRunStepsLevel("detail", "summary")).toBe("summary");
+    expect(recordedRunStepsLevel("detail", "off")).toBe("off");
+    expect(recordedRunStepsLevel("summary", "detail")).toBe("summary");
+    expect(recordedRunStepsLevel(null, "detail")).toBe("summary");
+    expect(recordedRunStepsLevel(null, "off")).toBe("off");
+  });
+});
+
+describe("dispatchRunStepsLevel", () => {
+  it("reads the ceiling from the environment", () => {
+    expect(dispatchRunStepsLevel({ runSteps: "detail" }, { WARDBY_RUN_STEPS: "detail" })).toBe("detail");
+    expect(dispatchRunStepsLevel({ runSteps: "detail" }, {})).toBe("summary");
+    expect(dispatchRunStepsLevel({ runSteps: null }, { WARDBY_RUN_STEPS: "detail" })).toBe("summary");
+  });
+});
+
+describe("runStepsAboveCeilingWarning", () => {
+  it("warns only when the setting asks for more than the instance allows", () => {
+    expect(runStepsAboveCeilingWarning("detail", "summary")).toBe(
+      "runSteps is detail but this instance allows up to summary (WARDBY_RUN_STEPS), so its runs record summary. See the run-steps help article.",
+    );
+    expect(runStepsAboveCeilingWarning("summary", "off")).toMatch(/allows up to off/);
+    expect(runStepsAboveCeilingWarning("detail", "detail")).toBeUndefined();
+    expect(runStepsAboveCeilingWarning(null, "off")).toBeUndefined();
   });
 });
 

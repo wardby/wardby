@@ -3,7 +3,7 @@
  * are stored already redacted (src/core/run-steps/writer.ts) and returned as stored; a step's
  * callId and detail text are never returned.
  */
-import { effectiveRunStepsLevel, type RunStepsLevel } from "../../core/run-steps/config.js";
+import { recordedRunStepsLevel, type RunStepsLevel } from "../../core/run-steps/config.js";
 import type { WardbyMcpServer } from "../server.js";
 import { findReadableRun } from "./run-access.js";
 import { textResult } from "./text-result.js";
@@ -62,7 +62,7 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
         run.finishedAt.getTime() + opts.retentionDays * DAY_MS < now.getTime();
       return textResult({
         runId: run.id,
-        level: effectiveRunStepsLevel(opts.level),
+        level: recordedRunStepsLevel(run.runStepsLevel, opts.level),
         steps: page.map((s) => ({
           seq: s.seq,
           at: s.at.toISOString(),

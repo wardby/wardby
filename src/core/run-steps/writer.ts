@@ -19,7 +19,7 @@ import type { PrismaClient } from "#prisma";
 import { redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { effectiveRunStepsLevel, loadRunStepRetentionDays, loadRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { loadRunStepRetentionDays, loadRunStepsLevel, type RunStepsLevel } from "./config.js";
 import { stepSummarizer } from "./summarize.js";
 import {
   MAX_RUN_STEPS,
@@ -82,7 +82,7 @@ export class RunStepWriter implements RunStepSink {
   constructor(private readonly deps: RunStepWriterDeps) {}
 
   record(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[] = []): Promise<void> {
-    if (effectiveRunStepsLevel(this.deps.level) === "off") return Promise.resolve();
+    if (this.deps.level === "off") return Promise.resolve();
     if (batch.steps.length === 0 && batch.results.length === 0) return Promise.resolve();
     const previous = this.queues.get(runId) ?? Promise.resolve();
     const next = previous
