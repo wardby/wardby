@@ -953,6 +953,8 @@ test("list rows show the last step under the agent name for running and failed r
     { ...runRow("a", "running", 60_000), lastStep: lastStep(3, "Bash: npm test") },
     { ...runRow("b", "failed", 120_000), lastStep: lastStep(9, "Edit: src/app.ts (error)") },
     { ...runRow("c", "succeeded", 180_000), lastStep: lastStep(4, "said: Finished: changes ready") },
+    { ...runRow("e", "stopped", 300_000), lastStep: lastStep(2, "Bash: sleep 9") },
+    { ...runRow("f", "budget_exhausted", 360_000), lastStep: lastStep(5, "Read: README.md") },
     // An older server, or a run without steps: no lastStep, nothing extra.
     runRow("d", "running", 240_000),
   ];
@@ -971,6 +973,8 @@ test("list rows show the last step under the agent name for running and failed r
     expect(JSON.stringify(await ui.find({ key: "last-b" }))).toContain("Edit: src/app.ts (error)");
     expect(await ui.find({ key: "last-c" })).toBeUndefined();
     expect(await ui.find({ key: "last-d" })).toBeUndefined();
+    expect(await ui.find({ key: "last-e" })).toBeUndefined();
+    expect(await ui.find({ key: "last-f" })).toBeUndefined();
     await ui.unmount();
   }
 });

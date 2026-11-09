@@ -408,8 +408,9 @@ function lastLineOf(value: unknown): string | null {
   return str((value as Record<string, unknown>).line);
 }
 
-/** A row's last step is shown while it runs and after it failed (where it went wrong), not after success. */
-const showsLastLine = (row: RunRow): boolean => row.lastLine !== null && row.status !== "succeeded";
+/** A row's last step is shown on running and failed rows only (where it is or where it went wrong). */
+const showsLastLine = (row: RunRow): boolean =>
+  row.lastLine != null && (row.status === "running" || row.status === "failed");
 
 function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
   return {
