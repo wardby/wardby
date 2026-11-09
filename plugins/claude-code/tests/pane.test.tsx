@@ -311,6 +311,28 @@ test("Refresh asks again, and /wardby-runs close closes the pane and stops polli
   expect(sinces).toHaveLength(2);
 });
 
+test("a list row shows a long pull request task as one short linked line", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const quoted = "The earlier review said: " + "x".repeat(2000);
+  const reviewer = {
+    ...runRow("r1", "succeeded", 60_000),
+    agentName: "reviewer",
+    trigger: "host_event",
+    taskOverride: `Review pull request #12 in your-org/api (head 0123456789abcdef).\n\nA review-fix round concluded.\n\n<untrusted_context>\n${quoted}\n</untrusted_context>`,
+  };
+  recordingServer(on, () => [reviewer]);
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  const link = await ui.find({ type: "Link", text: /Review pull request #12/ });
+  expect(link?.props.href).toBe("https://github.com/your-org/api/pull/12");
+  expect(link?.props.label).toBe("Review pull request #12 in your-org/api");
+  expect(await ui.find({ text: /untrusted_context|xxxxxxxxxx/ })).toBeUndefined();
+});
+
 test("rows show the trigger and task, and the status and text filters narrow the list", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);
@@ -1408,6 +1430,40 @@ for (const surface of ["desktop", "terminal"] as const) {
     await ui.unmount();
   });
 }
+
+test("desktop: a step with detail has a labelled Show detail button that opens and closes it", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Show detail");
+  await ui.press({ key: "step-toggle-button-1" });
+  expect(await texts(ui)).toContain("all [link](https://evil.invalid) passed");
+  expect((await ui.find({ key: "step-toggle-button-1" }))?.props.label).toBe("Hide detail");
+  await ui.press({ key: "step-toggle-button-1" });
+  expect(await texts(ui)).not.toContain("passed");
+  await ui.unmount();
+});
+
+test("terminal: no per-step detail buttons, the j/k/e row instead", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  detailServer(on, true);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  expect(await ui.find({ key: "step-toggle-button-1" })).toBeUndefined();
+  expect(await ui.find({ key: "step-open" })).toBeDefined();
+  await ui.unmount();
+});
 
 test("terminal: j and k move between steps with detail, e opens one", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
