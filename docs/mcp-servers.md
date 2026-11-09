@@ -113,7 +113,7 @@ deadline, and only its hash is stored.
   (the kind and GKE manifests set it). Without it `/mcp` answers `503` with
   [`mcp_unavailable`](../help/errors/mcp-unavailable.md) and coding agents get no MCP tools. See
   [Remote MCP servers](security-deployment.md#remote-mcp-servers) for the variables.
-- **Low-power mode (0.8.1 and later).** With `WARDBY_LOW_POWER=1`, a coding run with MCP tools wakes the native
+- **Low-power mode (0.9.0 and later).** With `WARDBY_LOW_POWER=1`, a coding run with MCP tools wakes the native
   gateway as well as the coding proxy before its worker launches (both at once), and the gateway
   stays awake while any such run is pending or running, or finished within the idle window. Those
   runs appear in the gateway's `blockers` in `power_status`, and `power_sleep` refuses to sleep the
