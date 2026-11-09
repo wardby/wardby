@@ -14,7 +14,8 @@
  * is already clean, so a result's callId is never persisted. At the detail level (the run's
  * Run.runStepsLevel, fixed at dispatch), each step's detail text is redacted the same way
  * (stepDetailer) before it is cut and stored; below it, detail material in a batch is dropped
- * unread. Log lines
+ * unread. Before any redaction, step text, input and output lose terminal control sequences and
+ * control characters (stripControlSequences), so no reader is sent an escape sequence. Log lines
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
 import { createHash } from "node:crypto";
@@ -23,6 +24,7 @@ import { redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel, recordedRunStepsLevel, type RunStepsLevel } from "./config.js";
+import { stripControlSequences } from "./control-chars.js";
 import { joinDetail, stepDetailer, type StepDetailer } from "./detail.js";
 import { stepSummarizer } from "./summarize.js";
 import {
@@ -70,6 +72,13 @@ function uniqueByCallId(steps: readonly ExtractedStep[]): ExtractedStep[] {
     seen.add(step.callId);
     return true;
   });
+}
+
+/** A step's text and input as plain text (stripControlSequences), before any redaction. */
+function plainStep(step: ExtractedStep): ExtractedStep {
+  if (step.kind === "said") return { ...step, text: stripControlSequences(step.text) };
+  const input = step.input === undefined ? {} : { input: stripControlSequences(step.input) };
+  return { ...step, text: stripControlSequences(step.text), ...input };
 }
 
 function safeToolName(tool: string, secretValues: readonly string[]): string {
@@ -135,7 +144,9 @@ export class RunStepWriter implements RunStepSink {
     const level = recordedRunStepsLevel(run.runStepsLevel, this.deps.level);
     if (level === "off") return;
     const detailed = level === "detail";
-    const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said"));
+    const steps = uniqueByCallId(batch.steps.filter((step) => step.kind === "tool" || step.kind === "said")).map(
+      plainStep,
+    );
     const results = batch.results.filter((r) => STEP_CALL_ID.test(r.callId) && STEP_STATUS.test(r.status));
     const outputs = detailed && results.some((r) => typeof r.output === "string");
     // Read fresh for every batch that stores text (steps, or outputs at detail), never cached: a
@@ -144,7 +155,8 @@ export class RunStepWriter implements RunStepSink {
     const needsValues = steps.length > 0 || outputs;
     const own = needsValues ? await this.deps.secretValues(run.agentId) : [];
     const extras = needsValues ? extraSecretValues.filter(Boolean) : [];
-    const values = [...own, ...extras];
+    // Each value also as plain text, as the step text is: a value holding a control character.
+    const values = [...new Set([...own, ...extras].flatMap((value) => [value, stripControlSequences(value)]))];
     // The summary forms are built once per batch, on the first row.
     let summarize: ReturnType<typeof stepSummarizer> | undefined;
     let detailer: StepDetailer | undefined;
@@ -190,7 +202,7 @@ export class RunStepWriter implements RunStepSink {
         if (dropped > 0) await tx.run.update({ where: { id: runId }, data: { stepsDropped: { increment: dropped } } });
       }
       for (const result of results) {
-        const output = outputs && typeof result.output === "string" ? result.output : undefined;
+        const output = outputs && typeof result.output === "string" ? stripControlSequences(result.output) : undefined;
         if (output === undefined) {
           // The first status wins: a result resent with the history, or replayed, changes nothing.
           await tx.runStep.updateMany({

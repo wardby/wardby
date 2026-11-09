@@ -245,6 +245,39 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     expect(rows.map((r) => r.detail)).toEqual(["ls\n\n--- output (end) ---\n[REDACTED]", "key [REDACTED]"]);
   });
 
+  it("removes terminal control sequences before redaction, so a secret split by colour codes is masked", async () => {
+    const run = await newRun("detail");
+    const w = writer({ level: "detail" });
+    // Fake value split by a colour code; an OSC 52 clipboard write and an OSC 8 link around it.
+    const coloured = `${FAKE_SECRET.slice(0, 9)}\u001b[31m${FAKE_SECRET.slice(9)}\u001b[0m`;
+    const hostile = "\u001b]52;c;ZmFrZQ==\u0007\u001b]8;;https://example.invalid\u0007link\u001b]8;;\u0007";
+    await w.record(run.id, {
+      steps: [
+        { ...tool("c1", `echo ${coloured} ${hostile}`), input: `{"command":"echo ${coloured}"}\r\n` },
+        { kind: "said", callId: "said:1", text: `key ${coloured}\r\n${hostile}`, truncated: false },
+      ],
+      results: [],
+    });
+    await w.record(run.id, {
+      steps: [],
+      results: [{ callId: "c1", status: "ok", output: `out ${coloured}\r\n${hostile}\rend` }],
+    });
+    const rows = await rowsOf(run.id);
+    expect(rows.map((r) => r.summary)).toEqual(["echo [REDACTED] link", "key [REDACTED] link"]);
+    expect(rows.map((r) => r.detail)).toEqual([
+      '{"command":"echo [REDACTED]"}\n\n\n--- output (end) ---\nout [REDACTED]\nlinkend',
+      "key [REDACTED]\nlink",
+    ]);
+    for (const row of rows) {
+      for (const text of [row.summary, row.detail!]) {
+        // eslint-disable-next-line no-control-regex -- asserting no control character survives
+        expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+        expect(text).not.toContain(FAKE_SECRET.slice(0, 9));
+        expect(text).not.toContain(FAKE_SECRET.slice(9));
+      }
+    }
+  });
+
   it("below detail never stores detail, even when the batch carries it", async () => {
     for (const level of ["summary", null] as const) {
       const run = await newRun(level);
