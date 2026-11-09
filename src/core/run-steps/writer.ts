@@ -24,7 +24,7 @@ import type { PrismaClient } from "#prisma";
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { MIN_REDACTABLE_SECRET_LENGTH, redactExactSecretValues } from "../secret-spans.js";
+import { MIN_REDACTABLE_SECRET_LENGTH } from "../secret-spans.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel, recordedRunStepsLevel, type RunStepsLevel } from "./config.js";
 import { stripControlSequences } from "./control-chars.js";
 import { joinDetail, stepDetailer, type StepDetailer } from "./detail.js";
@@ -38,6 +38,7 @@ import {
   type ExtractedStep,
   type RunStepBatch,
   type RunStepSink,
+  tailOf,
 } from "./types.js";
 
 const stepsLog = logger.child({ module: "run-steps" });
@@ -80,26 +81,37 @@ function uniqueByCallId(steps: readonly ExtractedStep[]): ExtractedStep[] {
 const HELD = "\uE000";
 
 /**
- * Untrusted text as plain text, safely: every exact secret value is masked on the raw text first
- * (the marker holds no control character), then control sequences are stripped
- * (stripControlSequences), and only then does the full redaction run. Stripping first could take a
- * secret's first character as a malformed sequence's final byte (`ESC Z` + value) and leave the
- * rest of it matching nothing; the full redaction after the strip still masks a value that only
- * the strip joined (one split by colour codes).
+ * Untrusted text as plain text, safely: every secret value is masked on the raw text first, whole
+ * and partial (StepDetailer.premask: the text's edges and every line and ellipsis boundary), then
+ * control sequences are stripped (stripControlSequences), and only then does the full redaction
+ * run. Stripping first could take a secret's first character as a malformed sequence's final byte
+ * (`ESC Z` + value) and leave the rest of it matching nothing; the full redaction after the strip
+ * still masks a value that only the strip joined (one split by colour codes). The mask is a
+ * placeholder no sequence pattern can take as a byte of its own (a sequence before `[REDACTED]`
+ * would eat its "["), swapped for the marker after the strip.
  */
-function plainText(raw: string, rawValues: readonly string[]): string {
-  if (rawValues.length === 0) return stripControlSequences(raw);
-  // A placeholder no sequence pattern can take as a byte of its own (a sequence before the marker
-  // would otherwise eat its "["), swapped for the marker after the strip.
-  const held = redactExactSecretValues(raw.replaceAll(HELD, ""), rawValues, { marker: HELD, minLength: 1 });
+function plainText(raw: string, premask: PremaskOf | undefined, headWasCut = false): string {
+  if (!premask) return stripControlSequences(raw);
+  const held = premask(raw.replaceAll(HELD, ""), headWasCut, HELD);
   return stripControlSequences(held).replaceAll(HELD, REDACTED);
+}
+type PremaskOf = StepDetailer["premask"];
+
+/**
+ * A result's detail suffix: its end taken from the raw output first (tailOf), so the premask's head
+ * check runs at the cut the detailer will see, then plainText, then the detailer.
+ */
+function plainOutput(raw: string, outputCut: boolean, premask: PremaskOf | undefined, detailer: StepDetailer): string {
+  const source = tailOf(raw);
+  const cut = outputCut || source.cut;
+  return detailer.output({ output: plainText(source.text, premask, cut), outputCut: cut });
 }
 
 /** A step's text and input as plainText. */
-function plainStep(step: ExtractedStep, rawValues: readonly string[]): ExtractedStep {
-  if (step.kind === "said") return { ...step, text: plainText(step.text, rawValues) };
-  const input = step.input === undefined ? {} : { input: plainText(step.input, rawValues) };
-  return { ...step, text: plainText(step.text, rawValues), ...input };
+function plainStep(step: ExtractedStep, premask: PremaskOf | undefined): ExtractedStep {
+  if (step.kind === "said") return { ...step, text: plainText(step.text, premask) };
+  const input = step.input === undefined ? {} : { input: plainText(step.input, premask) };
+  return { ...step, text: plainText(step.text, premask), ...input };
 }
 
 function safeToolName(tool: string, secretValues: readonly string[]): string {
@@ -185,11 +197,14 @@ export class RunStepWriter implements RunStepSink {
         }),
       ),
     ];
-    const steps = extracted.map((step) => plainStep(step, rawValues));
-    // The summary forms are built once per batch, on the first row.
+    // The summary forms are built once per batch, on the first row; the detailer (whose premask
+    // every text goes through first) once per batch that has any secret value.
     let summarize: ReturnType<typeof stepSummarizer> | undefined;
     let detailer: StepDetailer | undefined;
     const detailOf = (): StepDetailer => (detailer ??= stepDetailer(values));
+    const premask: PremaskOf | undefined =
+      values.length > 0 ? (raw, headWasCut, marker) => detailOf().premask(raw, headWasCut, marker) : undefined;
+    const steps = extracted.map((step) => plainStep(step, premask));
     const at = this.now();
     const expiresAt = new Date(at.getTime() + this.deps.retentionDays * DAY_MS);
     // callId is stored as text: a step whose callId holds a secret value is not stored at all.
@@ -213,7 +228,7 @@ export class RunStepWriter implements RunStepSink {
     // transaction holds the run's row lock.
     const suffixes = results.map((result) =>
       outputs && typeof result.output === "string"
-        ? detailOf().output({ output: plainText(result.output, rawValues), outputCut: result.outputCut })
+        ? plainOutput(result.output, result.outputCut === true, premask, detailOf())
         : undefined,
     );
     const newlyDropped: string[] = [];

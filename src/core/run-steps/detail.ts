@@ -140,6 +140,13 @@ export function joinDetail(existing: string | null, suffix: string): string {
 }
 
 export interface StepDetailer {
+  /**
+   * `raw` (untrusted text before control sequences are stripped) with every form of every secret
+   * value, the secret start it ends in, the secret end it starts with when its head was cut, and
+   * both at every line and ellipsis boundary, each replaced by `marker`: so a stripped escape
+   * sequence cannot take a character of a secret, whole or partial, and hide the rest of it.
+   */
+  premask(raw: string, headWasCut: boolean, marker: string): string;
   /** A step's detail: a tool's input (or its summary text when no input was sent), or a said step's text. */
   step(step: ExtractedStep): string;
   /** The text appended to a tool step's detail when its result arrives: the heading and the output's redacted end. */
@@ -200,16 +207,22 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
    * the longest secret start it ends in (every text: a stream can stop mid-secret without saying
    * so) and, when its head was cut, the longest secret end it starts with; then token shapes.
    */
+  const edges = (subject: string, headWasCut: boolean): string[] => {
+    const found = [secretTail(subject, forms, tails)];
+    if (headWasCut) found.push(reverse(secretTail(reverse(subject), reversedForms, heads)));
+    return found.filter(Boolean);
+  };
+  /** The spans of `text` as written: every form, the text's edges, and every boundary's edges. */
+  const asWrittenSpans = (text: string, headWasCut: boolean): Array<[number, number]> => [
+    ...secretSpans(text, [...forms, ...edges(text, headWasCut)], 1),
+    ...boundaryEdgeSpans(text),
+  ];
+
   const redact = (raw: string, headWasCut: boolean): string => {
     const text = raw.slice(0, MAX_STEP_TEXT_CHARS);
     const { collapsed, from, to } = collapseWithMap(text);
-    const edges = (subject: string): string[] => {
-      const found = [secretTail(subject, forms, tails)];
-      if (headWasCut) found.push(reverse(secretTail(reverse(subject), reversedForms, heads)));
-      return found.filter(Boolean);
-    };
-    const asWritten = [...secretSpans(text, [...forms, ...edges(text)], 1), ...boundaryEdgeSpans(text)];
-    const viaCollapsed = secretSpans(collapsed, [...forms, ...edges(collapsed)], 1).map(
+    const asWritten = asWrittenSpans(text, headWasCut);
+    const viaCollapsed = secretSpans(collapsed, [...forms, ...edges(collapsed, headWasCut)], 1).map(
       ([start, end]): [number, number] => [from[start], to[end - 1]],
     );
     const masked = maskSpans(text, mergeSpans([...asWritten, ...viaCollapsed]), REDACTED);
@@ -220,6 +233,9 @@ export function stepDetailer(secretValues: readonly string[]): StepDetailer {
   };
 
   return {
+    premask(raw, headWasCut, marker) {
+      return maskSpans(raw, mergeSpans(asWrittenSpans(raw, headWasCut)), marker);
+    },
     step(step) {
       if (step.kind === "said") return headCut(redact(step.text, false), DETAIL_SAID_CHARS);
       return headCut(redact(step.input ?? step.text, false), DETAIL_INPUT_CHARS);

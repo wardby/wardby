@@ -323,6 +323,77 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     }
   });
 
+  describe("a malformed escape sequence at a partial secret", () => {
+    // Fake run-given value.
+    const value = "Zq9vLmT4pXw2Rk7s";
+
+    it("masks a secret's start after `…\\x1bZ` at an input's tail cut, in summary and detail", async () => {
+      const run = await newRun("detail");
+      const cutInput = `{"command":"echo …\u001b${value.slice(0, 8)}`;
+      await writer({ level: "detail" }).record(
+        run.id,
+        {
+          steps: [
+            {
+              ...tool("c1", `echo …\u001b${value.slice(0, 8)}`),
+              truncated: true,
+              input: cutInput,
+              inputTruncated: true,
+            },
+          ],
+          results: [],
+        },
+        [value],
+      );
+      const [row] = await rowsOf(run.id);
+      for (const text of [row.summary, row.detail!]) {
+        expect(text).not.toContain(value.slice(1, 8));
+        expect(text).toContain("[REDACTED]");
+      }
+    });
+
+    it("masks a secret's start before a boundary after `\\x1bZ`, mid-text", async () => {
+      const run = await newRun("detail");
+      const output = `TOKEN=\u001b${value.slice(0, 9)}\n…40 tokens truncated…\n${value.slice(-9)} end`;
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [{ ...tool("c1", "env"), input: "env" }], results: [] },
+        [value],
+      );
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [], results: [{ callId: "c1", status: "ok", output }] },
+        [value],
+      );
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).not.toContain(value.slice(1, 9));
+      expect(row.detail).not.toContain(value.slice(-9));
+      expect(row.detail).toContain("TOKEN=[REDACTED]\n…40 tokens truncated…\n[REDACTED] end");
+    });
+
+    it("masks a secret's end after `\\x1b(Z` at a head-cut output", async () => {
+      const run = await newRun("detail");
+      await writer({ level: "detail" }).record(
+        run.id,
+        { steps: [{ ...tool("c1", "cat log"), input: "cat log" }], results: [] },
+        [value],
+      );
+      for (const lead of ["\u001b(Z", "\u001b("]) {
+        await writer({ level: "detail" }).record(
+          run.id,
+          {
+            steps: [],
+            results: [{ callId: "c1", status: "ok", output: `${lead}${value.slice(-10)} tail`, outputCut: true }],
+          },
+          [value],
+        );
+      }
+      const [row] = await rowsOf(run.id);
+      expect(row.detail).not.toContain(value.slice(-9));
+      expect(row.detail).not.toContain(value.slice(-6));
+    });
+  });
+
   it("adds no stripped form of a value too short to redact safely", async () => {
     const run = await newRun("detail");
     // Fake value that strips to "ab": masking every "ab" would blank ordinary text.

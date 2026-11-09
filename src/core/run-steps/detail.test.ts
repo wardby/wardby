@@ -311,6 +311,7 @@ describe("cost", () => {
     const times: number[] = [];
     let input = "";
     let said_ = "";
+    let premasked = "";
     for (let round = 0; round < 3; round++) {
       let started = performance.now();
       input = detail.step(tool(text));
@@ -321,12 +322,17 @@ describe("cost", () => {
       started = performance.now();
       detail.output({ output: text, outputCut: true });
       times.push(performance.now() - started);
+      // The writer's first pass on the raw text, before control sequences are stripped.
+      started = performance.now();
+      premasked = detail.premask(text, true, "\uE000");
+      times.push(performance.now() - started);
     }
     expect(text.length).toBe(MAX_STEP_TEXT_CHARS);
     for (const out of [input, said_]) {
       expect(out).toContain(`T=${REDACTED_TEXT}\n…99 tokens truncated…\n${REDACTED_TEXT} end`);
       expectNoFragment(out, [secrets[9]]);
     }
+    expect(premasked).toContain("T=\uE000\n…99 tokens truncated…\n\uE000 end");
     const worst = Math.max(...times);
     console.info(
       `detail cost: every line break, 200 x 4 KiB secrets, 16 KiB of 15-character lines: worst ${worst.toFixed(1)} ms, ` +
