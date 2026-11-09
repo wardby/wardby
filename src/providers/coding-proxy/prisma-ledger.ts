@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from "#prisma";
+import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { logger } from "../../core/logger.js";
 import { normalizeProxyModelTerms } from "./types.js";
 import type {
@@ -56,6 +57,7 @@ interface SessionRow {
   mcpTools?: unknown;
   mcpTokenHash?: string | null;
   mcpCallCount?: number | null;
+  runStepsLevel?: string | null;
 }
 
 interface RequestRow {
@@ -82,6 +84,10 @@ interface RequestRow {
   conversationKey: string | null;
 }
 
+function isRunStepsLevel(value: unknown): value is RunStepsLevel {
+  return typeof value === "string" && (RUN_STEPS_LEVELS as readonly string[]).includes(value);
+}
+
 function sessionFromRow(row: SessionRow): ProxySession {
   if (!Array.isArray(row.allowedModels) || !row.allowedModels.every((model) => typeof model === "string")) {
     throw new Error("invalid_proxy_session_models");
@@ -106,6 +112,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     mcpTools: sessionMcpTools(row),
     mcpTokenHash: row.mcpTokenHash ?? null,
     mcpCallCount: Number(row.mcpCallCount ?? 0),
+    runStepsLevel: isRunStepsLevel(row.runStepsLevel) ? row.runStepsLevel : null,
   };
 }
 
@@ -202,13 +209,14 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash",
+         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
          "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
+         ${input.runStepsLevel ?? null}::"RunStepsLevel",
          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
@@ -216,7 +224,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
@@ -225,7 +233,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel"
       FROM "CodingProxySession" WHERE "mcpTokenHash" = ${mcpTokenHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : undefined;

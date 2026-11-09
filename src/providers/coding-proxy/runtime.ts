@@ -254,6 +254,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     // The run's first model request closes its dependency cache (no-op for a run with it off).
     ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
     ...(steps ? { steps } : {}),
+    runStepsCeiling,
   });
   const startServer = options.startServer ?? startCodingProxyServer;
   let server: CodingProxyServerHandle;

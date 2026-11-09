@@ -22,10 +22,12 @@ import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import {
   resultsFromRequest,
+  type StepCaptureOptions,
   stepsFromJson,
   streamStepExtractor,
   type StreamStepExtractor,
 } from "../../core/run-steps/extract.js";
+import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { SeenIds } from "../../core/run-steps/seen.js";
 import { CLAUDE_RESULT_TOOL } from "../../core/run-steps/summarize.js";
 import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
@@ -99,6 +101,13 @@ export interface ExecuteProxyRequest {
   anthropicBeta?: string;
 }
 
+/** What this session's replies and requests are read for. */
+function stepCapture(session: ProxySession, ceiling: RunStepsLevel): "none" | "summary" | "detail" {
+  const level = session.runStepsLevel ?? "summary";
+  if (level === "off" || ceiling === "off") return "none";
+  return level === "detail" && ceiling === "detail" ? "detail" : "summary";
+}
+
 export interface CreateCodingProxySession {
   runId: string;
   credentialRef: string;
@@ -112,6 +121,8 @@ export interface CreateCodingProxySession {
   mcpTools?: McpToolPin[];
   /** SHA-256 (base64url) of the run's MCP token; the control plane mints and delivers the token itself. */
   mcpTokenHash?: string;
+  /** The run's level (Run.runStepsLevel), fixed at dispatch; absent counts as summary. */
+  runStepsLevel?: RunStepsLevel;
 }
 
 export interface CreatedCodingProxySession {
@@ -145,10 +156,14 @@ export interface CodingProxyOptions {
    * absent, no step is extracted. Steps are read from frames after they are relayed and handed over
    * unmasked (the control plane redacts them by exact value before writing). Extraction never fails,
    * delays or alters a relay, and nothing of it is logged or written to the proxy's database.
+   * Tool-result output (its end) is sent only for a session at detail under a detail ceiling; at off
+   * nothing is read.
    */
   steps?: RunStepSubmitter;
+  /** The proxy's own WARDBY_RUN_STEPS: a session captures detail only when this is detail too. Default summary. */
+  runStepsCeiling?: RunStepsLevel;
   /** Tests only: replaces the stream step extractor. */
-  createStepExtractor?: (protocol: ProxyProtocol) => StreamStepExtractor;
+  createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
 }
 
 interface ParsedRequest {
@@ -1085,7 +1100,8 @@ export class CodingProxy {
   private readonly activeRequests = new Map<string, Set<AbortController>>();
   private readonly onModelRequest?: (runId: string) => Promise<void>;
   private readonly steps?: RunStepSubmitter;
-  private readonly createStepExtractor?: (protocol: ProxyProtocol) => StreamStepExtractor;
+  private readonly createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
+  private readonly runStepsCeiling: RunStepsLevel;
   /** Results already handed over, per session: each request resends the history. */
   private readonly seenResults = new SeenIds();
 
@@ -1094,6 +1110,7 @@ export class CodingProxy {
     this.onModelRequest = options.onModelRequest;
     this.steps = options.steps;
     this.createStepExtractor = options.createStepExtractor;
+    this.runStepsCeiling = options.runStepsCeiling ?? "summary";
     this.credentials = options.credentials;
     this.upstreamUrls = {
       "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
@@ -1144,6 +1161,9 @@ export class CodingProxy {
     if (mcp && (!input.mcpTools || input.mcpTools.length === 0 || !input.mcpTokenHash)) {
       throw new Error("invalid_proxy_mcp_tools");
     }
+    if (input.runStepsLevel !== undefined && !RUN_STEPS_LEVELS.includes(input.runStepsLevel)) {
+      throw new Error("invalid_proxy_run_steps_level");
+    }
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
@@ -1159,6 +1179,7 @@ export class CodingProxy {
       registryTokenHash,
       terms: input.terms,
       ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
+      ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -1311,10 +1332,16 @@ export class CodingProxy {
       ...holdAudit,
     });
     // Run steps: the results this (validated) request carries for the previous turn, once per call id.
-    this.submitSteps(input.bearer, session.runId, () => ({
-      steps: [],
-      results: this.seenResults.fresh(session.id, resultsFromRequest(session.protocol, parsed.body)),
-    }));
+    const capture = stepCapture(session, this.runStepsCeiling);
+    if (capture !== "none") {
+      this.submitSteps(input.bearer, session.runId, () => ({
+        steps: [],
+        results: this.seenResults.fresh(
+          session.id,
+          resultsFromRequest(session.protocol, parsed.body, { detail: capture === "detail" }),
+        ),
+      }));
+    }
 
     let key: string;
     try {
@@ -1527,7 +1554,13 @@ export class CodingProxy {
     sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
     await safeWrite(sink, bytes, { value: true });
     sink.end();
-    this.submitSteps(capability, session.runId, () => ({ steps: stepsFromJson(session.protocol, value), results: [] }));
+    const capture = stepCapture(session, this.runStepsCeiling);
+    if (capture !== "none") {
+      this.submitSteps(capability, session.runId, () => ({
+        steps: stepsFromJson(session.protocol, value, { detail: capture === "detail" }),
+        results: [],
+      }));
+    }
   }
 
   private async forwardStream(
@@ -1549,7 +1582,7 @@ export class CodingProxy {
     const anthropicUsage =
       session.protocol === "anthropic-messages" ? (progress.anthropic = new AnthropicSseUsageTracker()) : undefined;
     // Run steps: each frame is read after it was relayed. An extractor that throws is dropped, never the relay.
-    let steps = this.newStepExtractor(session.protocol);
+    let steps = this.newStepExtractor(session);
     const observe = (frame: string) => {
       if (!steps) return;
       try {
@@ -1624,10 +1657,12 @@ export class CodingProxy {
     }
   }
 
-  private newStepExtractor(protocol: ProxyProtocol): StreamStepExtractor | undefined {
+  private newStepExtractor(session: ProxySession): StreamStepExtractor | undefined {
     if (!this.steps) return undefined;
+    const capture = stepCapture(session, this.runStepsCeiling);
+    if (capture === "none") return undefined;
     try {
-      return (this.createStepExtractor ?? streamStepExtractor)(protocol);
+      return (this.createStepExtractor ?? streamStepExtractor)(session.protocol, { detail: capture === "detail" });
     } catch {
       return undefined;
     }

@@ -57,6 +57,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     });
     expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({
       protocol: "openai-responses",
+      // Created without a level, as a session from before run steps detail.
+      runStepsLevel: null,
       budgetExhaustedAt: null,
       upstreamFailure: null,
       // Created without terms, as a session from before the catalog.
@@ -142,6 +144,54 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(Number(run.costUsd)).toBe(0.00005);
     // One completed proxied call (completed twice, idempotently) is one turn.
     expect(run.turns).toBe(1);
+  });
+
+  it("stores a session's run steps level and reads it back", async () => {
+    const dRun = `level-run-${suffix}`;
+    const dSession = `level-session-${suffix}`;
+    const dAgent = `level-agent-${suffix}`;
+    const ledger = new PrismaProxyLedger(db);
+    await db.agent.create({
+      data: { id: dAgent, name: dAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+    });
+    await db.run.create({ data: { id: dRun, agentId: dAgent, executionManaged: true } });
+    try {
+      await db.codingRun.create({
+        data: {
+          runId: dRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${dRun}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      await ledger.createSession({
+        id: dSession,
+        runId: dRun,
+        capabilityHash: `level-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: ["gpt-5.6-luna"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `level-registry-${suffix}`,
+        runStepsLevel: "detail",
+      });
+      expect(await ledger.findSessionByCapabilityHash(`level-hash-${suffix}`)).toMatchObject({
+        runStepsLevel: "detail",
+      });
+    } finally {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${dSession}`;
+      await db.codingRun.deleteMany({ where: { runId: dRun } });
+      await db.run.deleteMany({ where: { id: dRun } });
+      await db.agent.deleteMany({ where: { id: dAgent } });
+    }
   });
 
   it("copies only a refusal's well-formed amounts, model and turn, and records nothing for a malformed one", async () => {
