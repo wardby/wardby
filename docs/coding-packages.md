@@ -222,8 +222,8 @@ package requests for that run (it fails closed).
   policy, and an advisory that is malware (a `MAL-…` id or alias, or CWE-506)
   is still withheld even if its id is listed.
 - Each served version that needed a waiver is recorded with the reason
-  `accepted advisories: <ids>`. `get_run` shows `acceptedAdvisories` per
-  package, and the pull request body gets an **Accepted advisories** section
+  `accepted advisories: <ids>`. `get_run_packages` shows `acceptedAdvisories`
+  per package, and the pull request body gets an **Accepted advisories** section
   listing `name@version: ids` (only when a waiver was used).
 - The policy is fixed when a run starts; a change applies to the next run.
 
@@ -1381,16 +1381,32 @@ streamed unverified for those files — there is nothing to verify against.
 ## What the reviewer sees
 
 Every package the proxy served during a run is recorded, and so is every
-refusal up to the 500-per-run cap above. `get_run` returns `packages` and
-`packageRefusals` for a coding run, each deduplicated (a retried download is
-one package):
+refusal up to the 500-per-run cap above. For a coding run, `get_run`
+returns `packageCount` (how many packages were served) and every
+`packageRefusals` entry, each deduplicated (a retried download is one
+package). A run can install more than a thousand packages, more than one MCP
+reply holds, so the packages themselves come from `get_run_packages`
+(`runId`, optional `after` and `limit`), a page at a time in the order the run
+first fetched them: 200 a page by default, at most 500. Pass the reply's
+`next` as `after` for the next page; `next` is `null` on the last page, and
+`total` counts every package. It follows `get_run`'s access.
 
 ```json
 {
+  "runId": "<run id>",
   "packages": [
     { "ecosystem": "npm", "name": "@heroui/react", "version": "3.2.6", "size": 482113 },
     { "ecosystem": "pypi", "name": "flask", "version": "3.0.0", "size": 101817 }
   ],
+  "next": null,
+  "total": 2
+}
+```
+
+`get_run` returns, beside `packageCount: 2`:
+
+```json
+{
   "packageRefusals": [
     {
       "ecosystem": "npm",
@@ -1423,8 +1439,8 @@ the packages installed outside the allowlist.
 The pull request finalization also appends a collapsed **Packages installed
 during this run** section listing the same information, so a reviewer
 doesn't have to ask the agent what it added. It lists at most 100 packages
-and 100 refusals, followed by "…and N more — see get_run for the full list";
-`get_run` always has the complete list. If the report can't be loaded or
+and 100 refusals, each followed by "…and N more" and where the full list is:
+`get_run_packages` has every package and `get_run` every refusal. If the report can't be loaded or
 rendered, the section is left out and the pull request is still opened.
 
 A later run on the same pull request (a review fix round, a mention

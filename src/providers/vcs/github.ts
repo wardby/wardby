@@ -539,8 +539,13 @@ const MAX_PR_PACKAGE_LIST_CHARS = 16 * 1024;
 const MAX_PR_WAIVER_LIST_CHARS = 8 * 1024;
 
 /** Renders at most MAX_PR_PACKAGE_LINES lines (and at most `maxChars`
- *  characters) of `lines`, then a count of the rest. */
-function cappedList(lines: readonly string[], maxChars = MAX_PR_PACKAGE_LIST_CHARS): string[] {
+ *  characters) of `lines`, then a count of the rest and the MCP tool that
+ *  has them all (get_run for refusals, get_run_packages for packages). */
+function cappedList(
+  lines: readonly string[],
+  fullList: "get_run" | "get_run_packages",
+  maxChars = MAX_PR_PACKAGE_LIST_CHARS,
+): string[] {
   const shown: string[] = [];
   let chars = 0;
   for (const line of lines.slice(0, MAX_PR_PACKAGE_LINES)) {
@@ -549,7 +554,7 @@ function cappedList(lines: readonly string[], maxChars = MAX_PR_PACKAGE_LIST_CHA
     chars += line.length + 1;
   }
   const more = lines.length - shown.length;
-  return more > 0 ? [...shown, `- …and ${more} more — see get_run for the full list`] : shown;
+  return more > 0 ? [...shown, `- …and ${more} more — see ${fullList} for the full list`] : shown;
 }
 
 const MAX_DEPENDENCY_CACHE_FOLDERS = 4;
@@ -604,19 +609,25 @@ function packagesSection(input: PullRequestInput): string | undefined {
       ? `<summary>Packages installed by wardby's runs on this pull request (${packages.length})</summary>`
       : `<summary>Packages installed during this run (${packages.length})</summary>`,
     "",
-    ...cappedList(packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``)),
+    ...cappedList(
+      packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``),
+      "get_run_packages",
+    ),
     ...(refusals.length > 0
       ? [
           "",
           "**Refused:**",
-          ...cappedList(refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`)),
+          ...cappedList(
+            refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`),
+            "get_run",
+          ),
         ]
       : []),
     ...(waivers.length > 0
       ? [
           "",
           "**Accepted advisories** (waived by this agent's package policy):",
-          ...cappedList(waivers, MAX_PR_WAIVER_LIST_CHARS),
+          ...cappedList(waivers, "get_run_packages", MAX_PR_WAIVER_LIST_CHARS),
         ]
       : []),
     "</details>",

@@ -35,3 +35,6 @@ through the `wardby-runs` plugin: run `wardby claude-plugin install`, then
 `claude-code-run-pane`, Wardby 0.8.0 and later).
 
 To follow what a run is doing, call `get_run_steps` (article `run-steps`).
+To read the rest of a long request, task, final answer or error, call
+`get_run_text`; for a coding run's packages, `get_run_packages` (article
+`troubleshooting/debugging-agent-runs`).

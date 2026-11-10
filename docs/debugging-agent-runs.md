@@ -31,14 +31,16 @@ access to.
 
 | Tool                                                                                                            | What it tells you                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_runs` (agent id, optional `status`)                                                                       | An agent's recent runs: status, trigger, cost, turns, final text, and which run started it                                                                                                                                                                                                                                                                                               |
+| `list_runs` (agent id, optional `status`)                                                                       | An agent's recent runs: status, trigger, cost, turns, and which run started it. Like the listing across agents, rows leave out the final text and `pricingSnapshot` (`get_run` has them), carry the task's first 600 characters (`taskOverrideTruncated`), return 50 by default (at most 200), and page newest first with `before`                                                       |
 | `list_runs` without an agent id (from 0.8.0)                                                                    | Your runs across every agent, each with `agentName`; no final text, and the task cut to its first 600 characters (`taskOverrideTruncated`; from 0.9.2). `active: true` or `since` (ISO time) narrow it. Pages are newest first; from 0.9.2, pass `before` (the last row's id) for the next page                                                                                          |
-| `get_run` (run id)                                                                                              | One run in full, adding `failureCategory`, `diagnosticId`, `codingResult.outcome`, `request`, budget events and package refusals                                                                                                                                                                                                                                                         |
+| `get_run` (run id)                                                                                              | One run in full, adding `failureCategory`, `diagnosticId`, `codingResult.outcome`, `request`, budget events, package refusals and `packageCount`. A `request`, `taskOverride`, `finalText` or `error` longer than 8,000 characters comes as its first 8,000 plus `<field>More`; see [Long run replies](#long-run-replies)                                                                |
 | `triggerInfo`, `outcomes`, `serviceReadiness` (from 0.8.0, on `get_run` and on `list_runs` without an agent id) | What started the run (the pull request and whether it was a review or a mention, the issue, the schedule or the lead), what it produced (pull requests opened, comments, checks) and each service's state, in the admin viewer API's shapes. Follow a pull request from the run that opened it through its review and fix rounds by matching one run's outcome to the next run's trigger |
 | `get_agent`, `list_repositories`, `list_subagents`                                                              | How the agent is set up: prompt, model, budget, repo links and triggers, sub-agents                                                                                                                                                                                                                                                                                                      |
 | `search_help`, `get_help_article`                                                                               | Help for an error code or failure category                                                                                                                                                                                                                                                                                                                                               |
 | `cost_report`                                                                                                   | What runs cost, when spend is the question                                                                                                                                                                                                                                                                                                                                               |
 | `get_run_steps` (from 0.9.0)                                                                                    | The run's steps, one line per tool call or model message, live while it runs; see [Run steps](#run-steps)                                                                                                                                                                                                                                                                                |
+| `get_run_text` (run id, `field`, optional `offset` and `limit`)                                                 | The rest of a long `request`, `taskOverride`, `finalText` or `error`, a piece at a time; see [Long run replies](#long-run-replies)                                                                                                                                                                                                                                                       |
+| `get_run_packages` (run id, optional `after` and `limit`)                                                       | The packages the package registry served a coding run, a page at a time; see [Long run replies](#long-run-replies)                                                                                                                                                                                                                                                                       |
 | `get_run_transcript`                                                                                            | The run's conversation, for Claude Code runs with `sessionResume` on                                                                                                                                                                                                                                                                                                                     |
 | `stop_run`                                                                                                      | Stops a run that's stuck                                                                                                                                                                                                                                                                                                                                                                 |
 | The PR, issue or Jira ticket                                                                                    | The diff, CI, the review, and the comment the run posted                                                                                                                                                                                                                                                                                                                                 |
@@ -51,6 +53,38 @@ deployment.
 
 Admins can also use the [Wardby Viewer](viewer-api.md), a desktop app showing runs,
 sub-agent trees, triggers and outcomes for every owner.
+
+### Long run replies
+
+MCP clients cap the size of a tool result (Claude Code replaces one over about
+60,000 characters with an "exceeds maximum allowed tokens" error), so run
+replies that can grow without bound come in pages. Nothing is cut away: every
+character stays reachable.
+
+- **Long text fields.** `get_run` returns `request`, `taskOverride`,
+  `finalText` and `error` whole when they are at most 8,000 characters. A
+  longer one comes as its first 8,000 characters, with
+  `<field>More: { next, total }` beside it (for example `finalTextMore`). That
+  is a first page, not a cut: call `get_run_text` with `runId`, the `field` and
+  `offset: next`, then again with each reply's `next` until it is `null`. Each
+  piece is up to 32,000 characters (`limit`, at most 32,000), and the pieces
+  joined in order are the whole text. Offsets count UTF-16 code units, and a
+  piece never ends inside a surrogate pair: it stops one unit early instead.
+  The request is masked the same way `get_run` masks it.
+- **Packages.** `get_run` gives a coding run's `packageCount`, `packagePlan`
+  and every `packageRefusals` entry. The packages themselves come from
+  `get_run_packages`: 200 a page by default (`limit`, at most 500), in the
+  order the run first fetched them. Pass the reply's `next` as `after` for the
+  next page; `next` is `null` on the last one, and `total` counts them all.
+- **Run listings.** `list_runs`, with or without an agent id, returns 50 rows
+  by default (at most 200), newest first. Pass the last row's id as `before`
+  for the next page. Rows leave out `finalText` and `pricingSnapshot` and carry
+  the task's first 600 characters; a longer task has
+  `taskOverrideTruncated: true`, and `get_run_text` (field `taskOverride`,
+  offset 600) has the rest.
+
+`get_run_text` and `get_run_packages` need the `agents:read` scope and follow
+`get_run`'s access: a run you can't read with `get_run` is not found.
 
 ## The run failed
 

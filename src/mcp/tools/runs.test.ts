@@ -34,6 +34,7 @@ interface FakeRunRow {
   startedAt: Date;
   finishedAt: Date | null;
   triggeredById?: string | null;
+  taskOverride?: string | null;
   nativeExecutionMode?: "control_plane" | "sandbox" | null;
   codingRun?: {
     result: unknown;
@@ -551,7 +552,7 @@ describe("run observability tools", () => {
     await client.close();
   });
 
-  it("get_run returns packageRefusals with hint, deduplicated, and served packages for a coding run", async () => {
+  it("get_run returns packageRefusals with hint, deduplicated, and the served packages' count for a coding run", async () => {
     const now = new Date();
     const db = fakeDb(
       [{ id: "a1", ownerId: "p1" }],
@@ -647,14 +648,25 @@ describe("run observability tools", () => {
 
     const codingResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const codingBody = parseText(codingResult as never) as {
-      packages: Array<{ ecosystem: string; name: string; version: string; size: number | null }>;
+      packageCount: number;
       packageRefusals: Array<{ ecosystem: string; name: string; reason: string; hint?: string }>;
       packagePlan: { approved: number; refused: number };
     };
-    expect(codingBody.packages).toEqual([
-      { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
-      { ecosystem: "pypi", name: "flask", version: "3.0.0", size: null },
-    ]);
+    // The packages themselves page through get_run_packages; get_run counts them.
+    expect(codingBody).not.toHaveProperty("packages");
+    expect(codingBody.packageCount).toBe(2);
+    const packagesPage = parseText(
+      (await client.callTool({ name: "get_run_packages", arguments: { runId: "r1" } })) as never,
+    ) as { packages: unknown[]; next: number | null; total: number };
+    expect(packagesPage).toEqual({
+      runId: "r1",
+      packages: [
+        { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
+        { ecosystem: "pypi", name: "flask", version: "3.0.0", size: null },
+      ],
+      next: null,
+      total: 2,
+    });
     const hint = refusalHint("wardby_package_not_allowed");
     expect(hint).toBeDefined();
     expect(codingBody.packageRefusals).toEqual([
@@ -667,6 +679,7 @@ describe("run observability tools", () => {
     const nonCodingResult = await client.callTool({ name: "get_run", arguments: { runId: "r2" } });
     const nonCodingBody = parseText(nonCodingResult as never) as Record<string, unknown>;
     expect(nonCodingBody).not.toHaveProperty("packages");
+    expect(nonCodingBody).not.toHaveProperty("packageCount");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     expect(nonCodingBody).not.toHaveProperty("packagePlan");
     await client.close();
@@ -1146,5 +1159,264 @@ describe("get_run: a coding run's request", () => {
     expect(body.request).toBeUndefined();
     expect(body.requestUnavailable).toBeUndefined();
     expect(loadAgentSecretValues).not.toHaveBeenCalled();
+  });
+});
+
+describe("paging long run replies: get_run's first pages, get_run_text and get_run_packages", () => {
+  const now = new Date("2026-11-09T12:00:00.000Z");
+  /** Plain words, so nothing in them looks like a token to the request's redaction. */
+  const words = (n: number, seed = "the quick brown fox jumps over the lazy dog ") =>
+    seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+  const EMOJI = "\u{1F600}"; // two UTF-16 code units: a surrogate pair
+  const base = (over: Partial<FakeRunRow> = {}): FakeRunRow => ({
+    id: "r1",
+    agentId: "a1",
+    status: "succeeded",
+    trigger: "manual",
+    turns: 1,
+    tokensIn: 1,
+    tokensOut: 1,
+    costUsd: 0,
+    finalText: null,
+    error: null,
+    startedAt: now,
+    finishedAt: now,
+    ...over,
+  });
+  const connectAs = async (runs: FakeRunRow[], principalId = "p1") => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }], runs);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principalId, ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const call = async (name: string, args: Record<string, unknown>) =>
+      (await client.callTool({ name, arguments: args })) as { isError?: boolean; content: { text: string }[] };
+    const body = async (name: string, args: Record<string, unknown>) => {
+      const result = await call(name, args);
+      if (result.isError) throw new Error(result.content[0].text);
+      return JSON.parse(result.content[0].text) as Record<string, unknown>;
+    };
+    return { call, body, close: () => client.close() };
+  };
+  /** Every piece of one field, through get_run_text from `from`, joined. */
+  const readRest = async (
+    c: Awaited<ReturnType<typeof connectAs>>,
+    field: string,
+    from: number,
+    limit?: number,
+  ): Promise<{ text: string; pieces: Record<string, unknown>[] }> => {
+    const pieces: Record<string, unknown>[] = [];
+    let offset: number | null = from;
+    while (offset !== null && pieces.length < 100) {
+      const piece = await c.body("get_run_text", { runId: "r1", field, offset, ...(limit ? { limit } : {}) });
+      pieces.push(piece);
+      offset = piece.next as number | null;
+    }
+    return { text: pieces.map((piece) => piece.text as string).join(""), pieces };
+  };
+
+  beforeEach(() => {
+    loadAgentSecretValues.mockReset();
+    loadAgentSecretValues.mockResolvedValue([]);
+  });
+
+  it("a 40,000-character request: an 8,000 first page in get_run, then pieces that join back exactly, never splitting a pair", async () => {
+    // Pairs straddle the 8,000 first-page end and the 32,000 piece end after it.
+    const request = `${words(7_999)}${EMOJI}${words(31_997, "lorem ipsum dolor sit amet ")}${EMOJI}${words(500)}`;
+    expect(request.length).toBe(40_500);
+    expect(request.codePointAt(7_999)).toBe(0x1f600);
+    expect(request.codePointAt(39_998)).toBe(0x1f600);
+    const c = await connectAs([base({ codingRun: { result: null, request } as never })]);
+    const run = await c.body("get_run", { runId: "r1" });
+    // The first page stops one unit early rather than end inside the pair.
+    expect(run.request).toBe(request.slice(0, 7_999));
+    expect(run.requestMore).toEqual({ next: 7_999, total: 40_500 });
+    const { text, pieces } = await readRest(c, "request", 7_999);
+    expect(pieces.map((piece) => [piece.offset, (piece.text as string).length, piece.next, piece.total])).toEqual([
+      [7_999, 31_999, 39_998, 40_500],
+      [39_998, 502, null, 40_500],
+    ]);
+    expect(`${run.request as string}${text}`).toBe(request);
+    // From the start, with the default limit, the same text in 32,000-unit pieces.
+    expect((await readRest(c, "request", 0)).text).toBe(request);
+    // A limit of 1 at a pair takes the whole pair, so a page always moves on; an offset inside a pair starts at it.
+    expect(await c.body("get_run_text", { runId: "r1", field: "request", offset: 7_999, limit: 1 })).toMatchObject({
+      offset: 7_999,
+      text: EMOJI,
+      next: 8_001,
+    });
+    expect(await c.body("get_run_text", { runId: "r1", field: "request", offset: 8_000, limit: 3 })).toMatchObject({
+      offset: 7_999,
+      text: `${EMOJI}${request[8_001]}`,
+    });
+    // Past the end: nothing more.
+    expect(await c.body("get_run_text", { runId: "r1", field: "request", offset: 99_999 })).toMatchObject({
+      text: "",
+      next: null,
+      total: 40_500,
+    });
+    // The limit is capped at 32,000.
+    const capped = await c.body("get_run_text", { runId: "r1", field: "request", offset: 0, limit: 1_000_000 });
+    expect((capped.text as string).length).toBe(32_000);
+    await c.close();
+  });
+
+  it("get_run_text masks the request as get_run does, and withholds it when the agent's secrets can't be read", async () => {
+    loadAgentSecretValues.mockResolvedValue([{ name: "DB_PASSWORD", values: ["fake-attached-secret-value"] }]);
+    const request = `${words(9_000)} fake-attached-secret-value ${words(100)}`;
+    const c = await connectAs([base({ codingRun: { result: null, request } as never })]);
+    const run = await c.body("get_run", { runId: "r1" });
+    const { text } = await readRest(c, "request", (run.requestMore as { next: number }).next);
+    expect(`${run.request as string}${text}`).not.toContain("fake-attached-secret-value");
+    expect(text).toContain("[REDACTED]");
+    loadAgentSecretValues.mockRejectedValue(new Error("unreadable"));
+    expect(await c.body("get_run_text", { runId: "r1", field: "request" })).toEqual({
+      runId: "r1",
+      field: "request",
+      requestUnavailable: true,
+    });
+    await c.close();
+  });
+
+  it("get_run: fields up to 8,000 characters come whole and unchanged; longer ones as a first page with <field>More", async () => {
+    const exact = words(8_000);
+    const long = words(8_001);
+    const c = await connectAs([
+      base({ finalText: exact, error: "short error", taskOverride: "Review pull request #12" }),
+      base({ id: "r2", finalText: long, error: long, taskOverride: long }),
+    ]);
+    const short = await c.body("get_run", { runId: "r1" });
+    expect(short).toMatchObject({ finalText: exact, error: "short error", taskOverride: "Review pull request #12" });
+    for (const key of ["finalTextMore", "errorMore", "taskOverrideMore", "requestMore"]) {
+      expect(short).not.toHaveProperty(key);
+    }
+    const paged = await c.body("get_run", { runId: "r2" });
+    for (const field of ["finalText", "error", "taskOverride"]) {
+      expect(paged[field]).toBe(long.slice(0, 8_000));
+      expect(paged[`${field}More`]).toEqual({ next: 8_000, total: 8_001 });
+      const rest = await c.body("get_run_text", { runId: "r2", field, offset: 8_000 });
+      expect(rest).toEqual({ runId: "r2", field, offset: 8_000, text: long.slice(8_000), next: null, total: 8_001 });
+    }
+    // A field the run doesn't have: no text, nothing to page.
+    expect(await c.body("get_run_text", { runId: "r1", field: "request" })).toEqual({
+      runId: "r1",
+      field: "request",
+      offset: 0,
+      text: null,
+      next: null,
+      total: 0,
+    });
+    await c.close();
+  });
+
+  it("get_run_text reads only the four text fields", async () => {
+    const c = await connectAs([base({ finalText: "x" })]);
+    for (const field of ["pricingSnapshot", "systemPrompt", "codingResult", "__proto__", "status"]) {
+      const result = await c.call("get_run_text", { runId: "r1", field });
+      expect(result.isError, field).toBe(true);
+      expect(result.content[0].text).not.toContain('"text"');
+    }
+    await c.close();
+  });
+
+  it("get_run_packages pages a long package list in a stable order, with total and next null at the end", async () => {
+    const fetches = Array.from({ length: 450 }, (_, i) => ({
+      ecosystem: i % 3 === 0 ? "pypi" : "npm",
+      name: `pkg-${String(449 - i).padStart(3, "0")}`,
+      version: "1.0.0",
+      outcome: "served" as const,
+      reason: null,
+      sizeBytes: 1000 + i,
+      createdAt: new Date(now.getTime() + i),
+    }));
+    // A retried fetch of an early package collapses into its first entry.
+    fetches.push({ ...fetches[10], createdAt: new Date(now.getTime() + 10_000) });
+    const c = await connectAs([base({ codingRun: { result: null }, registryFetches: fetches })]);
+    const run = await c.body("get_run", { runId: "r1" });
+    expect(run).not.toHaveProperty("packages");
+    expect(run.packageCount).toBe(450);
+    const pages: Record<string, unknown>[] = [];
+    let after: number | null = 0;
+    while (after !== null && pages.length < 10) {
+      const page = await c.body("get_run_packages", { runId: "r1", ...(after ? { after } : {}) });
+      pages.push(page);
+      after = page.next as number | null;
+    }
+    expect(pages.map((page) => [(page.packages as unknown[]).length, page.next, page.total])).toEqual([
+      [200, 200, 450],
+      [200, 400, 450],
+      [50, null, 450],
+    ]);
+    const names = pages.flatMap((page) => (page.packages as { name: string }[]).map((p) => p.name));
+    // The order the run first fetched them, the same on every read.
+    expect(names).toEqual(fetches.slice(0, 450).map((f) => f.name));
+    expect((pages[0].packages as unknown[])[0]).toEqual({
+      ecosystem: "pypi",
+      name: "pkg-449",
+      version: "1.0.0",
+      size: 1000,
+    });
+    // limit is capped at 500; an after past the end gives an empty last page.
+    const all = await c.body("get_run_packages", { runId: "r1", limit: 10_000 });
+    expect([(all.packages as unknown[]).length, all.next]).toEqual([450, null]);
+    expect(await c.body("get_run_packages", { runId: "r1", after: 9_999 })).toEqual({
+      runId: "r1",
+      packages: [],
+      next: null,
+      total: 450,
+    });
+    await c.close();
+  });
+
+  it("get_run_packages on a run that isn't a coding run: no packages", async () => {
+    const c = await connectAs([base({ finalText: "x" })]);
+    expect(await c.body("get_run_packages", { runId: "r1" })).toEqual({
+      runId: "r1",
+      packages: [],
+      next: null,
+      total: 0,
+    });
+    await c.close();
+  });
+
+  it("both tools keep get_run's visibility: a caller who can't read the run gets the same not-found", async () => {
+    const run = base({
+      finalText: "secret answer",
+      codingRun: { result: null },
+      registryFetches: [
+        {
+          ecosystem: "npm",
+          name: "left-pad",
+          version: "1.0.0",
+          outcome: "served",
+          reason: null,
+          createdAt: now,
+        },
+      ],
+    });
+    const asStranger = await connectAs([run], "not-the-owner");
+    const notFound = 'Run "r1" not found.';
+    for (const [name, args] of [
+      ["get_run", { runId: "r1" }],
+      ["get_run_text", { runId: "r1", field: "finalText" }],
+      ["get_run_packages", { runId: "r1" }],
+    ] as const) {
+      const result = await asStranger.call(name, args);
+      expect(result.isError, name).toBe(true);
+      expect(result.content[0].text, name).toContain(notFound);
+      expect(result.content[0].text).not.toContain("secret answer");
+      expect(result.content[0].text).not.toContain("left-pad");
+      // A run that doesn't exist answers the same way.
+      const missing = await asStranger.call(name, { ...args, runId: "nope" });
+      expect(missing.content[0].text.replace("nope", "r1")).toBe(result.content[0].text);
+    }
+    await asStranger.close();
+    // The run's starter still reads it, as with get_run.
+    const asStarter = await connectAs([{ ...run, triggeredById: "starter" }], "starter");
+    expect(await asStarter.body("get_run_text", { runId: "r1", field: "finalText" })).toMatchObject({
+      text: "secret answer",
+    });
+    expect((await asStarter.body("get_run_packages", { runId: "r1" })).total).toBe(1);
+    await asStarter.close();
   });
 });

@@ -234,6 +234,27 @@ describe("buildHelpCatalog", () => {
     expect(searchHelp(catalog, query)[0]?.page.id).toBe("run-steps");
   });
 
+  it.each(["get_run_text", "get_run_packages", "packageCount"])(
+    "finds the run debugging article for %s",
+    async (query) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(
+        searchHelp(catalog, query)
+          .slice(0, 3)
+          .map((r) => r.page.id),
+      ).toContain("troubleshooting/debugging-agent-runs");
+    },
+  );
+
+  it("finds the run pane article for get_run_text", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, "get_run_text pane")
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("claude-code-run-pane");
+  });
+
   it.each(["pane steps", "recent steps pane"])("finds the run pane article for %s", async (query) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     expect(

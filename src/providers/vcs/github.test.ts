@@ -1228,7 +1228,9 @@ describe("pullRequestBody packages section", () => {
     expect(body).not.toContain("@scope-100/");
     expect(body).toContain("- npm `refused-package-with-a-long-name-99`");
     expect(body).not.toContain("refused-package-with-a-long-name-100`");
-    expect(body.match(/…and 1900 more — see get_run for the full list/g)).toHaveLength(2);
+    // Packages page through get_run_packages; refusals are all in get_run.
+    expect(body.match(/…and 1900 more — see get_run_packages for the full list/g)).toHaveLength(1);
+    expect(body.match(/…and 1900 more — see get_run for the full list/g)).toHaveLength(1);
   });
 
   it("bounds the section even when entries are pathologically long", () => {
@@ -1239,7 +1241,7 @@ describe("pullRequestBody packages section", () => {
     }));
     const body = pullRequestBody({ ...base, packages });
     expect(body.length).toBeLessThan(20_000);
-    expect(body).toMatch(/…and \d+ more — see get_run for the full list/);
+    expect(body).toMatch(/…and \d+ more — see get_run_packages for the full list/);
   });
 
   it("lists accepted advisories only when a package was served by waiving one", () => {
@@ -1274,7 +1276,8 @@ describe("pullRequestBody packages section", () => {
     expect(body).toContain("- `waived-99@1.0.0`: `GHSA-99-xyz`");
     expect(body).not.toContain("`waived-100@1.0.0`:");
     expect(body).not.toContain("bad`id");
-    expect(body.match(/…and 200 more — see get_run for the full list/g)).toHaveLength(2);
+    // The packages and their accepted advisories both page through get_run_packages.
+    expect(body.match(/…and 200 more — see get_run_packages for the full list/g)).toHaveLength(2);
   });
 
   it("drops accepted advisory ids that are not policy-shaped ids", () => {
