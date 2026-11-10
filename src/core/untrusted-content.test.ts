@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   UNTRUSTED_CONTEXT_TAG,
   UNTRUSTED_TOOL_OUTPUT_TAG,
+  MAX_UNTRUSTED_BODY_CHARS,
   composeTaskOverride,
+  cutUntrustedText,
   neutraliseWrapperTags,
   splitTaskOverride,
+  withCutMarker,
   wrapUntrusted,
 } from "./untrusted-content.js";
 
@@ -177,5 +180,62 @@ describe("neutraliseWrapperTags performance (I-1)", () => {
         RATIO_LIMIT,
       );
     }
+  });
+});
+
+describe("cutUntrustedText", () => {
+  it("is GitHub's own body maximum", () => {
+    expect(MAX_UNTRUSTED_BODY_CHARS).toBe(65_536);
+  });
+
+  it("keeps text under and at the limit whole", () => {
+    expect(cutUntrustedText("short")).toEqual({ text: "short", cut: false, total: 5 });
+    const at = "a".repeat(MAX_UNTRUSTED_BODY_CHARS);
+    expect(cutUntrustedText(at)).toEqual({ text: at, cut: false, total: MAX_UNTRUSTED_BODY_CHARS });
+    expect(cutUntrustedText("")).toEqual({ text: "", cut: false, total: 0 });
+  });
+
+  it("cuts text over the limit to exactly the limit and reports the whole length", () => {
+    const over = "a".repeat(MAX_UNTRUSTED_BODY_CHARS + 1);
+    const cut = cutUntrustedText(over);
+    expect(cut.text).toHaveLength(MAX_UNTRUSTED_BODY_CHARS);
+    expect(cut).toMatchObject({ cut: true, total: MAX_UNTRUSTED_BODY_CHARS + 1 });
+    expect(cutUntrustedText("a".repeat(81_200)).total).toBe(81_200);
+  });
+
+  it("never splits a surrogate pair at the cut", () => {
+    // "😀" is two UTF-16 code units; the limit falls between them.
+    const text = "a".repeat(9) + "😀" + "b";
+    const cut = cutUntrustedText(text, 10);
+    expect(cut).toEqual({ text: "a".repeat(9), cut: true, total: 12 });
+    // A pair that ends exactly at the limit is kept.
+    expect(cutUntrustedText("a".repeat(8) + "😀" + "b", 10)).toEqual({
+      text: "a".repeat(8) + "😀",
+      cut: true,
+      total: 11,
+    });
+    const atLimit = cutUntrustedText("a".repeat(MAX_UNTRUSTED_BODY_CHARS - 1) + "😀");
+    expect(atLimit.text).toBe("a".repeat(MAX_UNTRUSTED_BODY_CHARS - 1));
+  });
+
+  it("uses a caller's own limit", () => {
+    expect(cutUntrustedText("abcdef", 4)).toEqual({ text: "abcd", cut: true, total: 6 });
+  });
+});
+
+describe("withCutMarker", () => {
+  it("leaves uncut text alone", () => {
+    expect(withCutMarker(cutUntrustedText("whole"), "this issue's description", "https://x/1")).toBe("whole");
+  });
+
+  it("adds one marker line with the kept and total counts, what was cut, and where the original is", () => {
+    const cut = cutUntrustedText("a".repeat(81_200));
+    expect(withCutMarker(cut, "this issue's description", "https://github.com/o/r/issues/7")).toBe(
+      `${"a".repeat(65_536)}\n[… cut at 65,536 of 81,200 characters of this issue's description; ` +
+        "the whole text is at https://github.com/o/r/issues/7]",
+    );
+    expect(withCutMarker(cut, "the request comment", null).split("\n").at(-1)).toBe(
+      "[… cut at 65,536 of 81,200 characters of the request comment; the rest is not shown]",
+    );
   });
 });

@@ -114,6 +114,23 @@ describe("normalizeJiraEvent", () => {
       description: "Steps to repro",
     });
   });
+  it("keeps a long description and comment whole, for the task builder to cut and mark", () => {
+    const long = "d".repeat(70_000);
+    const big = { ...issue, fields: { ...issue.fields, description: long } };
+    expect(normalizeJiraEvent({ webhookEvent: "jira:issue_created", user: human, issue: big }, BOT)?.subject).toEqual({
+      summary: "Login fails",
+      description: long,
+    });
+    const mention = normalizeJiraEvent(
+      {
+        webhookEvent: "comment_created",
+        issue,
+        comment: { id: "99", author: human, body: `[~accountid:bot-1] ${long}` },
+      },
+      BOT,
+    );
+    expect(mention?.comment?.body).toBe(`@user ${long}`);
+  });
   it("uses the editor, not the original author, as the actor of comment_updated", () => {
     const other = { accountId: "u-2", accountType: "atlassian", displayName: "Eve" };
     const edited = (updateAuthor: unknown) => ({

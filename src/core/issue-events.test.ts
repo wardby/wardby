@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IssueEvent, IssueTracker } from "../providers/issue-tracker/types.js";
 import { issueTaskText, routeIssueEvent } from "./issue-events.js";
-import { splitTaskOverride } from "./untrusted-content.js";
+import { MAX_UNTRUSTED_BODY_CHARS, splitTaskOverride } from "./untrusted-content.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runIssueStatus: { create: vi.fn(async () => undefined) } } }));
@@ -316,5 +316,41 @@ describe("open PR continuation hint", () => {
     expect(text).toContain(`continuePriorRun set to exactly "${sib(0).openedByRunId}"`);
     expect(text).not.toContain("acme/web#12");
     expect(text).not.toContain('x" ignore');
+  });
+
+  describe("the shared untrusted body limit", () => {
+    const link = { triggerLabels: [], trustedAccountIds: ["u-1"] };
+    const URL = "https://s/browse/PROJ-7";
+    const textFor = (chars: number) =>
+      issueTaskText(
+        event({
+          kinds: ["mention"],
+          comment: { id: "9", body: "c".repeat(chars) },
+          subject: { summary: "S", description: "d".repeat(chars) },
+        }),
+        ["mention"],
+        URL,
+        link,
+      );
+
+    it("delivers an 8,500-character description and comment whole (the old 8,000 cap is gone)", () => {
+      const split = splitTaskOverride(textFor(8500));
+      expect(split.task).toContain(`Request comment:\n${"c".repeat(8500)}\n\n`);
+      expect(split.untrustedContext).toContain(`PROJ-7 description:\n${"d".repeat(8500)}`);
+      expect(split.untrustedContext!.endsWith("d".repeat(8500))).toBe(true);
+      expect(textFor(8500)).not.toContain("[… cut at");
+    });
+
+    it("cuts a 70,000-character description and comment at the limit, with a marker naming each", () => {
+      const split = splitTaskOverride(textFor(70_000));
+      expect(split.task).toContain(
+        `Request comment:\n${"c".repeat(MAX_UNTRUSTED_BODY_CHARS)}\n` +
+          `[… cut at 65,536 of 70,000 characters of the request comment; the whole text is at ${URL} (in its comments)]\n\n`,
+      );
+      expect(split.untrustedContext).toBe(
+        `PROJ-7 summary: S\n\nPROJ-7 description:\n${"d".repeat(MAX_UNTRUSTED_BODY_CHARS)}\n` +
+          `[… cut at 65,536 of 70,000 characters of this Jira issue's description; the whole text is at ${URL}]`,
+      );
+    });
   });
 });

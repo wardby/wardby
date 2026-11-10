@@ -187,7 +187,9 @@ reads one issue in a linked repository (title, state, body, labels, author,
 and the 30 most recent comments), read-only, so a reviewer can check a pull
 request that says `Resolves #N` against the issue's own acceptance criteria
 instead of the description's restatement of them. The body is capped at
-32,000 characters and each comment at 4,000, with `truncated` flags. A pull
+65,536 characters and each comment at 4,000, with `truncated` flags.
+`repo_pr_read` caps a pull request's body at the same 65,536 characters and
+sets `bodyTruncated` when it was cut. A pull
 request number is refused (`is_pull_request`; use `repo_pr_read`), a missing
 issue is `issue_not_found`, and a local repository has no issues
 (`issues_unavailable`). It needs the App's **Issues: Read** permission, which

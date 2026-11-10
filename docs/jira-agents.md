@@ -631,6 +631,11 @@ set `WARDBY_JIRA_EPIC_LINK_FIELD` to its field id (for example
 - `mention` and `assigned` triggers work only for accounts in the link's
   `trustedAccountIds`. `transitioned`, `labeled` and `created` rely on Jira's
   own permissions for who can perform those actions.
+- An issue description or request comment in a run's task is capped at
+  65,536 characters, as `jira_get_issue`'s `description` is
+  (`descriptionTruncated` says whether it was cut). Text cut in a task ends
+  with one marker line, for example
+  `[… cut at 65,536 of 81,200 characters of this Jira issue's description; the whole text is at https://your-site.atlassian.net/browse/PROJ-1]`.
 - Issue summaries, descriptions and comments are untrusted input. wardby hands
   them to the agent as separate, labelled context, never as its instructions;
   still, write agent prompts on the assumption that issue text can be hostile,

@@ -26,7 +26,9 @@ export interface IssueView {
   key: string;
   projectKey: string;
   summary: string;
+  /** Plain text, cut at MAX_UNTRUSTED_BODY_CHARS (65,536 characters); descriptionTruncated says whether it was. */
   description: string;
+  descriptionTruncated: boolean;
   status: string;
   /** The status's category (Jira statusCategory.key): "done" is what dedupe treats as resolved. */
   statusCategory: IssueStatusCategory;

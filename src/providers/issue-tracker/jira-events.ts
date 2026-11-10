@@ -8,7 +8,13 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { adfMentionIds, adfToText } from "./adf.js";
 import { ISSUE_KEY, projectOf, type IssueEvent, type IssueEventKind } from "./types.js";
 
-const MAX_TEXT = 20_000;
+/**
+ * Kept whole here: the task builder (core/issue-events.ts) cuts the
+ * description and comment to the shared untrusted body limit and marks the
+ * cut, which needs the whole length. Jira's own field limit and the webhook
+ * body already bound it.
+ */
+const MAX_TEXT = Infinity;
 
 export function verifyJiraSignature(rawBody: string, header: string | undefined, secret: string): boolean {
   if (!header || !/^sha256=[0-9a-f]{64}$/i.test(header)) return false;

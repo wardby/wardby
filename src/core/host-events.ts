@@ -39,7 +39,7 @@ import {
   type OpenSibling,
 } from "./related-pull-requests.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
-import { composeTaskOverride } from "./untrusted-content.js";
+import { composeTaskOverride, cutUntrustedText, MAX_UNTRUSTED_BODY_CHARS, withCutMarker } from "./untrusted-content.js";
 import {
   DEFAULT_KNOWLEDGE_BUNDLE_PATH,
   parseConcept,
@@ -53,7 +53,6 @@ import { spanHash } from "../knowledge/span-hash.js";
 export type { HostEvent };
 
 const log = logger.child({ module: "host-events" });
-const MAX_TASK_BODY = 8000;
 const MAX_TITLE = 256;
 const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub", local: "local repository" };
 
@@ -445,6 +444,37 @@ export function siblingContinuationHints(siblings: readonly OpenSibling[]): stri
   ].join("\n");
 }
 
+/** The GitHub web page of the mention's issue or PR, or of its request comment; null off GitHub. */
+function mentionWebUrl(event: MentionEvent, of: "subject" | "comment"): string | null {
+  if (event.provider !== "github" || event.repository.includes(":")) return null;
+  const base = `https://github.com/${event.repository}`;
+  if (of === "comment" && /^\d+$/.test(event.comment.id)) {
+    if (event.comment.kind === "inline") return `${base}/pull/${event.number}#discussion_r${event.comment.id}`;
+    if (event.comment.kind === "conversation") return `${base}/issues/${event.number}#issuecomment-${event.comment.id}`;
+  }
+  return event.isPullRequest
+    ? pullRequestWebUrl("github", event.repository, event.number)
+    : `${base}/issues/${event.number}`;
+}
+
+/** Task text cut to the shared limit, with a marker at any cut and one log line (counts only, never text). */
+function mentionTaskBody(event: MentionEvent, text: string, of: "subject" | "comment"): string {
+  const cut = cutUntrustedText(text);
+  if (!cut.cut) return cut.text;
+  const kind = of === "comment" ? "request_comment" : event.isPullRequest ? "pr_description" : "issue_description";
+  log.info(
+    { source: event.provider, kind, total: cut.total, limit: MAX_UNTRUSTED_BODY_CHARS },
+    "task text cut at the untrusted body limit",
+  );
+  const what =
+    of === "comment"
+      ? "the request comment"
+      : event.isPullRequest
+        ? "this PR's description"
+        : "this issue's description";
+  return withCutMarker(cut, what, mentionWebUrl(event, of));
+}
+
 /**
  * The mention agent's task text. Deterministic so a prompt can parse it.
  *
@@ -476,7 +506,7 @@ export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibl
     if (hints) sections.push(hints);
   }
   const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
-  const description = event.subject?.body.trim() ? event.subject.body.slice(0, MAX_TASK_BODY) : "";
+  const description = event.subject?.body.trim() ? mentionTaskBody(event, event.subject.body, "subject") : "";
   sections.push(
     [
       `[${HOST_NAMES[event.provider]} ${kind} #${event.number}${inSubject && title ? `: ${title}` : ""}]`,
@@ -488,7 +518,7 @@ export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibl
     if (description) sections.push(`${Kind} description:\n${description}`);
     return composeTaskOverride(sections.join("\n\n"));
   }
-  sections.push(`Request comment:\n${event.body.slice(0, MAX_TASK_BODY)}`);
+  sections.push(`Request comment:\n${mentionTaskBody(event, event.body, "comment")}`);
   const context: string[] = [];
   if (title) context.push(`${Kind} #${event.number} title: ${title}`);
   if (description) context.push(`${Kind} description:\n${description}`);

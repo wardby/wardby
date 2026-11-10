@@ -46,6 +46,30 @@ describe("GitHubReviewHost reads", () => {
     expect(view.nextPatchCursor).toMatch(/^v1\./);
   });
 
+  describe("the pull request body", () => {
+    const readBody = async (body: string) => {
+      const { client } = fakeGitHub(({ method, path }) => {
+        if (method === "GET" && path === `${BASE}/pulls/7`) return json({ ...PR, body });
+        if (path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+        if (path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+        return undefined;
+      });
+      return new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 100, agentMarker: "a" });
+    };
+
+    it("comes back whole under the shared limit (past the old 8,000 cap)", async () => {
+      const view = await readBody("b".repeat(8500));
+      expect(view.body).toBe("b".repeat(8500));
+      expect(view.bodyTruncated).toBe(false);
+    });
+
+    it("is cut at 65,536 characters with bodyTruncated over it", async () => {
+      const view = await readBody("b".repeat(70_000));
+      expect(view.body).toHaveLength(65_536);
+      expect(view.bodyTruncated).toBe(true);
+    });
+  });
+
   describe("a file list longer than one page", () => {
     // `total` files on the PR; the files endpoint pages them 100 at a time, as GitHub does.
     const bigPr = (total: number, changedFiles: number | undefined = total) => {
@@ -500,14 +524,14 @@ describe("GitHubReviewHost.readIssue", () => {
     const all = Array.from({ length: 130 }, (_, i) => comment(i + 1));
     all[129] = comment(130, "y".repeat(5000));
     const { client, calls } = fakeGitHub(({ path }) => {
-      if (path === `${BASE}/issues/3`) return json({ ...ISSUE, body: "x".repeat(40_000), comments: 130 });
+      if (path === `${BASE}/issues/3`) return json({ ...ISSUE, body: "x".repeat(70_000), comments: 130 });
       if (path === `${BASE}/issues/3/comments?per_page=100&page=2`) return json(all.slice(100));
       if (path === `${BASE}/issues/3/comments?per_page=100&page=1`) return json(all.slice(0, 100));
       return undefined;
     });
     const read = await new GitHubReviewHost(client).readIssue(REPO, 3);
     if (read.kind !== "issue") throw new Error(read.kind);
-    expect(read.body).toHaveLength(32_000);
+    expect(read.body).toHaveLength(65_536);
     expect(read.bodyTruncated).toBe(true);
     expect(read.comments).toHaveLength(30);
     expect(read.comments[0].author).toBe("u101");
@@ -517,6 +541,17 @@ describe("GitHubReviewHost.readIssue", () => {
     expect(read.truncated).toBe(true);
     // Page 2 alone held 30 comments: page 1 is never read.
     expect(calls.map((c) => c.path)).not.toContain(`${BASE}/issues/3/comments?per_page=100&page=1`);
+  });
+
+  it("returns a body under the shared limit whole (past the old 32,000 cap)", async () => {
+    const { client } = fakeGitHub(({ path }) =>
+      path === `${BASE}/issues/3` ? json({ ...ISSUE, body: "x".repeat(40_000), comments: 0 }) : undefined,
+    );
+    const read = await new GitHubReviewHost(client).readIssue(REPO, 3, { comments: false });
+    if (read.kind !== "issue") throw new Error(read.kind);
+    expect(read.body).toBe("x".repeat(40_000));
+    expect(read.bodyTruncated).toBe(false);
+    expect(read.truncated).toBe(false);
   });
 
   it("fills from the previous page when the last page is short", async () => {

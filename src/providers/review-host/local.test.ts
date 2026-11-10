@@ -301,6 +301,27 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
     ).toBe(1);
   });
 
+  it("cuts the commit-list body at the shared 65,536-character limit, and sets bodyTruncated", async () => {
+    // Separate worktrees, so the source checkout (with its uncommitted edit) is left alone.
+    const bodyOf = async (branch: string, subjectChars: number) => {
+      const dir = join(base, branch);
+      await git(repoPath, "worktree", "add", "-b", branch, dir, "main");
+      await writeFile(join(dir, `${branch}.txt`), "x\n");
+      await git(dir, "add", `${branch}.txt`);
+      await git(dir, "commit", "-m", "s".repeat(subjectChars));
+      const pr = await db.localPullRequest.create({ data: { repository, branch, base: "main" } });
+      prIds.push(pr.id);
+      return host.readPullRequest(repository, pr.number, { maxPatchChars: 100, agentMarker: "agent-x" });
+    };
+    // Past the old 8,000 cap, under the shared limit: whole.
+    const whole = await bodyOf("long-subject", 8500);
+    expect(whole.body).toContain("s".repeat(8500));
+    expect(whole.bodyTruncated).toBe(false);
+    const cut = await bodyOf("huge-subject", 70_000);
+    expect(cut.body).toHaveLength(65_536);
+    expect(cut.bodyTruncated).toBe(true);
+  });
+
   it("cuts a file list over 1,000 files, and repo_publish_review then refuses APPROVE", async () => {
     // A separate worktree, so the source checkout (with its uncommitted edit) is left alone.
     const bigDir = join(base, "big");
