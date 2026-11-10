@@ -670,6 +670,22 @@ coding agent: … Request: …") and stored with the run. A blank prompt leaves
 the task unchanged; a combination over the 16 KiB task limit is refused rather
 than truncated.
 
+A fresh coding run that a lead delegated, where the lead itself was started by
+a GitHub or local-repository mention or a Jira event, also gets the original
+request the lead was given, appended when the run starts: the issue or pull
+request header, the request comment, the title and description, and any
+[cut markers](code-review-agents.md) they already carry. It follows a fixed
+note inside an `<untrusted_context>` fence, with the same "not
+permission-checked" warning the lead's own task carries, so the coding agent
+reads the requester's own words and not only the lead's restatement. It is
+left out when the lead's request already repeats it word for word (whitespace
+aside), and it is the part cut to fit the 16 KiB task limit: a cut ends with a
+line such as
+`[… cut at 9,800 of 40,000 characters of the original request; the whole text is at https://github.com/your-org/your-repo/issues/7]`.
+Continuations (`continuePriorRun`, review fix rounds) never get it: they get
+the linked issue instead. Runs delegated by a manual or scheduled lead, and
+native sub-agents, are unchanged.
+
 The worker's result may carry an optional `tag`, shown as `[tag]` in the pull
 request title: at most 32 characters of letters, digits, `.`, `_`, `/`, and
 `-`, starting with a letter or digit. The output schema describes that rule to

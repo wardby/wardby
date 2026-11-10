@@ -437,6 +437,33 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("delegatingEventTask returns an event-started lead's task only to the run it delegated", async () => {
+    const eventLead = `container-orig-event-${randomUUID()}`;
+    const manualLead = `container-orig-manual-${randomUUID()}`;
+    const delegated = `container-orig-child-${randomUUID()}`;
+    const manualChild = `container-orig-mchild-${randomUUID()}`;
+    const leadTask =
+      "[GitHub issue #12]\nRepository: openai/example\nRequested by @someone\n\nRequest comment:\nAdd jokes";
+    try {
+      await db.run.create({ data: { id: eventLead, agentId, trigger: "host_event", taskOverride: leadTask } });
+      await db.run.create({ data: { id: manualLead, agentId, trigger: "manual", taskOverride: leadTask } });
+      await codingRunWith(delegated, "Child text.");
+      await codingRunWith(manualChild, "Child text.");
+      await db.run.update({ where: { id: delegated }, data: { trigger: "subagent", parentRunId: eventLead } });
+      await db.run.update({ where: { id: manualChild }, data: { trigger: "subagent", parentRunId: manualLead } });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.delegatingEventTask(delegated)).resolves.toBe(leadTask);
+      await expect(store.delegatingEventTask(manualChild)).resolves.toBeNull();
+      // Not delegated (e.g. started by the event itself): nothing.
+      await db.run.update({ where: { id: delegated }, data: { trigger: "host_event" } });
+      await expect(store.delegatingEventTask(delegated)).resolves.toBeNull();
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [delegated, manualChild] } } });
+      await db.run.deleteMany({ where: { id: { in: [delegated, manualChild] } } });
+      await db.run.deleteMany({ where: { id: { in: [eventLead, manualLead] } } });
+    }
+  });
+
   it("pullRequestRunIds lists the root, then continuations that pushed, oldest first", async () => {
     const root = `container-desc-runs-root-${randomUUID()}`;
     const pushedLater = `container-desc-runs-b-${randomUUID()}`;

@@ -465,6 +465,14 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   `repo_pr_read`'s `relatedPullRequests` either way — see
   [Reviewing a pull request a delegated run
   opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
+- When the lead was started by a mention or a Jira event, a fresh coding
+  sub-agent run gets the lead's original request (the issue or pull request,
+  the request comment, and their title and description) appended to its task
+  as untrusted context, so a lead prompt does not need to copy the issue body
+  into the delegated task: describe the change and let wardby hand over the
+  original. See
+  [the coding task](coding-worker-isolation.md) for the framing and the 16 KiB
+  budget it is cut to.
 - Each `delegate_to_<name>` call to a coding sub-agent can carry a
   `mergeOrder`: an integer from 1 to 99, where 1 merges first. Give a
   repository that other repositories' changes depend on a lower number than
