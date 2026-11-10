@@ -1,6 +1,6 @@
 {
   "name": "wardby-runs",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "A pane listing your wardby agent runs, with pull-request chains, run details and Continue locally",
   "author": {
     "name": "wardby",
