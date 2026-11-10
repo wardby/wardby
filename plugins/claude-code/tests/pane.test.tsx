@@ -2352,3 +2352,215 @@ test("terminal: every detail card's rounded border is in its kind's colour, and 
   expect(await ui.findAll({ type: "Svg" })).toHaveLength(0);
   await ui.unmount();
 });
+
+/**
+ * A server that sends long fields as a first page (one with get_run_text): get_run with <field>More, and
+ * get_run_text in pieces of `piece` characters. `text: "unknown"` is an older server without get_run_text.
+ */
+function pagedTextServer(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  full: { request: string; finalText: string; error: string; taskOverride?: string },
+  opts: { text?: "yes" | "unknown" | "refused"; piece?: number; first?: number } = {},
+) {
+  const first = opts.first ?? 8000;
+  const piece = opts.piece ?? 32000;
+  const textCalls: { field: string; offset: number }[] = [];
+  const reply = (value: unknown) => ({
+    value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+  });
+  const fail = (text: string) => ({ value: { content: [{ type: "text", text }], isError: true } });
+  const page = (field: string, text: string) =>
+    text.length > first
+      ? { [field]: text.slice(0, first), [`${field}More`]: { next: first, total: text.length } }
+      : { [field]: text };
+  on("mcp.call", (_, e) => {
+    if (e.tool === "list_runs")
+      return reply([{ ...runRow("r1", "failed", 60_000), taskOverride: full.taskOverride ?? null }]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status: "failed",
+        ...page("request", full.request),
+        ...page("finalText", full.finalText),
+        ...page("error", full.error),
+        ...(full.taskOverride ? page("taskOverride", full.taskOverride) : {}),
+      });
+    if (e.tool === "get_run_text") {
+      if (opts.text === "unknown") return fail("MCP error -32602: Tool get_run_text not found");
+      if (opts.text === "refused") return fail("Claude Code auto mode refused mcp__wardby__get_run_text");
+      const field = String(e.args.field) as keyof typeof full;
+      const offset = Number(e.args.offset ?? 0);
+      textCalls.push({ field, offset });
+      const text = full[field] ?? "";
+      const end = Math.min(text.length, offset + piece);
+      return reply({
+        runId: "r1",
+        field,
+        offset,
+        text: text.slice(offset, end),
+        next: end < text.length ? end : null,
+        total: text.length,
+      });
+    }
+    if (e.tool === "get_run_steps") return reply({ runId: "r1", level: "summary", steps: [], next: null, dropped: 0 });
+    return reply({});
+  });
+  return textCalls;
+}
+
+const longText = (label: string, n: number) =>
+  Array.from(
+    { length: Math.ceil(n / 50) },
+    (_, i) => `${label} line ${String(i).padStart(5, "0")} `.padEnd(49, ".") + "\n",
+  )
+    .join("")
+    .slice(0, n);
+
+test("Show full text reads the rest of a long request, final answer and error, piece by piece", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const full = {
+    request: longText("request", 40_000),
+    finalText: longText("answer", 20_000),
+    error: longText("error", 9_000),
+  };
+  const textCalls = pagedTextServer(on, full, { piece: 15_000 });
+  await $.session.start({ cwd: "/", surface: "terminal", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  // Only get_run's first pages until asked; the error says there is more.
+  expect(textCalls).toEqual([]);
+  expect(JSON.stringify(await ui.find({ key: "error-more" }))).toContain("1000 more characters");
+  expect((await ui.find({ key: "expand" }))?.props.hotkey).toBe("m");
+  await ui.press({ key: "expand" });
+  await clock.settle();
+  expect(textCalls).toEqual([
+    { field: "request", offset: 8000 },
+    { field: "request", offset: 23_000 },
+    { field: "request", offset: 38_000 },
+    { field: "finalText", offset: 8000 },
+    { field: "error", offset: 8000 },
+  ]);
+  expect((await ui.find({ key: "request-text" }))?.props.text).toBe(full.request);
+  expect((await ui.find({ key: "final-text" }))?.props.text).toBe(full.finalText);
+  expect(JSON.stringify(await ui.find({ type: "Text", text: /^error line 00000/ }))).toContain("error line 00179");
+  expect(await ui.find({ key: "error-more" })).toBeUndefined();
+  // Collapsing and expanding again reads nothing more.
+  await ui.press({ key: "expand" });
+  await ui.press({ key: "expand" });
+  await clock.settle();
+  expect(textCalls).toHaveLength(5);
+  await ui.unmount();
+});
+
+test("desktop: Copy on a long field reads the rest first and copies the whole text", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  const full = {
+    request: longText("request", 12_000),
+    finalText: longText("answer", 30_000),
+    error: longText("error", 8_500),
+  };
+  const textCalls = pagedTextServer(on, full);
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "copy-final" });
+  await clock.settle();
+  expect(copies.at(-1)).toBe(full.finalText);
+  expect(toasts.at(-1)).toBe("Copied");
+  // One call read every field the server cut; a second Copy reads nothing more.
+  expect(textCalls.map((c) => c.field)).toEqual(["request", "finalText", "error"]);
+  await ui.press({ key: "copy-started" });
+  await clock.settle();
+  expect(copies.at(-1)).toBe(full.request);
+  await ui.press({ key: "copy-error" });
+  await clock.settle();
+  expect(copies.at(-1)).toBe(full.error);
+  expect(textCalls).toHaveLength(3);
+  await ui.unmount();
+});
+
+test("desktop: a long task without a request: Copy reads the rest of taskOverride", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const taskOverride = longText("task", 10_000);
+  const textCalls = pagedTextServer(on, { request: "", finalText: "Done.", error: "", taskOverride });
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "copy-started" });
+  await clock.settle();
+  expect(textCalls).toEqual([{ field: "taskOverride", offset: 8000 }]);
+  expect(copies.at(-1)).toBe(taskOverride);
+  await ui.unmount();
+});
+
+test("an older server without get_run_text: Show full text and Copy keep the first page, with no error", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  const full = { request: longText("request", 9_000), finalText: longText("answer", 9_000), error: "short" };
+  pagedTextServer(on, full, { text: "unknown" });
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "expand" });
+  await clock.settle();
+  expect((await ui.find({ key: "final-text" }))?.props.text).toBe(full.finalText.slice(0, 8000));
+  await ui.press({ key: "copy-final" });
+  await clock.settle();
+  expect(copies.at(-1)).toBe(full.finalText.slice(0, 8000));
+  expect(toasts.at(-1)).toBe("Copied");
+  // No error line in the pane.
+  expect(await ui.find({ type: "Text", text: /^wardby: / })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("auto mode refusing get_run_text: the first page stays, and a toast names the rule to allow", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  const full = { request: "Short.", finalText: longText("answer", 9_000), error: "" };
+  pagedTextServer(on, full, { text: "refused" });
+  await $.session.start({ cwd: "/", surface: "terminal", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  await ui.press({ key: "expand" });
+  await clock.settle();
+  expect(toasts.at(-1)).toBe("Allow mcp__wardby__get_run_text in /permissions to read the rest of this run's text.");
+  expect((await ui.find({ key: "final-text" }))?.props.text).toBe(full.finalText.slice(0, 8000));
+  expect(await ui.find({ type: "Text", text: /^wardby: / })).toBeUndefined();
+  await ui.unmount();
+});

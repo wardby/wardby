@@ -37,6 +37,8 @@ To see your runs across every agent, call `list_runs` without an `agentId`
 text; `active: true` keeps pending and running runs, and `since` (an ISO time)
 keeps runs that started or finished since then plus any still active. You see
 every run of the agents you own and only the runs you started on the others.
+One agent's listing (with `agentId`) also leaves out the final text, returns 50
+rows by default and pages with `before`; `get_run` has the final text.
 `list_agents` with `summary: true` returns just each agent's id, name, kind,
 model, coding provider, budget, owner and your access, without the full
 configuration.

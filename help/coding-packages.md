@@ -187,7 +187,7 @@ with `create_agent` or `update_agent` (needs `packages:approve` or
   refusal names the ones still blocking.
 - Malware is never waivable: `MAL-…` ids are rejected, and malware advisories
   stay blocked even if listed.
-- Waivers show as `acceptedAdvisories` per package in `get_run` and in an
+- Waivers show as `acceptedAdvisories` per package in `get_run_packages` and in an
   **Accepted advisories** section of the pull request. The policy is fixed
   when a run starts.
 - Find the id from the package named in the refusal: `https://osv.dev/list?q=<package>`

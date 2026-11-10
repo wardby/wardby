@@ -3,7 +3,7 @@ id: claude-code-run-pane
 title: See your runs in Claude Code (the wardby-runs plugin)
 summary: Install the wardby-runs Claude Code plugin to see your runs beside the chat, grouped by pull request, with run details and Continue locally.
 audience: operator
-tags: [run steps, get_run_steps, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode, permissions]
+tags: [run steps, get_run_steps, get_run_text, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode]
 appliesTo: >=0.8.0
 ---
 
@@ -30,8 +30,8 @@ server named `wardby` yet. Or install it yourself with
 
 If the pane says auto mode refused a call, allow `mcp__wardby__list_runs`,
 `mcp__wardby__list_agents`, `mcp__wardby__get_run`,
-`mcp__wardby__get_run_transcript` and `mcp__wardby__get_run_steps` in
-`/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
+`mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps` and
+`mcp__wardby__get_run_text` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
 pane needs.
 
 In the terminal, the pane takes clicks and sits beside the chat only in Claude
@@ -62,7 +62,11 @@ Each section of a run's detail is a card, coloured by its kind (a bar on the
 desktop, the border in the terminal). On the desktop each card, an error and an
 open step's detail have a **Copy** button that copies the full text as the
 server sent it, an open step's detail included in full; in the terminal, **Copy section** (`y`) copies the open
-step's detail.
+step's detail. `get_run` sends a request, task, final answer or error longer
+than 8,000 characters as its first 8,000; **Show full text** and **Copy** read
+the rest with `get_run_text`. A server without `get_run_text` sends every field
+whole. If auto mode refuses `get_run_text`, the pane keeps the first 8,000
+characters and a toast names the rule to allow.
 
 If the pane shows `list_runs: ... exceeds maximum allowed tokens`, the day's run
 list is larger than Claude Code's MCP output limit, usually because runs started

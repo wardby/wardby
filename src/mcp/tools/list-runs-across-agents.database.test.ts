@@ -145,9 +145,10 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     const smallRow = rows.find((r) => r.id === small.id) as Row;
     expect(smallRow.taskOverride).toBe("Review pull request #12 in your-org/api");
     expect(smallRow.taskOverrideTruncated).toBeUndefined();
-    // One agent's listing and get_run still give the whole text.
-    const own = await c.list({ agentId: mine.id });
-    expect(String(own.find((r) => r.id === big.id)?.taskOverride).length).toBe(long.length);
+    // One agent's listing cuts it the same way.
+    const own = (await c.list({ agentId: mine.id })).find((r) => r.id === big.id) as Row;
+    expect(own.taskOverride).toBe(bigRow.taskOverride);
+    expect(own.taskOverrideTruncated).toBe(true);
     await c.close();
   });
 
@@ -250,6 +251,69 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     await c.close();
   });
 
+  it("one agent's listing: default limit 50, before pages like the cross-agent listing, ties broken by id", async () => {
+    const owner = await principal();
+    const mine = await agent(owner.id, "agent-paging");
+    const other = await agent(owner.id, "agent-paging-other");
+    const t = Date.now();
+    const same = new Date(t - 5000);
+    await db.run.createMany({
+      data: Array.from({ length: 55 }, (_, i) => ({
+        agentId: mine.id,
+        status: "succeeded" as const,
+        // Groups of five share a start time, so ties are broken by id.
+        startedAt: i < 5 ? same : new Date(t - 10_000 - Math.floor(i / 5) * 1000),
+        finalText: "a long final answer",
+      })),
+    });
+    const otherRun = await run(other.id);
+    const expected = (
+      await db.run.findMany({ where: { agentId: mine.id }, orderBy: [{ startedAt: "desc" }, { id: "desc" }] })
+    ).map((r) => r.id);
+    const c = await connect(owner);
+    // No limit: the first 50, newest first.
+    expect((await c.list({ agentId: mine.id })).map((r) => r.id)).toEqual(expected.slice(0, 50));
+    // The cap holds with an agentId too.
+    expect((await c.list({ agentId: mine.id, limit: 10_000 })).length).toBe(55);
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const rows = await c.list({ agentId: mine.id, limit: 7, ...(before ? { before } : {}) });
+      seen.push(...rows.map((r) => r.id));
+      if (rows.length < 7) break;
+      before = rows[rows.length - 1].id;
+    }
+    expect(seen).toEqual(expected);
+    // A cursor from another agent's listing names no run this listing could show.
+    expect(await c.list({ agentId: mine.id, before: otherRun.id })).toEqual([]);
+    await c.close();
+  });
+
+  it("one agent's rows leave out finalText and pricingSnapshot, and a reader sees only the runs they started", async () => {
+    const owner = await principal();
+    const reader = await principal();
+    const mine = await agent(owner.id, "agent-rows");
+    await readGrant(mine.id, reader.id);
+    const t = Date.now();
+    const theirs = await run(mine.id, { startedAt: new Date(t - 1000), triggeredById: reader.id });
+    const ownersRun = await run(mine.id, { startedAt: new Date(t - 500) });
+    await db.run.update({ where: { id: theirs.id }, data: { pricingSnapshot: { modelId: "m" } } });
+    const asOwner = await connect(owner);
+    const rows = await asOwner.list({ agentId: mine.id });
+    await asOwner.close();
+    expect(rows.map((r) => r.id)).toEqual([ownersRun.id, theirs.id]);
+    for (const row of rows) {
+      expect(row).not.toHaveProperty("finalText");
+      expect(row).not.toHaveProperty("pricingSnapshot");
+      expect(row).toMatchObject({ status: "succeeded", agentId: mine.id });
+    }
+    const asReader = await connect(reader);
+    expect((await asReader.list({ agentId: mine.id })).map((r) => r.id)).toEqual([theirs.id]);
+    // The owner's run is not this reader's to page from.
+    expect(await asReader.list({ agentId: mine.id, before: ownersRun.id })).toEqual([]);
+    await asReader.close();
+  });
+
   it("before combines with since and active, and keeps its place when the cursor run no longer matches", async () => {
     const owner = await principal();
     const mine = await agent(owner.id, "paging-filters");
@@ -271,7 +335,7 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     await c.close();
   });
 
-  it("gives an empty page for a before that is unknown or names a run the caller can't read, and refuses it with agentId", async () => {
+  it("gives an empty page for a before that is unknown or names a run the caller can't read, with or without agentId", async () => {
     const owner = await principal();
     const stranger = await principal();
     const mine = await agent(owner.id, "paging-hidden");
@@ -282,9 +346,9 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     expect((await c.list({})).length).toBeGreaterThan(0);
     expect(await c.list({ before: randomUUID() })).toEqual([]);
     expect(await c.list({ before: hidden.id })).toEqual([]);
-    const refused = await c.raw({ agentId: mine.id, before: hidden.id });
-    expect(refused.isError).toBe(true);
-    expect(refused.content[0].text).toMatch(/before pages the listing across agents; leave out agentId/);
+    // With agentId, the cursor must be a run of that agent's listing: another agent's run gives an empty page.
+    expect(await c.list({ agentId: mine.id, before: hidden.id })).toEqual([]);
+    expect(await c.list({ agentId: mine.id, before: randomUUID() })).toEqual([]);
     await c.close();
   });
 
