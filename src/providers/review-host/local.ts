@@ -22,6 +22,7 @@ import {
 } from "../../coding/local-repo.js";
 import { SHA, isSafeRefName, isSafeRepoPath, localGit as git } from "../../coding/local-git.js";
 import { skippedInListing } from "./github.js";
+import { cutUntrustedText } from "../../core/untrusted-content.js";
 import { pagePatches } from "./patch-pages.js";
 import { verdictConclusion } from "./review-format.js";
 import {
@@ -46,7 +47,6 @@ import {
 /** A pull request's file list is cut at this many files (as GitHub's host bounds its paging). */
 const MAX_PR_FILES = 1000;
 const MAX_LISTED_FILES = 1000;
-const MAX_BODY_CHARS = 8000;
 const MAX_LOGGED_COMMITS = 100;
 const MAX_PG_INT = 2_147_483_647;
 
@@ -365,13 +365,13 @@ export class LocalReviewHost implements CodeReviewHost {
       select: { coveredSha: true },
     });
 
+    // The commit list is cut to the shared untrusted body limit, as a hosted PR's description is.
+    const body = cutUntrustedText(log.trim() ? `Commits on ${row.branch} since ${row.base}:\n${log.trimEnd()}` : "");
     return {
       number: row.number,
       title: `${row.branch} into ${row.base}`,
-      body: (log.trim() ? `Commits on ${row.branch} since ${row.base}:\n${log.trimEnd()}` : "").slice(
-        0,
-        MAX_BODY_CHARS,
-      ),
+      body: body.text,
+      bodyTruncated: body.cut,
       author: null,
       state: "open",
       merged: false,

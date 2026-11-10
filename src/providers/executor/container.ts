@@ -18,6 +18,8 @@ import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
+import { withOriginalRequest } from "../../coding/original-request-note.js";
+import { originalRequestOf } from "../../core/request-text.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
@@ -447,6 +449,13 @@ export interface ContainerExecutionStore {
    */
   linkedIssueSource?(rootRunId: string): Promise<LinkedIssueSource>;
   /**
+   * The stored task (Run.taskOverride) of the event-started lead that delegated
+   * this run: only for a run a lead started with delegate_to_* (trigger
+   * "subagent") whose parent was started by a host or issue event. Null
+   * otherwise. Optional: without it the run gets no original request.
+   */
+  delegatingEventTask?(runId: string): Promise<string | null>;
+  /**
    * Compare-and-set of the root run's description hash and author run: writes
    * only while the root still records `expectedSha256` (null = none). False
    * when another write got there first.
@@ -655,6 +664,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       agentTextRunId,
       ...(legacySource ? { legacySource } : {}),
     };
+  }
+
+  async delegatingEventTask(runId: string): Promise<string | null> {
+    const row = await this.db.run.findUnique({ where: { id: runId }, select: { trigger: true, parentRunId: true } });
+    if (row?.trigger !== "subagent" || !row.parentRunId) return null;
+    const parent = await this.db.run.findUnique({
+      where: { id: row.parentRunId },
+      select: { trigger: true, taskOverride: true },
+    });
+    return parent?.trigger === "host_event" ? parent.taskOverride : null;
   }
 
   async linkedIssueSource(rootRunId: string): Promise<LinkedIssueSource> {
@@ -2050,6 +2069,32 @@ export class ContainerExecutor implements Executor {
    * read in turn until one is an issue. Undefined for a fresh or local run, or
    * on any failure: the run goes ahead without it.
    */
+  /**
+   * `task` with the original request of the event-started lead that delegated
+   * this fresh run (see withOriginalRequest). Unchanged for a continuation, for
+   * a run no event-started lead delegated, or on any failure: the run goes
+   * ahead without it. Logs counts only, never text.
+   */
+  private async originalRequestFor(run: ContainerRunSnapshot, task: string): Promise<string> {
+    const store = this.options.store;
+    if (run.rootCodingRunId || !store.delegatingEventTask) return task;
+    let leadTask: string | null;
+    try {
+      leadTask = await store.delegatingEventTask(run.runId);
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not read the lead's original request; continuing without it");
+      return task;
+    }
+    const added = withOriginalRequest(task, originalRequestOf(leadTask), run.request);
+    if (added.outcome === "no_room") {
+      containerLog.warn(
+        { event: "coding.original_request_omitted", runId: run.runId, taskBytes: Buffer.byteLength(task, "utf8") },
+        "the coding task left no room for the lead's original request",
+      );
+    }
+    return added.task;
+  }
+
   private async linkedIssueFor(
     run: ContainerRunSnapshot,
     description: string | undefined,
@@ -2653,8 +2698,11 @@ export class ContainerExecutor implements Executor {
     // The ticket first, then the description: each is cut to what's left of the task's budget.
     // The target-branch merge note (conflicts to resolve) comes before the ticket and the description.
     const withMerge = withTargetMerge(withCommit, workspace.targetMerge, run.headRef);
+    // A fresh run a lead delegated: the original request that started the lead (a continuation
+    // has the linked issue below instead, so the two never both appear).
+    const withOriginal = await this.originalRequestFor(run, withMerge);
     const task = withPullRequestDescription(
-      withLinkedIssue(withMerge, await this.linkedIssueFor(run, description)),
+      withLinkedIssue(withOriginal, await this.linkedIssueFor(run, description)),
       description,
     );
     if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {

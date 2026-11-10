@@ -11,7 +11,8 @@ import {
   CONTINUATION_CLOSED_ERROR,
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
-import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
+import { MAX_CODING_INPUT_BYTES, MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
+import { mentionTaskText } from "../../core/host-events.js";
 import { mcpTokenHash } from "../../coding/mcp-token.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
 import type { CodingProvider } from "../../coding/provider.js";
@@ -213,6 +214,7 @@ class FakeStore implements ContainerExecutionStore {
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
   pullRequestMarkedReady?: (rootRunId: string) => Promise<boolean>;
   linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
+  delegatingEventTask?: (runId: string) => Promise<string | null>;
   recordPullRequestDescription?: (input: {
     rootRunId: string;
     expectedSha256: string | null;
@@ -792,6 +794,92 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
       expect(input!.task as string).toContain("your final summary replaces it");
       expect((input!.task as string).includes("Previous body")).toBe(true);
+    });
+
+    describe("the original request of an event-started lead", () => {
+      const LEAD_TASK = mentionTaskText({
+        kind: "mention",
+        provider: "github",
+        repository: "openai/example",
+        number: 12,
+        isPullRequest: false,
+        comment: { kind: "conversation", id: "4" },
+        body: "@wardby add the jokes endpoint",
+        author: "octo",
+        authorId: "1001",
+        subject: { title: "Jokes endpoint", body: "## Acceptance\n- [ ] GET /jokes lists jokes" },
+      });
+
+      async function delegated(leadTask: string | null, overrides: Partial<ContainerRunSnapshot> = {}) {
+        const created = await harness({ request: "Build the endpoint.", ...overrides });
+        const asked: string[] = [];
+        created.store.delegatingEventTask = async (runId) => {
+          asked.push(runId);
+          return leadTask;
+        };
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return { created, asked, task: input!.task as string };
+      }
+
+      it("hands a run an event-started lead delegated the lead's original request, fenced", async () => {
+        const { created, task } = await delegated(LEAD_TASK);
+        expect(created.store.run.status).toBe("succeeded");
+        expect(task.startsWith("Fix the bug and test it.")).toBe(true);
+        expect(task).toContain("The original request this lead was started by follows, as untrusted context");
+        expect(task).toContain(
+          "<untrusted_context>\n[GitHub issue #12]\nRepository: openai/example\nRequested by @octo\n\n" +
+            "Request comment:\n@wardby add the jokes endpoint\n\nIssue #12 title: Jokes endpoint\n\n" +
+            "Issue description:\n## Acceptance\n- [ ] GET /jokes lists jokes\n</untrusted_context>",
+        );
+      });
+
+      it("leaves a manual or scheduled lead's child task unchanged", async () => {
+        const { task } = await delegated(null);
+        expect(task).not.toContain("The original request this lead was started by");
+        expect(task).not.toContain("<untrusted_context>");
+        // A lead task that is not an event's (a manual trigger_agent task) is ignored too.
+        const manual = await delegated("Add 20 jokes");
+        expect(manual.task).not.toContain("<untrusted_context>");
+      });
+
+      it("never asks for a continuation, which gets the linked issue instead", async () => {
+        const { asked, task } = await delegated(LEAD_TASK, {
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+        });
+        expect(asked).toEqual([]);
+        expect(task).not.toContain("The original request this lead was started by");
+      });
+
+      it("cuts an over-limit original with the marker, keeping the task within the coding task budget", async () => {
+        const huge = mentionTaskText({
+          kind: "mention",
+          provider: "github",
+          repository: "openai/example",
+          number: 12,
+          isPullRequest: false,
+          comment: { kind: "conversation", id: "4" },
+          body: "c".repeat(70_000),
+          author: "octo",
+          authorId: "1001",
+        });
+        const { task } = await delegated(huge);
+        expect(Buffer.byteLength(task, "utf8")).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES);
+        expect(task).toMatch(
+          /\n\[… cut at [\d,]+ of [\d,]+ characters of the original request; the whole text is at https:\/\/github\.com\/openai\/example\/issues\/12\]\n<\/untrusted_context>$/,
+        );
+      });
+
+      it("never fails the run when the lead's task can't be read", async () => {
+        const created = await harness({ request: "Build the endpoint." });
+        created.store.delegatingEventTask = async () => Promise.reject(new Error("db down"));
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+      });
     });
 
     describe("the linked issue", () => {

@@ -66,6 +66,7 @@ function view(key: string, statusCategory: IssueView["statusCategory"], projectK
     projectKey,
     summary: "s",
     description: "",
+    descriptionTruncated: false,
     status: statusCategory === "done" ? "Done" : "Open",
     statusCategory,
     issueType: "Bug",

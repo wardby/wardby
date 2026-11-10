@@ -271,7 +271,16 @@ PR description:
   the request: the header reads `[GitHub issue #<n>: <title>]`, the task ends
   with an `Issue description:` section, and there is no
   `Request comment:` section and no untrusted context.
-- The description and the comment are each capped at 8,000 characters.
+- The description and the comment are each capped at 65,536 characters
+  (GitHub's own maximum for an issue, PR or comment body). Text cut at the
+  limit ends with one marker line, for example
+  `[… cut at 65,536 of 81,200 characters of this issue's description; the whole text is at https://github.com/your-org/your-repo/issues/7]`,
+  so the agent knows it has only part of it. The marker names what was cut
+  (`this issue's description`, `this PR's description`, or
+  `the request comment`) and links to the original on GitHub; a local
+  repository has no link, and its marker says `the rest is not shown`. Each
+  cut also logs one `info` line with the source, kind, total length and
+  limit, never the text.
 - Text inside either fence that imitates one of these tags (for example a
   description containing `</untrusted_context>`) has its `<` escaped to
   `&lt;`, so it cannot end the fence early. This also covers lookalike
@@ -1224,7 +1233,8 @@ A linked agent gets these built-in tools automatically — they are not
 attached like ordinary tools, and never expose a token, check id, or
 internal marker to the model:
 
-- `repo_pr_read` — a pull request's metadata, per-file diff patches (paged; see
+- `repo_pr_read` — a pull request's metadata (its body capped at 65,536
+  characters, with `bodyTruncated` true when it was cut), per-file diff patches (paged; see
   [Large pull requests](#large-pull-requests)), the
   agent's own unresolved inline threads (`openThreads`), and `ci`: the head
   commit's check runs and commit statuses, excluding every check the wardby
@@ -1274,7 +1284,7 @@ internal marker to the model:
   `number`, `title`, `state` (`open` or `closed`), `body`, `labels`,
   `author`, `url`, `createdAt`, `updatedAt`, and its 30 most recent comments
   (`author`, `body`, `createdAt`), oldest first, with `totalComments`. The
-  body is capped at 32,000 characters and each comment at 4,000;
+  body is capped at 65,536 characters and each comment at 4,000;
   `truncated` is true when anything was cut (`bodyTruncated` and each
   comment's `truncated` say where). A reviewer uses it to read the issue a
   pull request says it resolves (`Resolves #N`) and check the change against

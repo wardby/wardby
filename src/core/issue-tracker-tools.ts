@@ -217,7 +217,7 @@ export const ISSUE_TRACKER_TOOL_DEFS: LoadedTool[] = [
   {
     name: "jira_get_issue",
     description:
-      "Reads a Jira issue: summary, description (plain text), status, type, priority, labels, assignee, reporter, url, its most recent comments (oldest first; commentsTruncated says whether older ones were left out), and its 20 most recent attachments (id, filename, mimeType, size), and its issue links (relation, key, summary, status; links into projects you are not linked to are only counted in otherLinks). Comments you wrote on this issue are marked byThisAgent and can be edited with jira_edit_own_comment.",
+      "Reads a Jira issue: summary, description (plain text, capped at 65,536 characters; descriptionTruncated is true when it was cut), status, type, priority, labels, assignee, reporter, url, its most recent comments (oldest first; commentsTruncated says whether older ones were left out), and its 20 most recent attachments (id, filename, mimeType, size), and its issue links (relation, key, summary, status; links into projects you are not linked to are only counted in otherLinks). Comments you wrote on this issue are marked byThisAgent and can be edited with jira_edit_own_comment.",
     jsonSchema: {
       type: "object",
       properties: {

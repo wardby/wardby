@@ -10,7 +10,10 @@ export const MAX_CODING_ARTIFACT_BYTES = 256 * 1024;
 export const MAX_CODING_INPUT_BYTES = 512 * 1024;
 /** Bounds on CodingTaskInput.claudeContext, enforced by the builder (src/coding/claude-context.ts) and this schema. */
 export const CLAUDE_CONTEXT_LIMITS = { maxFiles: 200, maxFileBytes: 64 * 1024, maxTotalBytes: 256 * 1024 } as const;
-export const MAX_CODING_TASK_BYTES = 16 * 1024;
+// 64 KiB: room for the agent's task, a lead's request and an event's original request (issue and PR
+// bodies are bounded at 65,536 characters). Workers check it against their own copy, so a change here
+// needs a driver image built from it and pinned in the worker Dockerfiles.
+export const MAX_CODING_TASK_BYTES = 64 * 1024;
 /** Room reserved at the end of a composed task for lines the executor appends (e.g. the base commit). */
 export const CODING_TASK_TRAILER_RESERVE_BYTES = 256;
 /**

@@ -1254,7 +1254,7 @@ describe("dispatchRun", () => {
       const state = fakeDb(agent);
       await expect(
         dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" }),
-      ).rejects.toThrow(/exceed the 16384-byte coding task limit/);
+      ).rejects.toThrow(/exceed the 65536-byte coding task limit/);
       expect(state.codingRuns).toEqual([]);
     });
   });
@@ -2151,7 +2151,7 @@ describe("coding-run services", () => {
     const state = fakeDb(agent, [], {}, CATALOG);
     const { executor } = servicesExecutor(null);
     await expect(dispatchRun({ db: state.db, executor, agentId: agent.id })).rejects.toThrow(
-      /exceed the 16384-byte coding task limit/,
+      /exceed the 65536-byte coding task limit/,
     );
   });
 
@@ -2503,7 +2503,7 @@ describe("coding-run services", () => {
       const state = fakeDb(agent, [], {}, CATALOG);
       const { executor } = resolvingExecutor(true);
       await expect(dispatchRun({ db: state.db, executor, agentId: agent.id })).rejects.toThrow(
-        /exceed the 16384-byte coding task limit/,
+        /exceed the 65536-byte coding task limit/,
       );
       expect(state.codingRuns).toEqual([]);
     });

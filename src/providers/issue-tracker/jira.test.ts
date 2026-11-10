@@ -187,6 +187,26 @@ describe("JiraIssueTracker", () => {
     ]);
   });
 
+  it("caps the description at the shared 65,536-character limit and says whether it was cut", async () => {
+    const read = async (description: string) => {
+      const { tracker } = fake((c) => {
+        if (c.path === "/rest/api/3/myself") return json({ accountId: "bot-1" });
+        if (c.path.startsWith("/rest/api/3/issue/PROJ-1?")) {
+          return json({ key: "PROJ-1", fields: { project: { key: "PROJ" }, summary: "s", description } });
+        }
+        return undefined;
+      });
+      return tracker.getIssue("PROJ-1", { maxComments: 0, agentMarker: "a" });
+    };
+    // Past the old 20,000 cap, under the shared limit: whole, no ellipsis.
+    const whole = await read("d".repeat(30_000));
+    expect(whole.description).toBe("d".repeat(30_000));
+    expect(whole.descriptionTruncated).toBe(false);
+    const cut = await read("d".repeat(70_000));
+    expect(cut.description).toBe("d".repeat(65_536));
+    expect(cut.descriptionTruncated).toBe(true);
+  });
+
   it("posts comments as ADF with the agent-independent body and optional role visibility", async () => {
     const { tracker, calls } = fake((c) =>
       c.method === "POST" && c.path === "/rest/api/3/issue/PROJ-1/comment" ? json({ id: "55" }) : undefined,

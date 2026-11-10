@@ -146,8 +146,11 @@ it can only judge the criteria from the pull request's description; see
 
 Only people (not customers, apps, or the service account itself) can trigger
 agents. Mention and assignment triggers work only for the account ids in the
-link's `trustedAccountIds`. Issue text is untrusted input to the agent, and
-agents cannot @-mention people. Wardby confines each agent to its linked
+link's `trustedAccountIds`. Issue text is untrusted input to the agent: a
+description or request comment in a task is capped at 65,536 characters, and a
+cut ends with a marker line that gives the length and links to the issue
+(`jira_get_issue` uses the same cap and sets `descriptionTruncated`).
+Agents cannot @-mention people. Wardby confines each agent to its linked
 projects, but JQL functions can still reveal facts about other projects the
 service account can browse. The tool names `jira_get_issue`, `jira_search`,
 `jira_comment`, `jira_edit_own_comment`, `jira_list_transitions`,

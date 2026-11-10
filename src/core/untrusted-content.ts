@@ -80,3 +80,48 @@ export function splitTaskOverride(taskOverride: string): { task: string; untrust
   if (rest.endsWith(CONTEXT_CLOSE)) rest = rest.slice(0, -CONTEXT_CLOSE.length);
   return { task, untrustedContext: rest };
 }
+
+/**
+ * The one limit on an untrusted issue, pull request or comment body that
+ * reaches an agent, in a task or from a read tool: 65,536 characters, GitHub's
+ * own maximum for an issue, PR or comment body. Every host and tracker
+ * (GitHub, Jira, local repositories, custom host providers) uses it.
+ */
+export const MAX_UNTRUSTED_BODY_CHARS = 65_536;
+
+/** A body cut to a limit: the kept `text`, whether anything was `cut`, and the original length. */
+export interface UntrustedCut {
+  text: string;
+  cut: boolean;
+  /** The original length in UTF-16 code units (JavaScript characters). */
+  total: number;
+}
+
+/**
+ * `text` cut to at most `limit` characters (UTF-16 code units), never between
+ * the two halves of a surrogate pair: a cut that would split one keeps one
+ * character fewer.
+ */
+export function cutUntrustedText(text: string, limit: number = MAX_UNTRUSTED_BODY_CHARS): UntrustedCut {
+  const total = text.length;
+  if (total <= limit) return { text, cut: false, total };
+  let end = Math.max(0, limit);
+  const last = text.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return { text: text.slice(0, end), cut: true, total };
+}
+
+const COUNT = new Intl.NumberFormat("en-US");
+
+/**
+ * The cut text followed, when it was cut, by one plain marker line saying how
+ * much was kept, of what (`what`, e.g. "this issue's description"), and where
+ * the original is (`original`: a link, or null when there is none to give).
+ * The marker holds only counts and the caller's fixed words: nothing new from
+ * the text itself.
+ */
+export function withCutMarker(cut: UntrustedCut, what: string, original: string | null): string {
+  if (!cut.cut) return cut.text;
+  const where = original ? `the whole text is at ${original}` : "the rest is not shown";
+  return `${cut.text}\n[… cut at ${COUNT.format(cut.text.length)} of ${COUNT.format(cut.total)} characters of ${what}; ${where}]`;
+}

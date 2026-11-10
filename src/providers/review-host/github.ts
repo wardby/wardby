@@ -8,7 +8,7 @@ import { MAX_PULL_REQUEST_BODY_CHARS, upsertRelatedSection, type GitHubAppClient
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
 import { logger } from "../../core/logger.js";
 import { findDescriptionComments } from "../vcs/pr-description.js";
-import { neutraliseWrapperTags } from "../../core/untrusted-content.js";
+import { cutUntrustedText, MAX_UNTRUSTED_BODY_CHARS, neutraliseWrapperTags } from "../../core/untrusted-content.js";
 import { MAX_CI_CHECKS, summarizeCi } from "./ci.js";
 import { partitionComments } from "./diff-lines.js";
 import { pagePatches, type PatchSource } from "./patch-pages.js";
@@ -86,7 +86,6 @@ const CHECKS_READ = { checks: "read" } as const;
 const STATUSES_READ = { statuses: "read" } as const;
 /** repo_issue_read: an issue and its comments, nothing else. */
 const ISSUES_READ = { issues: "read" } as const;
-const MAX_ISSUE_BODY_CHARS = 32_000;
 const MAX_ISSUE_COMMENT_CHARS = 4_000;
 const MAX_ISSUE_COMMENTS = 30;
 const MARK_READY_MUTATION = `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }`;
@@ -155,8 +154,8 @@ const HIDDEN_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
 
 /** Untrusted issue text for an agent: wardby markers removed, then cut at `limit` characters. */
 function capped(text: string, limit: number): { text: string; truncated: boolean } {
-  const clean = text.replace(HIDDEN_MARKER, "");
-  return clean.length > limit ? { text: clean.slice(0, limit), truncated: true } : { text: clean, truncated: false };
+  const { text: kept, cut } = cutUntrustedText(text.replace(HIDDEN_MARKER, ""), limit);
+  return { text: kept, truncated: cut };
 }
 
 function loginOf(user: unknown): string | null {
@@ -560,10 +559,12 @@ export class GitHubReviewHost implements CodeReviewHost {
         : undefined;
 
       const user = pr.user && typeof pr.user === "object" ? record(pr.user) : null;
+      const body = cutUntrustedText(typeof pr.body === "string" ? pr.body : "");
       return {
         number: num(pr.number),
         title: str(pr.title),
-        body: (typeof pr.body === "string" ? pr.body : "").slice(0, 8000),
+        body: body.text,
+        bodyTruncated: body.cut,
         author: user && typeof user.login === "string" ? user.login : null,
         state,
         merged: pr.merged === true,
@@ -714,7 +715,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         const { text, truncated } = capped(typeof c.body === "string" ? c.body : "", MAX_ISSUE_COMMENT_CHARS);
         return { author: loginOf(c.user), body: text, createdAt: str(c.created_at), truncated };
       });
-      const body = capped(typeof issue.body === "string" ? issue.body : "", MAX_ISSUE_BODY_CHARS);
+      const body = capped(typeof issue.body === "string" ? issue.body : "", MAX_UNTRUSTED_BODY_CHARS);
       const labels = Array.isArray(issue.labels)
         ? issue.labels
             .map((l) => (typeof l === "string" ? l : l && typeof l === "object" ? (l as Json).name : undefined))

@@ -20,6 +20,9 @@ each release's GitHub Release notes carry the resolved
 `@sha256:...` digest to pin. `wardby doctor` prints the digest your installed
 version's own workers are built on ("Base image for your own worker images:
 …"); build on that one so your image matches the run input your Wardby sends.
+From Wardby 0.9.3 a coding task can be up to 64 KiB; an image built on a driver
+older than `driver-v28` still refuses a task over 16 KiB, so a long task fails
+on it. Rebuild custom images on the current driver when you upgrade.
 
 An MCP assistant connected to Wardby can do the whole procedure for you: the
 `build-worker-image` help article walks it through finding the toolchain,

@@ -4,6 +4,7 @@
  * naming the agent (ADF has no hidden comments), which is how
  * jira_edit_own_comment knows a comment is this agent's.
  */
+import { cutUntrustedText } from "../../core/untrusted-content.js";
 import { adfToText, markdownToAdf } from "./adf.js";
 import type { JiraClient, RequestOptions } from "./jira-client.js";
 import {
@@ -27,7 +28,6 @@ import {
 
 const ISSUE_FIELDS =
   "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment,attachment,issuelinks";
-const MAX_DESCRIPTION = 20_000;
 const MAX_LINKS = 20;
 const MAX_COMMENT = 4_000;
 /** An issue view lists (and jira_read_attachment can read) only the most recent this many attachments. */
@@ -201,11 +201,13 @@ export class JiraIssueTracker implements IssueTracker {
       };
     });
     const total = typeof commentBlock.total === "number" ? commentBlock.total : all.length;
+    const description = cutUntrustedText(adfToText(f.description, Infinity));
     return {
       key: str(raw.key),
       projectKey: str(obj(f.project).key),
       summary: str(f.summary),
-      description: adfToText(f.description, MAX_DESCRIPTION),
+      description: description.text,
+      descriptionTruncated: description.cut,
       status: str(obj(f.status).name),
       statusCategory: statusCategory(f.status),
       issueType: str(obj(f.issuetype).name),

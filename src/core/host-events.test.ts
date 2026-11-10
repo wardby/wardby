@@ -14,7 +14,7 @@ import {
   startDeferredReviews,
   type HostEvent,
 } from "./host-events.js";
-import { splitTaskOverride } from "./untrusted-content.js";
+import { MAX_UNTRUSTED_BODY_CHARS, splitTaskOverride } from "./untrusted-content.js";
 import { spanHash } from "../knowledge/span-hash.js";
 
 vi.mock("./related-pull-requests.js", async (orig) => ({
@@ -613,15 +613,46 @@ describe("routeHostEvent mention task text", () => {
     expect(h.acknowledge).toHaveBeenCalledWith(REPO, { kind: "subject", id: "12" });
   });
 
-  it("caps the description and the comment", async () => {
-    const { task } = await taskFor({
-      ...base,
-      body: "@wardby " + "c".repeat(9000),
-      subject: { title: "T", body: "d".repeat(9000) },
-    });
+  it("delivers an 8,500-character description and comment whole (the old 8,000 cap is gone)", async () => {
+    const comment = "@wardby " + "c".repeat(8500);
+    const { task } = await taskFor({ ...base, body: comment, subject: { title: "T", body: "d".repeat(8500) } });
     const split = splitTaskOverride(task!);
-    expect(split.untrustedContext).toBe(`PR #7 title: T\n\nPR description:\n${"d".repeat(8000)}`);
-    expect(split.task).toContain(`\n@wardby ${"c".repeat(8000 - "@wardby ".length)}\n\n[The PR's`);
+    expect(split.untrustedContext).toBe(`PR #7 title: T\n\nPR description:\n${"d".repeat(8500)}`);
+    expect(split.task).toContain(`\n${comment}\n\n[The PR's`);
+    expect(task).not.toContain("[… cut at");
+  });
+
+  it("cuts a 70,000-character description and comment at the limit, with a marker naming each", async () => {
+    const comment = "@wardby " + "c".repeat(70_000 - "@wardby ".length);
+    const { task } = await taskFor({ ...base, body: comment, subject: { title: "T", body: "d".repeat(70_000) } });
+    const split = splitTaskOverride(task!);
+    expect(split.untrustedContext).toBe(
+      `PR #7 title: T\n\nPR description:\n${"d".repeat(MAX_UNTRUSTED_BODY_CHARS)}\n` +
+        `[… cut at 65,536 of 70,000 characters of this PR's description; the whole text is at https://github.com/${REPO}/pull/7]`,
+    );
+    expect(split.task).toContain(
+      `Request comment:\n${comment.slice(0, MAX_UNTRUSTED_BODY_CHARS)}\n` +
+        `[… cut at 65,536 of 70,000 characters of the request comment; the whole text is at https://github.com/${REPO}/issues/7#issuecomment-4]\n\n[The PR's`,
+    );
+  });
+
+  it("words the marker per kind: an issue description, an inline comment, a local repository", () => {
+    const long = "x".repeat(70_000);
+    const issue = mentionTaskText({
+      ...base,
+      isPullRequest: false,
+      comment: { kind: "subject", id: "7" },
+      body: long,
+      subject: { title: "T", body: long },
+    });
+    expect(issue).toContain(
+      `Issue description:\n${"x".repeat(MAX_UNTRUSTED_BODY_CHARS)}\n[… cut at 65,536 of 70,000 characters of this issue's description; the whole text is at https://github.com/${REPO}/issues/7]`,
+    );
+    const inline = mentionTaskText({ ...base, comment: { kind: "inline", id: "99" }, body: long });
+    expect(inline).toContain(`the whole text is at https://github.com/${REPO}/pull/7#discussion_r99]`);
+    const local = mentionTaskText({ ...base, provider: "local", repository: "local:/srv/repo", body: long });
+    expect(local).toContain("[… cut at 65,536 of 70,000 characters of the request comment; the rest is not shown]");
+    expect(local).not.toContain("https://");
   });
 
   it("falls back to a title-less header without subject details", async () => {

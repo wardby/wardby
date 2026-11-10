@@ -93,7 +93,9 @@ export interface CiView {
 export interface PullRequestView {
   number: number;
   title: string;
+  /** Cut at MAX_UNTRUSTED_BODY_CHARS (65,536 characters); bodyTruncated says whether it was. */
   body: string;
+  bodyTruncated: boolean;
   author: string | null;
   state: string;
   merged: boolean;

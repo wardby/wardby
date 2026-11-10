@@ -71,6 +71,13 @@ The `review_fix` trigger lets Wardby fix its own review's findings
 automatically, up to a round cap, on pull requests its own coding runs
 opened. See [Automatic review fix rounds](review-fix-rounds.md).
 
+A mention run's task carries the issue or PR description and the request
+comment, each capped at 65,536 characters (GitHub's own maximum for a body).
+Text cut at the limit ends with a marker line giving the kept and total
+length and a link to the original, so the agent knows it has only part of it.
+`repo_issue_read` and `repo_pr_read` cap a body at the same limit and flag a
+cut (`bodyTruncated`).
+
 When a mention run finishes without opening a pull request or failing a
 sub-run and its reply is longer than about 2,000 characters (for example a
 plan), the status comment does not cut the reply short. It says "✅ Finished
