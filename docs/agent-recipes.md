@@ -471,7 +471,7 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   as untrusted context, so a lead prompt does not need to copy the issue body
   into the delegated task: describe the change and let wardby hand over the
   original. See
-  [the coding task](coding-worker-isolation.md) for the framing and the 16 KiB
+  [the coding task](coding-worker-isolation.md) for the framing and the 64 KiB
   budget it is cut to.
 - Each `delegate_to_<name>` call to a coding sub-agent can carry a
   `mergeOrder`: an integer from 1 to 99, where 1 merges first. Give a

@@ -44,7 +44,7 @@ The router need not copy the issue or comment into its task. When a router
 started by a mention or a Jira event delegates a new coding run, wardby
 appends the original request (header, request comment, title and description,
 with any cut markers) to the builder's task itself, fenced as untrusted
-context and cut to the 16 KiB coding task limit with a marker line if needed.
+context and cut to the 64 KiB coding task limit with a marker line if needed.
 It is skipped when the router's task already repeats it word for word, and
 continuations (`continuePriorRun`) get the linked issue instead.
 

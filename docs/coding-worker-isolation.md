@@ -667,7 +667,7 @@ execution policy stay internal.
 The worker receives only its task text, so a coding agent's own `systemPrompt`
 is placed ahead of the request at dispatch ("Standing instructions for this
 coding agent: … Request: …") and stored with the run. A blank prompt leaves
-the task unchanged; a combination over the 16 KiB task limit is refused rather
+the task unchanged; a combination over the 64 KiB task limit is refused rather
 than truncated.
 
 A fresh coding run that a lead delegated, where the lead itself was started by
@@ -679,7 +679,7 @@ note inside an `<untrusted_context>` fence, with the same "not
 permission-checked" warning the lead's own task carries, so the coding agent
 reads the requester's own words and not only the lead's restatement. It is
 left out when the lead's request already repeats it word for word (whitespace
-aside), and it is the part cut to fit the 16 KiB task limit: a cut ends with a
+aside), and it is the part cut to fit the 64 KiB task limit: a cut ends with a
 line such as
 `[… cut at 9,800 of 40,000 characters of the original request; the whole text is at https://github.com/your-org/your-repo/issues/7]`.
 Continuations (`continuePriorRun`, review fix rounds) never get it: they get
