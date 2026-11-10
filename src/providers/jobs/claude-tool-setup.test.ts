@@ -9,9 +9,12 @@ import {
   MAX_FILE_BYTES,
   MAX_FILES,
   MAX_SETUP_BYTES,
+  MAX_COMMAND_TIMEOUT_MS,
   TOOL_SETUP_ENV,
+  commandTimeoutLimits,
   parseToolSetup,
 } from "../../claude-tool-runner/command.mjs";
+import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../../coding/command-timeouts.js";
 import { CLAUDE_TOOL_SETUP_LIMITS, claudeToolSetup } from "./claude-tool-setup.js";
 import { CLAUDE_TOOL_SETUP_ENV } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
@@ -50,6 +53,36 @@ describe("claudeToolSetup", () => {
     expect(JSON.parse(off)).not.toHaveProperty("diskMb");
     expect(parseToolSetup(off)).not.toHaveProperty("dependencyCache");
     expect(parseToolSetup(off)).not.toHaveProperty("diskMb");
+  });
+
+  it("carries the run's per-command timeouts, and the tool runner reads them back as its limits", () => {
+    const raw = claudeToolSetup({ ...spec, commandTimeouts: { defaultMs: 300_000, maxMs: 300_000 } }, CAPABILITY);
+    expect(JSON.parse(raw)).toMatchObject({ commandTimeouts: { defaultMs: 300_000, maxMs: 300_000 } });
+    expect(commandTimeoutLimits(parseToolSetup(raw))).toEqual({ defaultMs: 300_000, maxMs: 300_000 });
+    // A spec without them (an older control plane) keeps the tool runner's old 60 s / 120 s limits.
+    const legacy = claudeToolSetup(spec, CAPABILITY);
+    expect(JSON.parse(legacy)).not.toHaveProperty("commandTimeouts");
+    expect(commandTimeoutLimits(parseToolSetup(legacy))).toEqual({ defaultMs: 60_000, maxMs: 120_000 });
+  });
+
+  it("accepts per-command timeouts up to the longest run timeout and nothing the tool runner would refuse", () => {
+    expect(MAX_COMMAND_TIMEOUT_MS).toBe(MAX_CLAUDE_COMMAND_TIMEOUT_MS);
+    const setup = (commandTimeouts: unknown) =>
+      JSON.stringify({ schemaVersion: 1, env: {}, files: [], commandTimeouts });
+    expect(
+      commandTimeoutLimits(parseToolSetup(setup({ defaultMs: 1_000, maxMs: MAX_CLAUDE_COMMAND_TIMEOUT_MS }))),
+    ).toEqual({ defaultMs: 1_000, maxMs: MAX_CLAUDE_COMMAND_TIMEOUT_MS });
+    for (const bad of [
+      { defaultMs: 999, maxMs: 600_000 },
+      { defaultMs: 600_000, maxMs: MAX_CLAUDE_COMMAND_TIMEOUT_MS + 1 },
+      { defaultMs: 600_000, maxMs: 300_000 },
+      { defaultMs: 1.5e3, maxMs: 600_000.5 },
+      { defaultMs: "600000", maxMs: 600_000 },
+      [600_000, 600_000],
+      null,
+    ]) {
+      expect(() => parseToolSetup(setup(bad))).toThrow("tool_setup_invalid");
+    }
   });
 
   it("hands the tool runner the registry settings a Codex shell gets, under /workspace/.cache", () => {

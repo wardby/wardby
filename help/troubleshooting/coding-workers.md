@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, get_run, request, requestUnavailable, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
+tags: [coding-agents, get_run, request, requestUnavailable, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory, command-timeout, timeout_ms, exit-code-124, CODING_BASH_DEFAULT_TIMEOUT_MS, CODING_BASH_MAX_TIMEOUT_MS]
 appliesTo: >=0.2.1
 ---
 
@@ -94,6 +94,18 @@ commands run in a tool-runner container limited to at most 512 MiB and 0.25 CPU.
    guide). This applies to every coding run.
 3. For a Claude Code agent with heavy checks, run it on Codex instead, since raising
    the pod's memory doesn't raise the tool runner's limit.
+
+## Claude Code commands that stop with exit code 124
+
+A Claude Code command that returns exit code 124 ran out of time. Each command
+gets 10 minutes by default and may ask for at most 10 minutes, both capped at
+the run's `timeoutSec`. To give long builds or test suites more time, raise
+`CODING_BASH_DEFAULT_TIMEOUT_MS` and `CODING_BASH_MAX_TIMEOUT_MS` (whole
+milliseconds, 1000 to 7200000) on the control plane, and the agent's
+`timeoutSec` if it's the lower limit. They map to Claude Code's
+`BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`. Codex runs don't use them.
+A tool runner image older than Wardby 0.9.5 still stops every command after 2
+minutes; see [Coding worker isolation](../../docs/coding-worker-isolation.md#control-plane-configuration).
 
 ## See what a run was asked to do
 

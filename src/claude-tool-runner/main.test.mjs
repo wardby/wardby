@@ -77,6 +77,39 @@ test("serves only the bounded run_command MCP tool over its private socket", asy
   }
 });
 
+test("offers run_command with the setup's per-command timeouts, and the old 60 s / 120 s without them", async () => {
+  const listRunCommand = async (setup) => {
+    const directory = await mkdtemp(join(tmpdir(), "wardby-claude-limits-"));
+    const socketPath = join(directory, "runner.sock");
+    const server = await startToolRunner(socketPath, setup);
+    const client = await connect(socketPath);
+    try {
+      const listed = await client.request("tools/list");
+      return listed.result.tools.find((tool) => tool.name === "run_command");
+    } finally {
+      client.socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      await rm(directory, { recursive: true, force: true });
+    }
+  };
+  const raised = await listRunCommand(
+    parseToolSetup(
+      JSON.stringify({ schemaVersion: 1, env: {}, files: [], commandTimeouts: { defaultMs: 600_000, maxMs: 900_000 } }),
+    ),
+  );
+  assert.equal(raised.inputSchema.properties.timeout_ms.maximum, 900_000);
+  assert.match(raised.description, /stopped after 600 s unless timeout_ms asks for more, up to 900 s/);
+  const capped = await listRunCommand(
+    parseToolSetup(
+      JSON.stringify({ schemaVersion: 1, env: {}, files: [], commandTimeouts: { defaultMs: 300_000, maxMs: 300_000 } }),
+    ),
+  );
+  assert.equal(capped.inputSchema.properties.timeout_ms.maximum, 300_000);
+  assert.match(capped.description, /stopped after 300 s\.$/);
+  const legacy = await listRunCommand(parseToolSetup(undefined));
+  assert.equal(legacy.inputSchema.properties.timeout_ms.maximum, 120_000);
+});
+
 // ---------------------------------------------------------------- dependency cache
 
 /** A minimal MCP client over the tool runner's socket, like the relay. */

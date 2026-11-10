@@ -1457,6 +1457,45 @@ describe("ContainerExecutor", () => {
     }
   });
 
+  it("gives a Claude Code run's tool runner raised per-command timeouts, capped at the run's timeout; never Codex", async () => {
+    const launched = async (
+      overrides: Partial<ContainerRunSnapshot>,
+      extra: Partial<ContainerExecutorOptions> = {},
+    ) => {
+      const created = await harness(
+        overrides.provider === "claude-code"
+          ? { model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, ...overrides }
+          : overrides,
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+        extra,
+      );
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { spec: created.jobs.lastSpec!, input: input! };
+    };
+    const claude = await launched({ provider: "claude-code", timeoutSec: 7200 });
+    expect(claude.spec.commandTimeouts).toEqual({ defaultMs: 600_000, maxMs: 600_000 });
+    // The worker's input is unchanged, so a worker image from before this still accepts it.
+    expect(claude.input).not.toHaveProperty("commandTimeouts");
+    const capped = await launched({ provider: "claude-code", timeoutSec: 300 });
+    expect(capped.spec.commandTimeouts).toEqual({ defaultMs: 300_000, maxMs: 300_000 });
+    const operator = await launched(
+      { provider: "claude-code", timeoutSec: 1800 },
+      { claudeCommandTimeouts: { defaultMs: 120_000, maxMs: 3_600_000 } },
+    );
+    expect(operator.spec.commandTimeouts).toEqual({ defaultMs: 120_000, maxMs: 1_800_000 });
+    const codex = await launched(
+      { provider: "codex", timeoutSec: 7200 },
+      { claudeCommandTimeouts: { defaultMs: 120_000, maxMs: 3_600_000 } },
+    );
+    expect(codex.spec).not.toHaveProperty("commandTimeouts");
+  });
+
   it("hands the worker debugTraceMaxMb only on a traced run that sets one", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

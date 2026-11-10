@@ -71,11 +71,13 @@ const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 /**
- * The longest run_command timeout the Claude tool runner offers the model (its MAX_TIMEOUT_MS,
- * src/claude-tool-runner/command.mjs; the proxy tests keep the two equal). A lower limit here let the
- * command run, then refused the next request, which replays that tool call, as unsupported.
+ * The longest run_command timeout any Claude tool runner can offer the model (its
+ * MAX_COMMAND_TIMEOUT_MS, src/claude-tool-runner/command.mjs; the proxy tests keep the two equal).
+ * Each run's own limit is lower (CODING_BASH_MAX_TIMEOUT_MS, capped at its timeout) and the tool
+ * runner enforces it. A lower limit here let the command run, then refused the next request, which
+ * replays that tool call, as unsupported.
  */
-export const MAX_COMMAND_TIMEOUT_MS = 120_000;
+export const MAX_COMMAND_TIMEOUT_MS = 7_200_000;
 
 export class CodingProxyError extends Error {
   constructor(

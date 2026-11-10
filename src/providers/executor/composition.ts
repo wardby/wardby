@@ -125,6 +125,9 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   if (!config.workerImage && !claudeConfigured) {
     throw new Error(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${providerConfig.jobs}.`);
   }
+  if (config.claudeCommandMaxRaised) {
+    compositionLog.info("CODING_BASH_MAX_TIMEOUT_MS unset: raised to CODING_BASH_DEFAULT_TIMEOUT_MS");
+  }
   const proxyContainer = config.proxyContainer;
   if (providerConfig.jobs === "docker" && !proxyContainer) {
     throw new Error("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
@@ -247,6 +250,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
+    claudeCommandTimeouts: config.claudeCommandTimeouts,
     repoAccess,
     readLinkedIssue: linkedIssueReader({ hosts: reviewHosts, issueTrackers }),
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),

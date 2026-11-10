@@ -36,6 +36,8 @@ export interface ClaudeToolSetup {
   dependencyCache?: true;
   /** With dependencyCache only: the workspace volume size (limits.diskMb) the cache must stay inside. */
   diskMb?: number;
+  /** The run's run_command time limits (JobSpec.commandTimeouts); an older tool runner ignores the key. */
+  commandTimeouts?: { defaultMs: number; maxMs: number };
 }
 
 export function claudeToolSetup(spec: JobSpec, capability: string): string {
@@ -51,6 +53,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string): string {
     env: { ...serviceEnvironment(spec.services), ...registry.env },
     files: registry.files,
     ...(spec.dependencyCache ? { dependencyCache: true, diskMb: spec.limits.diskMb } : {}),
+    ...(spec.commandTimeouts ? { commandTimeouts: { ...spec.commandTimeouts } } : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;

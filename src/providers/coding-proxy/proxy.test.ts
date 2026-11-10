@@ -12,7 +12,7 @@ import {
   type CreatedCodingProxySession,
   type ProxyResponseSink,
 } from "./proxy.js";
-import { MAX_TIMEOUT_MS as TOOL_RUNNER_MAX_TIMEOUT_MS } from "../../claude-tool-runner/command.mjs";
+import { MAX_COMMAND_TIMEOUT_MS as TOOL_RUNNER_MAX_TIMEOUT_MS } from "../../claude-tool-runner/command.mjs";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { shippedCatalog } from "../llm/catalog.js";

@@ -5,7 +5,18 @@ import { formatRefusals, recentRefusals, registryAccess } from "../coding-worker
 
 export const MAX_OUTPUT_BYTES = 64 * 1024;
 export const MAX_COMMAND_BYTES = 16 * 1024;
+/**
+ * run_command's per-command time limits when the launcher's setup carries none (a launcher from
+ * before commandTimeouts): 60 s unless the model asks, at most 120 s.
+ */
+export const LEGACY_DEFAULT_TIMEOUT_MS = 60_000;
 export const MAX_TIMEOUT_MS = 120_000;
+/**
+ * Bounds on the setup's commandTimeouts (claude-tool-setup.ts): the launcher caps both at the run's
+ * timeoutSec, at most MAX_CODING_TIMEOUT_SEC (src/coding/profile.ts; a test keeps them equal).
+ */
+export const MIN_COMMAND_TIMEOUT_MS = 1_000;
+export const MAX_COMMAND_TIMEOUT_MS = 7_200_000;
 /** After a timeout's SIGTERM, how long the command's process group has before SIGKILL. */
 export const KILL_GRACE_MS = 2_000;
 /** The launcher's setup for this run (src/providers/jobs/claude-tool-setup.ts). */
@@ -86,6 +97,15 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     if (value.dependencyCache !== true) throw invalid();
     if (!Number.isSafeInteger(value.diskMb) || value.diskMb < 64 || value.diskMb > 32_768) throw invalid();
   }
+  // The run's per-command time limits (claude-tool-setup.ts); absent from an older launcher.
+  let commandTimeouts;
+  if (value.commandTimeouts !== undefined) {
+    const limits = value.commandTimeouts;
+    if (!limits || typeof limits !== "object" || Array.isArray(limits)) throw invalid();
+    const bounded = (ms) => Number.isSafeInteger(ms) && ms >= MIN_COMMAND_TIMEOUT_MS && ms <= MAX_COMMAND_TIMEOUT_MS;
+    if (!bounded(limits.defaultMs) || !bounded(limits.maxMs) || limits.defaultMs > limits.maxMs) throw invalid();
+    commandTimeouts = Object.freeze({ defaultMs: limits.defaultMs, maxMs: limits.maxMs });
+  }
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
   const cacheRoot = `${cacheRootFor(workspacePath)}/`;
   const files = value.files.map((file) => {
@@ -99,7 +119,13 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     files: Object.freeze(files),
     ...(value.dependencyCache === true ? { dependencyCache: true } : {}),
     ...(value.diskMb !== undefined ? { diskMb: value.diskMb } : {}),
+    ...(commandTimeouts ? { commandTimeouts } : {}),
   });
+}
+
+/** run_command's default and longest time limit for this setup (the legacy 60 s / 120 s without one). */
+export function commandTimeoutLimits(setup = EMPTY_SETUP) {
+  return setup.commandTimeouts ?? { defaultMs: LEGACY_DEFAULT_TIMEOUT_MS, maxMs: MAX_TIMEOUT_MS };
 }
 
 /** Exactly what a command's shell gets (runCommand); the dependency cache's npm runs with it too. */
@@ -158,7 +184,7 @@ export async function withPackageRefusals(result, env, startedAt, lookup = recen
 
 export async function runCommand(command, timeoutMs, workspacePath = "/workspace", setup = EMPTY_SETUP) {
   if (Buffer.byteLength(command) > MAX_COMMAND_BYTES) throw new Error("tool_command_too_large");
-  const timeout = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, timeoutMs));
+  const timeout = Math.max(MIN_COMMAND_TIMEOUT_MS, Math.min(commandTimeoutLimits(setup).maxMs, timeoutMs));
   await prepareCommandWorkspace(setup, workspacePath);
   const env = commandEnvironment(setup, workspacePath);
   const startedAt = Date.now();
