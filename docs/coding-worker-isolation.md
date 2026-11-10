@@ -544,6 +544,22 @@ existing disk size means upgrading to this branch changes nothing for a
 deployment that doesn't set `CODING_MAX_DISK_MB`: `workspaceDiskMb` stays
 inert until an operator explicitly raises the ceiling above `CODING_DISK_MB`.
 
+Claude Code runs have two more limits, on each shell command the agent runs:
+
+| Variable                         | Default  | Meaning                                                      |
+| -------------------------------- | -------- | ------------------------------------------------------------ |
+| `CODING_BASH_DEFAULT_TIMEOUT_MS` | `600000` | Time a command gets when it doesn't ask for a time limit.    |
+| `CODING_BASH_MAX_TIMEOUT_MS`     | `600000` | The longest time limit a command may ask for (`timeout_ms`). |
+
+Both are whole milliseconds from 1000 to 7200000; the control plane refuses to
+start on any other value, naming the variable. They map to Claude Code's own
+`BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`, and apply to the command
+tool of the tool runner, which runs every Claude Code command. Each run caps
+both at its own `timeoutSec` × 1000, so a command never outlives its run. Set
+only the default, and the maximum rises to match it when it would be lower; set
+both with the maximum below the default, and the control plane refuses to
+start. They apply to Claude Code coding runs only: Codex runs are unchanged.
+
 A coding agent's profile carries an optional `workspaceDiskMb` (MiB; `null`
 means "use the deployment default `CODING_DISK_MB`"). It is snapshotted onto
 the `CodingRun` at dispatch time, so a later profile edit never changes an

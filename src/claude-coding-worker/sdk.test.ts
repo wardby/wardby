@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudeQueryOptions } from "./driver.js";
-import { buildClaudeSdkOptions } from "./sdk.js";
+import { buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS } from "./sdk.js";
+import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../coding/command-timeouts.js";
+import { KILL_GRACE_MS, MAX_COMMAND_TIMEOUT_MS } from "../claude-tool-runner/command.mjs";
 
 function config(signal = new AbortController().signal): ClaudeQueryOptions {
   return {
@@ -49,10 +51,19 @@ describe("Claude SDK configuration", () => {
         command: "node",
         args: ["/opt/wardby/claude-coding-worker/tool-relay.js"],
         env: { PATH: "/usr/bin:/bin" },
-        timeout: 120_000,
+        timeout: WARDBY_TOOLS_TIMEOUT_MS,
         alwaysLoad: true,
       },
     });
+  });
+
+  it("lets a wardby_tools call outlast the longest command the tool runner can be set to run", () => {
+    // Claude Code's per-server timeout is a hard wall-clock limit (and its idle limit): at the old
+    // 120 s it stopped every command at two minutes, whatever the tool runner allowed.
+    const tools = (buildClaudeSdkOptions(config()).mcpServers as Record<string, { timeout: number }>).wardby_tools;
+    expect(MAX_COMMAND_TIMEOUT_MS).toBe(MAX_CLAUDE_COMMAND_TIMEOUT_MS);
+    expect(tools.timeout).toBeGreaterThan(MAX_CLAUDE_COMMAND_TIMEOUT_MS + KILL_GRACE_MS);
+    expect(tools.timeout).toBeLessThanOrEqual(2_147_483_647);
   });
 
   it("never lets the agent call the worker's own dependency-cache tool, in any mode", () => {

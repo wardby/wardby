@@ -755,6 +755,22 @@ release that supports them (Wardby 0.7.0 or later). An older pinned image still
 caps each reply at 4096 tokens, and rejects the input of a run whose agent sets
 `maxOutputTokens` as invalid.
 
+## Command time limit (Claude Code)
+
+A Claude Code run gives each shell command it runs 10 minutes by default, and a
+command may ask for at most 10 minutes. Both limits are capped at the run's
+`timeoutSec`, so a run with `timeoutSec: 300` stops every command after 5
+minutes. A command that runs out of time is stopped and returns exit code 124.
+
+The operator sets the deployment's limits on the control plane (or coding
+executor) with `CODING_BASH_DEFAULT_TIMEOUT_MS` and `CODING_BASH_MAX_TIMEOUT_MS`;
+see [Control plane configuration](coding-worker-isolation.md#control-plane-configuration). They are not
+per-agent settings. Codex runs don't use them.
+
+Runs get the limits only with a Claude Code tool runner image from Wardby 0.9.5
+or later. An older tool runner image, including a custom `workerImageRef` built
+from one, still stops each command after 2 minutes.
+
 ## Resume a run locally
 
 A Claude Code agent can keep a copy of each run's conversation so a developer

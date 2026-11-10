@@ -1,7 +1,10 @@
 // Types for command.mjs, so the launcher's tests can check they build within the tool runner's limits.
 export declare const MAX_OUTPUT_BYTES: number;
 export declare const MAX_COMMAND_BYTES: number;
+export declare const LEGACY_DEFAULT_TIMEOUT_MS: number;
 export declare const MAX_TIMEOUT_MS: number;
+export declare const MIN_COMMAND_TIMEOUT_MS: number;
+export declare const MAX_COMMAND_TIMEOUT_MS: number;
 export declare const KILL_GRACE_MS: number;
 export declare const TOOL_SETUP_ENV: string;
 export declare const SHIM_DIRECTORY: string;
@@ -18,7 +21,11 @@ export interface ToolSetup {
   readonly dependencyCache?: true;
   /** With dependencyCache only: the workspace volume size in MiB. */
   readonly diskMb?: number;
+  /** The run's run_command time limits, from the launcher; absent from an older one. */
+  readonly commandTimeouts?: Readonly<{ defaultMs: number; maxMs: number }>;
 }
+
+export declare function commandTimeoutLimits(setup?: ToolSetup): { defaultMs: number; maxMs: number };
 
 export declare function toolEnvironment(workspacePath?: string): Record<string, string>;
 export declare function commandEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;

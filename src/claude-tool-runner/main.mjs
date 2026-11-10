@@ -7,9 +7,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   MAX_COMMAND_BYTES,
-  MAX_TIMEOUT_MS,
+  MIN_COMMAND_TIMEOUT_MS,
   TOOL_SETUP_ENV,
   commandEnvironment,
+  commandTimeoutLimits,
   parseToolSetup,
   prepareCommandWorkspace,
   runCommand,
@@ -103,20 +104,29 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
   };
 }
 
+/** run_command's description: the run's time limits, so the model can ask for more on a long command. */
+export function runCommandDescription(limits) {
+  const seconds = (ms) => `${Math.floor(ms / 1000)} s`;
+  const base = "Run one bounded shell command in the isolated repository workspace.";
+  if (limits.maxMs <= limits.defaultMs) return `${base} A command is stopped after ${seconds(limits.defaultMs)}.`;
+  return `${base} A command is stopped after ${seconds(limits.defaultMs)} unless timeout_ms asks for more, up to ${seconds(limits.maxMs)}.`;
+}
+
 function toolServer(setup, gate, workspacePath) {
   const server = new McpServer({ name: "wardby_tools", version: "1.0.0" });
+  const limits = commandTimeoutLimits(setup);
   server.registerTool(
     "run_command",
     {
-      description: "Run one bounded shell command in the isolated repository workspace.",
+      description: runCommandDescription(limits),
       inputSchema: {
         command: z.string().min(1).max(MAX_COMMAND_BYTES),
-        timeout_ms: z.number().int().min(1_000).max(MAX_TIMEOUT_MS).optional(),
+        timeout_ms: z.number().int().min(MIN_COMMAND_TIMEOUT_MS).max(limits.maxMs).optional(),
       },
     },
     async ({ command, timeout_ms }) => {
       await gate.beforeCommand();
-      const result = await runCommand(command, timeout_ms ?? 60_000, workspacePath, setup);
+      const result = await runCommand(command, timeout_ms ?? limits.defaultMs, workspacePath, setup);
       return {
         content: [{ type: "text", text: `exit_code=${result.code}\n${result.output}` }],
         isError: result.code !== 0,

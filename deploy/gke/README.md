@@ -239,6 +239,22 @@ In a Claude Code run, the commands run in a separate tool-runner container whose
 share of the pod is limited (at most 512 MiB and 0.25 CPU), so raising these
 values mostly benefits Codex runs.
 
+## Claude Code command time limits
+
+In a Claude Code run, each shell command gets 10 minutes by default and may ask
+for at most 10 minutes, both capped at the run's `timeoutSec`. To give long
+builds or test suites more time, deploy with `CODING_BASH_DEFAULT_TIMEOUT_MS`
+and `CODING_BASH_MAX_TIMEOUT_MS` (they map to Claude Code's
+`BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`):
+
+```bash
+CODING_BASH_MAX_TIMEOUT_MS=1800000 deploy/gke/up.sh
+```
+
+`up.sh` adds them to the control plane only, which launches the coding runs.
+Each must be a whole number of milliseconds between 1000 and 7200000. Leaving
+them unset keeps the 600000 defaults. Codex runs don't use them.
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the

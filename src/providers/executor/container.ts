@@ -70,6 +70,11 @@ import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
+  cappedClaudeCommandTimeouts,
+  DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
+  type ClaudeCommandTimeouts,
+} from "../../coding/command-timeouts.js";
+import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
@@ -1101,6 +1106,11 @@ export interface ContainerExecutorOptions {
   limits: JobResourceLimits;
   /** Operator ceiling (MiB) on CodingRun.workspaceDiskMb; see coding_workspace_disk_exceeds_limit in jobSpec. */
   maxDiskMb: number;
+  /**
+   * Claude Code runs' per-command time limits (CODING_BASH_DEFAULT_TIMEOUT_MS / CODING_BASH_MAX_TIMEOUT_MS),
+   * capped per run at its timeoutSec in jobSpec; DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS for both when absent.
+   */
+  claudeCommandTimeouts?: ClaudeCommandTimeouts;
   pollMinMs?: number;
   pollMaxMs?: number;
   /** How often to beat the heartbeat during a long launch; defaults to a third of the reconciler's timeout. */
@@ -2669,6 +2679,18 @@ export class ContainerExecutor implements Executor {
       ...(run.sessionResume && provider === "claude-code" ? { sessionResume: true as const } : {}),
       // Only for a run with MCP tools: the launcher then delivers WARDBY_MCP_TOKEN from the vault.
       ...(options.mcpTools ? { mcpTools: true as const } : {}),
+      // Claude Code only: the tool runner's per-command limits, capped so no command outlives the run.
+      ...(provider === "claude-code"
+        ? {
+            commandTimeouts: cappedClaudeCommandTimeouts(
+              this.options.claudeCommandTimeouts ?? {
+                defaultMs: DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
+                maxMs: DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
+              },
+              run.timeoutSec,
+            ),
+          }
+        : {}),
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},

@@ -13,6 +13,12 @@ import {
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
+import {
+  DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
+  MAX_CLAUDE_COMMAND_TIMEOUT_MS,
+  MIN_CLAUDE_COMMAND_TIMEOUT_MS,
+  type ClaudeCommandTimeouts,
+} from "../coding/command-timeouts.js";
 import { loadMobileConfig, type MobileConfig } from "./mobile.js";
 import { testSimulatorBase } from "./test-simulators.js";
 
@@ -305,6 +311,10 @@ export interface ContainerExecutorConfig {
    */
   maxDiskMb: number;
   additionalWorkerImages: Record<string, Record<string, string>>;
+  /** Claude Code runs' per-command time limits (loadClaudeCommandTimeouts), before each run's cap. */
+  claudeCommandTimeouts: ClaudeCommandTimeouts;
+  /** True when only CODING_BASH_DEFAULT_TIMEOUT_MS was set and the max was raised to match it. */
+  claudeCommandMaxRaised: boolean;
 }
 
 function optionalPositiveNumber(value: string | undefined, name: string, fallback: number): number {
@@ -331,6 +341,47 @@ export function imageVariable(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
+function commandTimeoutVariable(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  const parsed = Number(raw);
+  if (
+    !/^[0-9]+$/.test(raw) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_CLAUDE_COMMAND_TIMEOUT_MS ||
+    parsed > MAX_CLAUDE_COMMAND_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `${name} must be a whole number of milliseconds from ${MIN_CLAUDE_COMMAND_TIMEOUT_MS} to ${MAX_CLAUDE_COMMAND_TIMEOUT_MS}.`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * CODING_BASH_DEFAULT_TIMEOUT_MS / CODING_BASH_MAX_TIMEOUT_MS: Claude Code coding runs' per-command
+ * time limits (src/coding/command-timeouts.ts), 600000 each when unset. Only the default set: the
+ * max rises to it if lower (maxRaised). Both set with the max below the default: refused.
+ */
+export function loadClaudeCommandTimeouts(env: NodeJS.ProcessEnv = process.env): {
+  timeouts: ClaudeCommandTimeouts;
+  maxRaised: boolean;
+} {
+  const defaultSet = commandTimeoutVariable(env, "CODING_BASH_DEFAULT_TIMEOUT_MS");
+  const maxSet = commandTimeoutVariable(env, "CODING_BASH_MAX_TIMEOUT_MS");
+  const defaultMs = defaultSet ?? DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS;
+  if (maxSet !== undefined && maxSet < defaultMs) {
+    throw new Error(
+      `CODING_BASH_MAX_TIMEOUT_MS (${maxSet}) must be at least the effective CODING_BASH_DEFAULT_TIMEOUT_MS (${defaultMs}).`,
+    );
+  }
+  const maxMs = Math.max(maxSet ?? DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS, defaultMs);
+  return {
+    timeouts: { defaultMs, maxMs },
+    maxRaised: maxSet === undefined && defaultMs > DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
+  };
+}
+
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
   const additionalWorkerImages: Record<string, Record<string, string>> = {};
   const nodePythonWorker = imageVariable(env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12);
@@ -345,6 +396,7 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
   if (maxDiskMb < diskMb) {
     throw new Error(`CODING_MAX_DISK_MB (${maxDiskMb}) must be at least the effective CODING_DISK_MB (${diskMb}).`);
   }
+  const commandTimeouts = loadClaudeCommandTimeouts(env);
   return {
     workerImage: imageVariable(env.CODING_WORKER_IMAGE),
     claudeWorkerImage: imageVariable(env.CODING_CLAUDE_WORKER_IMAGE),
@@ -361,6 +413,8 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     diskMb,
     maxDiskMb,
     additionalWorkerImages,
+    claudeCommandTimeouts: commandTimeouts.timeouts,
+    claudeCommandMaxRaised: commandTimeouts.maxRaised,
   };
 }
 

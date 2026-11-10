@@ -16,6 +16,8 @@
 #   CODING_MAX_DISK_MB=8192   # optional: largest per-agent workspaceDiskMb the control plane accepts (default 2048)
 #   CODING_MEMORY_MB=6144   # optional: memory for each coding run's pod, in MiB (default 2048)
 #   CODING_CPUS=2   # optional: CPUs for each coding run's pod (default 1)
+#   CODING_BASH_DEFAULT_TIMEOUT_MS=900000   # optional: Claude Code runs' time per command, in ms (default 600000)
+#   CODING_BASH_MAX_TIMEOUT_MS=1800000   # optional: longest time a Claude Code command may ask for, in ms (default 600000)
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -272,6 +274,44 @@ inject_coding_resources_env() {
     }'
 }
 # --- end CODING_MEMORY_MB and CODING_CPUS control-plane env ---
+
+# --- CODING_BASH timeouts check ---
+# Optional: Claude Code coding runs' per-command time limits, in whole
+# milliseconds (1000-7200000). Empty = the server defaults (600000 each). The
+# server checks them again at start-up, including that the max is not below the
+# default; this stops a bad value before anything changes.
+CODING_BASH_DEFAULT_TIMEOUT_MS="${CODING_BASH_DEFAULT_TIMEOUT_MS:-}"
+CODING_BASH_MAX_TIMEOUT_MS="${CODING_BASH_MAX_TIMEOUT_MS:-}"
+for bash_timeout_name in CODING_BASH_DEFAULT_TIMEOUT_MS CODING_BASH_MAX_TIMEOUT_MS; do
+  bash_timeout_ms="${!bash_timeout_name}"
+  if [[ -n "$bash_timeout_ms" ]]; then
+    if ! [[ "$bash_timeout_ms" =~ ^[1-9][0-9]{3,6}$ ]] || ((bash_timeout_ms > 7200000)); then
+      echo "up.sh: $bash_timeout_name must be a whole number of milliseconds between 1000 and 7200000 (got \"$bash_timeout_ms\")." >&2
+      exit 1
+    fi
+    echo "up.sh: $bash_timeout_name is ${bash_timeout_ms} ms."
+  fi
+done
+# --- end CODING_BASH timeouts check ---
+
+# --- CODING_BASH timeouts control-plane env ---
+# Adds whichever of the two is set to the control plane's container, right after
+# its WARDBY_MOBILE_ENABLED entry, like CODING_MAX_DISK_MB above. The control
+# plane launches coding runs, so it is the only container that reads them.
+inject_coding_bash_timeouts_env() {
+  if [[ -z "$CODING_BASH_DEFAULT_TIMEOUT_MS" && -z "$CODING_BASH_MAX_TIMEOUT_MS" ]]; then
+    cat
+    return
+  fi
+  awk -v default_ms="$CODING_BASH_DEFAULT_TIMEOUT_MS" -v max_ms="$CODING_BASH_MAX_TIMEOUT_MS" '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      if (default_ms != "") { print item_indent "- name: CODING_BASH_DEFAULT_TIMEOUT_MS"; print value_indent "value: \"" default_ms "\"" }
+      if (max_ms != "") { print item_indent "- name: CODING_BASH_MAX_TIMEOUT_MS"; print value_indent "value: \"" max_ms "\"" }
+    }'
+}
+# --- end CODING_BASH timeouts control-plane env ---
 
 # --- WARDBY_DEPENDENCY_CACHE check ---
 # Optional: true turns on the run dependency cache. It needs the bucket from
@@ -797,6 +837,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_mention_explanations_env \
   | inject_coding_max_disk_env \
   | inject_coding_resources_env \
+  | inject_coding_bash_timeouts_env \
   | inject_run_steps_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \

@@ -11,6 +11,13 @@ const TOOL_NAME = "mcp__wardby_tools__run_command";
  * dontAsk plus allowedTools would already deny it, this keeps it out of the tool list as well.
  */
 const PREPARE_DEPENDENCIES_TOOL_NAME = `mcp__wardby_tools__${PREPARE_DEPENDENCIES_TOOL}`;
+/**
+ * Claude Code's own wall-clock limit on one wardby_tools call (its per-server MCP `timeout`, which
+ * also sets the idle limit): above the longest command the tool runner can be set to run
+ * (MAX_CLAUDE_COMMAND_TIMEOUT_MS, src/coding/command-timeouts.ts; a test keeps them in step) plus
+ * its kill grace, so the tool runner's own per-command limit is the one that stops a command.
+ */
+export const WARDBY_TOOLS_TIMEOUT_MS = 7_200_000 + 60_000;
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   const abortController = new AbortController();
@@ -38,7 +45,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
         command: "node",
         args: ["/opt/wardby/claude-coding-worker/tool-relay.js"],
         env: config.relayEnvironment,
-        timeout: 120_000,
+        timeout: WARDBY_TOOLS_TIMEOUT_MS,
         alwaysLoad: true,
       },
       // The token rides only in this header (Claude Code passes it on its own command line, inside

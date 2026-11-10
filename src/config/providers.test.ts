@@ -193,6 +193,57 @@ describe("loadContainerExecutorConfig", () => {
   it("accepts CODING_MAX_DISK_MB exactly equal to the effective CODING_DISK_MB", () => {
     expect(loadContainerExecutorConfig({ CODING_DISK_MB: "4096", CODING_MAX_DISK_MB: "4096" }).maxDiskMb).toBe(4096);
   });
+
+  describe("Claude Code per-command timeouts (CODING_BASH_*_TIMEOUT_MS)", () => {
+    const timeouts = (env: NodeJS.ProcessEnv) => loadContainerExecutorConfig(env).claudeCommandTimeouts;
+
+    it("defaults both to 600000 when neither is set", () => {
+      expect(timeouts({})).toEqual({ defaultMs: 600_000, maxMs: 600_000 });
+      expect(loadContainerExecutorConfig({}).claudeCommandMaxRaised).toBe(false);
+    });
+
+    it("passes the operator's values through", () => {
+      expect(timeouts({ CODING_BASH_DEFAULT_TIMEOUT_MS: "300000", CODING_BASH_MAX_TIMEOUT_MS: "1800000" })).toEqual({
+        defaultMs: 300_000,
+        maxMs: 1_800_000,
+      });
+      expect(timeouts({ CODING_BASH_MAX_TIMEOUT_MS: "900000" })).toEqual({ defaultMs: 600_000, maxMs: 900_000 });
+    });
+
+    it("raises the max to a default set alone above it, and says so", () => {
+      const config = loadContainerExecutorConfig({ CODING_BASH_DEFAULT_TIMEOUT_MS: "1200000" });
+      expect(config.claudeCommandTimeouts).toEqual({ defaultMs: 1_200_000, maxMs: 1_200_000 });
+      expect(config.claudeCommandMaxRaised).toBe(true);
+      // A default below the max's own default leaves the max alone.
+      expect(timeouts({ CODING_BASH_DEFAULT_TIMEOUT_MS: "60000" })).toEqual({ defaultMs: 60_000, maxMs: 600_000 });
+    });
+
+    it("refuses a max set below the default", () => {
+      expect(() =>
+        loadContainerExecutorConfig({ CODING_BASH_DEFAULT_TIMEOUT_MS: "300000", CODING_BASH_MAX_TIMEOUT_MS: "200000" }),
+      ).toThrow(
+        "CODING_BASH_MAX_TIMEOUT_MS (200000) must be at least the effective CODING_BASH_DEFAULT_TIMEOUT_MS (300000)",
+      );
+    });
+
+    it.each(["999", "7200001", "1.5", "1e6", "-5000", "nope"])(
+      "refuses a bad value (%s), naming the variable",
+      (value) => {
+        for (const name of ["CODING_BASH_DEFAULT_TIMEOUT_MS", "CODING_BASH_MAX_TIMEOUT_MS"]) {
+          expect(() => loadContainerExecutorConfig({ [name]: value })).toThrow(
+            `${name} must be a whole number of milliseconds from 1000 to 7200000`,
+          );
+        }
+      },
+    );
+
+    it("never reads Claude Code's own unprefixed names", () => {
+      expect(timeouts({ BASH_DEFAULT_TIMEOUT_MS: "1000", BASH_MAX_TIMEOUT_MS: "1000" })).toEqual({
+        defaultMs: 600_000,
+        maxMs: 600_000,
+      });
+    });
+  });
 });
 
 describe("loadMcpConfig", () => {

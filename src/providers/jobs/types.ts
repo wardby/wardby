@@ -39,6 +39,11 @@ export interface JobSpec {
    * the agent container only (never Claude's tool runner). The token itself is never in the spec.
    */
   mcpTools?: true;
+  /**
+   * Claude Code only: run_command's default and longest per-command time limit, in ms, delivered to
+   * the tool runner in its setup (claude-tool-setup.ts). Already capped at timeoutSec (claudeCommandTimeouts).
+   */
+  commandTimeouts?: { defaultMs: number; maxMs: number };
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;

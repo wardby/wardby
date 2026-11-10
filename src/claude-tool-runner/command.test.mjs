@@ -11,6 +11,7 @@ import {
   MAX_SETUP_BYTES,
   SHIM_DIRECTORY,
   commandEnvironment,
+  commandTimeoutLimits,
   parseToolSetup,
   runCommand,
   toolEnvironment,
@@ -238,4 +239,22 @@ test("accepts a setup at the entry and file caps and refuses one past them", () 
     return JSON.stringify({ schemaVersion: 1, env: { PAD: "x".repeat(bytes - empty.length) }, files: [] });
   };
   assert.throws(() => parseToolSetup(padded(MAX_SETUP_BYTES + 1)), /tool_setup_invalid/);
+});
+
+test("stops a command at the setup's longest per-command timeout, whatever the call asks for", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-max-"));
+  try {
+    const setup = parseToolSetup(
+      JSON.stringify({ schemaVersion: 1, env: {}, files: [], commandTimeouts: { defaultMs: 1_000, maxMs: 1_500 } }),
+      workspace,
+    );
+    assert.deepEqual(commandTimeoutLimits(setup), { defaultMs: 1_000, maxMs: 1_500 });
+    const started = Date.now();
+    const result = await runCommand("sleep 6", 30_000, workspace, setup);
+    const elapsed = Date.now() - started;
+    assert.equal(result.code, 124);
+    assert.ok(elapsed < 5_000, `took ${elapsed} ms`);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
