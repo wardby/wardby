@@ -1,7 +1,7 @@
 import { atom, read, update } from "claude-code";
 import type { Register, UiCopyArgs } from "claude-code";
 
-import type { Filter, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps } from "../types";
+import type { Filter, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps, TextField } from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -13,7 +13,10 @@ const AGENTS_EVERY = 6;
 // Run steps (wardby 0.9.0+): a running run's last RECENT_STEPS, re-read each poll; a finished run's, a page at a time.
 const RECENT_STEPS = 8;
 const STEPS_PAGE = 200;
-// What a server without get_run_steps answers (the MCP SDK's "Tool <name> not found").
+// get_run_text (newer servers): the rest of a long field, a piece at a time; at most this many pieces a field.
+const TEXT_FIELDS: readonly TextField[] = ["request", "taskOverride", "finalText", "error"];
+const MAX_TEXT_PIECES = 64;
+// What a server without get_run_steps (or get_run_text) answers (the MCP SDK's "Tool <name> not found").
 const UNKNOWN_TOOL = /\btool\b[^\n]*\bnot found\b|unknown tool|no such tool/i;
 // The timer ticks this often; each tick refreshes only when one is due.
 const TICK_MS = 5000;
@@ -57,7 +60,7 @@ function taskUrl(task: string | null): string | null {
   return `https://github.com/${match[3]}/${kind}/${match[2]}`;
 }
 const selected = atom({ plugin: "wardby-runs", key: "selected" } as const, null);
-const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-3" });
+const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-4" });
 // A run's steps as get_run_steps returned them (stored already redacted); drawn as plain text only.
 const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-2" });
 // The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail.
@@ -488,9 +491,21 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     const state = str(entry.state);
     if (name && state) serviceStates[name] = state;
   }
+  // A long field's first page says where the rest starts (wardby 0.9.4+); an older server sends it whole.
+  const more: RunDetail["more"] = {};
+  for (const field of TEXT_FIELDS) {
+    const page = run[`${field}More`];
+    if (typeof page !== "object" || page === null) continue;
+    const { next, total } = page as Record<string, unknown>;
+    if (typeof next === "number" && typeof total === "number" && typeof run[field] === "string") {
+      more[field] = { next, total };
+    }
+  }
   return {
     id: String(run.id),
     request: str(run.request),
+    task: str(run.taskOverride),
+    more,
     finalText: str(run.finalText),
     error: str(run.error),
     failureCategory: str(run.failureCategory),
@@ -505,6 +520,16 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     parentRunId: str(run.parentRunId),
     lastStepSeq: typeof lastStep.seq === "number" ? lastStep.seq : null,
   };
+}
+
+/** A detail's text for one of get_run's long fields. */
+function fieldText(info: RunDetail, field: TextField): string | null {
+  return field === "taskOverride" ? info.task : info[field];
+}
+
+/** The detail with one long field's text set. */
+function withFieldText(info: RunDetail, field: TextField, text: string): RunDetail {
+  return field === "taskOverride" ? { ...info, task: text } : { ...info, [field]: text };
 }
 
 /** get_run_steps' steps, keeping only well-formed ones. */
@@ -958,7 +983,7 @@ export const register: Register = (on, options) => {
         const raw = err instanceof Error ? err.message : "could not reach the wardby server";
         // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools.
         const message = /auto mode/i.test(raw)
-          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run and mcp__${server}__get_run_steps in /permissions, then press r.`
+          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run, mcp__${server}__get_run_steps and mcp__${server}__get_run_text in /permissions, then press r.`
           : raw;
         await update($, poll, (p): Poll => ({ ...p, at: now, error: message }));
         failures += 1;
@@ -1024,7 +1049,7 @@ export const register: Register = (on, options) => {
     async function loadDetail(runId: string): Promise<void> {
       try {
         const run = (await call("get_run", { runId })) as Record<string, unknown>;
-        const info = toDetail(run);
+        const info = withFullTexts(toDetail(run));
         // A late reply for a run that is no longer open must not overwrite the open run's detail.
         if ((await read($, selected)) !== runId) return;
         await update($, detail, () => info);
@@ -1037,6 +1062,83 @@ export const register: Register = (on, options) => {
           error: err instanceof Error ? err.message : "get_run failed",
         }));
       }
+    }
+
+    /**
+     * The whole text of each field the server sent a first page of, read with get_run_text a piece at a
+     * time, keyed by run and field. A later get_run (each poll of a running run) sends the first page
+     * again; a held text of the same length replaces it, so the shown text doesn't shrink back.
+     */
+    const fullTexts = new Map<string, string>();
+    const textKey = (runId: string, field: TextField) => `${runId}\u0000${field}`;
+    function withFullTexts(info: RunDetail): RunDetail {
+      let out = info;
+      for (const field of TEXT_FIELDS) {
+        const page = info.more[field];
+        const held = fullTexts.get(textKey(info.id, field));
+        const first = fieldText(info, field);
+        if (!page || held === undefined || first === null) continue;
+        if (held.length !== page.total || !held.startsWith(first)) continue;
+        const { [field]: _done, ...rest } = out.more;
+        out = { ...withFieldText(out, field, held), more: rest };
+      }
+      return out;
+    }
+
+    /**
+     * The rest of the open run's long fields, through get_run_text, for Show full text and Copy. Pieces are
+     * joined at the offsets the server gives until next is null, and the detail is updated once with the
+     * whole text. An older server without get_run_text keeps the first page it sent, with no error; under
+     * auto mode a toast names the rule to allow. Resolves the detail as it then is.
+     */
+    const textInFlight = new Map<string, Promise<RunDetail | null>>();
+    function loadFullText(runId: string): Promise<RunDetail | null> {
+      const pending = textInFlight.get(runId);
+      if (pending) return pending;
+      const work = (async (): Promise<RunDetail | null> => {
+        const info = await read($, detail);
+        if (!info || info.id !== runId) return null;
+        let out = info;
+        for (const field of TEXT_FIELDS) {
+          const page = out.more[field];
+          let text = fieldText(out, field);
+          if (!page || text === null) continue;
+          let offset: number | null = page.next;
+          let isUnsupported = false;
+          try {
+            for (let piece = 0; offset !== null && piece < MAX_TEXT_PIECES; piece += 1) {
+              const reply = (await call("get_run_text", { runId, field, offset })) as Record<string, unknown>;
+              if (typeof reply.text !== "string" || typeof reply.offset !== "number") break;
+              text = text.slice(0, reply.offset) + reply.text;
+              offset = typeof reply.next === "number" && reply.next > reply.offset ? reply.next : null;
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "";
+            if (UNKNOWN_TOOL.test(message)) isUnsupported = true;
+            else if (/auto mode/i.test(message)) {
+              $.ui.toast(`Allow mcp__${server}__get_run_text in /permissions to read the rest of this run's text.`);
+            }
+            // Anything else (a network blip): keep what came, and ask again on the next press.
+          }
+          const { [field]: _page, ...rest } = out.more;
+          if (offset === null) {
+            fullTexts.set(textKey(runId, field), text);
+            out = { ...withFieldText(out, field, text), more: rest };
+          } else if (isUnsupported) {
+            // This server can't send the rest: show the first page as the text, with nothing more to fetch.
+            out = { ...withFieldText(out, field, text), more: rest };
+          } else {
+            out = { ...withFieldText(out, field, text), more: { ...out.more, [field]: { ...page, next: offset } } };
+          }
+        }
+        // A late reply for a run that is no longer open must not overwrite the open run's detail.
+        if ((await read($, selected)) !== runId) return out;
+        const current = await read($, detail);
+        if (current?.id === runId) await update($, detail, () => out);
+        return out;
+      })().finally(() => textInFlight.delete(runId));
+      textInFlight.set(runId, work);
+      return work;
     }
 
     /**
@@ -1170,6 +1272,7 @@ export const register: Register = (on, options) => {
     // Only for suggesting where to import; the pane works without it.
     pane.cwd = await $.session.cwd().catch(() => "");
     pane.loadDetail = loadDetail;
+    pane.loadFullText = loadFullText;
     pane.loadMoreSteps = (runId) => loadSteps(runId, false, null, true);
     pane.refresh = refresh;
     pane.start = () => {
@@ -1191,6 +1294,7 @@ export const register: Register = (on, options) => {
   // Set in session.start, where the MCP call is bound; the pane's buttons reach it here.
   const pane: {
     loadDetail: (runId: string) => Promise<void>;
+    loadFullText: (runId: string) => Promise<RunDetail | null>;
     loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
     start: () => void;
@@ -1198,6 +1302,7 @@ export const register: Register = (on, options) => {
     cwd: string;
   } = {
     loadDetail: async () => {},
+    loadFullText: async () => null,
     loadMoreSteps: async () => {},
     refresh: async () => {},
     start: () => {},
@@ -1298,6 +1403,7 @@ export const register: Register = (on, options) => {
     const open = openId ? rows.find((row) => row.id === openId) : undefined;
     if (open) {
       const info = await read($, detail);
+      const shownDetail = info && info.id === open.id ? info : null;
       const resumeState = await read($, resume);
       const isFull = (await read($, expanded)) === open.id;
       const D = isDesktop;
@@ -1322,6 +1428,18 @@ export const register: Register = (on, options) => {
           .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
           .catch(() => $.ui.toast("Couldn't copy"));
       /**
+       * Copies one of get_run's long fields. When the server sent only its first page, the rest is read
+       * first (get_run_text), so Copy gives the whole text; an older server's first page is copied as is.
+       */
+      const copyField = (field: TextField, text: string) => (press: { surface: UiCopyArgs["surface"] }) => {
+        const info0 = shownDetail;
+        if (!info0?.more[field]) return copyText(text)(press);
+        void pane
+          .loadFullText(info0.id)
+          .then((full) => copyText((full && fieldText(full, field)) ?? text)(press))
+          .catch(() => copyText(text)(press));
+      };
+      /**
        * Each section is a rounded card with its kind's colour from the wardby.com palette: on the desktop a
        * thin bar along the card's top (the theme's prompt-box border stays, visible in light and dark); on
        * the terminal, which draws no SVG, the card's rounded border in that colour.
@@ -1344,13 +1462,21 @@ export const register: Register = (on, options) => {
             {children as never}
           </Box>
         );
-      /** A card's heading row: the heading, and on the desktop a small Copy button at its right. */
-      const headingRow = (key: string, text: string, copy: string | null) =>
+      /**
+       * A card's heading row: the heading, and on the desktop a small Copy button at its right. `field`
+       * names the get_run field it copies, so Copy reads the rest of a long one first.
+       */
+      const headingRow = (key: string, text: string, copy: string | null, field?: TextField) =>
         D && copy !== null ? (
           <Box key={`${key}-head`} alignItems="center">
             {heading(text)}
             <Box flexGrow={1} />
-            <Button key={`copy-${key}`} label="Copy" dimColor onPress={copyText(copy)} />
+            <Button
+              key={`copy-${key}`}
+              label="Copy"
+              dimColor
+              onPress={field ? copyField(field, copy) : copyText(copy)}
+            />
           </Box>
         ) : (
           heading(text)
@@ -1380,10 +1506,19 @@ export const register: Register = (on, options) => {
           </Box>
         );
       };
-      const shown = info && info.id === open.id ? info : null;
+      const shown = shownDetail;
+      // What the run was asked: the request once loaded, else get_run's task, else the row's (first 600 characters).
+      const asked: { field: TextField; text: string } | null = shown?.request
+        ? { field: "request", text: shown.request }
+        : (shown?.task ?? open.task)
+          ? { field: "taskOverride", text: (shown?.task ?? open.task) as string }
+          : null;
       // The long texts the detail shows, and whether any is cut: that is when Show full text has work to do.
-      const longTexts = [shown?.request ?? open.task, shown?.finalText].filter((text): text is string => !!text);
-      const hasLong = longTexts.some((text) => collapse(text, inner).more > 0);
+      // A field the server sent only the first page of is cut too, until the rest is read.
+      const longTexts = [asked?.text, shown?.finalText].filter((text): text is string => !!text);
+      const hasLong =
+        longTexts.some((text) => collapse(text, inner).more > 0) ||
+        (shown !== null && Object.keys(shown.more).length > 0);
       const cursor = await read($, openStep);
       const stepsState = await read($, runSteps);
       const stepsOf = stepsState?.runId === open.id ? stepsState : null;
@@ -1750,19 +1885,26 @@ export const register: Register = (on, options) => {
                   </Text>
                   <Box flexGrow={1} />
                   {D && shown.error && (
-                    <Button key="copy-error" label="Copy" dimColor onPress={copyText(shown.error)} />
+                    <Button key="copy-error" label="Copy" dimColor onPress={copyField("error", shown.error)} />
                   )}
                 </Box>
                 {shown.error && <Text wrap="wrap">{shown.error}</Text>}
+                {shown.error && shown.more.error && (
+                  <Box key="error-more">
+                    <Text color={TONES.blue.fg} size="caption">
+                      … {shown.more.error.total - shown.more.error.next} more characters{D ? "" : " (m)"}
+                    </Text>
+                  </Box>
+                )}
               </>,
             )}
           {stepsOf?.mode === "recent" && stepsBlock}
-          {(open.via || shown?.request || open.task) &&
+          {(open.via || asked) &&
             card(
               "started-card",
               "started",
               <>
-                {headingRow("started", "Started by", shown?.request ?? open.task ?? null)}
+                {headingRow("started", "Started by", asked?.text ?? null, asked?.field)}
                 {open.via && (
                   <Box gap={1}>
                     <Text>
@@ -1780,10 +1922,10 @@ export const register: Register = (on, options) => {
                   </Box>
                 )}
                 {/* What it was asked: the request once loaded (markdown), else the task. */}
-                {shown?.request
-                  ? folded("request", shown.request, true)
-                  : open.task
-                    ? folded("task", open.task, false, true)
+                {asked?.field === "request"
+                  ? folded("request", asked.text, true)
+                  : asked
+                    ? folded("task", asked.text, false, true)
                     : null}
               </>,
             )}
@@ -1916,7 +2058,7 @@ export const register: Register = (on, options) => {
               "final-card",
               "final",
               <>
-                {headingRow("final", "Final answer", shown.finalText)}
+                {headingRow("final", "Final answer", shown.finalText, "finalText")}
                 {folded("final", shown.finalText, true)}
               </>,
             )}
@@ -1991,7 +2133,11 @@ export const register: Register = (on, options) => {
                 key="expand"
                 label={isFull ? (D ? "Show less" : "Show less (m)") : D ? "Show full text" : "Show full text (m)"}
                 {...hk("m")}
-                onPress={() => void update($, expanded, (current) => (current === open.id ? null : open.id))}
+                onPress={() => {
+                  void update($, expanded, (current) => (current === open.id ? null : open.id));
+                  // Expanding reads the rest of any field the server sent only the first page of.
+                  if (!isFull && shown && Object.keys(shown.more).length > 0) void pane.loadFullText(open.id);
+                }}
               />
             )}
             <Button

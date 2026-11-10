@@ -20,9 +20,19 @@ export type RunRow = {
   lastLine: string | null;
 };
 
+/** The long text fields get_run may send as a first page, the rest through get_run_text (servers with get_run_text). */
+export type TextField = "request" | "taskOverride" | "finalText" | "error";
+
 export type RunDetail = {
   id: string;
   request: string | null;
+  /** get_run's taskOverride: the task a trigger or lead gave the run. */
+  task: string | null;
+  /**
+   * Fields get_run sent only the first page of (its <field>More): where the rest starts and the whole
+   * length. Empty from an older server, which sends every field whole.
+   */
+  more: Partial<Record<TextField, { next: number; total: number }>>;
   finalText: string | null;
   error: string | null;
   failureCategory: string | null;

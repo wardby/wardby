@@ -332,6 +332,7 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
       "mcp__wardby-prod__get_run",
       "mcp__wardby-prod__get_run_transcript",
       "mcp__wardby-prod__get_run_steps",
+      "mcp__wardby-prod__get_run_text",
     ]);
     const bad = fakeDeps({ hasServer: true });
     expect(await claudePluginCommand(["install", "--server-name", "x y"], bad.deps)).toBe(1);
@@ -366,16 +367,17 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
     expect(doctor).toMatch(/claude-plugin install --allow-tools/);
 
     await claudePluginCommand(["install", "--allow-tools"], deps);
-    expect(lines).toContain("✓ Allowed mcp__wardby__get_run_steps.");
+    expect(lines).toContain("✓ Allowed mcp__wardby__get_run_steps, mcp__wardby__get_run_text.");
     expect((settings().permissions as { allow: string[] }).allow).toEqual([
       "Bash(git status)",
       ...earlier,
       "mcp__wardby__get_run_steps",
+      "mcp__wardby__get_run_text",
     ]);
     // A third run changes nothing.
     await claudePluginCommand(["install", "--allow-tools"], deps);
     expect(lines).toContain("✓ The pane's tools are already allowed.");
-    expect((settings().permissions as { allow: string[] }).allow).toHaveLength(6);
+    expect((settings().permissions as { allow: string[] }).allow).toHaveLength(7);
 
     await claudePluginCommand(["uninstall"], deps);
     expect((settings().permissions as { allow: string[] }).allow).toEqual(["Bash(git status)"]);
@@ -393,6 +395,23 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
     await claudePluginCommand(["install", "--allow-tools"], deps);
     await claudePluginCommand(["uninstall"], deps);
     expect((settings().permissions as { allow: string[] }).allow).toEqual(["mcp__wardby__get_run_steps"]);
+  });
+
+  it("an install from before run text paging gains only the get_run_text rule", async () => {
+    const earlier = PANE_TOOLS.filter((rule) => rule !== "mcp__wardby__get_run_text");
+    expect(PANE_TOOLS).toContain("mcp__wardby__get_run_text");
+    expect(PANE_TOOLS).not.toContain("mcp__wardby__get_run_packages");
+    const { deps, lines, settings, wardbyDir, configDir } = fakeDeps({
+      hasServer: true,
+      settings: { permissions: { allow: earlier } },
+    });
+    writeFileSync(
+      join(wardbyDir, "claude-plugin.json"),
+      JSON.stringify({ settingsPath: join(configDir, "settings.json"), rules: earlier, tui: false }),
+    );
+    await claudePluginCommand(["install", "--allow-tools"], deps);
+    expect(lines).toContain("✓ Allowed mcp__wardby__get_run_text.");
+    expect((settings().permissions as { allow: string[] }).allow).toEqual([...earlier, "mcp__wardby__get_run_text"]);
   });
 
   it("quickstart offers the pane only once Claude Code is connected, and honours its flags", async () => {

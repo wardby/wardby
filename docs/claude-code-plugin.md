@@ -8,8 +8,9 @@ finished Claude Code run in your own terminal.
 The plugin lives in this repository under `plugins/claude-code/`, and the
 repository is its marketplace (`.claude-plugin/marketplace.json`). It talks only
 to the wardby MCP server your Claude Code session already has, through
-`list_runs`, `list_agents`, `get_run`, `get_run_steps` and `get_run_transcript`,
-so it shows exactly what those tools show you and needs no token of its own.
+`list_runs`, `list_agents`, `get_run`, `get_run_steps`, `get_run_text` and
+`get_run_transcript`, so it shows exactly what those tools show you and needs no
+token of its own.
 
 Against a server older than 0.8.0, which can't list runs across agents, the pane
 lists each agent's latest runs one agent at a time and shows a notice at the top
@@ -101,16 +102,17 @@ The pane reads only, with the caller's own access:
 | Agent names, budgets | `list_agents`        | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
 | Run detail           | `get_run`            | `agents:read` | Runs you started, or of agents you own                                         |
 | Recent steps, Steps  | `get_run_steps`      | `agents:read` | Same as `get_run`                                                              |
+| Show full text, Copy | `get_run_text`       | `agents:read` | Same as `get_run`                                                              |
 | Continue locally     | `get_run_transcript` | `agents:read` | Same as `get_run`                                                              |
 
 Under Claude Code's auto mode, a plugin's MCP calls go through the same safety
 check as any other, and calls the pane makes on its own timer are refused
 unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
-`mcp__wardby__get_run`, `mcp__wardby__get_run_transcript` and
-`mcp__wardby__get_run_steps`. The pane never calls `stop_run` or any other tool
-that changes something. When a call is refused, the pane says which rules to
-add.
+`mcp__wardby__get_run`, `mcp__wardby__get_run_transcript`,
+`mcp__wardby__get_run_steps` and `mcp__wardby__get_run_text`. The pane never
+calls `stop_run` or any other tool that changes something. When a call is
+refused, the pane says which rules to add.
 
 Plugins are not sandboxed: they run as you. **Continue locally** runs
 `npx @wardby/cli@latest resume - --print` in the folder you give it, passing the
@@ -139,10 +141,13 @@ or logged. The import writes only under `~/.wardby/` and the new worktree.
   Each kind of card has its own colour, the same on every run: a thin bar
   along its top on the desktop, its rounded border in the terminal.
   The request and final answer show about three lines, as markdown, then how
-  many more; **Show full text** shows all of it. The pull request link and the
-  other actions sit at the bottom.
+  many more; **Show full text** shows all of it. `get_run` sends a field longer
+  than 8,000 characters (a request, task, final answer or error) as its first
+  8,000; **Show full text** reads the rest with `get_run_text`, a piece at a
+  time. The pull request link and the other actions sit at the bottom.
 - **Copy**: on the desktop, each card (and an error, and an open step's detail)
-  has a **Copy** button that copies its full text as the server sent it. In the
+  has a **Copy** button that copies its full text as the server sent it,
+  reading the rest of a long request, task, final answer or error first. In the
   terminal, **Copy section** (`y`) copies the open step's detail; **Copy run
   id** is on both.
 - **Recent steps** (a running run's detail): its last 8 steps, refreshed with
@@ -174,6 +179,11 @@ before run steps, run `wardby claude-plugin install` again (or allow
 `mcp__wardby__get_run_steps` in `/permissions`): under auto mode the pane
 otherwise shows which rule to add in place of the steps. `wardby claude-plugin
 status` and `wardby doctor` name the missing rule.
+
+Against a server without `get_run_text`, every field arrives whole, so there is
+nothing to read. If auto mode refuses `get_run_text`, the pane keeps the first
+8,000 characters it has and a toast names the rule to allow; run `wardby
+claude-plugin install --allow-tools` again to add it.
 
 The pane refreshes every 10 seconds while a run is active and every 60 seconds
 otherwise (the plugin's **pollSeconds** and **idleSeconds** options), asks only
