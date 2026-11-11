@@ -265,6 +265,102 @@ describe("discoverOAuth", () => {
     expect(await failureCode(discoverOAuth(`${s.origin}/mcp`, options))).toBe("bad_response");
   });
 
+  const prmOk = (origin: string): Record<string, unknown> => ({
+    resource: `${origin}/mcp`,
+    authorization_servers: [origin],
+  });
+
+  it.each([401, 403, 405, 410])("moves on to the root path when the suffixed one answers %i", async (status) => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") return json(res, { e: 1 }, status);
+        if (req.url === "/.well-known/oauth-protected-resource") return json(res, prmOk(origin));
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect((await discoverOAuth(`${s.origin}/mcp`, options)).tokenEndpoint).toBe(`${s.origin}/token`);
+  });
+
+  it("moves on when an authorization-server candidate answers 403", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") return json(res, prmOk(origin));
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, {}, 403);
+        if (req.url === "/.well-known/openid-configuration") return json(res, asMeta(origin));
+      }),
+    );
+    await expect(discoverOAuth(`${s.origin}/mcp`, options)).resolves.toMatchObject({ issuer: s.origin });
+  });
+
+  it("gives provider_unavailable when a well-known path answers 5xx", async () => {
+    const s = await track(
+      inline((req, res) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") return json(res, {}, 503);
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/mcp`, options))).toBe("provider_unavailable");
+  });
+
+  it("ignores a large HTML 404 at the suffixed path", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") {
+          res.writeHead(404, { "content-type": "text/html" }).end("<html>" + "x".repeat(100 * 1024) + "</html>");
+          return true;
+        }
+        if (req.url === "/.well-known/oauth-protected-resource") return json(res, prmOk(origin));
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    await expect(discoverOAuth(`${s.origin}/mcp`, options)).resolves.toMatchObject({ issuer: s.origin });
+  });
+
+  it("still discovers when the probe answers with a redirect", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.method === "POST") {
+          res.writeHead(307, { location: `${origin}/elsewhere` }).end();
+          return true;
+        }
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") return json(res, prmOk(origin));
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    await expect(discoverOAuth(`${s.origin}/mcp`, options)).resolves.toMatchObject({ issuer: s.origin });
+  });
+
+  it("still discovers when the probe answers 200 text/event-stream", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.method === "POST") {
+          res.writeHead(200, { "content-type": "text/event-stream" }).end("data: {}\n\n");
+          return true;
+        }
+        if (req.url === "/.well-known/oauth-protected-resource/mcp") return json(res, prmOk(origin));
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    await expect(discoverOAuth(`${s.origin}/mcp`, options)).resolves.toMatchObject({ issuer: s.origin });
+  });
+
+  it("returns the server's canonical resource and sends the package version in the probe", async () => {
+    let probeBody = "";
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.method === "POST") {
+          req.on("data", (c: Buffer) => (probeBody += c.toString()));
+          return json(res, {});
+        }
+        if (req.url === "/.well-known/oauth-protected-resource/mcp")
+          return json(res, { resource: `${origin}/mcp/`, authorization_servers: [origin] });
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    const m = await discoverOAuth(`${s.origin}/mcp`, options);
+    expect(m.resource).toBe(`${s.origin}/mcp/`);
+    expect(probeBody).toContain(`"version":"${packageVersion()}"`);
+  });
+
   it("treats a redirect as bad_response", async () => {
     const s = await track(
       inline((req, res, origin) => {

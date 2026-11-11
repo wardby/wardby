@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { SafeFetchOptions } from "../../sandbox/safe-fetch.js";
 import type { safeFetch } from "../../sandbox/safe-fetch.js";
+import { packageVersion } from "../../package-version.js";
 import { isAllowedEndpoint, oauthFetch, OAuthProtocolError } from "./http.js";
 
 export interface OAuthMetadata {
@@ -65,13 +66,14 @@ function wellKnown(base: string, suffix: string, appendPath: boolean): string {
 
 type Fetch = (url: string, init: { method: "GET" }) => ReturnType<typeof oauthFetch>;
 
-/** First candidate that answers 200; a 404 moves on, anything else fails. */
+/** First candidate that answers 200; any 4xx moves on, a 5xx is a provider outage, anything else fails. */
 async function firstDocument(candidates: string[], get: Fetch, options?: SafeFetchOptions): Promise<unknown> {
   for (const url of candidates) {
     if (!isAllowedEndpoint(url, options)) fail();
     const r = await get(url, { method: "GET" });
     if (r.status === 200) return r.json;
-    if (r.status !== 404) fail();
+    if (r.status >= 500) throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
+    if (r.status < 400 || r.status >= 500) fail();
   }
   return fail();
 }
@@ -85,26 +87,33 @@ export async function discoverOAuth(
   const get: Fetch = (url, init) => oauthFetch(url, init, options, fetchImpl);
 
   // 1. Ask the resource itself; a 401 challenge may name its metadata document.
-  const probe = await oauthFetch(
-    resource,
-    {
-      method: "POST",
-      accept: "application/json, text/event-stream",
-      json: {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "wardby", version: "0.0.0" },
+  let probe: Awaited<ReturnType<typeof oauthFetch>> | undefined;
+  try {
+    probe = await oauthFetch(
+      resource,
+      {
+        method: "POST",
+        ignoreBody: true,
+        accept: "application/json, text/event-stream",
+        json: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "wardby", version: packageVersion() },
+          },
         },
       },
-    },
-    options,
-    fetchImpl,
-  );
-  const challenged = probe.status === 401 ? challengeMetadataUrl(probe.headers["www-authenticate"]) : undefined;
+      options,
+      fetchImpl,
+    );
+  } catch (e) {
+    // A redirect or an unusable answer from the probe only means "no challenge"; an unreachable server is fatal.
+    if (!(e instanceof OAuthProtocolError) || e.code !== "bad_response") throw e;
+  }
+  const challenged = probe?.status === 401 ? challengeMetadataUrl(probe.headers["www-authenticate"]) : undefined;
 
   // 2. Protected-resource metadata (RFC 9728).
   const root = new URL("/.well-known/oauth-protected-resource", resource).href;
@@ -120,9 +129,11 @@ export async function discoverOAuth(
   const as = serverMetadataSchema.safeParse(
     await firstDocument(
       [
-        wellKnown(authServer, "oauth-authorization-server", false),
-        wellKnown(authServer, "openid-configuration", false),
-        wellKnown(authServer, "openid-configuration", true),
+        ...new Set([
+          wellKnown(authServer, "oauth-authorization-server", false),
+          wellKnown(authServer, "openid-configuration", false),
+          wellKnown(authServer, "openid-configuration", true),
+        ]),
       ],
       get,
       options,
@@ -136,7 +147,7 @@ export async function discoverOAuth(
     if (endpoint !== undefined && !isAllowedEndpoint(endpoint, options)) fail();
   }
   return {
-    resource,
+    resource: prm.data.resource,
     issuer: m.issuer,
     authorizationEndpoint: m.authorization_endpoint,
     tokenEndpoint: m.token_endpoint,

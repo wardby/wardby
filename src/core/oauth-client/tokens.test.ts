@@ -90,6 +90,18 @@ describe("registerClient", () => {
     await expect(registerClient(meta(bad.url), REDIRECT, opts)).rejects.toMatchObject({ code: "registration_failed" });
   });
 
+  it("gives provider_unavailable on 5xx, 429 or a network error at the registration endpoint", async () => {
+    for (const status of [503, 429]) {
+      const s = await stub(status, "down");
+      await expect(registerClient(meta(s.url), REDIRECT, opts)).rejects.toMatchObject({
+        code: "provider_unavailable",
+      });
+    }
+    await expect(registerClient(meta("http://127.0.0.1:1"), REDIRECT, opts)).rejects.toMatchObject({
+      code: "provider_unavailable",
+    });
+  });
+
   it("registers against the fake server", async () => {
     fake = await startFakeOAuthServer();
     const m = await discoverOAuth(fake.mcpUrl, opts);
@@ -174,6 +186,29 @@ describe("exchangeCode", () => {
     expect(new URLSearchParams(s.log[0]?.body).has("client_secret")).toBe(false);
   });
 
+  it("accepts a numeric-string expires_in and clamps a huge one to a year", async () => {
+    const now = new Date("2026-01-01T00:00:00Z");
+    const args = [{ clientId: "cid" }, { code: "c", codeVerifier: "v", redirectUri: REDIRECT }] as const;
+    const a = await stub(200, { access_token: "AT", expires_in: "3600" });
+    expect((await exchangeCode(meta(a.url), ...args, opts, undefined, now)).expiresAt).toEqual(
+      new Date(now.getTime() + 3600_000),
+    );
+    const b = await stub(200, { access_token: "AT", expires_in: 1e12 });
+    expect((await exchangeCode(meta(b.url), ...args, opts, undefined, now)).expiresAt).toEqual(
+      new Date(now.getTime() + 31_536_000 * 1000),
+    );
+  });
+
+  it.each([{ expires_in: "soon" }, { expires_in: 0 }, { expires_in: -5 }, { expires_in: "-5" }])(
+    "rejects an unusable expires_in %j as bad_response",
+    async (extra) => {
+      const s = await stub(200, { access_token: "AT", ...extra });
+      await expect(
+        exchangeCode(meta(s.url), { clientId: "cid" }, { code: "c", codeVerifier: "v", redirectUri: REDIRECT }, opts),
+      ).rejects.toMatchObject({ code: "bad_response" });
+    },
+  );
+
   it("rejects a response without an access token as bad_response", async () => {
     const s = await stub(200, { token_type: "Bearer" });
     await expect(
@@ -254,6 +289,36 @@ describe("refreshTokens", () => {
     });
     await expect(refreshTokens(meta("http://127.0.0.1:1"), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
       code: "provider_unavailable",
+    });
+  });
+
+  it("treats 429 as provider_unavailable, on refresh and on revoke", async () => {
+    const s = await stub(429, { error: "slow_down" });
+    await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
+      code: "provider_unavailable",
+    });
+    await expect(
+      revokeToken({ revocationEndpoint: `${s.url}/revoke` }, { clientId: "c" }, "t", "refresh_token", opts),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
+  });
+
+  it("treats a 401 or 403 without an invalid_client error as bad_response", async () => {
+    for (const [status, reply] of [
+      [401, { error: "unauthorized" }],
+      [401, "<html>nope</html>"],
+      [403, {}],
+    ] as const) {
+      const s = await stub(status, reply);
+      await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
+        code: "bad_response",
+      });
+    }
+  });
+
+  it("maps a 400 invalid_client to invalid_client", async () => {
+    const s = await stub(400, { error: "invalid_client" });
+    await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
+      code: "invalid_client",
     });
   });
 

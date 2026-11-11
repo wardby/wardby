@@ -17,12 +17,19 @@ export interface OAuthTokens {
 
 type Fetch = typeof safeFetch;
 
+const MAX_EXPIRES_IN_SECONDS = 31_536_000;
+
+const retryable = (status: number): boolean => status >= 500 || status === 429;
+
 const registrationSchema = z.object({ client_id: z.string().min(1), client_secret: z.string().min(1).optional() });
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),
   refresh_token: z.string().min(1).optional(),
-  expires_in: z.number().finite().positive().optional(),
+  expires_in: z.preprocess(
+    (v) => (typeof v === "string" && /^\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v),
+    z.number().finite().positive().optional(),
+  ),
   scope: z.string().optional(),
 });
 
@@ -54,8 +61,12 @@ export async function registerClient(
       options,
       fetchImpl,
     );
-  } catch {
+  } catch (e) {
+    if (e instanceof OAuthProtocolError && e.code === "provider_unavailable") throw e;
     return fail();
+  }
+  if (retryable(r.status)) {
+    throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
   }
   if (r.status < 200 || r.status >= 300) fail();
   const parsed = registrationSchema.safeParse(r.json);
@@ -95,13 +106,13 @@ async function tokenRequest(
   now: Date,
 ): Promise<OAuthTokens> {
   const r = await oauthFetch(endpoint, { method: "POST", form }, options, fetchImpl);
-  if (r.status >= 500) {
+  if (retryable(r.status)) {
     throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
   }
   if (r.status < 200 || r.status >= 300) {
     // Only the short `error` code is read; the description is never used in a message.
     const code = (r.json as { error?: unknown } | undefined)?.error;
-    if (r.status === 401 || code === "invalid_client") {
+    if (code === "invalid_client") {
       throw new OAuthProtocolError("invalid_client", "The OAuth provider rejected the client.");
     }
     if (code === "invalid_grant") throw new OAuthProtocolError("invalid_grant", refusal);
@@ -115,7 +126,10 @@ async function tokenRequest(
   return {
     accessToken: d.access_token,
     ...(d.refresh_token ? { refreshToken: d.refresh_token } : {}),
-    expiresAt: d.expires_in !== undefined ? new Date(now.getTime() + d.expires_in * 1000) : null,
+    expiresAt:
+      d.expires_in !== undefined
+        ? new Date(now.getTime() + Math.min(d.expires_in, MAX_EXPIRES_IN_SECONDS) * 1000)
+        : null,
     ...(d.scope ? { scope: d.scope } : {}),
   };
 }
@@ -179,7 +193,7 @@ export async function revokeToken(
     options,
     fetchImpl,
   );
-  if (r.status >= 500) throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
+  if (retryable(r.status)) throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
   if (r.status < 200 || r.status >= 300) {
     throw new OAuthProtocolError("bad_response", "The OAuth provider refused the revocation request.");
   }

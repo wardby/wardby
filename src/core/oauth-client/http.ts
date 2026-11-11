@@ -27,14 +27,18 @@ export interface OAuthFetchInit {
   form?: Record<string, string>;
   json?: unknown;
   accept?: string;
-  /** Skip JSON parsing of the body (RFC 7009 revocation); the size cap still applies. */
+  /** Do not read the body at all (RFC 7009 revocation, the discovery probe): no parsing and no size cap. */
   ignoreBody?: boolean;
 }
 
 export interface OAuthFetchResult {
   status: number;
   headers: Record<string, string>;
-  /** Parsed body; undefined when the body is empty, or is not JSON on a non-2xx response. */
+  /**
+   * Parsed body. Undefined when the body is empty, when `ignoreBody` is set, or on a non-2xx
+   * response whose body is oversized or not JSON. The 64 KiB cap and the JSON requirement are
+   * enforced only on a 2xx body that is actually used.
+   */
   json: unknown;
 }
 
@@ -90,13 +94,14 @@ export async function oauthFetch(
   if (response.status >= 300 && response.status < 400) {
     throw new OAuthProtocolError("bad_response", "The OAuth provider answered with a redirect.");
   }
+  if (init.ignoreBody) return { status: response.status, headers: response.headers, json: undefined };
+  const ok = response.status >= 200 && response.status < 300;
   const raw = Buffer.from(response.bodyBase64, "base64");
-  if (raw.length > OAUTH_MAX_BODY_BYTES) {
+  if (raw.length > OAUTH_MAX_BODY_BYTES && ok) {
     throw new OAuthProtocolError("bad_response", "The OAuth provider response is too large.");
   }
-  const ok = response.status >= 200 && response.status < 300;
   let json: unknown;
-  if (raw.length > 0 && !init.ignoreBody) {
+  if (raw.length > 0 && raw.length <= OAUTH_MAX_BODY_BYTES) {
     try {
       json = JSON.parse(raw.toString("utf8"));
     } catch {
