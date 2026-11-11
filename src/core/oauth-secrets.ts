@@ -34,6 +34,7 @@ import {
   exchangeCode,
   refreshTokens,
   registerClient,
+  revokeToken,
   type OAuthClient,
   type OAuthTokens,
 } from "./oauth-client/tokens.js";
@@ -705,4 +706,44 @@ export function storedSecretRedactionValues(plaintext: string, oauth: unknown): 
   if (!parsed.success) return [plaintext];
   const p = parsed.data;
   return [p.accessToken, p.refreshToken, p.clientSecret].filter((v): v is string => v !== undefined);
+}
+
+/**
+ * Best effort: asks the provider to revoke an OAuth secret's tokens (the refresh token first, then
+ * the access token) before the secret is deleted. It never throws and never logs a token, an error
+ * or its message: only `{ secretId, reason }` with a fixed reason. Nothing is sent without a
+ * revocation endpoint.
+ */
+export async function revokeOAuthSecretTokens(input: {
+  secretId: string;
+  ciphertext: string;
+  oauth: unknown;
+  cipher: Pick<SecretCipher, "decrypt">;
+  options?: SafeFetchOptions;
+  fetchImpl?: typeof safeFetch;
+}): Promise<void> {
+  const meta = OAuthSecretMetaSchema.safeParse(input.oauth);
+  if (!meta.success || !meta.data.revocationEndpoint) return;
+  let payload: OAuthSecretPayload;
+  try {
+    payload = await storedPayload(input.cipher, input.ciphertext);
+  } catch {
+    log.warn({ secretId: input.secretId, reason: "cipher_failed" }, "OAuth secret not revoked at the provider");
+    return;
+  }
+  const client: OAuthClient = {
+    clientId: meta.data.clientId,
+    ...(payload.clientSecret !== undefined ? { clientSecret: payload.clientSecret } : {}),
+    ...(meta.data.authMethod ? { authMethod: meta.data.authMethod } : {}),
+  };
+  const tokens: [string, "refresh_token" | "access_token"][] = [];
+  if (payload.refreshToken !== undefined) tokens.push([payload.refreshToken, "refresh_token"]);
+  tokens.push([payload.accessToken, "access_token"]);
+  for (const [token, hint] of tokens) {
+    try {
+      await revokeToken(meta.data, client, token, hint, input.options, input.fetchImpl);
+    } catch {
+      log.warn({ secretId: input.secretId, reason: "revoke_failed" }, "OAuth secret not revoked at the provider");
+    }
+  }
 }

@@ -403,6 +403,65 @@ describe("secrets tools", () => {
     await client.close();
   });
 
+  it("delete_secret on an OAuth secret an MCP server uses gives 409 and revokes nothing", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const cipher = fakeCipher();
+    let fetched = 0;
+    const mcp = buildMcpServer({
+      providers: {
+        secrets: cipher,
+        sandboxFetch: (async () => {
+          fetched++;
+          throw new Error("no");
+        }) as never,
+      } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
+    const client = await connectClient(mcp);
+    const row = await db.secret.create({
+      data: {
+        name: "OAUTH_KEY",
+        ciphertext: JSON.stringify({ accessToken: "fake-access", refreshToken: "fake-refresh" }),
+        keyId: "k",
+        ownerId: "p1",
+        oauth: {
+          resource: "https://oauth.fake.test/mcp",
+          issuer: "https://oauth.fake.test",
+          authorizationEndpoint: "https://oauth.fake.test/a",
+          tokenEndpoint: "https://oauth.fake.test/t",
+          revocationEndpoint: "https://oauth.fake.test/revoke",
+          clientId: "client-id-xyz",
+          expiresAt: null,
+          status: "connected",
+          connectedAt: "2026-01-01T00:00:00.000Z",
+        },
+      } as never,
+    });
+    (db as unknown as { mcpServerRows: { name: string; secretNames: string[] }[] }).mcpServerRows.push({
+      name: "bs",
+      secretNames: ["OAUTH_KEY"],
+    });
+    const refused = await client.callTool({ name: "delete_secret", arguments: { id: row.id } });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toContain("is used by MCP server(s) bs");
+    expect(fetched).toBe(0);
+
+    const listed = parseText((await client.callTool({ name: "list_secrets", arguments: {} })) as never) as Record<
+      string,
+      unknown
+    >[];
+    expect(listed[0]).toMatchObject({ kind: "oauth", oauth: { status: "connected" } });
+    expect(JSON.stringify(listed)).not.toContain("client-id-xyz");
+    expect(JSON.stringify(listed)).not.toContain("fake-access");
+    await client.close();
+  });
+
   it("delete_secret refuses a secret an MCP server uses", async () => {
     const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
     const cipher = fakeCipher();

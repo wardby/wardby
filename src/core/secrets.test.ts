@@ -67,10 +67,14 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
       },
       findMany: async ({ where }: { where: { ownerId: string } }) =>
         [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
-      findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
-        [...secrets.values()].find(
-          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
-        ) ?? null,
+      findUnique: async ({ where }: { where: { id?: string; ownerId_name?: { ownerId: string; name: string } } }) => {
+        if (where.id !== undefined) return secrets.get(where.id) ?? null;
+        return (
+          [...secrets.values()].find(
+            (s) => s.ownerId === where.ownerId_name!.ownerId && s.name === where.ownerId_name!.name,
+          ) ?? null
+        );
+      },
       upsert: async ({
         where,
         create,

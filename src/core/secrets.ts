@@ -13,6 +13,9 @@ import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
 import {
   currentOAuthPayload,
   OAuthSecretFlowError,
+  OAuthSecretMetaSchema,
+  revokeOAuthSecretTokens,
+  SECRET_OAUTH_MANAGED,
   SECRET_OAUTH_REFRESH_FAILED,
   storedSecretRedactionValues,
   type OAuthResolveOptions,
@@ -28,6 +31,15 @@ import {
 export type BrokerChangeVia = "mcp" | "browser";
 export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | "createdAt" | "updatedAt"> & {
   broker: SecretBrokerConfig | null;
+  kind: "value" | "oauth";
+  /** An OAuth secret only; never a client id, issuer, endpoint or token. */
+  oauth?: {
+    resource: string;
+    status: "connected" | "reauth_required";
+    expiresAt: string | null;
+    connectedAt: string;
+    reauthReason?: string;
+  };
 };
 export interface SecretEntry {
   value: string;
@@ -109,6 +121,11 @@ export async function createSecret(
 ): Promise<Secret> {
   boundedString(name, 1024);
   boundedString(value, 65_536);
+  const named = await db.secret.findUnique({
+    where: { ownerId_name: { ownerId, name } },
+    select: { oauth: true },
+  });
+  if (named?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
   if (value.length < MIN_WEBHOOK_SECRET_LENGTH) {
     const current = await db.secret.findUnique({ where: { ownerId_name: { ownerId, name } }, select: { id: true } });
     if (current && (await db.hostProvider.count({ where: { webhookSecretId: current.id } })) > 0) {
@@ -134,6 +151,7 @@ export async function createSecret(
   }
   return db.$transaction(async (tx) => {
     const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
+    if (existing?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
     const before = existing ? brokerOf(existing) : null;
     const secret = await tx.secret.upsert({
       where: { ownerId_name: { ownerId, name } },
@@ -182,6 +200,7 @@ export async function setSecretBroker(
       where: { ownerId_name: { ownerId: input.ownerId, name: input.name } },
     });
     if (!secret) throw new Error(`secret_not_found: no secret named "${input.name}"`);
+    if (secret.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
     const before = brokerOf(secret);
     if (input.expectedBrokerHash !== undefined && (!before || brokerConfigHash(before) !== input.expectedBrokerHash)) {
       throw new Error(SECRET_BROKER_CHANGED);
@@ -215,7 +234,28 @@ export async function listSecrets(ownerId: string, db: PrismaClient): Promise<Se
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     broker: brokerOf(s),
+    ...oauthListing(s.oauth),
   }));
+}
+
+/** What a listing says about a secret's kind: an OAuth secret's status and expiry, nothing else of it. */
+function oauthListing(oauth: unknown): Pick<SecretMetadata, "kind" | "oauth"> {
+  if (oauth === null || oauth === undefined) return { kind: "value" };
+  const meta = OAuthSecretMetaSchema.safeParse(oauth);
+  if (!meta.success) {
+    return { kind: "oauth", oauth: { resource: "", status: "reauth_required", expiresAt: null, connectedAt: "" } };
+  }
+  const m = meta.data;
+  return {
+    kind: "oauth",
+    oauth: {
+      resource: m.resource,
+      status: m.status,
+      expiresAt: m.expiresAt,
+      connectedAt: m.connectedAt,
+      ...(m.reauthReason ? { reauthReason: m.reauthReason } : {}),
+    },
+  };
 }
 
 async function findOwnedSecretByName(db: PrismaClient, ownerId: string, name: string): Promise<Secret | null> {
@@ -253,8 +293,57 @@ export async function detachSecret(agentId: string, name: string, db: PrismaClie
   return bySecretName.count;
 }
 
-export async function deleteSecret(secretId: string, db: PrismaClient): Promise<void> {
-  await db.secret.delete({ where: { id: secretId } });
+export interface DeleteSecretOptions {
+  /** Decrypts an OAuth secret's tokens for revocation. Without it nothing is revoked. */
+  cipher?: Pick<SecretCipher, "decrypt">;
+  /** The fetch policy the MCP server path uses. */
+  options?: SafeFetchOptions;
+  fetchImpl?: typeof safeFetch;
+  /** Who disconnected it, for the audit row; defaults to the owner. */
+  actorId?: string;
+}
+
+/**
+ * Deletes a secret. An OAuth secret is first revoked at its provider (best effort: any failure is
+ * logged with a fixed reason and the delete goes on), and its disconnect is audited in the same
+ * transaction as the delete.
+ */
+export async function deleteSecret(
+  secretId: string,
+  db: PrismaClient,
+  options: DeleteSecretOptions = {},
+): Promise<void> {
+  const row = await db.secret.findUnique({ where: { id: secretId } });
+  if (!row || row.oauth == null) {
+    await db.secret.delete({ where: { id: secretId } });
+    return;
+  }
+  if (options.cipher) {
+    await revokeOAuthSecretTokens({
+      secretId,
+      ciphertext: row.ciphertext,
+      oauth: row.oauth,
+      cipher: options.cipher,
+      options: options.options,
+      fetchImpl: options.fetchImpl,
+    });
+  }
+  const status = OAuthSecretMetaSchema.safeParse(row.oauth);
+  const broker = brokerOf(row);
+  await db.$transaction(async (tx) => {
+    await tx.secretBrokerChange.create({
+      data: {
+        secretId,
+        ownerId: row.ownerId ?? "",
+        secretName: row.name,
+        actorId: options.actorId ?? row.ownerId ?? "",
+        before: { ...(broker ?? {}), oauthStatus: status.success ? status.data.status : "unknown" },
+        after: Prisma.JsonNull,
+        via: "mcp",
+      },
+    });
+    await tx.secret.delete({ where: { id: secretId } });
+  });
 }
 
 /**

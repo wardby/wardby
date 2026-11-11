@@ -47,6 +47,7 @@ function parseBrokerArg(input: unknown): SecretBrokerConfig {
 function mapSecretError(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);
   if (message.startsWith("secret_not_found")) throw new McpError(404, message);
+  if (message.startsWith("secret_oauth_managed")) throw new McpError(409, message);
   if (
     message.startsWith("secret_broker_config_invalid") ||
     message.startsWith("secret_broker_value_invalid") ||
@@ -392,7 +393,11 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           `Secret "${secret!.name}" is used by MCP server(s) ${servers.join(", ")}; update or delete them first.`,
         );
       }
-      await deleteSecret(args.id, ctx.db);
+      await deleteSecret(args.id, ctx.db, {
+        cipher: ctx.providers.secrets,
+        fetchImpl: ctx.providers.sandboxFetch,
+        actorId: ctx.principal.id,
+      });
       return textResult({ deleted: args.id });
     },
   });

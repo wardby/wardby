@@ -22,6 +22,9 @@ import {
 import { loadServerSecrets, redactForServer } from "./mcp-servers.js";
 import { handleMcpTool, loadMcpToolPins, mcpNamedSecretValues, SHARED_CREDENTIALS_MESSAGE } from "./mcp-tools.js";
 import { loadAgentSecretValues } from "./secret-guard.js";
+import { fulfillSecretElicitation } from "../mcp/tools/secret-elicitation.js";
+import { createSecret, deleteSecret, listSecrets, setSecretBroker } from "./secrets.js";
+import { SECRET_OAUTH_MANAGED } from "./oauth-secrets.js";
 import { readRedactionValues } from "./runner.js";
 import { withEscapedForms } from "./secret-spans.js";
 import { buildSecretsAccessor, decryptEntry } from "./secrets.js";
@@ -994,6 +997,132 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(mcp.seen.filter((s) => s.method === "initialize")).toHaveLength(2);
       expect(mcp.seen.filter((s) => s.method === "tools/call")).toEqual([]);
       expect(metaOf((await row(ownerId, "midcall")).oauth)).toMatchObject({ reauthReason: "expired" });
+    });
+  });
+
+  describe("guards, listing and revoking on delete", () => {
+    async function connectedSecret(name: string, fetchImpl?: typeof safeFetch) {
+      const ownerId = await owner();
+      const { outcome } = await connect(ownerId, name, { fetchImpl });
+      if (outcome.kind !== "confirm") throw new Error("unreachable");
+      await confirmCode(ownerId, name, outcome.code);
+      const row = await db.secret.findUniqueOrThrow({ where: { ownerId_name: { ownerId, name } } });
+      const payload = JSON.parse(await cipher.decrypt(row.ciphertext)) as { accessToken: string; refreshToken: string };
+      logged.mockClear();
+      return { ownerId, row, payload };
+    }
+    const logText = () => JSON.stringify(logged.mock.calls);
+
+    it("refuses a typed value and a broker change on an OAuth secret", async () => {
+      const { ownerId, row } = await connectedSecret("guarded");
+      await expect(createSecret("guarded", "typed-by-hand-value", ownerId, cipher, db)).rejects.toThrow(
+        SECRET_OAUTH_MANAGED,
+      );
+      await expect(
+        setSecretBroker(db, cipher, {
+          ownerId,
+          name: "guarded",
+          broker: null,
+          actorId: ownerId,
+          via: "mcp",
+        }),
+      ).rejects.toThrow(SECRET_OAUTH_MANAGED);
+      const after = await db.secret.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.ciphertext).toBe(row.ciphertext);
+      expect(after.broker).toEqual(row.broker);
+    });
+
+    it("refuses the browser form's value for an OAuth secret's name", async () => {
+      const { ownerId, row } = await connectedSecret("formguard");
+      const out = await fulfillSecretElicitation(
+        { ownerId, secretName: "formguard", kind: "create" },
+        "typed-in-the-form-value",
+        cipher,
+        db,
+      );
+      expect(out).toMatchObject({ ok: false, error: SECRET_OAUTH_MANAGED });
+      const after = await db.secret.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.ciphertext).toBe(row.ciphertext);
+      await db.secretElicitationOutcome.deleteMany({ where: { ownerId } });
+    });
+
+    it("lists kind oauth with status and expiry, and kind value for the rest, with no value or client id", async () => {
+      const { ownerId, payload } = await connectedSecret("listed");
+      await createSecret("plain-one", "plain-fake-value-123456", ownerId, cipher, db);
+      const list = await listSecrets(ownerId, db);
+      const oauth = list.find((s) => s.name === "listed")!;
+      expect(oauth.kind).toBe("oauth");
+      expect(oauth.oauth).toEqual({
+        resource: fake.mcpUrl,
+        status: "connected",
+        expiresAt: expect.stringMatching(/^\d{4}-/),
+        connectedAt: expect.stringMatching(/^\d{4}-/),
+      });
+      expect(list.find((s) => s.name === "plain-one")!.kind).toBe("value");
+      const text = JSON.stringify(list);
+      for (const v of [
+        payload.accessToken,
+        payload.refreshToken,
+        "ciphertext",
+        "clientId",
+        "fake-client-",
+        "tokenEndpoint",
+      ]) {
+        expect(text).not.toContain(v);
+      }
+    });
+
+    it("revokes the refresh token, then the access token, then deletes and audits", async () => {
+      const { ownerId, row, payload } = await connectedSecret("revoked");
+      const rec = recordingFetch();
+      await deleteSecret(row.id, db, { cipher, fetchImpl: rec.impl, options: OPTS, actorId: ownerId });
+      const revokes = rec.requests.filter((r) => r.url.endsWith("/revoke"));
+      expect(revokes).toHaveLength(2);
+      expect(revokes[0].body).toContain(`token=${payload.refreshToken}`);
+      expect(revokes[1].body).toContain(`token=${payload.accessToken}`);
+      expect(fake.revoked.has(payload.refreshToken)).toBe(true);
+      expect(await db.secret.findUnique({ where: { id: row.id } })).toBeNull();
+      const all = await db.secretBrokerChange.findMany({ where: { secretId: row.id }, orderBy: { createdAt: "asc" } });
+      expect(all).toHaveLength(2); // the connect, then the disconnect
+      const audit = all.slice(1);
+      expect(audit[0]).toMatchObject({ after: null, via: "mcp", actorId: ownerId });
+      expect(audit[0].before).toMatchObject({ oauthStatus: "connected" });
+      expect(JSON.stringify(audit)).not.toContain(payload.accessToken);
+    });
+
+    it("still deletes when the provider answers 5xx, logging no token", async () => {
+      const { ownerId, row, payload } = await connectedSecret("revoke5xx");
+      const failing: typeof safeFetch = async (url, init, options) =>
+        url.endsWith("/revoke")
+          ? {
+              ok: false,
+              status: 503,
+              statusText: "Service Unavailable",
+              url,
+              headers: {},
+              bodyBase64: Buffer.from(`oops ${payload.refreshToken}`).toString("base64"),
+            }
+          : safeFetch(url, init, options);
+      await deleteSecret(row.id, db, { cipher, fetchImpl: failing, options: OPTS, actorId: ownerId });
+      expect(await db.secret.findUnique({ where: { id: row.id } })).toBeNull();
+      expect(logged).toHaveBeenCalled();
+      expect(logText()).not.toContain(payload.refreshToken);
+      expect(logText()).not.toContain(payload.accessToken);
+      expect(logText()).toContain(row.id);
+    });
+
+    it("still deletes when the cipher fails, logging cipher_failed", async () => {
+      const { ownerId, row } = await connectedSecret("revokecipher");
+      const broken = {
+        ...cipher,
+        decrypt: async () => {
+          throw new Error("kms said sk-secret-detail");
+        },
+      };
+      await deleteSecret(row.id, db, { cipher: broken, options: OPTS, actorId: ownerId });
+      expect(await db.secret.findUnique({ where: { id: row.id } })).toBeNull();
+      expect(logText()).toContain("cipher_failed");
+      expect(logText()).not.toContain("sk-secret-detail");
     });
   });
 });

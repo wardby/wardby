@@ -168,6 +168,7 @@ export async function fulfillSecretElicitation(
         ownerId: secret.ownerId,
         createdAt: secret.createdAt,
         updatedAt: secret.updatedAt,
+        kind: "value", // createSecret refuses an OAuth secret
         // A rotation without a broker keeps the stored config, so report what was saved.
         broker: secret.broker === null || secret.broker === undefined ? null : parseSecretBrokerConfig(secret.broker),
       },
