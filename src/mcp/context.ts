@@ -16,7 +16,7 @@ import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
 import type { Power } from "../core/power.js";
 import type { ChatProviderRegistry } from "../providers/chat/types.js";
-import type { safeFetch } from "../sandbox/safe-fetch.js";
+import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
 
 export type McpProviders = Pick<
   ProviderRegistry,
@@ -39,6 +39,8 @@ export type McpProviders = Pick<
   power?: Power;
   /** Overrides the outbound call to remote MCP servers (register/update/refresh_mcp_server) — tests only. */
   sandboxFetch?: typeof safeFetch;
+  /** The fetch policy for OAuth secret sign-in (create_secret with oauth); absent in production, tests allow-list their fake. */
+  sandboxFetchOptions?: SafeFetchOptions;
   /** Records runs' steps; also what the run-steps listener writes through. */
   runSteps?: RunStepSink;
 };
