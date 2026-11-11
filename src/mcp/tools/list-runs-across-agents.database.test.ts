@@ -472,4 +472,62 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     }
     await mcp.close();
   });
+
+  it("query finds runs by id, agent name, status, trigger, repository or branch, at any date, but never by task text", async () => {
+    const owner = await principal();
+    const stranger = await principal();
+    const tag = randomUUID().slice(0, 8);
+    const mine = await agent(owner.id, `searchable-${tag}`);
+    const coder = await agent(owner.id, "coder");
+    const theirs = await agent(stranger.id, `searchable-${tag}`);
+    const yearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const byName = await run(mine.id, { startedAt: yearAgo, finishedAt: yearAgo });
+    const byTask = await run(coder.id, { taskOverride: `deploy with fake-key-${tag}` });
+    const coding = await db.run.create({
+      data: {
+        agentId: coder.id,
+        status: "budget_exhausted",
+        trigger: "host_event",
+        codingRun: {
+          create: {
+            task: `standing ${tag}`,
+            request: `Use fake-key-${tag}`,
+            repository: `your-org/repo-${tag}`,
+            baseRef: "main",
+            headRef: `wardby/branch-${tag}`,
+            provider: "codex",
+            model: "coding-model",
+            timeoutSec: 60,
+            protectedPaths: [],
+            budgetReservedUsd: 0.5,
+          },
+        },
+      },
+    });
+    await run(theirs.id, { triggeredById: stranger.id });
+
+    const mcp = await connect(owner);
+    const ids = async (query: string, args: Record<string, unknown> = {}) =>
+      (await mcp.list({ query, limit: 200, ...args }))
+        .filter((r) => [mine.id, coder.id, theirs.id].includes(r.agentId))
+        .map((r) => r.id);
+    // The agent name, ignoring case and at any date; another owner's agent of the same name stays hidden.
+    expect(await ids(`SEARCHABLE-${tag}`)).toEqual([byName.id]);
+    expect(await ids(byName.id.slice(-10))).toEqual([byName.id]);
+    expect(await ids(`REPO-${tag}`)).toEqual([coding.id]);
+    expect(await ids(`branch-${tag}`)).toEqual([coding.id]);
+    expect(await ids("budget exhausted", { agentId: coder.id })).toEqual([coding.id]);
+    expect(await ids("host_event", { agentId: coder.id })).toEqual([coding.id]);
+    // Task and request texts can hold secret values: never searched.
+    expect(await ids(`fake-key-${tag}`)).toEqual([]);
+    expect(await ids(`standing ${tag}`)).toEqual([]);
+    expect(byTask.id).toBeTruthy();
+    // since still narrows it; a blank query keeps everything.
+    expect(await ids(`searchable-${tag}`, { since: new Date(Date.now() - 60_000).toISOString() })).toEqual([]);
+    expect((await ids("  ")).length).toBe(3);
+    const tooLong = await mcp.raw({ query: "x".repeat(201) });
+    expect(tooLong.isError).toBe(true);
+    await mcp.close();
+    await db.run.deleteMany({ where: { agentId: { in: [mine.id, coder.id, theirs.id] } } });
+  });
 });

@@ -11,7 +11,9 @@ appliesTo: >=0.7.0
 
 Find the run with `list_runs`, read it with `get_run`, then follow what you see.
 Without an `agentId`, `list_runs` lists your runs across every agent (from
-Wardby 0.8.0); add `active: true` or `since` to narrow it.
+Wardby 0.8.0); add `active: true` or `since` to narrow it. From 0.9.7, `query`
+finds runs at any date by run id, agent name, status, trigger, repository or
+branch (not by task text, which can hold secret values).
 
 | What you see                  | What to check                                                                                      |
 | ----------------------------- | -------------------------------------------------------------------------------------------------- |

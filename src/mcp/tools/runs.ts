@@ -1,4 +1,4 @@
-import type { NativeExecutionMode, Prisma, RunStatus } from "#prisma";
+import { RunStatus, RunTrigger, type NativeExecutionMode, type Prisma } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -136,9 +136,50 @@ function withListingTask<T extends { taskOverride: string | null }>(run: T): T &
   };
 }
 
-/** The `active` and `since` filters, as clauses to AND onto the visibility rule. */
-function runFilters(args: { active?: boolean; since?: string }): Prisma.RunWhereInput[] {
+/** The longest `query` list_runs accepts. */
+export const RUN_QUERY_MAX_CHARS = 200;
+
+/** The enum values whose name, or name with spaces for underscores, contains `text` (lower case). */
+function enumValuesMatching<T extends string>(values: readonly T[], text: string): T[] {
+  return values.filter((value) => value.includes(text) || value.replaceAll("_", " ").includes(text));
+}
+
+/**
+ * The `query` filter: text found, ignoring case, in a field that never holds a secret value — the run's
+ * id, its agent's name, its status or trigger, or a coding run's repository or branch. The task and
+ * request texts are not searched: they can hold secret values, which are only masked when read, so a
+ * match there would show what the mask hides.
+ */
+function queryClause(query: string): Prisma.RunWhereInput | null {
+  const text = query.trim();
+  if (text === "") return null;
+  if (text.length > RUN_QUERY_MAX_CHARS) {
+    throw new McpError(400, `query must be at most ${RUN_QUERY_MAX_CHARS} characters`);
+  }
+  const lower = text.toLowerCase();
+  const statuses = enumValuesMatching(Object.values(RunStatus), lower);
+  const triggers = enumValuesMatching(Object.values(RunTrigger), lower);
+  const contains = { contains: text, mode: "insensitive" } as const;
+  return {
+    OR: [
+      { id: contains },
+      { agent: { name: contains } },
+      { codingRun: { repository: contains } },
+      { codingRun: { headRef: contains } },
+      ...(statuses.length > 0 ? [{ status: { in: statuses } }] : []),
+      ...(triggers.length > 0 ? [{ trigger: { in: triggers } }] : []),
+    ],
+  };
+}
+
+/** The `active`, `since` and `query` filters, as clauses to AND onto the visibility rule. */
+function runFilters(args: { active?: boolean; since?: string; query?: string }): Prisma.RunWhereInput[] {
   const filters: Prisma.RunWhereInput[] = [];
+  if (args.query !== undefined) {
+    if (typeof args.query !== "string") throw new McpError(400, "query must be a string");
+    const clause = queryClause(args.query);
+    if (clause) filters.push(clause);
+  }
   if (args.active === true) filters.push({ status: { in: ACTIVE_STATUSES } });
   if (args.since !== undefined) {
     const since = new Date(args.since);
@@ -268,7 +309,9 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       `${ACROSS_AGENTS_TASK_CHARS}) has the rest. Default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, at most ${ACROSS_AGENTS_MAX_LIMIT}. ` +
       "You see all runs of agents you own and only the runs you triggered on others. " +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
-      "plus any still pending or running. all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
+      "plus any still pending or running. query keeps runs whose id, agent name, status, trigger, repository or " +
+      "branch contains the text (case ignored; task and request texts are not searched), over all dates unless since is given. " +
+      "all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
       "Pages are newest first (startedAt, then id): for the next page, pass before: the last row's id, with or without " +
       "agentId; the reply holds only runs after that one, and is empty when before names no run this listing could show. " +
       "Use get_run for one run's detail.",
@@ -279,6 +322,10 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         status: { type: "string" },
         active: { type: "boolean" },
         since: { type: "string", description: "ISO date or time" },
+        query: {
+          type: "string",
+          description: `Text to find in the run's id, agent name, status, trigger, repository or branch (at most ${RUN_QUERY_MAX_CHARS} characters)`,
+        },
         all: { type: "boolean" },
         limit: { type: "number" },
         before: {
@@ -293,6 +340,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         status?: string;
         active?: boolean;
         since?: string;
+        query?: string;
         all?: boolean;
         limit?: number;
         before?: string;

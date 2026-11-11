@@ -99,6 +99,18 @@ export type Resume = {
 
 export type Filter = { status: "all" | "active" | "failed" | "done"; text: string };
 
+/**
+ * Runs the server found for the filter text (list_runs' query, wardby 0.9.7+), at any date: `text` is the
+ * query they answer, `next` the cursor for the next page (null at the end).
+ */
+export type Older = {
+  text: string;
+  rows: RunRow[];
+  next: string | null;
+  state: "idle" | "loading" | "done" | "error" | "unsupported";
+  error: string | null;
+};
+
 declare module "claude-code" {
   interface PluginState {
     "wardby-runs": {
@@ -109,6 +121,7 @@ declare module "claude-code" {
       openStep: Shaped<OpenStep | null>;
       poll: Shaped<Poll>;
       filter: Shaped<Filter>;
+      older: Shaped<Older>;
       resume: Shaped<Resume | null>;
       expanded: string | null;
       groupOpen: Shaped<Record<string, boolean>>;

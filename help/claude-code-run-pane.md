@@ -3,7 +3,7 @@ id: claude-code-run-pane
 title: See your runs in Claude Code (the wardby-runs plugin)
 summary: Install the wardby-runs Claude Code plugin to see your runs beside the chat, grouped by pull request, with run details and Continue locally.
 audience: operator
-tags: [run steps, get_run_steps, get_run_text, claude code, plugin, wardby-runs, pane, claude-plugin, runs, auto mode]
+tags: [run steps, search, filter, query, get_run_steps, get_run_text, claude code, plugin, wardby-runs, pane, auto mode]
 appliesTo: >=0.8.0
 ---
 
@@ -33,6 +33,13 @@ If the pane says auto mode refused a call, allow `mcp__wardby__list_runs`,
 `mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps` and
 `mcp__wardby__get_run_text` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
 pane needs.
+
+The filter box first narrows the runs the pane holds: those still running and
+those from the last 24 hours, matched by agent, status, trigger or task. With
+Wardby 0.9.7 or later it also asks the server, and lists older runs whose id,
+agent name, status, trigger, repository or branch matches under **Older runs**,
+with **Load more** for the next page. The server never searches task text,
+since it can hold secret values.
 
 In the terminal, the pane takes clicks and sits beside the chat only in Claude
 Code's fullscreen view (`"tui": "fullscreen"`); otherwise use ctrl+x tab and the
