@@ -16,6 +16,7 @@ import {
   SECRET_OAUTH_DISCOVERY_FAILED,
   startOAuthSecretConnect,
 } from "./oauth-secrets.js";
+import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 
 const logged = vi.hoisted(() => vi.fn());
 vi.mock("./logger.js", async (importOriginal) => {
@@ -32,7 +33,12 @@ vi.mock("./logger.js", async (importOriginal) => {
 });
 
 const db = createPrismaClient();
-const OPTS = { privateHostAllowlist: ["127.0.0.1"] };
+const HOST = "oauth.fake.test";
+// The fake listens on 127.0.0.1; clients reach it through a dotted name so the broker schema validates.
+const OPTS = {
+  privateHostAllowlist: [HOST],
+  resolve: async () => [{ address: "127.0.0.1", family: 4 }],
+};
 const REDIRECT = "https://wardby.example/oauth/callback";
 const principalIds: string[] = [];
 
@@ -112,7 +118,7 @@ async function confirmCode(ownerId: string, name: string, code: string) {
 describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAuth server)", () => {
   beforeEach(async () => {
     logged.mockClear();
-    fake = await startFakeOAuthServer();
+    fake = await startFakeOAuthServer({ publicHost: HOST });
   });
   afterEach(async () => {
     await fake.close();
@@ -134,7 +140,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(outcome).toMatchObject({
       kind: "confirm",
       signedInAs: "the account you signed in with",
-      target: "127.0.0.1",
+      target: HOST,
       tool: "create_secret",
     });
     if (outcome.kind !== "confirm") throw new Error("unreachable");
@@ -228,7 +234,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
 
   it("needs a clientId when the provider has no registration endpoint; uses one when given", async () => {
     await fake.close();
-    fake = await startFakeOAuthServer({ dcr: false });
+    fake = await startFakeOAuthServer({ publicHost: HOST, dcr: false });
     const ownerId = await owner();
     await expect(
       startOAuthSecretConnect({
@@ -253,7 +259,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
 
   it("gives secret_oauth_discovery_failed for a provider without S256", async () => {
     await fake.close();
-    fake = await startFakeOAuthServer({ s256: false });
+    fake = await startFakeOAuthServer({ publicHost: HOST, s256: false });
     const ownerId = await owner();
     await expect(
       startOAuthSecretConnect({
@@ -404,5 +410,47 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     await expect(confirmCode(ownerId, "someone-else", outcome.code)).rejects.toThrow(/no OAuth sign-in/i);
     await expect(confirmCode(other, "mine", outcome.code)).rejects.toThrow(/no OAuth sign-in/i);
     await expect(confirmCode(ownerId, "mine", outcome.code)).resolves.toMatchObject({ status: "connected" });
+  });
+
+  it("stores a broker that passes the broker schema", async () => {
+    const ownerId = await owner();
+    const { outcome } = await connect(ownerId, "valid-broker");
+    if (outcome.kind !== "confirm") throw new Error("unreachable");
+    await confirmCode(ownerId, "valid-broker", outcome.code);
+    const row = await db.secret.findUniqueOrThrow({ where: { ownerId_name: { ownerId, name: "valid-broker" } } });
+    expect(parseSecretBrokerConfig(row.broker)).toEqual(oauthBroker(fake.mcpUrl));
+    expect(parseSecretBrokerConfig(row.broker).hosts).toEqual([HOST]);
+  });
+
+  it("refuses an IP-literal resource even on the allow-list, and stores nothing", async () => {
+    const ownerId = await owner();
+    const before = await db.oAuthLinkRequest.count({ where: { principalId: ownerId } });
+    await expect(
+      startOAuthSecretConnect({
+        db,
+        cipher,
+        ownerId,
+        name: "ip-literal",
+        resource: `${fake.url.replace(HOST, "127.0.0.1")}/mcp`,
+        redirectUri: REDIRECT,
+        options: { ...OPTS, privateHostAllowlist: [HOST, "127.0.0.1"] },
+      }),
+    ).rejects.toThrow();
+    expect(await db.oAuthLinkRequest.count({ where: { principalId: ownerId } })).toBe(before);
+    expect(await db.secret.count({ where: { ownerId, name: "ip-literal" } })).toBe(0);
+  });
+
+  it("refuses at confirm a context whose resource gives an invalid broker", async () => {
+    const ownerId = await owner();
+    const { outcome } = await connect(ownerId, "bad-context");
+    if (outcome.kind !== "confirm") throw new Error("unreachable");
+    const link = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    const ctx = link.context as { meta: Record<string, unknown> };
+    await db.oAuthLinkRequest.update({
+      where: { id: link.id },
+      data: { context: { ...ctx, meta: { ...ctx.meta, resource: "http://127.0.0.1:9/mcp" } } },
+    });
+    await expect(confirmCode(ownerId, "bad-context", outcome.code)).rejects.toThrow(/not valid/);
+    expect(await db.secret.count({ where: { ownerId, name: "bad-context" } })).toBe(0);
   });
 });

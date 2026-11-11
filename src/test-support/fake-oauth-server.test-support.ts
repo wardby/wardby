@@ -45,7 +45,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
 }
 
 export async function startFakeOAuthServer(
-  opts: { revocation?: boolean; dcr?: boolean; s256?: boolean } = {},
+  opts: {
+    revocation?: boolean;
+    dcr?: boolean;
+    s256?: boolean;
+    /**
+     * A hostname the metadata advertises instead of 127.0.0.1 (e.g. `oauth.fake.test`), so a
+     * client must reach the server through its own resolver. `approve` still connects to the
+     * listen address.
+     */
+    publicHost?: string;
+  } = {},
 ): Promise<FakeOAuthServer> {
   const revocation = opts.revocation ?? true;
   const dcr = opts.dcr ?? true;
@@ -58,6 +68,7 @@ export async function startFakeOAuthServer(
   const accessByRefresh = new Map<string, string[]>();
   let counter = 0;
   let origin = "";
+  let listenOrigin = "";
 
   function issue(existingRefresh?: string): { access: string; refresh: string } {
     counter += 1;
@@ -286,7 +297,9 @@ export async function startFakeOAuthServer(
   });
 
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
-  origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  const port = (http.address() as AddressInfo).port;
+  listenOrigin = `http://127.0.0.1:${port}`;
+  origin = opts.publicHost ? `http://${opts.publicHost}:${port}` : listenOrigin;
 
   const server: FakeOAuthServer = {
     url: origin,
@@ -296,7 +309,13 @@ export async function startFakeOAuthServer(
     revoked: new Set<string>(),
     tokenRequests: 0,
     async approve(authorizeUrl: string): Promise<string> {
-      const r = await fetch(authorizeUrl, { redirect: "manual" });
+      const target = new URL(authorizeUrl);
+      const listen = new URL(listenOrigin);
+      if (target.origin === origin) {
+        target.protocol = listen.protocol;
+        target.host = listen.host;
+      }
+      const r = await fetch(target, { redirect: "manual" });
       const loc = r.headers.get("location");
       if (r.status !== 302 || !loc) {
         throw new Error(`authorize not approved: HTTP ${r.status}`);

@@ -182,18 +182,21 @@ export function oauthBroker(resource: string): SecretBrokerConfig {
 }
 
 /**
- * The MCP server URL rules (https, no userinfo or fragment, default port), except that
- * an http URL to a host in `privateHostAllowlist` (tests and local development) passes.
+ * The MCP server URL rules (normaliseServerUrl). The one other form is an http URL that
+ * isAllowedEndpoint (the OAuth client's own scheme rule: no userinfo, host in the operator's
+ * `privateHostAllowlist`) permits, with no fragment. The broker is validated separately.
  */
 function normaliseResource(raw: string, options: SafeFetchOptions): string {
-  const url = URL.canParse(raw) ? new URL(raw) : undefined;
-  if (url?.protocol === "http:" && url.hash === "" && isAllowedEndpoint(raw, options)) return url.href;
+  if (URL.canParse(raw)) {
+    const url = new URL(raw);
+    if (url.protocol === "http:" && url.hash === "" && isAllowedEndpoint(raw, options)) return url.href;
+  }
   return normaliseServerUrl(raw);
 }
 
-function onAllowlist(resource: string, options: SafeFetchOptions): boolean {
-  const host = new URL(resource).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return (options.privateHostAllowlist ?? []).some((h) => h.replace(/^\[|\]$/g, "").toLowerCase() === host);
+/** The broker for a resource, always validated (an IP-literal or otherwise unsendable host is refused). */
+function validatedBroker(resource: string): SecretBrokerConfig {
+  return parseSecretBrokerConfig(oauthBroker(resource));
 }
 
 export async function startOAuthSecretConnect(input: {
@@ -235,7 +238,7 @@ export async function startOAuthSecretConnect(input: {
     throw err; // Every OAuthProtocolError message is a fixed sentence.
   }
   // Fail now, not at confirm, on a resource the broker could not send to (e.g. an IP address).
-  if (!onAllowlist(meta.resource, options)) parseSecretBrokerConfig(oauthBroker(meta.resource));
+  validatedBroker(meta.resource);
 
   let client: OAuthClient;
   if (input.clientId !== undefined) {
@@ -349,6 +352,13 @@ export async function finishOAuthSecretConnect(input: {
     // Runs once, before the transaction: all cipher work happens here.
     prepare: async (done) => {
       const ctx = parseContext(done.context);
+      // The broker is written on every connect: it must pass the schema (the context is only a string).
+      let broker: SecretBrokerConfig;
+      try {
+        broker = validatedBroker(ctx.meta.resource);
+      } catch {
+        throw new OAuthSecretFlowError("bad_context", "This sign-in's request is not valid; start again.");
+      }
       let raw: unknown;
       try {
         raw = done.payload === undefined ? undefined : JSON.parse(done.payload);
@@ -372,7 +382,7 @@ export async function finishOAuthSecretConnect(input: {
         status: "connected",
         connectedAt: now.toISOString(),
       };
-      return { ciphertext, keyId: cipher.keyId(), broker: oauthBroker(ctx.meta.resource), oauth };
+      return { ciphertext, keyId: cipher.keyId(), broker, oauth };
     },
     // May run more than once: only `tx` reads and writes.
     finish: async (tx, _done, prepared) => {
