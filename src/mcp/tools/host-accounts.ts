@@ -10,6 +10,7 @@ import { HOST_ACCOUNT_PROVIDERS, type ReviewHostProvider } from "../../providers
 import {
   confirmHostIdentityLink,
   HostLinkError,
+  hostIdentityPurpose,
   startHostIdentityLink,
   userCallbackPath,
 } from "../../core/host-identity-links.js";
@@ -126,7 +127,9 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
     handler: async (args: { provider?: ReviewHostProvider }, ctx) => {
       const provider = args.provider ?? "github";
       const { count } = await ctx.db.hostIdentity.deleteMany({ where: { principalId: ctx.principal.id, provider } });
-      await ctx.db.hostIdentityLinkRequest.deleteMany({ where: { principalId: ctx.principal.id, provider } });
+      await ctx.db.oAuthLinkRequest.deleteMany({
+        where: { principalId: ctx.principal.id, purpose: hostIdentityPurpose(provider) },
+      });
       return textResult({ unlinked: count > 0 });
     },
   });

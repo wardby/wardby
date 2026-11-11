@@ -70,7 +70,7 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
     expect(createHash("sha256").update(codeVerifier).digest("base64url")).toBe(params.get("code_challenge"));
     expect(complete.mock.calls[0][0]).toMatchObject({ code: "gh-code", redirectUri: REDIRECT });
     // Neither the state nor the confirmation code is stored in the clear.
-    const stored = await db.hostIdentityLinkRequest.findFirstOrThrow({ where: { principalId: p.id } });
+    const stored = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: p.id } });
     expect(stored.stateHash).not.toBe(params.get("state"));
 
     expect(outcome).toMatchObject({ kind: "confirm", login: "octo", subject: p.subject });
@@ -92,7 +92,7 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
       hostUserId,
       login: "octo",
     });
-    expect(await db.hostIdentityLinkRequest.count({ where: { principalId: p.id } })).toBe(0);
+    expect(await db.oAuthLinkRequest.count({ where: { principalId: p.id } })).toBe(0);
   });
 
   it("refuses a replayed state without calling the host again", async () => {
@@ -196,7 +196,7 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
     );
     expect(results.filter((s) => s === 400).length).toBeLessThanOrEqual(5);
     expect(results.every((s) => s === 400 || s === 404)).toBe(true);
-    expect((await db.hostIdentityLinkRequest.findFirstOrThrow({ where: { principalId: p.id } })).attempts).toBe(5);
+    expect((await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: p.id } })).attempts).toBe(5);
     await expect(
       confirmHostIdentityLink({ db, principalId: p.id, provider: "github", confirmationCode: outcome.code }),
     ).rejects.toMatchObject({ status: 404 });
@@ -210,7 +210,7 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
     await expect(
       confirmHostIdentityLink({ db, principalId: p.id, provider: "github", confirmationCode: "not-a-code!" }),
     ).rejects.toMatchObject({ status: 400 });
-    expect((await db.hostIdentityLinkRequest.findFirstOrThrow({ where: { principalId: p.id } })).attempts).toBe(0);
+    expect((await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: p.id } })).attempts).toBe(0);
   });
 
   it("refuses a GitHub account already linked to another principal (409), and relinks the same principal", async () => {

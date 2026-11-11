@@ -23,6 +23,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Prisma, type PrismaClient } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { logger } from "./logger.js";
+import { preferIndexScans, withSerializableRetry } from "./serializable-retry.js";
 
 const log = logger.child({ module: "oauth-link" });
 
@@ -121,7 +122,8 @@ export async function completeOAuthCallback(input: {
   cipher: Pick<SecretCipher, "encrypt">;
   state: string | null;
   code: string | null;
-  redirectUri: string;
+  /** Exactly the redirect_uri the authorize URL carried: one value, or one per purpose. */
+  redirectUri: string | ((purpose: string) => string);
   now?: Date;
 }): Promise<OAuthCallbackOutcome> {
   const now = input.now ?? new Date();
@@ -147,7 +149,7 @@ export async function completeOAuthCallback(input: {
     const done = await adapter.complete({
       code: input.code,
       codeVerifier: request.codeVerifier,
-      redirectUri: input.redirectUri,
+      redirectUri: typeof input.redirectUri === "string" ? input.redirectUri : input.redirectUri(request.purpose),
       context: request.context,
     });
     const code = confirmationCode();
@@ -236,14 +238,19 @@ export async function confirmOAuthLink<Result, P, T>(input: {
   const payload = request.payloadCiphertext ? await input.cipher.decrypt(request.payloadCiphertext) : undefined;
   const done = { result: request.result as Result, payload, context: request.context as unknown };
   const prepared = input.prepare ? await input.prepare(done) : undefined;
-  return input.db.$transaction(
-    async (tx) => {
-      // Consume the request first: a concurrent confirmation of the same code loses here.
-      // (Its attempt was already spent above, so attempts may now equal the limit.)
-      const consumed = await tx.oAuthLinkRequest.deleteMany({ where: { id: request.id, expiresAt: { gt: now } } });
-      if (consumed.count !== 1) throw new OAuthLinkError(404, "This link attempt is no longer valid; start again.");
-      return input.finish(tx, done, prepared);
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  // Bounded retry: on a small table Serializable aborts unrelated concurrent links
+  // (see serializable-retry.ts); nothing of an aborted attempt was committed.
+  return withSerializableRetry(() =>
+    input.db.$transaction(
+      async (tx) => {
+        await preferIndexScans(tx);
+        // Consume the request first: a concurrent confirmation of the same code loses here.
+        // (Its attempt was already spent above, so attempts may now equal the limit.)
+        const consumed = await tx.oAuthLinkRequest.deleteMany({ where: { id: request.id, expiresAt: { gt: now } } });
+        if (consumed.count !== 1) throw new OAuthLinkError(404, "This link attempt is no longer valid; start again.");
+        return input.finish(tx, done, prepared);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    ),
   );
 }

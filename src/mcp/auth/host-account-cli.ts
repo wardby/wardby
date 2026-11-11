@@ -7,6 +7,7 @@
  */
 import { parseArgs } from "node:util";
 import type { PrismaClient } from "#prisma";
+import { hostIdentityPurpose } from "../../core/host-identity-links.js";
 import { HOST_ACCOUNT_PROVIDERS } from "../../providers/review-host/types.js";
 
 const USAGE = "Use auth host-account list [--subject <s>] | host-account unlink --subject <s> [--provider github].";
@@ -52,6 +53,8 @@ export async function hostAccountCommand(
   const principal = await db.principal.findUnique({ where: { subject: values.subject } });
   if (!principal) throw new Error(`No principal with subject "${values.subject}".`);
   const { count } = await db.hostIdentity.deleteMany({ where: { principalId: principal.id, provider } });
-  await db.hostIdentityLinkRequest.deleteMany({ where: { principalId: principal.id, provider } });
+  await db.oAuthLinkRequest.deleteMany({
+    where: { principalId: principal.id, purpose: hostIdentityPurpose(provider) },
+  });
   output(count > 0 ? "Host account unlinked." : "No host account was linked.");
 }
