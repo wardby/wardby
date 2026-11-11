@@ -16,6 +16,24 @@ import {
   WEBHOOK_SECRET_ATTACHED,
 } from "../../core/secrets.js";
 import { mcpServersUsingSecret } from "../../core/mcp-servers.js";
+import {
+  finishOAuthSecretConnect,
+  OAUTH_SECRET_PURPOSE,
+  OAuthSecretFlowError,
+  SECRET_NOT_OAUTH,
+  SECRET_OAUTH_CIPHER_FAILED,
+  SECRET_OAUTH_CLIENT_ID_REQUIRED,
+  SECRET_OAUTH_DISCOVERY_FAILED,
+  SECRET_OAUTH_MANAGED,
+  SECRET_OAUTH_PROVIDER_UNAVAILABLE,
+  SECRET_OAUTH_REFRESH_UNAVAILABLE,
+  startOAuthSecretConnect,
+} from "../../core/oauth-secrets.js";
+import { OAuthLinkError } from "../../core/oauth-link.js";
+import { oauthRedirectUri } from "../../core/host-identity-links.js";
+import { OAuthProtocolError } from "../../core/oauth-client/http.js";
+import { Prisma } from "#prisma";
+import { callbackOrigin } from "./host-accounts.js";
 import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
 import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
@@ -47,6 +65,7 @@ function parseBrokerArg(input: unknown): SecretBrokerConfig {
 function mapSecretError(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);
   if (message.startsWith("secret_not_found")) throw new McpError(404, message);
+  if (message.startsWith("secret_oauth_managed")) throw new McpError(409, message);
   if (
     message.startsWith("secret_broker_config_invalid") ||
     message.startsWith("secret_broker_value_invalid") ||
@@ -55,6 +74,70 @@ function mapSecretError(err: unknown): never {
     throw new McpError(400, message);
   }
   throw err;
+}
+
+const OAUTH_NEEDS_HTTP =
+  "Connecting an OAuth secret needs wardby's HTTP transport (the sign-in callback is served at MCP_CANONICAL_URI); " +
+  "use an MCP client connected over HTTP.";
+
+/**
+ * Maps the OAuth secret flow's errors to MCP statuses. Every message is a fixed constant or a
+ * fixed sentence of our own; provider, Prisma and cipher text is never passed through.
+ */
+function mapOAuthSecretError(err: unknown): never {
+  if (err instanceof OAuthLinkError) throw new McpError(err.status, err.message);
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    throw new McpError(409, "a secret with this name already exists");
+  }
+  if (err instanceof OAuthProtocolError) {
+    if (err.code === "discovery_failed") throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
+    if (err.code === "provider_unavailable") throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
+    throw new McpError(502, err.message);
+  }
+  if (err instanceof OAuthSecretFlowError) {
+    if (err.reason === "cipher_failed") throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
+    if (err.reason === "refresh_unavailable") throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
+    if (err.reason === "bad_context" || err.reason === "issuer_mismatch") throw new McpError(400, err.message);
+    throw new McpError(502, err.message);
+  }
+  const message = err instanceof Error ? err.message : "";
+  if (message.startsWith("secret_oauth_discovery_failed")) throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
+  if (message.startsWith("secret_oauth_client_id_required")) throw new McpError(400, SECRET_OAUTH_CLIENT_ID_REQUIRED);
+  if (message.startsWith("secret_oauth_name_taken")) throw new McpError(409, SECRET_NOT_OAUTH);
+  if (message.startsWith("secret_oauth_encryption_failed")) throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
+  if (message.startsWith("secret_oauth_provider_unavailable")) {
+    throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
+  }
+  if (message.startsWith("secret_oauth_refresh_unavailable")) {
+    throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
+  }
+  throw err;
+}
+
+interface OAuthArg {
+  resource: string;
+  scope?: string;
+  clientId?: string;
+}
+
+/** Validates the caller's `oauth` argument; an invalid one is the caller's 400. */
+function parseOAuthArg(input: unknown): OAuthArg {
+  const o = input as Record<string, unknown> | null;
+  if (typeof o !== "object" || o === null || Array.isArray(o)) throw new McpError(400, "oauth must be an object.");
+  for (const key of Object.keys(o)) {
+    if (key !== "resource" && key !== "scope" && key !== "clientId") {
+      throw new McpError(400, `oauth has an unknown field "${key}".`);
+    }
+  }
+  const str = (key: string, required: boolean): string | undefined => {
+    const v = o[key];
+    if (v === undefined && !required) return undefined;
+    if (typeof v !== "string" || v.length === 0) throw new McpError(400, `oauth.${key} must be a non-empty string.`);
+    return v;
+  };
+  const scope = str("scope", false);
+  const clientId = str("clientId", false);
+  return { resource: str("resource", true)!, ...(scope ? { scope } : {}), ...(clientId ? { clientId } : {}) };
 }
 
 /**
@@ -128,19 +211,85 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "create_secret",
     scope: "secrets:write",
     description:
-      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. See the help article "brokered-secrets".',
+      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string" },
         value: { type: "string" },
         broker: { type: "object", description: `Optional broker config: ${BROKER_SCHEMA_DOC}` },
+        oauth: {
+          type: "object",
+          description:
+            "Connect an OAuth-only service: resource is its URL; scope and clientId are optional (clientId is needed only when the provider has no dynamic client registration).",
+          properties: { resource: { type: "string" }, scope: { type: "string" }, clientId: { type: "string" } },
+          required: ["resource"],
+          additionalProperties: false,
+        },
+        confirmationCode: { type: "string", minLength: 1, maxLength: 32 },
       },
       required: ["name"],
     },
-    handler: async (args: { name: string; value?: string; broker?: unknown }, ctx) => {
+    handler: async (
+      args: { name: string; value?: string; broker?: unknown; oauth?: unknown; confirmationCode?: string },
+      ctx,
+    ) => {
       const hostManager = await requireHostsAdminIfProviderSecret(ctx, args.name);
+      if (args.confirmationCode !== undefined) {
+        try {
+          return textResult(
+            await finishOAuthSecretConnect({
+              db: ctx.db,
+              cipher: ctx.providers.secrets,
+              ownerId: ctx.principal.id,
+              name: args.name,
+              confirmationCode: args.confirmationCode,
+            }),
+          );
+        } catch (err) {
+          mapOAuthSecretError(err);
+        }
+      }
+      if (args.oauth !== undefined) {
+        if (args.value !== undefined) throw new McpError(400, "Pass either value or oauth, not both.");
+        if (args.broker !== undefined) {
+          throw new McpError(400, "An OAuth secret's broker is set by wardby; do not pass broker with oauth.");
+        }
+        const oauth = parseOAuthArg(args.oauth);
+        const origin = callbackOrigin(ctx.canonicalUri);
+        if (!origin) throw new McpError(400, OAUTH_NEEDS_HTTP);
+        let started;
+        try {
+          started = await startOAuthSecretConnect({
+            db: ctx.db,
+            cipher: ctx.providers.secrets,
+            ownerId: ctx.principal.id,
+            name: args.name,
+            resource: oauth.resource,
+            ...(oauth.scope ? { scope: oauth.scope } : {}),
+            ...(oauth.clientId ? { clientId: oauth.clientId } : {}),
+            redirectUri: oauthRedirectUri(origin, OAUTH_SECRET_PURPOSE),
+            options: ctx.providers.sandboxFetchOptions,
+            fetchImpl: ctx.providers.sandboxFetch,
+          });
+        } catch (err) {
+          mapOAuthSecretError(err);
+        }
+        return textResult({
+          status: "pending",
+          url: started.authorizeUrl,
+          message:
+            "Open this link in your browser and sign in, then call create_secret again with the same name and the confirmationCode the page shows.",
+        });
+      }
       const broker = args.broker === undefined ? undefined : parseBrokerArg(args.broker);
+      if (args.value === undefined) {
+        const named = await ctx.db.secret.findUnique({
+          where: { ownerId_name: { ownerId: ctx.principal.id, name: args.name } },
+          select: { oauth: true },
+        });
+        if (named?.oauth != null) throw new McpError(409, SECRET_OAUTH_MANAGED);
+      }
       if (args.value !== undefined) {
         let secret;
         try {
@@ -392,7 +541,11 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           `Secret "${secret!.name}" is used by MCP server(s) ${servers.join(", ")}; update or delete them first.`,
         );
       }
-      await deleteSecret(args.id, ctx.db);
+      await deleteSecret(args.id, ctx.db, {
+        cipher: ctx.providers.secrets,
+        fetchImpl: ctx.providers.sandboxFetch,
+        actorId: ctx.principal.id,
+      });
       return textResult({ deleted: args.id });
     },
   });

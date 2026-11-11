@@ -26,7 +26,7 @@ function asMcpError(err: unknown): unknown {
 }
 
 /** The HTTP origin the host's browser callback must reach, or null over stdio (no canonical URI). */
-function callbackOrigin(canonicalUri: string): string | null {
+export function callbackOrigin(canonicalUri: string): string | null {
   try {
     return canonicalUrl(canonicalUri).origin;
   } catch {

@@ -10,6 +10,8 @@ import type { AddressInfo } from "node:net";
 export interface FakeOAuthServer {
   /** Origin, e.g. http://127.0.0.1:PORT. */
   url: string;
+  /** The plain-http origin it listens on, http://127.0.0.1:PORT (the same as `url` without `publicHost`). */
+  listenUrl: string;
   /** `${url}/mcp`, protected. */
   mcpUrl: string;
   accessTtlSeconds: number;
@@ -45,7 +47,29 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
 }
 
 export async function startFakeOAuthServer(
-  opts: { revocation?: boolean; dcr?: boolean; s256?: boolean } = {},
+  opts: {
+    revocation?: boolean;
+    dcr?: boolean;
+    s256?: boolean;
+    /**
+     * A hostname the metadata advertises instead of 127.0.0.1 (e.g. `oauth.fake.test`), so a
+     * client must reach the server through its own resolver. `approve` still connects to the
+     * listen address.
+     */
+    publicHost?: string;
+    /**
+     * The scheme the metadata advertises with `publicHost` (default http). With "https" the origin is
+     * `https://<publicHost>` on the default port, and a client reaches the server through a fetch
+     * that maps it onto `listenUrl`, as a TLS front would; the paths that refuse plain http (or a
+     * non-default https port) then run unchanged.
+     */
+    publicScheme?: "http" | "https";
+    /**
+     * Opt-in: a refresh must name a client the server registered, by `client_id` in the form or
+     * HTTP Basic credentials; any other answers 401 `invalid_client`.
+     */
+    checkClient?: boolean;
+  } = {},
 ): Promise<FakeOAuthServer> {
   const revocation = opts.revocation ?? true;
   const dcr = opts.dcr ?? true;
@@ -58,6 +82,7 @@ export async function startFakeOAuthServer(
   const accessByRefresh = new Map<string, string[]>();
   let counter = 0;
   let origin = "";
+  let listenOrigin = "";
 
   function issue(existingRefresh?: string): { access: string; refresh: string } {
     counter += 1;
@@ -82,6 +107,15 @@ export async function startFakeOAuthServer(
   function bearerOf(req: IncomingMessage): string | undefined {
     const m = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
     return m?.[1];
+  }
+
+  /** The client id of HTTP Basic client credentials (RFC 6749 section 2.3.1), when sent. */
+  function basicClientId(req: IncomingMessage): string | undefined {
+    const m = /^Basic (.+)$/i.exec(req.headers.authorization ?? "");
+    if (!m) return undefined;
+    const decoded = Buffer.from(m[1], "base64").toString("utf8");
+    const id = decoded.slice(0, Math.max(0, decoded.indexOf(":")));
+    return new URLSearchParams(`v=${id}`).get("v") ?? undefined;
   }
 
   function bearerValid(token: string | undefined): token is string {
@@ -120,6 +154,10 @@ export async function startFakeOAuthServer(
     }
     if (grant === "refresh_token") {
       server.tokenRequests += 1;
+      if (opts.checkClient && !clients.has(basicClientId(req) ?? clientId)) {
+        sendJson(res, 401, { error: "invalid_client", error_description: "unknown client" });
+        return;
+      }
       const refresh = form.get("refresh_token") ?? "";
       if (!activeRefresh.has(refresh) || server.revoked.has(refresh)) {
         sendJson(res, 400, { error: "invalid_grant", error_description: refresh });
@@ -286,17 +324,30 @@ export async function startFakeOAuthServer(
   });
 
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
-  origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  const port = (http.address() as AddressInfo).port;
+  listenOrigin = `http://127.0.0.1:${port}`;
+  origin = !opts.publicHost
+    ? listenOrigin
+    : opts.publicScheme === "https"
+      ? `https://${opts.publicHost}`
+      : `http://${opts.publicHost}:${port}`;
 
   const server: FakeOAuthServer = {
     url: origin,
+    listenUrl: listenOrigin,
     mcpUrl: `${origin}/mcp`,
     accessTtlSeconds: 3600,
     rotateRefresh: true,
     revoked: new Set<string>(),
     tokenRequests: 0,
     async approve(authorizeUrl: string): Promise<string> {
-      const r = await fetch(authorizeUrl, { redirect: "manual" });
+      const target = new URL(authorizeUrl);
+      const listen = new URL(listenOrigin);
+      if (target.origin === origin) {
+        target.protocol = listen.protocol;
+        target.host = listen.host;
+      }
+      const r = await fetch(target, { redirect: "manual" });
       const loc = r.headers.get("location");
       if (r.status !== 302 || !loc) {
         throw new Error(`authorize not approved: HTTP ${r.status}`);

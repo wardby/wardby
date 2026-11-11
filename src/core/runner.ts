@@ -1119,13 +1119,20 @@ export type BuiltinToolHandler = (argsJson: string, callId?: string) => Promise<
  * Every value of the secrets `names` (readable or brokered; a SigV4 secret's key and token alone
  * too, the same set the in-process host redacts), as a redaction list. Rejects when ANY read
  * fails: a list missing one secret would let that secret through, so a caller treats a rejection
- * as "no list" and fails closed. A secret with no value contributes nothing.
+ * as "no list" and fails closed. A secret with no value contributes nothing. Values are read as
+ * stored (storedEntry) when the accessor can: an OAuth secret is never refreshed for a list, and one
+ * that needs connecting again still lists its tokens.
  */
 export async function readRedactionValues(accessor: SecretsAccessor, names: readonly string[]): Promise<string[]> {
+  const read = accessor.storedEntry
+    ? (name: string) => accessor.storedEntry!(name)
+    : accessor.resolve
+      ? (name: string) => accessor.resolve!(name)
+      : undefined;
   const values = await Promise.all(
     names.map((secret) =>
-      accessor.resolve
-        ? accessor.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
+      read
+        ? read(secret).then((e) => (e ? consoleRedactionValues(e) : []))
         : accessor.get(secret).then((v) => (v === undefined ? [] : [v])),
     ),
   );

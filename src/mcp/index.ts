@@ -45,6 +45,7 @@ import { buildChatProviders } from "../providers/chat/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
 import { hostIdentityAdapter, oauthRedirectUri } from "../core/host-identity-links.js";
 import type { OAuthLinkAdapter } from "../core/oauth-link.js";
+import { oauthSecretAdapter } from "../core/oauth-secrets.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
@@ -517,6 +518,13 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     const adapter = hostIdentityAdapter(githubAuthorizer);
     oauthAdapters.set(adapter.purpose, adapter);
   }
+  // OAuth secrets (create_secret with oauth) share the callback, whether or not GitHub linking is configured.
+  const secretAdapter = oauthSecretAdapter(
+    providers.secrets,
+    providers.sandboxFetchOptions,
+    providers.sandboxFetch,
+  ) as OAuthLinkAdapter<unknown, unknown>;
+  oauthAdapters.set(secretAdapter.purpose, secretAdapter);
   const oauthCallback =
     oauthAdapters.size > 0
       ? {

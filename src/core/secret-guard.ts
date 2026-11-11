@@ -29,7 +29,8 @@ export async function loadAgentSecretValues(
   const accessor = buildSecretsAccessor(agentId, cipher, db);
   const own = await Promise.all(
     rows.map(async ({ boundName }) => {
-      const entry = await accessor.resolve!(boundName);
+      // Read as stored: building a redaction list never refreshes, and never fails on an OAuth status.
+      const entry = await accessor.storedEntry!(boundName);
       return { name: boundName, values: entry ? withEscapedForms(consoleRedactionValues(entry)) : [] };
     }),
   );

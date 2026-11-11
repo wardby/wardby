@@ -14,6 +14,7 @@ interface Recorded {
   method: string;
   path: string;
   contentType: string;
+  authorization: string;
   body: string;
 }
 let servers: Server[] = [];
@@ -36,6 +37,7 @@ async function stub(status: number, reply: unknown): Promise<{ url: string; log:
         method: req.method ?? "",
         path: req.url ?? "",
         contentType: req.headers["content-type"] ?? "",
+        authorization: req.headers.authorization ?? "",
         body: Buffer.concat(chunks).toString("utf8"),
       });
       res.writeHead(status, { "content-type": "application/json" });
@@ -376,5 +378,63 @@ describe("revokeToken", () => {
     const m = await discoverOAuth(fake.mcpUrl, opts);
     await revokeToken(m, { clientId: "c" }, "fake-refresh-1", "refresh_token", opts);
     expect(fake.revoked.has("fake-refresh-1")).toBe(true);
+  });
+});
+
+describe("token endpoint client authentication", () => {
+  const form = (body: string | undefined) => Object.fromEntries(new URLSearchParams(body));
+  const input = { code: "c1", codeVerifier: "v1", redirectUri: REDIRECT };
+
+  it("records the registered token_endpoint_auth_method", async () => {
+    for (const method of ["none", "client_secret_post", "client_secret_basic"] as const) {
+      const s = await stub(201, { client_id: "cid", client_secret: "sec", token_endpoint_auth_method: method });
+      expect(await registerClient(meta(s.url), REDIRECT, opts)).toEqual({
+        clientId: "cid",
+        clientSecret: "sec",
+        authMethod: method,
+      });
+    }
+  });
+
+  it("refuses a registration whose auth method wardby cannot use", async () => {
+    const s = await stub(201, { client_id: "cid", token_endpoint_auth_method: "private_key_jwt" });
+    await expect(registerClient(meta(s.url), REDIRECT, opts)).rejects.toMatchObject({ code: "registration_failed" });
+  });
+
+  it("client_secret_basic: sends the secret by HTTP Basic, not in the form", async () => {
+    const s = await stub(200, { access_token: "AT" });
+    const client = { clientId: "c id", clientSecret: "s:é", authMethod: "client_secret_basic" as const };
+    await exchangeCode(meta(s.url), client, input, opts);
+    await refreshTokens(meta(s.url), client, "RT", opts);
+    await revokeToken(meta(s.url), client, "tok", "access_token", opts);
+    const expected = `Basic ${Buffer.from(`${encodeURIComponent("c id").replace(/%20/g, "+")}:${encodeURIComponent("s:é")}`).toString("base64")}`;
+    for (const entry of s.log) {
+      expect(entry.authorization).toBe(expected);
+      expect(form(entry.body)).not.toHaveProperty("client_secret");
+      expect(form(entry.body)).not.toHaveProperty("client_id");
+    }
+  });
+
+  it("client_secret_post: sends the secret in the form, no Authorization header", async () => {
+    const s = await stub(200, { access_token: "AT" });
+    const client = { clientId: "cid", clientSecret: "sec", authMethod: "client_secret_post" as const };
+    await exchangeCode(meta(s.url), client, input, opts);
+    await refreshTokens(meta(s.url), client, "RT", opts);
+    for (const entry of s.log) {
+      expect(entry.authorization).toBe("");
+      expect(form(entry.body)).toMatchObject({ client_id: "cid", client_secret: "sec" });
+    }
+  });
+
+  it("none: sends only the client id, even when a secret is known", async () => {
+    const s = await stub(200, { access_token: "AT" });
+    const client = { clientId: "cid", clientSecret: "sec", authMethod: "none" as const };
+    await exchangeCode(meta(s.url), client, input, opts);
+    await refreshTokens(meta(s.url), client, "RT", opts);
+    for (const entry of s.log) {
+      expect(entry.authorization).toBe("");
+      expect(form(entry.body).client_id).toBe("cid");
+      expect(form(entry.body)).not.toHaveProperty("client_secret");
+    }
   });
 });

@@ -65,6 +65,8 @@ Only removal is confirmed: `set_secret_broker { name, broker: null }` returns a
 browser link, and a person confirms by typing the secret's name. The MCP call
 alone never removes it. Every change is audited.
 
+For OAuth-only services, see the oauth-secrets help article.
+
 ## Related
 
 - [Host providers](../docs/host-providers.md): a provider's credentials must be brokered

@@ -15,19 +15,22 @@ import {
 } from "./mcp-client/client.js";
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 import { redactExactSecretValues, withEscapedForms } from "./secret-spans.js";
-import type { SecretEntry, SecretsAccessor } from "./secrets.js";
+import { OAuthSecretFlowError } from "./oauth-secrets.js";
+import {
+  decryptEntry,
+  type SecretEntry,
+  type SecretFetchSettings,
+  type SecretsAccessor,
+  type StoredSecretRow,
+} from "./secrets.js";
 import type { Logger } from "./logger.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { brokeredFetch } from "../sandbox/brokered-fetch.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
 import { consoleRedactionValues, encodedForms } from "../sandbox/secret-broker.js";
+import { McpServerInputError } from "./resource-url.js";
 
-export class McpServerInputError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "McpServerInputError";
-  }
-}
+export { McpServerInputError, normaliseServerUrl } from "./resource-url.js";
 
 /** What the server's owner (or an admin) sees when a stored secret of the server can't be decrypted. */
 export const CREDENTIALS_UNAVAILABLE_MESSAGE =
@@ -75,22 +78,6 @@ export interface McpServerRow {
 const SERVER_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const EXPOSED_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_TIMEOUT_MS = 30_000;
-
-/** Validates a server URL: https, no userinfo, no fragment, default port; returns the normalised string. */
-export function normaliseServerUrl(raw: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new McpServerInputError("The MCP server URL is not a valid URL.");
-  }
-  if (url.protocol !== "https:") throw new McpServerInputError("The MCP server URL must use https.");
-  if (url.username !== "" || url.password !== "")
-    throw new McpServerInputError("The MCP server URL must not contain a username or password; use a brokered secret.");
-  if (url.hash !== "") throw new McpServerInputError("The MCP server URL must not contain a fragment (#).");
-  if (url.port !== "") throw new McpServerInputError("The MCP server URL must use the default https port (443).");
-  return url.href;
-}
 
 export function assertServerName(name: string): void {
   if (!SERVER_NAME.test(name)) {
@@ -166,27 +153,40 @@ export function redactError(error: unknown, values: string[]): Error {
   return out;
 }
 
-type SecretDb = Pick<PrismaClient, "secret">;
+type SecretDb = Pick<PrismaClient, "secret" | "$transaction">;
+
+const STORED_SECRET_SELECT = { id: true, name: true, ciphertext: true, broker: true, oauth: true } as const;
 
 /**
  * Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list
  * the URL's host (McpServerInputError otherwise). A stored value that can't be decrypted throws
- * McpCredentialsUnavailableError.
+ * McpCredentialsUnavailableError. An OAuth secret that needs connecting again, or whose refresh
+ * failed, throws McpServerInputError with the fixed OAuth message.
+ *
+ * `values` is live: an OAuth secret's resolve and refresh re-read the stored row through
+ * decryptEntry (so the newest token is always sent) and add what they return to `values` before
+ * it is used, so a token minted mid-call is redacted too.
  */
 export async function loadServerSecrets(
   db: SecretDb,
-  cipher: Pick<SecretCipher, "decrypt">,
+  cipher: SecretCipher,
   server: McpServerRow,
+  fetch: SecretFetchSettings = {},
 ): Promise<{ accessor: SecretsAccessor; values: string[] }> {
   const host = new URL(server.url).hostname.toLowerCase();
   const entries = new Map<string, SecretEntry>();
-  const values = new Set<string>();
-  for (const name of server.secretNames) {
-    const stored = await db.secret.findUnique({
-      where: { ownerId_name: { ownerId: server.ownerId, name } },
-      select: { ciphertext: true, broker: true },
-    });
-    if (!stored) throw new McpServerInputError(`Secret "${name}" was not found among your secrets.`);
+  const oauthIds = new Map<string, string>();
+  const values: string[] = [];
+  const seen = new Set<string>();
+  const addValues = (entry: SecretEntry): void => {
+    for (const v of withEscapedForms(consoleRedactionValues(entry))) {
+      if (!seen.has(v)) {
+        seen.add(v);
+        values.push(v);
+      }
+    }
+  };
+  const checkBroker = (stored: StoredSecretRow, name: string): void => {
     if (stored.broker === null || stored.broker === undefined)
       throw new McpServerInputError(
         `Secret "${name}" is not brokered; set its broker config first (set_secret_broker).`,
@@ -199,24 +199,56 @@ export async function loadServerSecrets(
     }
     if (!broker.hosts.includes(host))
       throw new McpServerInputError(`Secret "${name}" is not brokered to host ${host}; add it to the secret's hosts.`);
-    let value: string;
+  };
+  const entryOf = async (stored: StoredSecretRow, name: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+    let entry: SecretEntry;
     try {
-      value = await cipher.decrypt(stored.ciphertext);
-    } catch {
+      entry = await decryptEntry(db, cipher, stored, {
+        ...fetch,
+        ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+      });
+    } catch (err) {
+      const isOAuth = stored.oauth !== null && stored.oauth !== undefined;
       // The cipher's error is dropped: it is not an input problem, and its text is not ours to pass on.
-      throw new McpCredentialsUnavailableError(server.id, server.name, name);
+      if (!isOAuth || (err instanceof OAuthSecretFlowError && err.reason === "cipher_failed"))
+        throw new McpCredentialsUnavailableError(server.id, server.name, name);
+      // Its message is fixed (reconnect, or try again) and names only the secret.
+      if (err instanceof OAuthSecretFlowError) throw new McpServerInputError(err.message);
+      throw err;
     }
-    const entry: SecretEntry = { value, broker };
-    entries.set(name, entry);
-    for (const v of withEscapedForms(consoleRedactionValues(entry))) values.add(v);
+    addValues(entry);
+    return entry;
+  };
+  const reload = async (name: string, id: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+    const stored = await db.secret.findUnique({ where: { id }, select: STORED_SECRET_SELECT });
+    if (!stored) throw new McpServerInputError(`Secret "${name}" was not found among your secrets.`);
+    checkBroker(stored, name);
+    return entryOf(stored, name, forceRefreshIfStill);
+  };
+  for (const name of server.secretNames) {
+    const stored = await db.secret.findUnique({
+      where: { ownerId_name: { ownerId: server.ownerId, name } },
+      select: STORED_SECRET_SELECT,
+    });
+    if (!stored) throw new McpServerInputError(`Secret "${name}" was not found among your secrets.`);
+    checkBroker(stored, name);
+    entries.set(name, await entryOf(stored, name));
+    if (stored.oauth !== null && stored.oauth !== undefined) oauthIds.set(name, stored.id);
   }
   const accessor: SecretsAccessor = {
     get: async () => {
       throw new Error("secret_brokered: this secret is brokered; it is never readable");
     },
-    resolve: async (name) => entries.get(name),
+    resolve: async (name) => {
+      const id = oauthIds.get(name);
+      return id === undefined ? entries.get(name) : reload(name, id);
+    },
+    refresh: async (name, usedValue) => {
+      const id = oauthIds.get(name);
+      return id === undefined ? undefined : reload(name, id, usedValue);
+    },
   };
-  return { accessor, values: [...values] };
+  return { accessor, values };
 }
 
 /** The McpFetch for one server: brokeredFetch over safeFetch with the timeout and signal; text body, lower-case headers. */
@@ -248,13 +280,15 @@ export async function fetchSnapshot(
   server: McpServerRow,
   deps: {
     db: SecretDb;
-    cipher: Pick<SecretCipher, "decrypt">;
+    cipher: SecretCipher;
     fetchImpl?: typeof safeFetch;
     timeoutMs?: number;
   },
 ): Promise<{ serverInfo: McpServerInfo; tools: McpToolEntry[] }> {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { accessor, values } = await loadServerSecrets(deps.db, deps.cipher, server);
+  const { accessor, values } = await loadServerSecrets(deps.db, deps.cipher, server, {
+    ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+  });
   const client = new McpHttpClient({
     fetch: serverFetch(server, accessor, { timeoutMs, fetchImpl: deps.fetchImpl }),
     signal: AbortSignal.timeout(timeoutMs * 3),

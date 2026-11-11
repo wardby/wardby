@@ -121,17 +121,26 @@ export function brokerScrubValues(secrets: readonly BrokeredSecret[]): string[] 
 }
 
 /**
- * The strings console output must not show for one secret the tool may use: its value and, for a
- * brokered SigV4 secret, the secret key and session token alone. A value that won't parse adds nothing.
+ * The strings console output must not show for one secret the tool may use: its value, for a
+ * brokered SigV4 secret the secret key and session token alone, and for an OAuth secret every value
+ * it lists (access token, refresh token, client secret). A value that won't parse adds nothing.
  */
-export function consoleRedactionValues(entry: { value: string; broker: SecretBrokerConfig | null }): string[] {
-  if (!entry.broker) return [entry.value];
+export function consoleRedactionValues(entry: {
+  value: string;
+  broker: SecretBrokerConfig | null;
+  oauth?: { redact: readonly string[] };
+}): string[] {
+  const unique = (values: string[]) => values.filter((v, i, all) => all.indexOf(v) === i);
+  const oauth = entry.oauth?.redact ?? [];
+  if (!entry.broker) return unique([entry.value, ...oauth]);
   try {
-    return [entry.value, ...brokerScrubValues([{ name: "", value: entry.value, broker: entry.broker }])].filter(
-      (v, i, all) => all.indexOf(v) === i,
-    );
+    return unique([
+      entry.value,
+      ...brokerScrubValues([{ name: "", value: entry.value, broker: entry.broker }]),
+      ...oauth,
+    ]);
   } catch {
-    return [entry.value];
+    return unique([entry.value, ...oauth]);
   }
 }
 

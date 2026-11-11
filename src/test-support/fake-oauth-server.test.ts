@@ -12,8 +12,8 @@ const verifier = "v".repeat(50);
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 const redirect = "http://127.0.0.1:9/cb";
 
-async function register(s: FakeOAuthServer): Promise<string> {
-  const r = await fetch(`${s.url}/register`, {
+async function register(s: FakeOAuthServer, base = s.url): Promise<string> {
+  const r = await fetch(`${base}/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ redirect_uris: [redirect] }),
@@ -65,6 +65,20 @@ function mcp(s: FakeOAuthServer, body: unknown, bearer?: string): Promise<Respon
 }
 
 describe("fake OAuth server", () => {
+  it("advertises a public host while approve still reaches the listen address", async () => {
+    srv = await startFakeOAuthServer({ publicHost: "oauth.fake.test" });
+    expect(srv.url).toMatch(/^http:\/\/oauth\.fake\.test:\d+$/);
+    expect(srv.mcpUrl).toBe(`${srv.url}/mcp`);
+    const listen = srv.url.replace("oauth.fake.test", "127.0.0.1");
+    const as = (await (await fetch(`${listen}/.well-known/oauth-authorization-server`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(as.issuer).toBe(srv.url);
+    const clientId = await register(srv, listen);
+    expect(await codeFor(srv, clientId)).not.toBe("");
+  });
+
   it("serves discovery at the root path only", async () => {
     srv = await startFakeOAuthServer();
     const prm = await fetch(`${srv.url}/.well-known/oauth-protected-resource`);
@@ -143,6 +157,25 @@ describe("fake OAuth server", () => {
       await token(srv, { grant_type: "refresh_token", refresh_token: t1.refresh_token, client_id: cid })
     ).json()) as { refresh_token: string };
     expect(t2.refresh_token).toBe(t1.refresh_token);
+  });
+
+  it("checks the refresh's client when checkClient is on (form or Basic)", async () => {
+    srv = await startFakeOAuthServer({ checkClient: true });
+    const cid = await register(srv);
+    const t1 = (await (await exchange(srv, cid, await codeFor(srv, cid))).json()) as { refresh_token: string };
+    const wrong = await token(srv, { grant_type: "refresh_token", refresh_token: t1.refresh_token, client_id: "nope" });
+    expect(wrong.status).toBe(401);
+    expect(((await wrong.json()) as { error: string }).error).toBe("invalid_client");
+    const basic = await fetch(`${srv.url}/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${Buffer.from(`${cid}:s3cret`).toString("base64")}`,
+      },
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t1.refresh_token }),
+    });
+    expect(basic.status).toBe(200);
+    expect(srv.tokenRequests).toBe(2);
   });
 
   it("revokes tokens", async () => {

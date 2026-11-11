@@ -1282,6 +1282,8 @@ model Secret {
   keyId      String
   /// Brokered-secret config (core/secret-broker-config.ts). Null = readable by attached tools.
   broker     Json?
+  /// Set for an OAuth secret (core/oauth-secrets.ts): what is not secret about the connection. The ciphertext holds the token pair.
+  oauth      Json?
   ownerId    String?
   owner      Principal?    @relation(fields: [ownerId], references: [id])
   createdAt  DateTime      @default(now())

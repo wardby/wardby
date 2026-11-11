@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SecretsAccessor } from "./secrets.js";
 import { readRedactionValues } from "./runner.js";
 
 // Fake values only; assertions compare booleans.
 const FAKE_A = "fake-redaction-value-0010";
+const FAKE_REFRESH = "fake-redaction-refresh-0011";
 
 describe("readRedactionValues", () => {
   it("rejects when any allowed secret's read fails, so the list is never silently partial", async () => {
@@ -38,5 +39,21 @@ describe("readRedactionValues", () => {
       () => "rejected",
     );
     expect(outcome).toBe("rejected");
+  });
+
+  it("reads stored entries when the accessor has them, never resolve (an OAuth secret is not refreshed for a list)", async () => {
+    const resolve = vi.fn(async () => {
+      throw new Error("secret_reauth_required");
+    });
+    const accessor = {
+      get: async () => undefined,
+      resolve,
+      storedEntry: async (name: string) =>
+        name === "a" ? { value: FAKE_A, broker: null, oauth: { redact: [FAKE_A, FAKE_REFRESH] } } : undefined,
+    } as unknown as SecretsAccessor;
+    const values = await readRedactionValues(accessor, ["a", "missing"]);
+    expect(values.includes(FAKE_A)).toBe(true);
+    expect(values.includes(FAKE_REFRESH)).toBe(true);
+    expect(resolve).not.toHaveBeenCalled();
   });
 });
