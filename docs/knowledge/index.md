@@ -32,6 +32,7 @@
 - [Terminal run state belongs to the first writer](terminal-run-first-writer.md) — Run completion must conditionally write pending or running rows and read back the persisted winner.
 - [Task cancellation takes precedence over run status](mcp-cancelled-task-precedence.md) — A cancelled task remains cancelled even if its underlying run finishes with a different terminal outcome.
 - [Secret entry replicas must share token verification](secret-entry-replica-contract.md) — A shared outcome database cannot complete a secret-entry round trip when replicas use independent signing keys.
+- [Transcript signatures do not confer transport authority](transcript-link-audience.md) — Shared signing keys must not let a stdio operator link authorize a download through HTTP.
 
 ## Decisions
 
@@ -39,18 +40,19 @@
 
 ## Pitfalls
 
+- [Serializable scans can couple unrelated ownership actions](serializable-scan-planning.md) — Bounded retries cannot reliably compensate for relation-wide predicate locks on small tables.
 - [Nullable tool ownership leaves a uniqueness gap](nullable-tool-uniqueness.md) — The owner-and-name unique index does not deduplicate ownerless tools in PostgreSQL.
 - [HTTP prompt discovery cannot use per-call identity](mcp-http-prompt-discovery.md) — The HTTP factory exposes everyone-readable agent prompts rather than the authenticated caller’s full agent set.
 
 ## Coverage
 
-1. src/mcp/ (tools, auth, access, grants): covered 2026-10-17 (6 concepts)
+1. src/mcp/ (tools, auth, access, grants): covered 2026-11-09 (8 concepts)
 2. src/config/ and env handling: covered 2026-10-17 (2 concepts)
-3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-17 (7 concepts)
-4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-17 (2 concepts)
-5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-10-17 (3 concepts)
-6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-10-17 (3 concepts)
-7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-10-17 (7 concepts)
+3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-11-09 (8 concepts)
+4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-11-09 (2 concepts)
+5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-11-09 (3 concepts)
+6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-11-09 (3 concepts)
+7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-11-09 (7 concepts)
 8. prisma/ (schema, migrations): covered 2026-10-17 (3 concepts)
 9. deploy/ (Terraform, Kubernetes, scripts): covered 2026-10-17 (2 concepts)
 10. src/quickstart/, src/import/, the CLI files in src/: covered 2026-10-17 (4 concepts)

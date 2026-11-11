@@ -9,9 +9,9 @@ sources:
   - id: swap
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/workspace-swap.ts#L16-L51
   - id: docker
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/docker.ts#L385-L400
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/providers/jobs/docker.ts#L390-L405
   - id: kubernetes
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/kubernetes.ts#L738-L750
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/providers/jobs/kubernetes.ts#L823-L835
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -27,16 +27,16 @@ wardby:
     - id: docker
       repo: github:wardby/wardby
       path: src/providers/jobs/docker.ts
-      lines: [385, 400]
+      lines: [390, 405]
       symbol: DockerJobLauncher.materializeWorkspace
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
       spanHash: sha256:3e9525156cbd3c0791e79ff7ce86b16c92b0d62d8acc92a104b604fc6f54c08f
     - id: kubernetes
       repo: github:wardby/wardby
       path: src/providers/jobs/kubernetes.ts
-      lines: [738, 750]
+      lines: [823, 835]
       symbol: KubernetesJobLauncher.materializeWorkspace
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
       spanHash: sha256:44a85cadf23fdb1d77c0f4e1738873327756c029ce114c4efb47276d18abac84
   confidence: high
 ---
@@ -49,6 +49,6 @@ The swap keeps the original workspace until filling and validation succeed, then
 
 [^swap]: src/providers/jobs/workspace-swap.ts, lines 16-51.
 
-[^docker]: src/providers/jobs/docker.ts, lines 385-400.
+[^docker]: src/providers/jobs/docker.ts, lines 390-405.
 
-[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 738-750.
+[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 823-835.
