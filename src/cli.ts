@@ -80,6 +80,7 @@ import { RunStepSweeper } from "./core/run-steps/sweep.js";
 import { buildRunStepWriter } from "./core/run-steps/writer.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
+import { startRunHookDispatcher } from "./core/run-hooks/dispatcher.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { buildPower } from "./core/power-composition.js";
@@ -963,6 +964,12 @@ async function scheduler(args: string[]): Promise<void> {
     deferredReviews: { db: prisma, executor, hosts: reviewHosts, repoAccess, issueTrackers },
   });
   const notifications = await startNotifications({ db: prisma, chat });
+  // Run hooks deliver with or without a chat provider (every replica; a lease elects one sender).
+  const runHooks = startRunHookDispatcher({
+    db: prisma,
+    secrets: nativeProviders.secrets,
+    datastore: nativeProviders.datastore,
+  });
   const selfDefects = { db: prisma, issueTrackers };
   const runStepSweeper = new RunStepSweeper(prisma);
   const sched = startScheduler({
@@ -992,6 +999,7 @@ async function scheduler(args: string[]): Promise<void> {
       sched.stop();
       reconciler.stop();
       notifications.stop();
+      runHooks.stop();
       void Promise.resolve(executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
         .finally(() => {

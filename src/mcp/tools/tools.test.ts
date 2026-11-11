@@ -118,6 +118,7 @@ function fakeDb(
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
+    runHook: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
     agentTool: {
       findUnique: async ({ where }: { where: { agentId_toolId: { agentId: string; toolId: string } } }) =>
         attachments.find(

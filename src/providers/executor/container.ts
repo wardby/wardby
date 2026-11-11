@@ -55,6 +55,7 @@ import {
 } from "../../coding/merge-wording.js";
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
+import { emitRunCompletedEvent } from "../../core/workflow-run-events.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
 import { topUpCodingBudget, type TopUpOutcome } from "../../core/budget-topup.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
@@ -952,6 +953,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     if (finished && status === "budget_exhausted") {
       await this.selfDefect({ ...finished, status, error: null, finishedAt });
     }
+    // Only the write that made the row terminal emits (never throws).
+    if (finished) await emitRunCompletedEvent(this.db, runId);
   }
 
   async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
@@ -1006,6 +1009,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
     // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
     if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
+    if (changed) await emitRunCompletedEvent(this.db, runId);
     return changed;
   }
 }

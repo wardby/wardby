@@ -17,16 +17,21 @@ interface Row {
   code: string;
 }
 
-function fakeDb(tool: Row | null, agents: { id: string; name: string; ownerId: string | null }[]) {
+function fakeDb(
+  tool: Row | null,
+  agents: { id: string; name: string; ownerId: string | null }[],
+  hookedAgents: { id: string; name: string; ownerId: string | null }[] = [],
+) {
   let current = tool;
   let attachments = agents.map((agent) => ({ toolId: tool?.id ?? "", agent }));
+  let hooks = hookedAgents.map((agent) => ({ toolId: tool?.id ?? "", agent }));
   const isolationLevels: unknown[] = [];
   const tx = {
     tool: {
       findUnique: async () => current,
       update: async ({ data }: { data: Partial<Row> }) => (current = { ...current!, ...data }),
       delete: async () => {
-        if (attachments.length > 0) {
+        if (attachments.length > 0 || hooks.length > 0) {
           throw new Prisma.PrismaClientKnownRequestError("fk", { code: "P2003", clientVersion: "test" });
         }
         const deleted = current;
@@ -38,6 +43,13 @@ function fakeDb(tool: Row | null, agents: { id: string; name: string; ownerId: s
       findMany: async () => attachments.map((a) => ({ agent: a.agent })),
       deleteMany: async ({ where }: { where: { agentId: { in: string[] } } }) => {
         attachments = attachments.filter((a) => !where.agentId.in.includes(a.agent.id));
+        return { count: 0 };
+      },
+    },
+    runHook: {
+      findMany: async () => hooks.map((h) => ({ agent: h.agent })),
+      deleteMany: async ({ where }: { where: { agentId: { in: string[] } } }) => {
+        hooks = hooks.filter((h) => !where.agentId.in.includes(h.agent.id));
         return { count: 0 };
       },
     },
@@ -146,6 +158,23 @@ describe("deleteToolGuarded", () => {
     expect(fake.tool()).not.toBeNull();
     await expect(deleteToolGuarded(fake.db, "t1", { detach: true, authorize: allow })).resolves.toEqual(["a1"]);
     expect(fake.tool()).toBeNull();
+  });
+
+  it("counts a run hook like an attachment: needs detach, then removes the owner's own hooks", async () => {
+    const fake = fakeDb({ id: "t1", ownerId: "p1", code: "" }, [], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+    expect((await rejection(deleteToolGuarded(fake.db, "t1", { detach: false, authorize: allow }))).reason).toBe(
+      "needs_detach",
+    );
+    await expect(deleteToolGuarded(fake.db, "t1", { detach: true, authorize: allow })).resolves.toEqual(["a1"]);
+    expect(fake.tool()).toBeNull();
+  });
+
+  it("refuses while another owner's agent has a run hook on the tool", async () => {
+    const fake = fakeDb({ id: "t1", ownerId: "p1", code: "" }, [], [{ id: "a2", name: "theirs", ownerId: "p2" }]);
+    expect((await rejection(deleteToolGuarded(fake.db, "t1", { detach: true, authorize: allow }))).reason).toBe(
+      "other_owners",
+    );
+    expect(fake.tool()).not.toBeNull();
   });
 
   it("never detaches another owner's agent, and then detaches nothing at all", async () => {

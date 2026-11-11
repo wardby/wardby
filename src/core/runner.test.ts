@@ -454,8 +454,9 @@ describe("runAgent", () => {
       error: "LLM call failed\nstack",
     });
     const events: WorkflowEventInput[] = [];
+    // run_completed (for run hooks) is covered in workflow-run-completed.test.ts.
     setWorkflowEventSink(async (e) => {
-      events.push(e);
+      if (e.payload.kind !== "run_completed") events.push(e);
     });
     try {
       const run = await runAgent(
@@ -485,8 +486,9 @@ describe("runAgent", () => {
       },
     };
     const events: WorkflowEventInput[] = [];
+    // run_completed (for run hooks) is covered in workflow-run-completed.test.ts.
     setWorkflowEventSink(async (e) => {
-      events.push(e);
+      if (e.payload.kind !== "run_completed") events.push(e);
     });
     try {
       const run = await runAgent(
@@ -1550,8 +1552,9 @@ describe("executeRun terminal-write races", () => {
     });
     const lost = new RunOwnershipLostError("turn:1:llm");
     const events: WorkflowEventInput[] = [];
+    // run_completed (for run hooks) is covered in workflow-run-completed.test.ts.
     setWorkflowEventSink(async (e) => {
-      events.push(e);
+      if (e.payload.kind !== "run_completed") events.push(e);
     });
     try {
       const loser: Engine = {
@@ -1846,8 +1849,9 @@ describe("native runs record and keep their catalog entry", () => {
     const run = await db.run.create({ data: { agentId: "a1" } });
     const { llm } = routed(disabled);
     const events: WorkflowEventInput[] = [];
+    // run_completed (for run hooks) is covered in workflow-run-completed.test.ts.
     setWorkflowEventSink(async (e) => {
-      events.push(e);
+      if (e.payload.kind !== "run_completed") events.push(e);
     });
     try {
       const finished = await executeRun(run.id, providers(llm, { run: vi.fn(async () => succeeded) }), db);

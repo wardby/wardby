@@ -386,7 +386,12 @@ export async function pruneWorkflowEvents(
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 86_400_000);
   const { count } = await db.workflowEvent.deleteMany({
-    where: { ...only, createdAt: { lt: cutoff }, deliveries: { none: { state: "pending" } } },
+    where: {
+      ...only,
+      createdAt: { lt: cutoff },
+      deliveries: { none: { state: "pending" } },
+      hookDeliveries: { none: { state: "pending" } },
+    },
   });
   return count;
 }

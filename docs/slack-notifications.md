@@ -266,3 +266,7 @@ Link a project only to a channel whose members may see every issue in it.
 
 The bot token stays on the wardby server; agents, sandboxed tools, and
 coding-run workers never see it.
+
+To send a run's report, or to post somewhere wardby has no built-in support
+for, use [run hooks](run-hooks.md): your own sandbox tool, called on the same
+events plus `run_completed`.

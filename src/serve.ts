@@ -23,6 +23,7 @@ import { prisma } from "./core/db.js";
 import { logger } from "./core/logger.js";
 import { DISABLED_POWER } from "./core/power.js";
 import { startNotifications } from "./core/notifications.js";
+import { startRunHookDispatcher } from "./core/run-hooks/dispatcher.js";
 import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
@@ -106,6 +107,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       : {}),
   });
   const notifications = await startNotifications({ db: prisma, chat: providers.chat ?? {} });
+  // Run hooks deliver with or without a chat provider (every replica; a lease elects one sender).
+  const runHooks = startRunHookDispatcher({ db: prisma, secrets: providers.secrets, datastore: providers.datastore });
   const selfDefects = { db: prisma, issueTrackers: providers.issueTrackers };
   // Expired run steps (RUN_STEP_RETENTION_DAYS), from the scheduler leader only.
   const runStepSweeper = new RunStepSweeper(prisma);
@@ -136,6 +139,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       scheduler.stop();
       reconciler.stop();
       notifications.stop();
+      runHooks.stop();
       // Before mcp.close(), which flushes the run-steps writer: no batch arrives after the flush.
       const ingress = runStepIngress;
       if (ingress) await new Promise<void>((resolve) => ingress.close(() => resolve()));
