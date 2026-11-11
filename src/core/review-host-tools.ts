@@ -43,8 +43,29 @@ export interface PublishedReview {
   ciPending?: boolean;
 }
 
-/** Cap on the review text kept on the check row and handed to a fix round. */
-export const MAX_REVIEW_BODY_CHARS = 20_000;
+/** repo_review_publish's own limits on the summary and the body it posts. */
+export const MAX_REVIEW_SUMMARY_CHARS = 140;
+export const MAX_REVIEW_PUBLISH_BODY_CHARS = 60_000;
+
+/**
+ * Cap on the review text kept on the check row and handed to a fix round:
+ * room for the whole published review (summary, blank line, body), so a fix
+ * round always sees the recommendations at its end.
+ */
+export const MAX_REVIEW_BODY_CHARS = MAX_REVIEW_SUMMARY_CHARS + 2 + MAX_REVIEW_PUBLISH_BODY_CHARS;
+
+/** Ends review text that was cut, so a reader knows the rest is missing. */
+export const REVIEW_CUT_NOTE =
+  "\n\n[This review was cut to fit; the rest is missing. Read the full review on the pull request.]";
+
+/**
+ * Review text within MAX_REVIEW_BODY_CHARS. Text that fits is returned as is;
+ * longer text is cut and ends with REVIEW_CUT_NOTE, never silently.
+ */
+export function capReviewText(text: string): string {
+  if (text.length <= MAX_REVIEW_BODY_CHARS) return text;
+  return text.slice(0, MAX_REVIEW_BODY_CHARS - REVIEW_CUT_NOTE.length).trimEnd() + REVIEW_CUT_NOTE;
+}
 
 export interface RepositoryLink {
   provider: ReviewHostProvider;
@@ -158,8 +179,8 @@ const PublishArgs = z
     prNumber: z.number().int().positive(),
     headSha: SHA,
     verdict: z.enum(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]),
-    summary: postedText(140),
-    body: postedText(60_000),
+    summary: postedText(MAX_REVIEW_SUMMARY_CHARS),
+    body: postedText(MAX_REVIEW_PUBLISH_BODY_CHARS),
     comments: z.array(InlineCommentArgs).max(50).optional(),
     resolveThreadIds: z
       .array(z.string().regex(/^[A-Za-z0-9_=-]{1,100}$/))
@@ -256,8 +277,8 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
         prNumber: { type: "integer", minimum: 1 },
         headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
         verdict: { type: "string", enum: ["APPROVE", "CHANGES_REQUESTED", "COMMENT"] },
-        summary: { type: "string", maxLength: 140, description: "One line, shown on the check." },
-        body: { type: "string", maxLength: 60000, description: "The full review in markdown." },
+        summary: { type: "string", maxLength: MAX_REVIEW_SUMMARY_CHARS, description: "One line, shown on the check." },
+        body: { type: "string", maxLength: MAX_REVIEW_PUBLISH_BODY_CHARS, description: "The full review in markdown." },
         comments: {
           type: "array",
           maxItems: 50,
@@ -647,7 +668,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           }
           await markCompleted(ctx, {
             verdict: a.verdict,
-            body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
+            body: capReviewText(`${a.summary}\n\n${a.body}`),
             ...(ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
           });
         }

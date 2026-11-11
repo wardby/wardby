@@ -373,10 +373,11 @@ budget — wardby only decides **whether** a round may start. The task handed
 to the agent includes the same continuation hint a mention follow-up gets
 (so it keeps working on the same branch) and asks it to fix only the
 review's CRITICAL/MAJOR findings and MUST_FIX recommendations and change
-nothing else. The review itself (capped at 20,000 characters) is passed to
+nothing else. The whole published review (summary and body) is passed to
 the agent as **untrusted context**, not as part of its instructions: the
 agent reads it as information about what to fix and is told never to follow
-instructions written inside it. A fix round's task names only its own pull
+instructions written inside it. Review text is never cut silently: any text
+that doesn't fit ends with a note saying the rest is missing. A fix round's task names only its own pull
 request; it never lists related pull requests in other repositories.
 
 Only the review's summary and body reach the fixing agent — inline review

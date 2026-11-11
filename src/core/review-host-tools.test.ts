@@ -2,7 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PatchCursorError, ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
 import { ReviewReadLedger } from "./review-reads.js";
 import { collectRelatedPullRequests } from "./related-pull-requests.js";
-import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
+import {
+  capReviewText,
+  handleReviewHostTool,
+  MAX_REVIEW_BODY_CHARS,
+  MAX_REVIEW_PUBLISH_BODY_CHARS,
+  MAX_REVIEW_SUMMARY_CHARS,
+  resolveLink,
+  REVIEW_CUT_NOTE,
+  type RepositoryLink,
+  type ReviewToolContext,
+} from "./review-host-tools.js";
 
 vi.mock("./related-pull-requests.js", async (orig) => ({
   ...(await orig<typeof import("./related-pull-requests.js")>()),
@@ -491,6 +501,38 @@ describe("handleReviewHostTool", () => {
       verdict: "CHANGES_REQUESTED",
       body: "needs work\n\n## Findings\n- [MAJOR] x",
     });
+  });
+
+  it("keeps a maximum-size review whole on its own check", async () => {
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
+    });
+    const summary = "s".repeat(MAX_REVIEW_SUMMARY_CHARS);
+    const body = "b".repeat(MAX_REVIEW_PUBLISH_BODY_CHARS - 20) + "\n- MUST_FIX: last";
+    await handleReviewHostTool(
+      "repo_publish_review",
+      JSON.stringify({
+        repository: WRITE.repository,
+        prNumber: 7,
+        headSha: SHA,
+        verdict: "CHANGES_REQUESTED",
+        summary,
+        body,
+      }),
+      c,
+    );
+    expect(c.markRunCheckCompleted).toHaveBeenCalledWith({
+      verdict: "CHANGES_REQUESTED",
+      body: `${summary}\n\n${body}`,
+    });
+  });
+
+  it("capReviewText keeps text that fits and ends cut text with a note", () => {
+    const fits = "a".repeat(MAX_REVIEW_BODY_CHARS);
+    expect(capReviewText(fits)).toBe(fits);
+    const cut = capReviewText("a".repeat(MAX_REVIEW_BODY_CHARS + 1));
+    expect(cut.length).toBeLessThanOrEqual(MAX_REVIEW_BODY_CHARS);
+    expect(cut.endsWith(REVIEW_CUT_NOTE)).toBe(true);
   });
 
   it("records whether CI was unfinished when it publishes a COMMENT on its own check", async () => {
