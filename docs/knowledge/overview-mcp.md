@@ -4,14 +4,14 @@ title: MCP management and authorization
 description: Transport identity becomes scoped management calls over owned resources and explicit grants.
 tags: [mcp, access, auth]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:21:57.208Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-02T06:04:39.135Z }
 sources:
   - id: composition
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/mcp/index.ts#L109-L167
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/mcp/index.ts#L118-L175
   - id: dispatch
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/mcp/server.ts#L256-L276
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/mcp/server.ts#L282-L302
   - id: access
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/mcp/auth/access.ts#L47-L70
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/mcp/auth/access.ts#L55-L78
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -20,23 +20,23 @@ wardby:
     - id: composition
       repo: github:wardby/wardby
       path: src/mcp/index.ts
-      lines: [109, 167]
+      lines: [118, 175]
       symbol: localOperatorContext / registerAllTools
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:6aa95fcc8cdc1954cd86a19e435870c3b23f5c4f0ec6d003839181c5e67c50cf
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
+      spanHash: sha256:3efbdb7f5f323e05b8baddab05ded6c84faf40d3f86e1be9b948a990bf4f97ef
     - id: dispatch
       repo: github:wardby/wardby
       path: src/mcp/server.ts
-      lines: [256, 276]
+      lines: [282, 302]
       symbol: factory
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
       spanHash: sha256:4fe5d3d2e93961fb1d044450ab050dcfe7429a5f7fc588af677dc710c05ae222
     - id: access
       repo: github:wardby/wardby
       path: src/mcp/auth/access.ts
-      lines: [47, 70]
+      lines: [55, 78]
       symbol: assertAgentAccess / requireAgentAccess
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
       spanHash: sha256:04c8d3accf60339956706f501fbf628ae620e8f368bd93c20825f6ef4f915cbb
   confidence: high
 ---
@@ -52,10 +52,10 @@ A management call proceeds through these steps:
 
 The area owns request context, tool registration and task presentation; durable principals, grants and task rows live in [Prisma](overview-prisma.md). Authentication adapters come from [provider seams](overview-providers.md), and transport settings come from [configuration](overview-config.md).
 
-**What to do:** preserve independent scope and resource checks. Read the area's contracts on [transactional authorization](transactional-agent-authorization.md), [schema conversion](mcp-schema-module-boundary.md), [HTTP prompt discovery](mcp-http-prompt-discovery.md), [task cancellation](mcp-cancelled-task-precedence.md) and [secret-entry replicas](secret-entry-replica-contract.md). Operator setup belongs in [identity provider guidance](../getting-started-identity-provider.md).
+**What to do:** preserve independent scope and resource checks and [transactional exclusion between public write and bindings](public-write-binding-transaction.md). Read the area's contracts on [transactional authorization](transactional-agent-authorization.md), [schema conversion](mcp-schema-module-boundary.md), [HTTP prompt discovery](mcp-http-prompt-discovery.md), [task cancellation](mcp-cancelled-task-precedence.md) and [secret-entry replicas](secret-entry-replica-contract.md). Operator setup belongs in [identity provider guidance](../getting-started-identity-provider.md).
 
-[^composition]: src/mcp/index.ts, lines 109-167.
+[^composition]: src/mcp/index.ts, lines 118-175.
 
-[^dispatch]: src/mcp/server.ts, lines 256-276.
+[^dispatch]: src/mcp/server.ts, lines 282-302.
 
-[^access]: src/mcp/auth/access.ts, lines 47-70.
+[^access]: src/mcp/auth/access.ts, lines 55-78.

@@ -11,7 +11,7 @@ sources:
   - id: docker
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/docker.ts#L385-L400
   - id: kubernetes
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/kubernetes.ts#L738-L750
+    url: https://github.com/wardby/wardby/blob/39e9de0bcf8d4b8df8f69289d580229ff375a664/src/providers/jobs/kubernetes.ts#L797-L809
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -34,9 +34,9 @@ wardby:
     - id: kubernetes
       repo: github:wardby/wardby
       path: src/providers/jobs/kubernetes.ts
-      lines: [738, 750]
+      lines: [797, 809]
       symbol: KubernetesJobLauncher.materializeWorkspace
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 39e9de0bcf8d4b8df8f69289d580229ff375a664
       spanHash: sha256:44a85cadf23fdb1d77c0f4e1738873327756c029ce114c4efb47276d18abac84
   confidence: high
 ---
@@ -51,4 +51,4 @@ The swap keeps the original workspace until filling and validation succeed, then
 
 [^docker]: src/providers/jobs/docker.ts, lines 385-400.
 
-[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 738-750.
+[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 797-809.
