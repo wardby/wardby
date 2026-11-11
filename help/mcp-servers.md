@@ -22,15 +22,14 @@ A native, Claude Code or Codex agent can call tools from a remote MCP server (St
 
 Each call has `callTimeoutMs` (default `30000`, at most `WARDBY_TOOL_MAX_TIMEOUT_MS`, and never
 past the run's deadline). Results are untrusted input; the allowlist is the control. stdio servers
-and OAuth are not supported.
+are not supported. Servers that only offer OAuth sign-in need Wardby 0.9.11 or later; see the
+oauth-secrets help article.
 
 `WARDBY_MCP_SERVERS` is `owners` (default), `admins` (registering needs `hosts:admin`) or `off`
 (only `detach_mcp_server` and `delete_mcp_server` still work, for cleanup).
 
 Each call opens a fresh MCP session, so a server that keeps state between calls in one session
 won't see it. Arguments that aren't a JSON object return `invalid_arguments`.
-
-For OAuth-only servers, see the oauth-secrets help article.
 
 ## Coding agents
 
