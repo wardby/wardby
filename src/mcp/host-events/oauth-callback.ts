@@ -10,7 +10,7 @@
  */
 import type { ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
-import { completeOAuthCallback, type OAuthLinkAdapter } from "../../core/oauth-link.js";
+import { completeOAuthCallback, OAUTH_ISS_MAX_LENGTH, type OAuthLinkAdapter } from "../../core/oauth-link.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 import { PAGE_STYLE } from "../shared/page-style.js";
 
@@ -86,14 +86,20 @@ export async function handleOAuthCallback(
     }
     return;
   }
-  const outcome = await completeOAuthCallback({
-    db: deps.db,
-    adapters: deps.adapters,
-    cipher: deps.cipher,
-    state: url.searchParams.get("state"),
-    code: url.searchParams.get("code"),
-    redirectUri: deps.redirectUri,
-  });
+  // RFC 9207: the issuer that sent the browser back, checked by an adapter that knows its issuer.
+  const iss = url.searchParams.get("iss") ?? undefined;
+  const outcome =
+    iss !== undefined && iss.length > OAUTH_ISS_MAX_LENGTH
+      ? ({ kind: "invalid" } as const)
+      : await completeOAuthCallback({
+          db: deps.db,
+          adapters: deps.adapters,
+          cipher: deps.cipher,
+          state: url.searchParams.get("state"),
+          code: url.searchParams.get("code"),
+          ...(iss !== undefined ? { iss } : {}),
+          redirectUri: deps.redirectUri,
+        });
   if (outcome.kind === "invalid") {
     page(
       res,

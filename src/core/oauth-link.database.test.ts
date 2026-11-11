@@ -36,13 +36,13 @@ async function principal() {
 }
 
 // Test adapter: counts complete() calls, returns a fake token payload.
-const calls: { code: string; codeVerifier: string; redirectUri: string; context: unknown }[] = [];
+const calls: { code: string; codeVerifier: string; redirectUri: string; context: unknown; iss?: string }[] = [];
 const testAdapter: OAuthLinkAdapter<{ label: string }, { login: string }> = {
   purpose: "test",
   authorizeUrl: ({ state, codeChallenge, redirectUri, context }) =>
     `https://idp.invalid/authorize?${new URLSearchParams({ state, code_challenge: codeChallenge, redirect_uri: redirectUri, label: context.label }).toString()}`,
-  complete: async ({ code, codeVerifier, redirectUri, context }) => {
-    calls.push({ code, codeVerifier, redirectUri, context });
+  complete: async ({ code, codeVerifier, redirectUri, context, iss }) => {
+    calls.push({ code, codeVerifier, redirectUri, context, ...(iss !== undefined ? { iss } : {}) });
     if (code === "bad") throw new Error("idp refused: fake-access-AAAA");
     return { result: { login: "svc-user" }, payload: JSON.stringify({ accessToken: "fake-access-AAAA" }) };
   },
@@ -404,5 +404,39 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
       reason: "github_oauth_exchange_failed:redirect_uri_mismatch",
     });
     expect(JSON.stringify(logged.mock.calls)).not.toContain("fake-access-AAAA");
+  });
+
+  it("passes iss to the adapter's complete, and refuses an over-long one before using the state", async () => {
+    const p = await principal();
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "iss" },
+      redirectUri: REDIRECT,
+    });
+    const state = new URL(started.authorizeUrl).searchParams.get("state");
+    const long = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "idp-code",
+      iss: "a".repeat(2049),
+      redirectUri: REDIRECT,
+    });
+    expect(long).toEqual({ kind: "invalid" });
+    expect(calls).toHaveLength(0);
+    const ok = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "idp-code",
+      iss: "https://idp.invalid",
+      redirectUri: REDIRECT,
+    });
+    expect(ok.kind).toBe("confirm");
+    expect(calls[0]).toMatchObject({ iss: "https://idp.invalid" });
   });
 });

@@ -1,7 +1,10 @@
 import type { ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../core/oauth-link.js", () => ({ completeOAuthCallback: vi.fn() }));
+vi.mock("../../core/oauth-link.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../core/oauth-link.js")>()),
+  completeOAuthCallback: vi.fn(),
+}));
 import { completeOAuthCallback } from "../../core/oauth-link.js";
 import { handleOAuthCallback, type OAuthCallbackDeps } from "./oauth-callback.js";
 
@@ -135,5 +138,23 @@ describe("GitHub user callback page", () => {
     expect(await body("error=other")).toContain(
       "<p>GitHub did not authorize the link. Start again from your MCP client.</p>",
     );
+  });
+
+  it("passes the iss parameter (RFC 9207) through, and none when it is absent", async () => {
+    vi.mocked(completeOAuthCallback).mockClear();
+    vi.mocked(completeOAuthCallback).mockResolvedValue({ kind: "invalid" });
+    const { res } = fakeRes();
+    await handleOAuthCallback(url("code=c&state=s&iss=https%3A%2F%2Fas.example"), res, deps);
+    expect(vi.mocked(completeOAuthCallback).mock.calls[0][0]).toMatchObject({ iss: "https://as.example" });
+    await handleOAuthCallback(url("code=c&state=s"), fakeRes().res, deps);
+    expect(vi.mocked(completeOAuthCallback).mock.calls[1][0].iss).toBeUndefined();
+  });
+
+  it("answers not valid for an over-long iss without completing the link", async () => {
+    vi.mocked(completeOAuthCallback).mockClear();
+    const { res, out } = fakeRes();
+    await handleOAuthCallback(url(`code=c&state=s&iss=${"a".repeat(2049)}`), res, deps);
+    expect(out.status).toBe(400);
+    expect(completeOAuthCallback).not.toHaveBeenCalled();
   });
 });

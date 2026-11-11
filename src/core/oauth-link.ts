@@ -31,6 +31,8 @@ export const OAUTH_LINK_TTL_MS = 10 * 60_000;
 export const OAUTH_LINK_MAX_ATTEMPTS = 5;
 export const OAUTH_LINK_MAX_PENDING = 5;
 export const OAUTH_CALLBACK_PATH = "/oauth/callback";
+/** Longest `iss` callback parameter (RFC 9207) accepted; anything longer is "not valid". */
+export const OAUTH_ISS_MAX_LENGTH = 2048;
 const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const CODE_LENGTH = 8;
 
@@ -49,8 +51,12 @@ export interface OAuthLinkAdapter<Ctx, Result> {
   readonly purpose: string;
   /** The provider's authorize URL for this request. */
   authorizeUrl(input: { state: string; codeChallenge: string; redirectUri: string; context: Ctx }): string;
-  /** At the callback: exchanges the code. `payload` (optional) is encrypted before it is stored. */
-  complete(input: { code: string; codeVerifier: string; redirectUri: string; context: Ctx }): Promise<{
+  /**
+   * At the callback: exchanges the code. `payload` (optional) is encrypted before it is stored.
+   * `iss` is the callback's RFC 9207 issuer parameter when the provider sent one; an adapter that
+   * knows its issuer checks it, others ignore it.
+   */
+  complete(input: { code: string; codeVerifier: string; redirectUri: string; context: Ctx; iss?: string }): Promise<{
     result: Result;
     payload?: string;
   }>;
@@ -124,12 +130,15 @@ export async function completeOAuthCallback(input: {
   cipher: Pick<SecretCipher, "encrypt">;
   state: string | null;
   code: string | null;
+  /** The callback's `iss` parameter (RFC 9207), when present. */
+  iss?: string | null;
   /** Exactly the redirect_uri the authorize URL carried: one value, or one per purpose. */
   redirectUri: string | ((purpose: string) => string);
   now?: Date;
 }): Promise<OAuthCallbackOutcome> {
   const now = input.now ?? new Date();
   if (!input.state || !input.code || input.state.length > 256 || input.code.length > 256) return { kind: "invalid" };
+  if (input.iss && input.iss.length > OAUTH_ISS_MAX_LENGTH) return { kind: "invalid" };
   const stateHash = sha256(input.state);
   // Single use: only the first callback for a live state wins.
   const { count } = await input.db.oAuthLinkRequest.updateMany({
@@ -153,6 +162,7 @@ export async function completeOAuthCallback(input: {
       codeVerifier: request.codeVerifier,
       redirectUri: typeof input.redirectUri === "string" ? input.redirectUri : input.redirectUri(request.purpose),
       context: request.context,
+      ...(input.iss ? { iss: input.iss } : {}),
     });
     const code = confirmationCode();
     const payloadCiphertext = done.payload ? await input.cipher.encrypt(done.payload) : null;
