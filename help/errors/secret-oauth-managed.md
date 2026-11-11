@@ -4,7 +4,7 @@ title: An OAuth secret cannot be changed by hand
 summary: The secret is managed by its OAuth connection; its value and broker cannot be set directly.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_managed]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # An OAuth secret cannot be changed by hand

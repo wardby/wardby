@@ -4,7 +4,7 @@ title: The service has no usable OAuth metadata
 summary: Connecting an OAuth secret failed because the resource does not publish the OAuth metadata Wardby needs.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_discovery_failed]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # The service has no usable OAuth metadata

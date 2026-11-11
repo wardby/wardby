@@ -4,7 +4,7 @@ title: That name belongs to a secret that is not an OAuth secret
 summary: Connecting an OAuth secret failed because an ordinary secret already has that name.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_name_taken]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # That name belongs to a secret that is not an OAuth secret

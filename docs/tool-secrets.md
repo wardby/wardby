@@ -158,7 +158,11 @@ Provider requirements:
   [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md).
 - Everyone an MCP server (or agent) is shared with uses the same service
   identity, with the owner's credentials: share it as carefully as the access
-  of the signed-in user.
+  of the signed-in user. If the owner's OAuth secret needs reconnecting (or its
+  credentials otherwise can't be used), a user the server is shared with sees only
+  "The MCP server's credentials can't be used; ask its owner to check it." They
+  never see the owner's secret name or `secret_reauth_required`; only the owner
+  sees the specific error and can reconnect.
 
 To use an OAuth secret with a remote MCP server, see
 [OAuth-only servers](mcp-servers.md#oauth-only-servers).

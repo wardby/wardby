@@ -112,6 +112,12 @@ with [`mcp_server_auth_failed`](../help/errors/mcp-server-auth-failed.md) or
 [`secret_reauth_required`](../help/errors/secret-reauth-required.md); connect
 the secret again under the same name and the server keeps working.
 
+Only the owner sees those specific errors. A user the server is shared with,
+whose call fails because the owner's OAuth secret needs reconnecting (or its
+credentials otherwise can't be used), sees only "The MCP server's credentials
+can't be used; ask its owner to check it." They never see the owner's secret name
+or `secret_reauth_required`, and only the owner can reconnect.
+
 ## Coding agents
 
 A Claude Code or Codex agent can use attached servers too. Attach them the same way, with

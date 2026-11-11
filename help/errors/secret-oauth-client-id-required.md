@@ -4,7 +4,7 @@ title: The provider needs a registered client id
 summary: The provider does not offer dynamic client registration, so connecting needs oauth.clientId.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_client_id_required]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # The provider needs a registered client id

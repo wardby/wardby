@@ -4,7 +4,7 @@ title: The OAuth secret could not be encrypted or decrypted
 summary: Wardby could not encrypt or decrypt an OAuth secret's tokens; try again, and check the secret key.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_encryption_failed]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # The OAuth secret could not be encrypted or decrypted

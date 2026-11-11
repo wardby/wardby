@@ -4,7 +4,7 @@ title: An OAuth secret must be connected again
 summary: An OAuth secret can no longer be refreshed; connect it again with create_secret and oauth.
 audience: operator
 tags: [error, secrets, oauth, secret_reauth_required, reauth, connect, create_secret oauth]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # An OAuth secret must be connected again

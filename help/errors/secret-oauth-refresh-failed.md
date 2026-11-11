@@ -4,7 +4,7 @@ title: The OAuth provider did not refresh the token
 summary: A refresh got an answer Wardby could not use; nothing changed. Try again, or connect again.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_refresh_failed]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # The OAuth provider did not refresh the token

@@ -1,10 +1,10 @@
 ---
 id: brokered-secrets
-title: Brokered secrets and the secret broker
-summary: Let tools use a secret only by sending it to hosts you choose, without ever reading its value.
+title: Brokered and OAuth secrets and the secret broker
+summary: Let tools use a secret only by sending it to hosts you choose, without ever reading its value, including OAuth secrets for OAuth-only services.
 audience: operator
-tags: [secrets, brokered, secret broker, set_secret_broker, oauth, browserstack, connect, reauth, create_secret oauth]
-appliesTo: ">=0.6.0"
+tags: [secrets, brokered, secret broker, security, tools, fetch, sigv4, set_secret_broker, oauth, browserstack, connect, reauth, create_secret oauth]
+appliesTo: >=0.6.0
 ---
 
 # Brokered secrets and the secret broker

@@ -1,10 +1,10 @@
 ---
 id: mcp-servers
-title: Remote MCP server tools for native and coding agents
-summary: Register a remote MCP server, then attach an allowlist of its tools to a native, Claude Code or Codex agent; credentials stay in brokered secrets.
+title: Remote MCP server tools, including OAuth-only servers, for native and coding agents
+summary: Register a remote MCP server, then attach an allowlist of its tools to a native, Claude Code or Codex agent; credentials stay in brokered secrets, including OAuth secrets.
 audience: operator
-tags: [mcp, codex, register_mcp_server, attach_mcp_server, readOnlyHint, oauth, browserstack, create_secret oauth]
-appliesTo: ">=0.8.0"
+tags: [mcp, mcp server, coding-agent, codex, register_mcp_server, attach_mcp_server, readOnlyHint, WARDBY_MCP_SERVERS, oauth, browserstack, create_secret oauth, connect, reauth]
+appliesTo: >=0.8.0
 ---
 
 # Remote MCP server tools for native and coding agents
@@ -38,6 +38,7 @@ open the link, sign in as a service user, then call again with the `confirmation
 server with that secret in `secretNames` and attach it as usual. The account you sign in with sets
 what agents can do. If calls fail with [`secret_reauth_required`](errors/secret-reauth-required.md),
 connect the secret again under the same name. See [Brokered secrets](brokered-secrets.md#oauth-secrets).
+A user the server is shared with sees only "The MCP server's credentials can't be used; ask its owner to check it.", never the secret name; only the owner sees the specific error.
 
 ## Coding agents
 

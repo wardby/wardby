@@ -4,7 +4,7 @@ title: The OAuth provider could not be reached to refresh the token
 summary: A refresh failed because the provider was unreachable or busy; nothing changed, so try again.
 audience: operator
 tags: [error, secrets, oauth, secret_oauth_refresh_unavailable]
-appliesTo: ">=0.9.10"
+appliesTo: ">=0.9.11"
 ---
 
 # The OAuth provider could not be reached to refresh the token
