@@ -2628,3 +2628,62 @@ test("an older server, which ignores query, gets no older-runs search", async ($
   expect(await ui.find({ key: "older-run-r1" })).toBeUndefined();
   await ui.unmount();
 });
+
+test("Continue locally without npx on the session's PATH runs the login shell's npx with its PATH", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  on("env.get", (_, e) => ({ value: e.name === "SHELL" ? "/bin/zsh" : undefined }));
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status: "succeeded",
+        codingResult: { outcome: "pull_request_opened", repository: "your-org/api" },
+      });
+    if (e.tool === "get_run_transcript")
+      return reply({
+        runId: "r1",
+        status: "stored",
+        repository: "your-org/api",
+        download: { url: "https://wardby.example/dl?s=FAKE" },
+      });
+    return reply({});
+  });
+  const spawned: { argv: readonly string[]; env?: Record<string, string> }[] = [];
+  on("process.run", (_, e) => {
+    spawned.push({ argv: e.argv, env: e.init?.env });
+    if (e.argv[0] === "npx") return { deny: "failed to start: ENOENT: posix_spawn 'npx'" };
+    if (e.argv[0] === "/bin/zsh")
+      return {
+        value: {
+          exitCode: 0,
+          // What the rc files print comes before the answer.
+          stdout: "Now using node v24\n\n@@wardby-npx@@/home/me/.nvm/bin/npx@@/home/me/.nvm/bin:/usr/bin@@\n",
+          stderr: "",
+        },
+      };
+    return {
+      value: { exitCode: 0, stdout: "cd '/home/me/code/api-run-r1' && claude --resume /x/s.jsonl\n", stderr: "" },
+    };
+  });
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "continue-locally" });
+  await clock.settle();
+  expect(spawned.map((s) => s.argv[0])).toEqual(["npx", "/bin/zsh", "/home/me/.nvm/bin/npx"]);
+  expect(spawned[1].argv.slice(1, 2)).toEqual(["-lic"]);
+  expect(spawned[2].argv.slice(1)).toEqual(["-y", "@wardby/cli@latest", "resume", "-", "--print"]);
+  expect(spawned[2].env).toEqual({ PATH: "/home/me/.nvm/bin:/usr/bin" });
+  expect(await ui.find({ type: "Text", text: /claude --resume/ })).toBeDefined();
+  await ui.unmount();
+});
