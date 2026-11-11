@@ -3,7 +3,7 @@ id: status-comments
 title: Run status comments
 summary: Read GitHub and Jira run outcomes, package registry blocked statuses, and Slack notifications.
 audience: operator
-tags: [status, comments, github, jira, slack, blocked, packages, mentions]
+tags: [status, comments, github, jira, slack, blocked, packages, mentions, checks, tests, test-first, expected-failure, expected_failure, skipped]
 appliesTo: >=0.2.1
 ---
 
@@ -29,3 +29,25 @@ An approver can update the coding agent's package allowlist or policy with
 `@wardby` again. See [Package refusal errors](errors/package-refusals.md) for
 code-specific fixes and [Approve packages for coding agents](coding-packages.md)
 for policy details. Malware checks cannot be bypassed.
+
+## Checks a coding run reports
+
+A coding run lists each check it ran in the pull request description under
+**Tests:**, with its outcome: `passed`, `failed`, `expected failure` or
+`skipped`. The status comment counts only real failures:
+
+| In the run                                                   | Status comment                                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Every check passed                                           | ✅ Opened #N.                                                                    |
+| A test-first run that failed on purpose (`expected_failure`) | not counted: ✅ Opened #N.                                                       |
+| A check that could not run in the sandbox (`skipped`)        | ✅ Opened #N. 1 check could not be run and was skipped: see the description.     |
+| A check that failed                                          | ⚠️ Opened #N, but 1 check failed in the run (and how many were skipped, if any). |
+
+Builders on a worker older than Wardby 0.9.6 can't report `expected_failure`.
+A `failed` entry whose label says the failure was expected still isn't
+counted, for example `(before fix)`, `(before implementation)`,
+`(expected failure)` or `(red run)`. To have a builder report test-first runs
+this way, add the rule from the [builder prompt](builder-agent.md#builder-prompt).
+
+The status comment doesn't read the repository's own CI checks; see the pull
+request for those.

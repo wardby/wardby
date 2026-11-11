@@ -1,3 +1,4 @@
+import type { TestOutcome } from "../../coding/test-outcomes.js";
 import type { PackageAuditReport } from "../../coding/registry/audit-mode.js";
 
 /** What happened to a pull request description: wardby just wrote it (a new PR) or updated a fix round's. */
@@ -79,7 +80,7 @@ export type ContinuationTarget = Pick<
 /** Already-validated/redacted agent-authored fields (coding/protocol.ts) surfaced in the opened PR, if any. */
 export interface FinalizeChangesDetails {
   summary?: string;
-  tests?: readonly { command: string; outcome: "passed" | "failed" | "skipped" }[];
+  tests?: readonly { command: string; outcome: TestOutcome }[];
   tag?: string;
   /** Packages the registry proxy served/refused during this run (RegistryFetch), for the PR body. */
   packages?: readonly {

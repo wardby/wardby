@@ -608,7 +608,10 @@ from the App. The router either asks a question or delegates, the builder
 pushes a unique branch and opens at most one draft pull request, and the App
 edits the status comment with the pull request link or the failure. The
 link carries ⚠️ instead of ✅ when any of the builder's own checks failed in
-the run; the pull request description says which. A person
+the run; the pull request description says which. A deliberate test-first run
+(reported `expected_failure`, or labelled "before fix") doesn't count as a
+failure, and a check the builder couldn't run is reported as skipped; see
+[Run status comments](../help/status-comments.md#checks-a-coding-run-reports). A person
 reviews and merges; Wardby never merges for you. A later mention on that pull
 request continues the same branch.
 

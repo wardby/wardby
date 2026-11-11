@@ -436,10 +436,17 @@ const tagSchema = z
   .optional()
   .transform((value) => value ?? undefined) as unknown as OptionalTagSchema;
 
+/** The outcomes an agent may report per test command; see test-outcomes.ts for how they count. */
+export const TEST_OUTCOMES = ["passed", "failed", "expected_failure", "skipped"] as const;
+export type TestOutcome = (typeof TEST_OUTCOMES)[number];
+/** The `outcome` description both coding workers send in their result schema. */
+export const TEST_OUTCOME_DESCRIPTION =
+  "passed or failed: how the command ended. expected_failure: a run you made fail on purpose, such as the run of a new test before the fix (test-first); it is listed but not counted as a failed check. skipped: a command you could not run here, such as one that needs network access; say why in the summary.";
+
 const testResultSchema = z
   .object({
     command: boundedText(MAX_CODING_TEST_COMMAND_BYTES, true),
-    outcome: z.enum(["passed", "failed", "skipped"]),
+    outcome: z.enum(TEST_OUTCOMES),
   })
   .strict();
 

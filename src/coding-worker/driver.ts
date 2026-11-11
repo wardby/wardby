@@ -8,6 +8,8 @@ import {
   type CodingTaskInput,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  TEST_OUTCOME_DESCRIPTION,
+  TEST_OUTCOMES,
 } from "../coding/protocol.js";
 import { workerTaskNote } from "./task-note.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
@@ -57,7 +59,7 @@ export const CODING_OUTPUT_JSON_SCHEMA = {
         type: "object",
         properties: {
           command: { type: "string" },
-          outcome: { type: "string", enum: ["passed", "failed", "skipped"] },
+          outcome: { type: "string", enum: [...TEST_OUTCOMES], description: TEST_OUTCOME_DESCRIPTION },
         },
         required: ["command", "outcome"],
         additionalProperties: false,

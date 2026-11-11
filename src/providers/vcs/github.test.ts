@@ -1017,6 +1017,18 @@ describe("pullRequestBody length", () => {
     expect(body).toContain("- `npm test`: passed");
   });
 
+  it("lists every test entry, spelling out an expected failure", () => {
+    const tests = [
+      { command: "npx jest steps.test.ts", outcome: "expected_failure" as const },
+      { command: "npm test", outcome: "passed" as const },
+      { command: "npm audit", outcome: "skipped" as const },
+    ];
+    const body = pullRequestBody({ ...base, summary: "Added steps.", tests });
+    expect(body).toContain(
+      "- `npx jest steps.test.ts`: expected failure\n- `npm test`: passed\n- `npm audit`: skipped",
+    );
+  });
+
   it("leaves a body within the limit unchanged", () => {
     const body = pullRequestBody({ ...base, summary: "Added a cart." });
     expect(body).toContain("Added a cart.");

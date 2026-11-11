@@ -8,6 +8,8 @@ import {
   type DependencyCacheReport,
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
+  TEST_OUTCOME_DESCRIPTION,
+  TEST_OUTCOMES,
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
@@ -65,7 +67,7 @@ export const CLAUDE_OUTPUT_JSON_SCHEMA = {
         type: "object",
         properties: {
           command: { type: "string" },
-          outcome: { type: "string", enum: ["passed", "failed", "skipped"] },
+          outcome: { type: "string", enum: [...TEST_OUTCOMES], description: TEST_OUTCOME_DESCRIPTION },
         },
         required: ["command", "outcome"],
         additionalProperties: false,

@@ -8,6 +8,7 @@
  * died first, say) still gets one: the reconciler posts the outcome as a new
  * comment. Best effort throughout: nothing here throws.
  */
+import { countTestOutcomes } from "../coding/test-outcomes.js";
 import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
 import { summarizeRegistryFetches, warningRefusals, type RegistryRefusalSummary } from "../coding/registry/report.js";
 import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
@@ -96,8 +97,10 @@ export interface PullRequestOutcome {
   codeProvider: string;
   /** The coding sub-run that produced it; set by collectRunOutcome. */
   runId?: string;
-  /** How many of the run's own checks (result.tests) failed; the commands stay in the PR body. */
+  /** How many of the run's own checks (result.tests) really failed; the commands stay in the PR body. */
   failedChecks?: number;
+  /** How many of them the agent could not run (outcome `skipped`). */
+  skippedChecks?: number;
 }
 
 /** A sub-run that ended without succeeding. */
@@ -146,18 +149,20 @@ export function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
     pullRequestNumber: r.pullRequestNumber,
     codeProvider: codeProviderOf(r.repository),
     ...(typeof r.pullRequestUrl === "string" ? { pullRequestUrl: r.pullRequestUrl } : {}),
-    ...failedCheckCount(r.tests),
+    ...checkCounts(r.tests),
   };
 }
 
-/** Only a count reaches the comment: test commands are agent-authored and belong in the PR body. */
-function failedCheckCount(tests: unknown): { failedChecks?: number } {
-  if (!Array.isArray(tests)) return {};
-  const failed = tests.filter(
-    (t) => t && typeof t === "object" && (t as Record<string, unknown>).outcome === "failed",
-  ).length;
-  return failed > 0 ? { failedChecks: failed } : {};
+/**
+ * Only counts reach the comment: test commands are agent-authored and belong in the PR body.
+ * A deliberate red run (test-first, before the fix) is not a failed check.
+ */
+function checkCounts(tests: unknown): { failedChecks?: number; skippedChecks?: number } {
+  const { failed, skipped } = countTestOutcomes(tests);
+  return { ...(failed > 0 ? { failedChecks: failed } : {}), ...(skipped > 0 ? { skippedChecks: skipped } : {}) };
 }
+
+const checksOf = (n: number): string => (n === 1 ? "1 check" : `${n} checks`);
 
 /** The agent's reply as a quote, cut to MAX_REPLY_CHARS, with @-mentions defused so nobody is pinged. */
 const cutReply = (text: string): string =>
@@ -373,9 +378,13 @@ export function outcomeBody(
     return `${icon} ${lines.join(" ")}${otherLinks}${quoted}\n\n${footer}`;
   }
   const failedChecks = pullRequests.reduce((sum, pr) => sum + (pr.failedChecks ?? 0), 0);
+  const skippedChecks = pullRequests.reduce((sum, pr) => sum + (pr.skippedChecks ?? 0), 0);
   if (links.length > 0 && failedChecks > 0) {
-    const checks = failedChecks === 1 ? "1 check" : `${failedChecks} checks`;
-    return `⚠️ ${links.join(", ")}, but ${checks} failed in the run: see the pull request's description before merging.\n\n${footer}`;
+    const skipped = skippedChecks > 0 ? ` and ${skippedChecks} skipped` : "";
+    return `⚠️ ${links.join(", ")}, but ${checksOf(failedChecks)} failed${skipped} in the run: see the pull request's description before merging.\n\n${footer}`;
+  }
+  if (links.length > 0 && skippedChecks > 0) {
+    return `✅ ${links.join(", ")}. ${checksOf(skippedChecks)} could not be run and ${skippedChecks === 1 ? "was" : "were"} skipped: see the pull request's description.\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
   if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
