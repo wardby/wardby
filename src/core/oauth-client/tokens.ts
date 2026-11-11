@@ -3,9 +3,16 @@ import type { safeFetch, SafeFetchOptions } from "../../sandbox/safe-fetch.js";
 import type { OAuthMetadata } from "./discovery.js";
 import { oauthFetch, OAuthProtocolError, type OAuthFetchResult } from "./http.js";
 
+export type OAuthClientAuthMethod = "none" | "client_secret_post" | "client_secret_basic";
+
 export interface OAuthClient {
   clientId: string;
   clientSecret?: string;
+  /**
+   * How the token endpoint authenticates the client (the registration's token_endpoint_auth_method).
+   * Absent: the secret, when there is one, goes in the form.
+   */
+  authMethod?: OAuthClientAuthMethod;
 }
 
 export interface OAuthTokens {
@@ -21,7 +28,13 @@ const MAX_EXPIRES_IN_SECONDS = 31_536_000;
 
 const retryable = (status: number): boolean => status >= 500 || status === 429;
 
-const registrationSchema = z.object({ client_id: z.string().min(1), client_secret: z.string().min(1).optional() });
+const AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"] as const;
+
+const registrationSchema = z.object({
+  client_id: z.string().min(1),
+  client_secret: z.string().min(1).optional(),
+  token_endpoint_auth_method: z.enum(AUTH_METHODS).optional(),
+});
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),
@@ -72,7 +85,11 @@ export async function registerClient(
   const parsed = registrationSchema.safeParse(r.json);
   if (!parsed.success) fail();
   const d = parsed.data as z.infer<typeof registrationSchema>;
-  return { clientId: d.client_id, ...(d.client_secret ? { clientSecret: d.client_secret } : {}) };
+  return {
+    clientId: d.client_id,
+    ...(d.client_secret ? { clientSecret: d.client_secret } : {}),
+    ...(d.token_endpoint_auth_method ? { authMethod: d.token_endpoint_auth_method } : {}),
+  };
 }
 
 export function buildAuthorizeUrl(
@@ -93,19 +110,41 @@ export function buildAuthorizeUrl(
   return url.href;
 }
 
-function clientParams(client: OAuthClient): Record<string, string> {
-  return { client_id: client.clientId, ...(client.clientSecret ? { client_secret: client.clientSecret } : {}) };
+/** RFC 6749 section 2.3.1: each part form-urlencoded, then joined and base64-encoded. */
+function basicCredentials(clientId: string, clientSecret: string): string {
+  const enc = (v: string) => new URLSearchParams({ v }).toString().slice(2);
+  return `Basic ${Buffer.from(`${enc(clientId)}:${enc(clientSecret)}`, "utf8").toString("base64")}`;
+}
+
+/** The client's credentials as the token endpoint expects them: form fields, or an HTTP Basic header. */
+function clientAuth(client: OAuthClient): { form: Record<string, string>; authorization?: string } {
+  if (client.authMethod === "none" || !client.clientSecret) return { form: { client_id: client.clientId } };
+  if (client.authMethod === "client_secret_basic") {
+    return { form: {}, authorization: basicCredentials(client.clientId, client.clientSecret) };
+  }
+  return { form: { client_id: client.clientId, client_secret: client.clientSecret } };
 }
 
 async function tokenRequest(
   endpoint: string,
-  form: Record<string, string>,
+  client: OAuthClient,
+  params: Record<string, string>,
   refusal: string,
   options: SafeFetchOptions | undefined,
   fetchImpl: Fetch | undefined,
   now: Date,
 ): Promise<OAuthTokens> {
-  const r = await oauthFetch(endpoint, { method: "POST", form }, options, fetchImpl);
+  const auth = clientAuth(client);
+  const r = await oauthFetch(
+    endpoint,
+    {
+      method: "POST",
+      form: { ...params, ...auth.form },
+      ...(auth.authorization ? { authorization: auth.authorization } : {}),
+    },
+    options,
+    fetchImpl,
+  );
   if (retryable(r.status)) {
     throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
   }
@@ -144,13 +183,13 @@ export function exchangeCode(
 ): Promise<OAuthTokens> {
   return tokenRequest(
     meta.tokenEndpoint,
+    client,
     {
       grant_type: "authorization_code",
       code: input.code,
       code_verifier: input.codeVerifier,
       redirect_uri: input.redirectUri,
       resource: meta.resource,
-      ...clientParams(client),
     },
     "The provider refused the authorization code.",
     options,
@@ -169,7 +208,8 @@ export function refreshTokens(
 ): Promise<OAuthTokens> {
   return tokenRequest(
     meta.tokenEndpoint,
-    { grant_type: "refresh_token", refresh_token: refreshToken, resource: meta.resource, ...clientParams(client) },
+    client,
+    { grant_type: "refresh_token", refresh_token: refreshToken, resource: meta.resource },
     "The provider refused the refresh token.",
     options,
     fetchImpl,
@@ -187,9 +227,15 @@ export async function revokeToken(
   fetchImpl?: Fetch,
 ): Promise<void> {
   if (!meta.revocationEndpoint) return;
+  const auth = clientAuth(client);
   const r = await oauthFetch(
     meta.revocationEndpoint,
-    { method: "POST", form: { token, token_type_hint: hint, ...clientParams(client) }, ignoreBody: true },
+    {
+      method: "POST",
+      form: { token, token_type_hint: hint, ...auth.form },
+      ...(auth.authorization ? { authorization: auth.authorization } : {}),
+      ignoreBody: true,
+    },
     options,
     fetchImpl,
   );

@@ -27,6 +27,8 @@ export interface OAuthFetchInit {
   form?: Record<string, string>;
   json?: unknown;
   accept?: string;
+  /** An Authorization header value (HTTP Basic client authentication). */
+  authorization?: string;
   /** Do not read the body at all (RFC 7009 revocation, the discovery probe): no parsing and no size cap. */
   ignoreBody?: boolean;
 }
@@ -69,6 +71,7 @@ export async function oauthFetch(
   const headers: Record<string, string> = {
     "user-agent": `wardby/${packageVersion()}`,
     accept: init.accept ?? "application/json",
+    ...(init.authorization !== undefined ? { authorization: init.authorization } : {}),
   };
   let body: string | undefined;
   if (init.form !== undefined) {
