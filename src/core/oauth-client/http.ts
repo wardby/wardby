@@ -27,6 +27,8 @@ export interface OAuthFetchInit {
   form?: Record<string, string>;
   json?: unknown;
   accept?: string;
+  /** Skip JSON parsing of the body (RFC 7009 revocation); the size cap still applies. */
+  ignoreBody?: boolean;
 }
 
 export interface OAuthFetchResult {
@@ -94,7 +96,7 @@ export async function oauthFetch(
   }
   const ok = response.status >= 200 && response.status < 300;
   let json: unknown;
-  if (raw.length > 0) {
+  if (raw.length > 0 && !init.ignoreBody) {
     try {
       json = JSON.parse(raw.toString("utf8"));
     } catch {

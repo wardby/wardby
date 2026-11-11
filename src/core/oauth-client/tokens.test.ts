@@ -288,6 +288,20 @@ describe("revokeToken", () => {
     });
   });
 
+  it("succeeds when a 200 revocation response carries a text body", async () => {
+    const s = await stub(200, "OK");
+    await expect(
+      revokeToken({ revocationEndpoint: `${s.url}/revoke` }, { clientId: "c" }, "t", "refresh_token", opts),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still rejects a non-JSON 200 body on a non-revocation call", async () => {
+    const s = await stub(200, "OK");
+    await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
+      code: "bad_response",
+    });
+  });
+
   it("throws provider_unavailable on a 5xx and revokes on the fake server", async () => {
     const five = await stub(500, "x");
     await expect(

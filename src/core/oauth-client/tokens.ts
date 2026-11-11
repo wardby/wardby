@@ -163,7 +163,7 @@ export function refreshTokens(
   );
 }
 
-/** RFC 7009. A no-op when the provider has no revocation endpoint. */
+/** RFC 7009. A no-op when the provider has no revocation endpoint. Callers treat revocation as best effort and should catch its errors. */
 export async function revokeToken(
   meta: Pick<OAuthMetadata, "revocationEndpoint">,
   client: OAuthClient,
@@ -175,7 +175,7 @@ export async function revokeToken(
   if (!meta.revocationEndpoint) return;
   const r = await oauthFetch(
     meta.revocationEndpoint,
-    { method: "POST", form: { token, token_type_hint: hint, ...clientParams(client) } },
+    { method: "POST", form: { token, token_type_hint: hint, ...clientParams(client) }, ignoreBody: true },
     options,
     fetchImpl,
   );
