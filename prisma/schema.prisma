@@ -1197,6 +1197,7 @@ model Principal {
 
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
+  oauthLinkRequests        OAuthLinkRequest[]
   grants                   ResourceGrant[]
 }
 
@@ -1703,6 +1704,35 @@ model HostIdentityLinkRequest {
   createdAt    DateTime  @default(now())
 
   @@index([principalId])
+  @@index([expiresAt])
+}
+
+/// A pending OAuth link (an account link or an OAuth secret): shared by core/oauth-link.ts.
+model OAuthLinkRequest {
+  id                String    @id @default(cuid())
+  principalId       String
+  principal         Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  /// Which adapter completes it: "host-identity:github" or "oauth-secret".
+  purpose           String
+  /// Non-secret input the adapter needs at the callback (e.g. discovered endpoints, the secret name).
+  context           Json      @default("{}")
+  /// sha256 of the OAuth state; the state itself is never stored.
+  stateHash         String    @unique
+  /// PKCE verifier, cleared once used.
+  codeVerifier      String
+  /// Non-secret result shown on the page and used at confirm (e.g. login).
+  result            Json?
+  /// Encrypted secret result (e.g. an OAuth secret's tokens); null for account links.
+  payloadCiphertext String?
+  /// sha256 of the confirmation code shown on the callback page.
+  confirmHash       String?
+  /// Wrong confirmation codes submitted; the request is dead at 5.
+  attempts          Int       @default(0)
+  callbackAt        DateTime?
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+
+  @@index([principalId, purpose])
   @@index([expiresAt])
 }
 
