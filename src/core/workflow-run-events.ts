@@ -27,13 +27,14 @@ export type RunCompletedDb = Pick<
   "run" | "runHook" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
 >;
 
-const RUN_ENDS = new Set<string>(RUN_END_STATUSES);
+const RUN_END_STATUSES_SET = new Set<string>(RUN_END_STATUSES);
 
 /**
  * run_completed for a finished run, for run hooks only (Slack links never
  * match it). Every terminal status of a top-level run; a child run only when
  * a hook on its agent asks for child runs. The payload is metadata: the final
- * text is read at delivery time, never stored on the event. Never throws.
+ * text is read at delivery time, never stored on the event. Recorded only
+ * when a hook on the agent wants it. Never throws.
  */
 export async function emitRunCompletedEvent(db: RunCompletedDb, runId: string): Promise<void> {
   try {
@@ -52,18 +53,18 @@ export async function emitRunCompletedEvent(db: RunCompletedDb, runId: string): 
         agent: { select: { name: true } },
       },
     });
-    if (!run || !RUN_ENDS.has(run.status)) return;
-    if (run.parentRunId) {
-      const wanting = await db.runHook.count({
-        where: {
-          agentId: run.agentId,
-          enabled: true,
-          runs: "all",
-          OR: [{ events: { isEmpty: true } }, { events: { has: "run_completed" } }],
-        },
-      });
-      if (wanting === 0) return;
-    }
+    if (!run || !RUN_END_STATUSES_SET.has(run.status)) return;
+    // Only run hooks take run_completed: with none on the agent that wants
+    // this run, record nothing and skip the outcome reads (one count query).
+    const wanting = await db.runHook.count({
+      where: {
+        agentId: run.agentId,
+        enabled: true,
+        ...(run.parentRunId ? { runs: "all" } : {}),
+        OR: [{ events: { isEmpty: true } }, { events: { has: "run_completed" } }],
+      },
+    });
+    if (wanting === 0) return;
     let pullRequests: { repository: string; number: number; url: string | null; outcome: string }[] = [];
     try {
       const outcome = await collectRunOutcome(db, { id: run.id, status: run.status, finalText: null });
@@ -85,7 +86,7 @@ export async function emitRunCompletedEvent(db: RunCompletedDb, runId: string): 
         agentName: run.agent?.name ?? run.agentId,
         status: run.status as RunEndStatus,
         trigger: String(run.trigger),
-        parentRunId: run.parentRunId,
+        parentRunId: run.parentRunId ?? null,
         startedAt: run.startedAt.toISOString(),
         finishedAt: run.finishedAt ? run.finishedAt.toISOString() : null,
         costUsd: run.costUsd.toString(),

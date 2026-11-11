@@ -18,9 +18,9 @@ const row = (over: Record<string, unknown> = {}) => ({
   agent: { name: "auditor" },
   ...over,
 });
-const db = (run: unknown, hooksWantingChildren = 0) => ({
+const db = (run: unknown, hooksWanting = 1) => ({
   run: { findUnique: vi.fn(async () => run), findMany: vi.fn(async () => []) },
-  runHook: { count: vi.fn(async () => hooksWantingChildren) },
+  runHook: { count: vi.fn(async () => hooksWanting) },
   runBudgetEvent: { findMany: vi.fn(async () => []) },
   registryFetch: { findMany: vi.fn(async () => []) },
   registryAuditRecord: { findMany: vi.fn(async () => []) },
@@ -69,7 +69,21 @@ describe("emitRunCompletedEvent", () => {
     expect(events).toEqual([]);
   });
 
-  it("emits for a child run only when a hook on the agent asks for child runs", async () => {
+  it("records nothing when no hook on the agent wants run_completed", async () => {
+    const none = db(row(), 0);
+    await emitRunCompletedEvent(none as never, "r1");
+    expect(events).toEqual([]);
+    expect(none.runBudgetEvent.findMany).not.toHaveBeenCalled();
+    expect(none.runHook.count).toHaveBeenCalledWith({
+      where: {
+        agentId: "a1",
+        enabled: true,
+        OR: [{ events: { isEmpty: true } }, { events: { has: "run_completed" } }],
+      },
+    });
+  });
+
+  it("asks for a hook with runs: all for a child run", async () => {
     await emitRunCompletedEvent(db(row({ parentRunId: "p1" }), 0) as never, "r1");
     expect(events).toEqual([]);
     const withHook = db(row({ parentRunId: "p1" }), 1);
