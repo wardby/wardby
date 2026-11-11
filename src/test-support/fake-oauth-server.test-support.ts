@@ -55,6 +55,11 @@ export async function startFakeOAuthServer(
      * listen address.
      */
     publicHost?: string;
+    /**
+     * Opt-in: a refresh must name a client the server registered, by `client_id` in the form or
+     * HTTP Basic credentials; any other answers 401 `invalid_client`.
+     */
+    checkClient?: boolean;
   } = {},
 ): Promise<FakeOAuthServer> {
   const revocation = opts.revocation ?? true;
@@ -95,6 +100,15 @@ export async function startFakeOAuthServer(
     return m?.[1];
   }
 
+  /** The client id of HTTP Basic client credentials (RFC 6749 section 2.3.1), when sent. */
+  function basicClientId(req: IncomingMessage): string | undefined {
+    const m = /^Basic (.+)$/i.exec(req.headers.authorization ?? "");
+    if (!m) return undefined;
+    const decoded = Buffer.from(m[1], "base64").toString("utf8");
+    const id = decoded.slice(0, Math.max(0, decoded.indexOf(":")));
+    return new URLSearchParams(`v=${id}`).get("v") ?? undefined;
+  }
+
   function bearerValid(token: string | undefined): token is string {
     if (!token || server.revoked.has(token)) return false;
     const exp = accessExpiry.get(token);
@@ -131,6 +145,10 @@ export async function startFakeOAuthServer(
     }
     if (grant === "refresh_token") {
       server.tokenRequests += 1;
+      if (opts.checkClient && !clients.has(basicClientId(req) ?? clientId)) {
+        sendJson(res, 401, { error: "invalid_client", error_description: "unknown client" });
+        return;
+      }
       const refresh = form.get("refresh_token") ?? "";
       if (!activeRefresh.has(refresh) || server.revoked.has(refresh)) {
         sendJson(res, 400, { error: "invalid_grant", error_description: refresh });

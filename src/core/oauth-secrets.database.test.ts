@@ -14,8 +14,16 @@ import {
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
   SECRET_OAUTH_DISCOVERY_FAILED,
+  SECRET_OAUTH_REFRESH_FAILED,
+  SECRET_OAUTH_REFRESH_UNAVAILABLE,
+  SECRET_REAUTH_REQUIRED,
   startOAuthSecretConnect,
 } from "./oauth-secrets.js";
+import { loadServerSecrets, redactForServer } from "./mcp-servers.js";
+import { mcpNamedSecretValues } from "./mcp-tools.js";
+import { withEscapedForms } from "./secret-spans.js";
+import { buildSecretsAccessor, decryptEntry } from "./secrets.js";
+import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 
 const logged = vi.hoisted(() => vi.fn());
@@ -41,6 +49,7 @@ const OPTS = {
 };
 const REDIRECT = "https://wardby.example/oauth/callback";
 const principalIds: string[] = [];
+const agentIds: string[] = [];
 
 const cipher = {
   keyId: () => "test-key",
@@ -118,12 +127,16 @@ async function confirmCode(ownerId: string, name: string, code: string) {
 describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAuth server)", () => {
   beforeEach(async () => {
     logged.mockClear();
-    fake = await startFakeOAuthServer({ publicHost: HOST });
+    fake = await startFakeOAuthServer({ publicHost: HOST, checkClient: true });
   });
   afterEach(async () => {
     await fake.close();
   });
   afterAll(async () => {
+    await db.agentMcpServer.deleteMany({ where: { agentId: { in: agentIds } } });
+    await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
+    await db.agentSecret.deleteMany({ where: { agentId: { in: agentIds } } });
+    await db.agent.deleteMany({ where: { id: { in: agentIds } } });
     await db.secretBrokerChange.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.secret.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.principal.deleteMany({ where: { id: { in: principalIds } } });
@@ -452,5 +465,266 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     });
     await expect(confirmCode(ownerId, "bad-context", outcome.code)).rejects.toThrow(/not valid/);
     expect(await db.secret.count({ where: { ownerId, name: "bad-context" } })).toBe(0);
+  });
+
+  describe("resolving an OAuth secret", () => {
+    const row = (ownerId: string, name: string) =>
+      db.secret.findUniqueOrThrow({
+        where: { ownerId_name: { ownerId, name } },
+        select: { id: true, name: true, ciphertext: true, broker: true, oauth: true },
+      });
+
+    /** Connects `name` with access tokens living `ttl` seconds; later tokens live an hour. */
+    async function connected(name: string, ttl = 3600) {
+      const ownerId = await owner();
+      fake.accessTtlSeconds = ttl;
+      const { outcome } = await connect(ownerId, name);
+      if (outcome.kind !== "confirm") throw new Error("unreachable");
+      await confirmCode(ownerId, name, outcome.code);
+      fake.accessTtlSeconds = 3600;
+      logged.mockClear();
+      return { ownerId, read: () => row(ownerId, name) };
+    }
+
+    const payloadOf = async (ciphertext: string) =>
+      JSON.parse(await cipher.decrypt(ciphertext)) as Record<string, string>;
+    const metaOf = (oauth: unknown) => OAuthSecretMetaSchema.parse(oauth);
+    const logText = () => JSON.stringify(logged.mock.calls);
+
+    /** A fetch that answers the token endpoint itself; everything else goes to the fake. */
+    function tokenAnswer(status: number, body: unknown): typeof safeFetch {
+      return async (url, init, options) =>
+        url.endsWith("/token")
+          ? {
+              ok: status >= 200 && status < 300,
+              status,
+              statusText: "",
+              url,
+              headers: { "content-type": "application/json" },
+              bodyBase64: Buffer.from(JSON.stringify(body)).toString("base64"),
+            }
+          : safeFetch(url, init, options);
+    }
+
+    it("leaves a non-OAuth secret as it was", async () => {
+      const ownerId = await owner();
+      const s = await db.secret.create({
+        data: { name: "plain", ciphertext: await cipher.encrypt("plain-value-123"), keyId: "k", ownerId },
+      });
+      const entry = await decryptEntry(db, cipher, { ...s, oauth: null });
+      expect(entry).toEqual({ value: "plain-value-123", broker: null });
+    });
+
+    it("uses a token that is not due without a token request", async () => {
+      const { read } = await connected("not-due");
+      const entry = await decryptEntry(db, cipher, await read(), { options: OPTS });
+      expect(entry.value).toBe("fake-access-1");
+      expect(entry.broker).toEqual(oauthBroker(fake.mcpUrl));
+      expect(fake.tokenRequests).toBe(0);
+    });
+
+    it("refreshes a token due within 60 s and stores the new ciphertext and expiry", async () => {
+      const { read } = await connected("due", 30);
+      const before = await read();
+      const entry = await decryptEntry(db, cipher, before, { options: OPTS });
+      expect(fake.tokenRequests).toBe(1);
+      expect(entry.value).toBe("fake-access-2");
+      const after = await read();
+      expect(after.ciphertext).not.toBe(before.ciphertext);
+      expect(await payloadOf(after.ciphertext)).toEqual({
+        accessToken: "fake-access-2",
+        refreshToken: "fake-refresh-2",
+      });
+      const expiresAt = Date.parse(metaOf(after.oauth).expiresAt!);
+      expect(expiresAt - Date.now()).toBeGreaterThan(3000_000);
+      expect(metaOf(after.oauth).status).toBe("connected");
+      expect(logText()).not.toContain("fake-");
+    });
+
+    it("keeps the old refresh token when the provider does not rotate it", async () => {
+      const { read } = await connected("no-rotate", 30);
+      fake.rotateRefresh = false;
+      // The provider leaves refresh_token out of its answer altogether.
+      const omitting: typeof safeFetch = async (url, init, options) => {
+        const r = await safeFetch(url, init, options);
+        if (!url.endsWith("/token")) return r;
+        const body = JSON.parse(Buffer.from(r.bodyBase64, "base64").toString("utf8")) as Record<string, unknown>;
+        delete body.refresh_token;
+        return { ...r, bodyBase64: Buffer.from(JSON.stringify(body)).toString("base64") };
+      };
+      const entry = await decryptEntry(db, cipher, await read(), { options: OPTS, fetchImpl: omitting });
+      expect(entry.value).toBe("fake-access-2");
+      expect(await payloadOf((await read()).ciphertext)).toEqual({
+        accessToken: "fake-access-2",
+        refreshToken: "fake-refresh-1",
+      });
+    });
+
+    it("refreshes once for five concurrent resolves of a due token", async () => {
+      const { read } = await connected("concurrent", 30);
+      const stale = await read();
+      const entries = await Promise.all(
+        Array.from({ length: 5 }, () => decryptEntry(db, cipher, stale, { options: OPTS })),
+      );
+      expect(fake.tokenRequests).toBe(1);
+      expect(new Set(entries.map((e) => e.value))).toEqual(new Set(["fake-access-2"]));
+    });
+
+    it("forces a refresh only while the used token is still the stored one", async () => {
+      const { read } = await connected("forced");
+      const first = await decryptEntry(db, cipher, await read(), {
+        options: OPTS,
+        forceRefreshIfStill: "fake-access-1",
+      });
+      expect(first.value).toBe("fake-access-2");
+      // A second caller that also saw fake-access-1 fail gets the new token without another request.
+      const second = await decryptEntry(db, cipher, await read(), {
+        options: OPTS,
+        forceRefreshIfStill: "fake-access-1",
+      });
+      expect(second.value).toBe("fake-access-2");
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("marks a spent refresh token reauth_required without logging or throwing token text", async () => {
+      const { ownerId, read } = await connected("spent", 30);
+      fake.revoked.add("fake-refresh-1");
+      const error = await decryptEntry(db, cipher, await read(), { options: OPTS }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(SECRET_REAUTH_REQUIRED("spent"));
+      expect((error as Error).cause).toBeUndefined();
+      expect((error as { retryable?: boolean }).retryable).toBe(false);
+      const after = await read();
+      expect(metaOf(after.oauth)).toMatchObject({ status: "reauth_required", reauthReason: "invalid_grant" });
+      const change = await db.secretBrokerChange.findFirstOrThrow({
+        where: { secretId: after.id },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(change).toMatchObject({ ownerId, secretName: "spent", actorId: ownerId });
+      expect(change.after).toMatchObject({ oauthStatus: "reauth_required" });
+      expect(change.before).toMatchObject({ oauthStatus: "connected" });
+      expect(logText()).toContain("invalid_grant");
+      expect(logText()).toContain(after.id);
+      expect(logText()).not.toContain("fake-refresh");
+      expect(logText()).not.toContain("fake-access");
+      expect(JSON.stringify(after.oauth)).not.toMatch(/fake-(access|refresh)/);
+      // Once marked, no further token request is made.
+      await expect(decryptEntry(db, cipher, after, { options: OPTS })).rejects.toThrow(SECRET_REAUTH_REQUIRED("spent"));
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("marks reauth_required (invalid_client) when the provider refuses the client", async () => {
+      const { read } = await connected("wrong-client", 30);
+      const current = await read();
+      await db.secret.update({
+        where: { id: current.id },
+        data: { oauth: { ...metaOf(current.oauth), clientId: "wrong-client-id" } },
+      });
+      await expect(decryptEntry(db, cipher, await read(), { options: OPTS })).rejects.toThrow(
+        SECRET_REAUTH_REQUIRED("wrong-client"),
+      );
+      expect(metaOf((await read()).oauth)).toMatchObject({ status: "reauth_required", reauthReason: "invalid_client" });
+    });
+
+    it("keeps the status on a 5xx and throws a fixed retryable error", async () => {
+      const { read } = await connected("five-hundred", 30);
+      const before = await read();
+      const error = await decryptEntry(db, cipher, before, {
+        options: OPTS,
+        fetchImpl: tokenAnswer(503, { error: "temporarily_unavailable", error_description: "fake-refresh-1" }),
+      }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((error as { retryable?: boolean }).retryable).toBe(true);
+      expect((error as Error).cause).toBeUndefined();
+      const after = await read();
+      expect(metaOf(after.oauth).status).toBe("connected");
+      expect(after.ciphertext).toBe(before.ciphertext);
+      expect(logText()).not.toContain("fake-");
+    });
+
+    it("keeps the status on another refusal and throws a fixed error without provider text", async () => {
+      const { read } = await connected("bad-response", 30);
+      const error = await decryptEntry(db, cipher, await read(), {
+        options: OPTS,
+        fetchImpl: tokenAnswer(400, { error: "invalid_request", error_description: "fake-refresh-1 is odd" }),
+      }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_OAUTH_REFRESH_FAILED);
+      expect((error as Error).message).not.toContain("fake-");
+      expect((error as Error).cause).toBeUndefined();
+      expect(metaOf((await read()).oauth).status).toBe("connected");
+    });
+
+    it("maps an undecryptable payload to the fixed cipher error", async () => {
+      const { read } = await connected("bad-cipher");
+      const broken = { ...cipher, decrypt: async () => Promise.reject(new Error("kms said fake-access-1")) };
+      const error = await decryptEntry(db, broken, await read(), { options: OPTS }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_OAUTH_CIPHER_FAILED);
+      expect((error as Error).cause).toBeUndefined();
+    });
+
+    it("lists the access and refresh tokens for redaction", async () => {
+      const { read } = await connected("redact");
+      const entry = await decryptEntry(db, cipher, await read(), { options: OPTS });
+      expect(entry.oauth?.redact).toEqual(expect.arrayContaining(["fake-access-1", "fake-refresh-1"]));
+      expect(consoleRedactionValues(entry)).toEqual(expect.arrayContaining(["fake-access-1", "fake-refresh-1"]));
+    });
+
+    it("loadServerSecrets redacts both tokens, and a token minted mid-call joins the values", async () => {
+      const { ownerId, read } = await connected("mcp-oauth");
+      const server = { id: "srv-1", ownerId, name: "bs", url: fake.mcpUrl, secretNames: ["mcp-oauth"] };
+      const { accessor, values } = await loadServerSecrets(db, cipher, server, { options: OPTS });
+      const entry = await decryptEntry(db, cipher, await read(), { options: OPTS });
+      for (const v of withEscapedForms(consoleRedactionValues(entry))) expect(values).toContain(v);
+      expect(values).not.toContain("fake-access-2");
+
+      const refreshed = await accessor.refresh!("mcp-oauth", "fake-access-1");
+      expect(refreshed?.value).toBe("fake-access-2");
+      expect(values).toContain("fake-access-2");
+      expect(values).toContain("fake-refresh-2");
+      const echoed = `seen ${Buffer.from("fake-refresh-2").toString("base64")} and ${encodeURIComponent("fake-access-2")}`;
+      expect(redactForServer(echoed, values)).not.toMatch(/ZmFrZS1yZWZyZXNoLTI|fake-access-2/);
+      // resolve reads the stored row, not what was loaded.
+      expect((await accessor.resolve!("mcp-oauth"))?.value).toBe("fake-access-2");
+      expect(fake.tokenRequests).toBe(1);
+      // A stale caller's refresh does not spend the new token.
+      expect((await accessor.refresh!("mcp-oauth", "fake-access-1"))?.value).toBe("fake-access-2");
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("mcpNamedSecretValues lists an OAuth secret's tokens without refreshing", async () => {
+      const { ownerId } = await connected("named", 30);
+      const agentId = `oauth-agent-${randomUUID()}`;
+      agentIds.push(agentId);
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId },
+      });
+      const server = await db.mcpServer.create({
+        data: { ownerId, name: "bs", url: fake.mcpUrl, secretNames: ["named"], toolSnapshot: [] },
+      });
+      await db.agentMcpServer.create({
+        data: { agentId, serverId: server.id, allowedTools: [], attachedById: ownerId },
+      });
+      const named = await mcpNamedSecretValues(db, cipher, agentId);
+      expect(named).toHaveLength(1);
+      expect(named[0].values).toEqual(expect.arrayContaining(["fake-access-1", "fake-refresh-1"]));
+      expect(named[0].values.some((v) => v.includes("accessToken"))).toBe(false);
+      expect(fake.tokenRequests).toBe(0);
+    });
+
+    it("buildSecretsAccessor resolves and refreshes an attached OAuth secret", async () => {
+      const { ownerId, read } = await connected("attached", 30);
+      const agentId = `oauth-agent-${randomUUID()}`;
+      agentIds.push(agentId);
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId },
+      });
+      await db.agentSecret.create({ data: { agentId, secretId: (await read()).id, boundName: "BS" } });
+      const accessor = buildSecretsAccessor(agentId, cipher, db, { options: OPTS });
+      expect((await accessor.resolve!("BS"))?.value).toBe("fake-access-2");
+      await expect(accessor.get("BS")).rejects.toThrow("secret_brokered");
+      expect((await accessor.refresh!("BS", "fake-access-2"))?.value).toBe("fake-access-3");
+      expect(await accessor.refresh!("NOPE", "x")).toBeUndefined();
+      expect(fake.tokenRequests).toBe(2);
+    });
   });
 });

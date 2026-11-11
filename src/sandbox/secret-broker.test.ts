@@ -241,6 +241,15 @@ describe("scrubBrokeredResponse", () => {
 });
 
 describe("consoleRedactionValues", () => {
+  it("adds every value an OAuth secret lists, once", () => {
+    expect(
+      consoleRedactionValues({
+        value: "fake-access-9",
+        broker: gh.broker,
+        oauth: { redact: ["fake-access-9", "fake-refresh-9", "fake-client-secret"] },
+      }),
+    ).toEqual(["fake-access-9", "fake-refresh-9", "fake-client-secret"]);
+  });
   it("is the value alone for a readable secret, and adds a SigV4 secret's key and token", () => {
     expect(consoleRedactionValues({ value: "plain-value", broker: null })).toEqual(["plain-value"]);
     expect(consoleRedactionValues({ value: gh.value, broker: gh.broker })).toEqual([gh.value]);

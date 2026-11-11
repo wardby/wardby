@@ -9,6 +9,13 @@
 import { Prisma, type PrismaClient, type Secret } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
+import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
+import {
+  currentOAuthPayload,
+  OAuthSecretFlowError,
+  SECRET_OAUTH_REFRESH_FAILED,
+  type OAuthResolveOptions,
+} from "./oauth-secrets.js";
 import {
   assertBrokerableValue,
   brokerConfigHash,
@@ -24,12 +31,31 @@ export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | 
 export interface SecretEntry {
   value: string;
   broker: SecretBrokerConfig | null;
+  /** Set for an OAuth secret: every value that must be redacted (access, refresh, client secret). */
+  oauth?: { redact: string[] };
 }
 export interface SecretsAccessor {
   /** Readable secrets only: a brokered secret throws `secret_brokered`. */
   get(name: string): Promise<string | undefined>;
   /** Host-internal: value and broker config, brokered or not. Never exposed to tool code. */
   resolve?(name: string): Promise<SecretEntry | undefined>;
+  /** OAuth only: refresh now unless another caller already replaced `usedValue`; resolves the fresh entry. */
+  refresh?(name: string, usedValue: string): Promise<SecretEntry | undefined>;
+}
+
+/** The fetch policy an OAuth refresh uses: what the caller's brokered fetches already use. */
+export interface SecretFetchSettings {
+  options?: SafeFetchOptions;
+  fetchImpl?: typeof safeFetch;
+}
+
+/** A stored secret as the loaders read it. */
+export interface StoredSecretRow {
+  id: string;
+  name: string;
+  ciphertext: string;
+  broker: unknown;
+  oauth: unknown;
 }
 
 function brokerOf(secret: Pick<Secret, "broker">): SecretBrokerConfig | null {
@@ -226,6 +252,27 @@ export async function deleteSecret(secretId: string, db: PrismaClient): Promise<
 }
 
 /**
+ * The one place a stored secret becomes an entry. A non-OAuth secret decrypts as it always has;
+ * an OAuth secret resolves to its current access token, refreshed first when due (or when
+ * `forceRefreshIfStill` is still the stored token), and lists its tokens for redaction.
+ */
+export async function decryptEntry(
+  db: Pick<PrismaClient, "$transaction" | "secret">,
+  cipher: SecretCipher,
+  row: StoredSecretRow,
+  opts?: OAuthResolveOptions,
+): Promise<SecretEntry> {
+  const broker = brokerOf({ broker: row.broker as Secret["broker"] });
+  if (row.oauth === null || row.oauth === undefined) return { value: await cipher.decrypt(row.ciphertext), broker };
+  const p = await currentOAuthPayload(db, cipher, row, opts);
+  return {
+    value: p.accessToken,
+    broker,
+    oauth: { redact: [p.accessToken, p.refreshToken, p.clientSecret].filter((v): v is string => v !== undefined) },
+  };
+}
+
+/**
  * Decrypt-on-demand: only the ONE secret actually requested by name is
  * decrypted, never the agent's whole attached set eagerly — a lookup
  * that returns nothing (unattached name) is indistinguishable from one
@@ -242,25 +289,27 @@ export async function deleteSecret(secretId: string, db: PrismaClient): Promise<
 export function buildSecretsAccessor(
   agentId: string,
   cipher: SecretCipher,
-  db: Pick<PrismaClient, "agentSecret"> & Partial<Pick<PrismaClient, "$queryRaw">>,
+  db: Pick<PrismaClient, "agentSecret"> & Partial<Pick<PrismaClient, "$queryRaw" | "$transaction" | "secret">>,
+  fetch: SecretFetchSettings = {},
 ): SecretsAccessor {
-  async function resolve(name: string): Promise<SecretEntry | undefined> {
+  async function load(name: string): Promise<StoredSecretRow | undefined> {
     boundedString(name, 1024);
     if (db.$queryRaw) {
       // NULL-safe: "=" is never true when either owner is NULL.
-      const rows = await db.$queryRaw<{ ciphertext: string | null; broker: unknown }[]>`
-        SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext",
-               s."broker" AS "broker"
+      const rows = await db.$queryRaw<
+        { id: string; name: string; ciphertext: string | null; broker: unknown; oauth: unknown }[]
+      >`
+        SELECT s."id" AS "id", s."name" AS "name",
+               CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext",
+               s."broker" AS "broker", s."oauth" AS "oauth"
         FROM "Secret" s
         JOIN "AgentSecret" a ON a."secretId" = s."id"
         JOIN "Agent" g ON g."id" = a."agentId"
         WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} AND s."ownerId" = g."ownerId" LIMIT 1`;
       if (!rows.length) return undefined;
-      if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
-      return {
-        value: await cipher.decrypt(rows[0].ciphertext),
-        broker: brokerOf({ broker: rows[0].broker as Secret["broker"] }),
-      };
+      const row = rows[0];
+      if (row.ciphertext === null) throw new Error("secret_value_limit");
+      return { ...row, ciphertext: row.ciphertext };
     }
     // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
     const attachment = await db.agentSecret.findFirst({
@@ -271,10 +320,23 @@ export function buildSecretsAccessor(
     const owner = attachment.agent.ownerId;
     if (owner === null || attachment.secret.ownerId !== owner) return undefined;
     boundedString(attachment.secret.ciphertext, 256 * 1024);
-    return {
-      value: await cipher.decrypt(attachment.secret.ciphertext),
-      broker: brokerOf({ broker: attachment.secret.broker ?? null }),
-    };
+    const { id, name: secretName, ciphertext, broker, oauth } = attachment.secret;
+    return { id, name: secretName, ciphertext, broker: broker ?? null, oauth: oauth ?? null };
+  }
+  function entryOf(row: StoredSecretRow, forceRefreshIfStill?: string): Promise<SecretEntry> {
+    const isOAuth = row.oauth !== null && row.oauth !== undefined;
+    // Refreshing needs a transaction; only a provider double lacks one.
+    if (isOAuth && (!db.$transaction || !db.secret)) {
+      throw new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
+    }
+    return decryptEntry(db as Pick<PrismaClient, "$transaction" | "secret">, cipher, row, {
+      ...fetch,
+      ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+    });
+  }
+  async function resolve(name: string): Promise<SecretEntry | undefined> {
+    const row = await load(name);
+    return row ? entryOf(row) : undefined;
   }
   return {
     resolve,
@@ -282,6 +344,11 @@ export function buildSecretsAccessor(
       const entry = await resolve(name);
       if (entry?.broker) throw new Error(BROKERED_GET_MESSAGE);
       return entry?.value;
+    },
+    async refresh(name: string, usedValue: string): Promise<SecretEntry | undefined> {
+      const row = await load(name);
+      if (!row || row.oauth === null || row.oauth === undefined) return undefined;
+      return entryOf(row, usedValue);
     },
   };
 }
@@ -302,6 +369,10 @@ export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: re
     },
     ...(accessor.resolve && {
       resolve: async (name: string) => (allowed.has(name) ? accessor.resolve!(name) : undefined),
+    }),
+    ...(accessor.refresh && {
+      refresh: async (name: string, usedValue: string) =>
+        allowed.has(name) ? accessor.refresh!(name, usedValue) : undefined,
     }),
   };
 }

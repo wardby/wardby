@@ -15,6 +15,8 @@
  *     become the Secret's ciphertext (encrypted before the transaction), and
  *     the row, its broker config and an audit row are written in one
  *     transaction. A reconnect updates the row in place, so attachments stay.
+ *  4. currentOAuthPayload (through secrets.ts decryptEntry): the stored tokens, refreshed first
+ *     under a row lock when the access token is due, or when a caller saw it refused.
  *
  * Secret values (tokens, a client secret) are never in the `oauth` JSON, the
  * link request's context or result, an error message, or a log line.
@@ -24,10 +26,18 @@ import { Prisma, type PrismaClient } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
 import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
-import { normaliseServerUrl } from "./mcp-servers.js";
+import { normaliseServerUrl } from "./resource-url.js";
 import { discoverOAuth } from "./oauth-client/discovery.js";
 import { isAllowedEndpoint, OAuthProtocolError } from "./oauth-client/http.js";
-import { buildAuthorizeUrl, exchangeCode, registerClient, type OAuthClient } from "./oauth-client/tokens.js";
+import {
+  buildAuthorizeUrl,
+  exchangeCode,
+  refreshTokens,
+  registerClient,
+  type OAuthClient,
+  type OAuthTokens,
+} from "./oauth-client/tokens.js";
+import { logger } from "./logger.js";
 import { confirmOAuthLink, startOAuthLink, type OAuthLinkAdapter, type OAuthLinkDb } from "./oauth-link.js";
 import { parseSecretBrokerConfig, type SecretBrokerConfig } from "./secret-broker-config.js";
 
@@ -47,7 +57,22 @@ export const SECRET_OAUTH_CLIENT_ID_REQUIRED =
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
 
+/** A refresh the provider could not answer (network, 5xx, 429), or the store failed: nothing changed. */
+export const SECRET_OAUTH_REFRESH_UNAVAILABLE =
+  "secret_oauth_refresh_unavailable: the OAuth provider could not be reached to refresh the token; try again";
+/** A refresh the provider answered with something unusable: nothing changed. */
+export const SECRET_OAUTH_REFRESH_FAILED =
+  "secret_oauth_refresh_failed: the OAuth provider did not refresh the token; try again, or connect again with create_secret and oauth";
+
 const AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"] as const;
+
+/** Refresh this long before the access token expires. */
+const REFRESH_EARLY_MS = 60_000;
+/** The token request's own limit; the transaction holding the row lock allows a little more. */
+const REFRESH_TIMEOUT_MS = 15_000;
+const REFRESH_TRANSACTION_TIMEOUT_MS = 20_000;
+
+const log = logger.child({ module: "oauth-secrets" });
 
 export interface OAuthSecretMeta {
   resource: string;
@@ -134,11 +159,19 @@ export interface OAuthSecretResult {
   scope?: string;
 }
 
-/** A failure with a fixed reason, safe to log. */
-class OAuthSecretFlowError extends Error {
+/** A failure with a fixed reason and message, safe to log and to return. It never has a cause. */
+export class OAuthSecretFlowError extends Error {
   constructor(
-    readonly reason: "issuer_mismatch" | "bad_context" | "cipher_failed",
+    readonly reason:
+      | "issuer_mismatch"
+      | "bad_context"
+      | "cipher_failed"
+      | "reauth_required"
+      | "refresh_unavailable"
+      | "refresh_failed",
     message: string,
+    /** Trying the same call again may work: nothing about the secret changed. */
+    readonly retryable = false,
   ) {
     super(message);
     this.name = "OAuthSecretFlowError";
@@ -146,7 +179,11 @@ class OAuthSecretFlowError extends Error {
 }
 
 function cipherFailed(): OAuthSecretFlowError {
-  return new OAuthSecretFlowError("cipher_failed", SECRET_OAUTH_CIPHER_FAILED);
+  return new OAuthSecretFlowError("cipher_failed", SECRET_OAUTH_CIPHER_FAILED, true);
+}
+
+function reauthRequired(name: string): OAuthSecretFlowError {
+  return new OAuthSecretFlowError("reauth_required", SECRET_REAUTH_REQUIRED(name));
 }
 
 async function encrypt(cipher: Pick<SecretCipher, "encrypt">, plaintext: string): Promise<string> {
@@ -420,4 +457,195 @@ export async function finishOAuthSecretConnect(input: {
       return { name, kind: "oauth", status: "connected", expiresAt: p.oauth.expiresAt };
     },
   });
+}
+
+/** A stored OAuth secret, as both secret loaders read it. */
+export interface StoredOAuthSecret {
+  id: string;
+  name: string;
+  ciphertext: string;
+  oauth: unknown;
+}
+
+export interface OAuthResolveOptions {
+  /** Refresh even when not due, unless the stored access token is no longer this one (another caller refreshed). */
+  forceRefreshIfStill?: string;
+  /** The fetch policy the caller's brokered fetches use; the refresh adds its own 15 s timeout. */
+  options?: SafeFetchOptions;
+  fetchImpl?: typeof safeFetch;
+  now?: Date;
+}
+
+/** The connected meta; reauth_required (or meta that can't be read) throws SECRET_REAUTH_REQUIRED. */
+function connectedMeta(oauth: unknown, name: string): OAuthSecretMeta {
+  const parsed = OAuthSecretMetaSchema.safeParse(oauth);
+  if (!parsed.success || parsed.data.status !== "connected") throw reauthRequired(name);
+  return parsed.data;
+}
+
+async function storedPayload(cipher: Pick<SecretCipher, "decrypt">, ciphertext: string): Promise<OAuthSecretPayload> {
+  const plaintext = await decrypt(cipher, ciphertext);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(plaintext);
+  } catch {
+    raw = undefined; // A SyntaxError quotes its input: never carried.
+  }
+  const parsed = PayloadSchema.safeParse(raw);
+  if (!parsed.success) throw cipherFailed();
+  return parsed.data;
+}
+
+function wantsRefresh(
+  meta: OAuthSecretMeta,
+  payload: OAuthSecretPayload,
+  opts: OAuthResolveOptions,
+  now: Date,
+): boolean {
+  if (opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill) return true;
+  return meta.expiresAt !== null && Date.parse(meta.expiresAt) - now.getTime() <= REFRESH_EARLY_MS;
+}
+
+/**
+ * The OAuth secret's current tokens. When the access token is due (expires within 60 s) or is the
+ * one `forceRefreshIfStill` names, it is refreshed first, under a row lock, so concurrent callers
+ * spend a refresh token once. A provider that refuses the grant or the client marks the secret
+ * reauth_required. Every error is an OAuthSecretFlowError with a fixed message and no cause.
+ */
+export async function currentOAuthPayload(
+  db: Pick<PrismaClient, "$transaction" | "secret">,
+  cipher: SecretCipher,
+  row: StoredOAuthSecret,
+  opts: OAuthResolveOptions = {},
+): Promise<OAuthSecretPayload> {
+  const now = opts.now ?? new Date();
+  const meta = connectedMeta(row.oauth, row.name);
+  const payload = await storedPayload(cipher, row.ciphertext);
+  if (!wantsRefresh(meta, payload, opts, now) || !payload.refreshToken) return payload;
+  return refreshLocked(db, cipher, row, opts, now);
+}
+
+type LockedOutcome =
+  | { kind: "current"; payload: OAuthSecretPayload }
+  | { kind: "refreshed"; payload: OAuthSecretPayload }
+  | { kind: "reauth"; reason: "invalid_grant" | "invalid_client" };
+
+async function refreshLocked(
+  db: Pick<PrismaClient, "$transaction">,
+  cipher: SecretCipher,
+  row: StoredOAuthSecret,
+  opts: OAuthResolveOptions,
+  now: Date,
+): Promise<OAuthSecretPayload> {
+  let outcome: LockedOutcome;
+  try {
+    // The token request runs inside the transaction on purpose: the row lock must cover it, so a
+    // rotating refresh token is spent once however many callers found the access token due.
+    outcome = await db.$transaction(
+      async (tx): Promise<LockedOutcome> => {
+        const locked = await tx.$queryRaw<{ ciphertext: string; oauth: unknown; broker: unknown; ownerId: string }[]>`
+          SELECT "ciphertext", "oauth", "broker", "ownerId" FROM "Secret" WHERE "id" = ${row.id} FOR UPDATE`;
+        if (!locked.length) throw reauthRequired(row.name);
+        const meta = connectedMeta(locked[0].oauth, row.name);
+        const payload = await storedPayload(cipher, locked[0].ciphertext);
+        // Another caller may have refreshed while this one waited for the lock.
+        if (!wantsRefresh(meta, payload, opts, now) || !payload.refreshToken) return { kind: "current", payload };
+        const client: OAuthClient = {
+          clientId: meta.clientId,
+          ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
+          ...(meta.authMethod ? { authMethod: meta.authMethod } : {}),
+        };
+        let tokens: OAuthTokens;
+        try {
+          tokens = await refreshTokens(
+            meta,
+            client,
+            payload.refreshToken,
+            { ...opts.options, timeoutMs: REFRESH_TIMEOUT_MS },
+            opts.fetchImpl,
+            now,
+          );
+        } catch (err) {
+          // Only the fixed code is read: an OAuthProtocolError's message is fixed, anything else is dropped.
+          const code = err instanceof OAuthProtocolError ? err.code : "unknown";
+          if (code === "invalid_grant" || code === "invalid_client") {
+            const reauth: OAuthSecretMeta = { ...meta, status: "reauth_required", reauthReason: code };
+            await tx.secret.update({
+              where: { id: row.id },
+              data: { oauth: reauth as unknown as Prisma.InputJsonValue },
+            });
+            const broker =
+              locked[0].broker !== null && typeof locked[0].broker === "object"
+                ? (locked[0].broker as Record<string, unknown>)
+                : {};
+            await tx.secretBrokerChange.create({
+              data: {
+                secretId: row.id,
+                ownerId: locked[0].ownerId,
+                secretName: row.name,
+                actorId: locked[0].ownerId,
+                before: { ...broker, oauthStatus: "connected" },
+                after: { ...broker, oauthStatus: "reauth_required" },
+                via: "mcp",
+              },
+            });
+            return { kind: "reauth", reason: code };
+          }
+          throw code === "provider_unavailable"
+            ? new OAuthSecretFlowError("refresh_unavailable", SECRET_OAUTH_REFRESH_UNAVAILABLE, true)
+            : new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
+        }
+        const next: OAuthSecretPayload = {
+          accessToken: tokens.accessToken,
+          // A provider that doesn't rotate leaves refresh_token out: the old one stays good.
+          refreshToken: tokens.refreshToken ?? payload.refreshToken,
+          ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
+        };
+        const ciphertext = await encrypt(cipher, JSON.stringify(next));
+        const refreshed: OAuthSecretMeta = {
+          ...meta,
+          expiresAt: tokens.expiresAt ? tokens.expiresAt.toISOString() : null,
+        };
+        await tx.secret.update({
+          where: { id: row.id },
+          data: { ciphertext, keyId: cipher.keyId(), oauth: refreshed as unknown as Prisma.InputJsonValue },
+        });
+        return { kind: "refreshed", payload: next };
+      },
+      { timeout: REFRESH_TRANSACTION_TIMEOUT_MS },
+    );
+  } catch (err) {
+    if (err instanceof OAuthSecretFlowError) {
+      if (err.reason !== "reauth_required")
+        log.warn({ secretId: row.id, reason: err.reason }, "OAuth secret refresh failed");
+      throw err;
+    }
+    // A database or transaction error: its message may quote query arguments, so it is dropped.
+    log.warn({ secretId: row.id, reason: "store_failed" }, "OAuth secret refresh failed");
+    throw new OAuthSecretFlowError("refresh_unavailable", SECRET_OAUTH_REFRESH_UNAVAILABLE, true);
+  }
+  if (outcome.kind === "reauth") {
+    log.warn({ secretId: row.id, reason: outcome.reason }, "OAuth secret needs connecting again");
+    throw reauthRequired(row.name);
+  }
+  if (outcome.kind === "refreshed") log.info({ secretId: row.id }, "OAuth secret refreshed");
+  return outcome.payload;
+}
+
+/**
+ * Redaction values of a stored secret, read without refreshing: an OAuth secret's tokens and client
+ * secret, or `[plaintext]` for any other. For redaction lists only: it never sends anything.
+ */
+export function storedSecretRedactionValues(plaintext: string, oauth: unknown): string[] {
+  if (oauth === null || oauth === undefined) return [plaintext];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(plaintext);
+  } catch {
+    return [plaintext];
+  }
+  const parsed = PayloadSchema.safeParse(raw);
+  if (!parsed.success) return [plaintext];
+  const p = parsed.data;
+  return [p.accessToken, p.refreshToken, p.clientSecret].filter((v): v is string => v !== undefined);
 }

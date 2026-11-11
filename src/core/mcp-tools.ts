@@ -27,6 +27,7 @@ import {
   snapshotOf,
   type McpServerRow,
 } from "./mcp-servers.js";
+import { storedSecretRedactionValues } from "./oauth-secrets.js";
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 import { withEscapedForms } from "./secret-spans.js";
 import type { Logger } from "./logger.js";
@@ -71,7 +72,7 @@ export function isCodexCoding(provider: string | null | undefined): boolean {
   return provider !== "claude-code";
 }
 
-type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret" | "resourceGrant">;
+type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret" | "resourceGrant" | "$transaction">;
 /** Redaction reads attachments and secrets only: it covers every attached server, usable or not. */
 type McpSecretsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
 
@@ -159,7 +160,8 @@ export function mcpToolDefs(pins: readonly McpToolPin[]): LoadedTool[] {
 
 export interface McpToolContext {
   db: McpToolsDb;
-  cipher: Pick<SecretCipher, "decrypt">;
+  /** Full cipher: an OAuth secret's refresh re-encrypts its tokens. */
+  cipher: SecretCipher;
   /** The agent whose attachment is re-checked on every call. */
   agentId: string;
   /** The run, for the per-call log line. */
@@ -271,7 +273,9 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     };
     let secrets: Awaited<ReturnType<typeof loadServerSecrets>>;
     try {
-      secrets = await loadServerSecrets(ctx.db, ctx.cipher, server);
+      secrets = await loadServerSecrets(ctx.db, ctx.cipher, server, {
+        ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+      });
     } catch (err) {
       const shared = row.agent.ownerId !== server.ownerId;
       if (err instanceof McpCredentialsUnavailableError) {
@@ -362,11 +366,17 @@ export async function mcpNamedSecretValues(
     for (const secretName of server.secretNames) {
       const stored = await db.secret.findUnique({
         where: { ownerId_name: { ownerId: server.ownerId, name: secretName } },
-        select: { ciphertext: true, broker: true },
+        select: { ciphertext: true, broker: true, oauth: true },
       });
       if (!stored) continue;
-      const value = await cipher.decrypt(stored.ciphertext);
-      const base = consoleRedactionValues({ value, broker: readableBroker(stored.broker) });
+      const plaintext = await cipher.decrypt(stored.ciphertext);
+      // Read as stored, never refreshed: an OAuth secret contributes its tokens, not its payload JSON.
+      const [value, ...rest] = storedSecretRedactionValues(plaintext, stored.oauth);
+      const base = consoleRedactionValues({
+        value,
+        broker: readableBroker(stored.broker),
+        ...(rest.length ? { oauth: { redact: rest } } : {}),
+      });
       named.push({
         name: `mcp:${server.name}/${secretName}`,
         values: withEscapedForms([...new Set([...base, ...base.flatMap(encodedForms)])]),

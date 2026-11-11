@@ -159,6 +159,25 @@ describe("fake OAuth server", () => {
     expect(t2.refresh_token).toBe(t1.refresh_token);
   });
 
+  it("checks the refresh's client when checkClient is on (form or Basic)", async () => {
+    srv = await startFakeOAuthServer({ checkClient: true });
+    const cid = await register(srv);
+    const t1 = (await (await exchange(srv, cid, await codeFor(srv, cid))).json()) as { refresh_token: string };
+    const wrong = await token(srv, { grant_type: "refresh_token", refresh_token: t1.refresh_token, client_id: "nope" });
+    expect(wrong.status).toBe(401);
+    expect(((await wrong.json()) as { error: string }).error).toBe("invalid_client");
+    const basic = await fetch(`${srv.url}/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${Buffer.from(`${cid}:s3cret`).toString("base64")}`,
+      },
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t1.refresh_token }),
+    });
+    expect(basic.status).toBe(200);
+    expect(srv.tokenRequests).toBe(2);
+  });
+
   it("revokes tokens", async () => {
     srv = await startFakeOAuthServer();
     const cid = await register(srv);
