@@ -45,6 +45,12 @@ async function code(promise: Promise<unknown>): Promise<{ code?: string; message
 const live = () => new AbortController().signal;
 
 describe("McpHttpClient.initialize", () => {
+  it("sends a wardby User-Agent", async () => {
+    const { fetch, calls } = scripted([init(), accepted]);
+    await new McpHttpClient({ fetch, signal: live() }).initialize();
+    expect(calls[0].headers["User-Agent"]).toBe(`wardby/${version}`);
+  });
+
   it("sends initialize, keeps the session id, then posts initialized", async () => {
     const { fetch, calls } = scripted([init(), accepted]);
     const client = new McpHttpClient({ fetch, signal: live() });

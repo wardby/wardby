@@ -67,6 +67,7 @@ export class McpHttpClient {
     const headers: Record<string, string> = {
       Accept: "application/json, text/event-stream",
       "Content-Type": "application/json",
+      "User-Agent": `wardby/${CLIENT_VERSION}`,
     };
     if (this.sessionId !== undefined) headers["Mcp-Session-Id"] = this.sessionId;
     if (this.protocolVersion !== undefined) headers["MCP-Protocol-Version"] = this.protocolVersion;
