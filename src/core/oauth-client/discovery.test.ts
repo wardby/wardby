@@ -107,18 +107,91 @@ describe("discoverOAuth", () => {
     expect((await discoverOAuth(`${s.origin}/mcp`, options)).tokenEndpoint).toBe(`${s.origin}/token`);
   });
 
-  it("tries the path-suffixed form when the root one is 404, and OpenID configuration for the server", async () => {
+  it("tries the path-suffixed form first, then the root one, and OpenID configuration for the server", async () => {
     const s = await track(
       inline((req, res, origin) => {
-        if (req.url === "/.well-known/oauth-protected-resource/mcp")
+        if (req.url === "/.well-known/oauth-protected-resource")
           return json(res, { resource: `${origin}/mcp`, authorization_servers: [origin] });
         if (req.url === "/.well-known/openid-configuration") return json(res, asMeta(origin));
       }),
     );
     expect((await discoverOAuth(`${s.origin}/mcp`, options)).authorizationEndpoint).toBe(`${s.origin}/authorize`);
     const urls = s.seen.map((r) => r.url);
-    expect(urls).toContain("/.well-known/oauth-protected-resource");
+    const suffixed = urls.indexOf("/.well-known/oauth-protected-resource/mcp");
+    expect(suffixed).toBeGreaterThanOrEqual(0);
+    expect(urls.indexOf("/.well-known/oauth-protected-resource")).toBeGreaterThan(suffixed);
     expect(urls).toContain("/.well-known/oauth-authorization-server");
+  });
+
+  it("prefers the path-suffixed protected-resource form when both are served", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp")
+          return json(res, {
+            resource: `${origin}/mcp`,
+            authorization_servers: [origin],
+            scopes_supported: ["suffixed"],
+          });
+        if (req.url === "/.well-known/oauth-protected-resource")
+          return json(res, { resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: ["root"] });
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect((await discoverOAuth(`${s.origin}/mcp`, options)).scopesSupported).toEqual(["suffixed"]);
+    expect(s.seen.map((r) => r.url)).not.toContain("/.well-known/oauth-protected-resource");
+  });
+
+  it("follows a challenge's resource_metadata even when it is not a well-known path", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.method === "POST")
+          return (
+            res
+              .writeHead(401, {
+                "content-type": "application/json",
+                "www-authenticate": `Bearer resource_metadata="${origin}/meta/prm"`,
+              })
+              .end("{}"),
+            true
+          );
+        if (req.url === "/meta/prm") return json(res, { resource: `${origin}/mcp`, authorization_servers: [origin] });
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect((await discoverOAuth(`${s.origin}/mcp`, options)).tokenEndpoint).toBe(`${s.origin}/token`);
+    const urls = s.seen.map((r) => r.url);
+    expect(urls).toContain("/meta/prm");
+    expect(urls.filter((u) => u?.includes("oauth-protected-resource"))).toEqual([]);
+  });
+
+  it("rejects authorization-server metadata whose issuer does not match", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp")
+          return json(res, { resource: `${origin}/mcp`, authorization_servers: [origin] });
+        if (req.url === "/.well-known/oauth-authorization-server")
+          return json(res, asMeta(origin, { issuer: "https://evil.example.com" }));
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/mcp`, options))).toBe("discovery_failed");
+  });
+
+  it("falls back to the OpenID path-appended form for an issuer with a path", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/mcp")
+          return json(res, { resource: `${origin}/mcp`, authorization_servers: [`${origin}/tenant`] });
+        if (req.url === "/tenant/.well-known/openid-configuration") return json(res, asMeta(`${origin}/tenant`));
+      }),
+    );
+    expect((await discoverOAuth(`${s.origin}/mcp`, options)).issuer).toBe(`${s.origin}/tenant`);
+    expect(s.seen.map((r) => r.url)).toEqual(
+      expect.arrayContaining([
+        "/.well-known/oauth-authorization-server/tenant",
+        "/.well-known/openid-configuration/tenant",
+        "/tenant/.well-known/openid-configuration",
+      ]),
+    );
   });
 
   it("rejects a server without S256", async () => {

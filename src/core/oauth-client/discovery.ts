@@ -110,7 +110,7 @@ export async function discoverOAuth(
   const root = new URL("/.well-known/oauth-protected-resource", resource).href;
   const candidates = challenged
     ? [challenged]
-    : [...new Set([root, wellKnown(resource, "oauth-protected-resource", false)])];
+    : [...new Set([wellKnown(resource, "oauth-protected-resource", false), root])];
   const prm = resourceMetadataSchema.safeParse(await firstDocument(candidates, get, options));
   if (!prm.success || !sameUrl(prm.data.resource, resource)) fail();
   const authServer = prm.data.authorization_servers[0];
