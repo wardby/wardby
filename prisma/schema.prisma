@@ -62,6 +62,7 @@ model Agent {
   issueProjects        AgentIssueProject[]
   mcpServers           AgentMcpServer[]
   notificationChannels NotificationChannel[]
+  runHooks             RunHook[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
   defectProjectKey String?
@@ -89,7 +90,7 @@ model Agent {
   nativeExecutionMode NativeExecutionMode @default(control_plane)
   /// The owner's run steps level for this agent's runs; null = unset (summary). A run records
   /// min(WARDBY_RUN_STEPS, this), fixed at dispatch (Run.runStepsLevel). Owner-only.
-  runSteps RunStepsLevel?
+  runSteps            RunStepsLevel?
 
   /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
   /// agent can be a parent (has children it can delegate to) and/or a
@@ -206,6 +207,7 @@ model Tool {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   agents      AgentTool[]
+  runHooks    RunHook[]
 
   // Phase 4: ownership. Null = owner-less (a transition state; tool grants
   // arrive in the resource-sharing grants Phase 2, see ResourceGrant).
@@ -2035,8 +2037,70 @@ model WorkflowEvent {
   payload          Json
   createdAt        DateTime               @default(now())
   deliveries       NotificationDelivery[]
+  hookDeliveries   RunHookDelivery[]
 
   @@index([createdAt])
+}
+
+/// A run hook: wardby calls `tool` (a sandbox tool) when one of `agent`'s
+/// workflow events happens. One tool can be hooked to many agents, and the
+/// same tool more than once on one agent (each hook has its own config).
+model RunHook {
+  id                      String            @id @default(cuid())
+  agentId                 String
+  agent                   Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  toolId                  String
+  /// Restrict: delete_tool refuses while hooks reference the tool.
+  tool                    Tool              @relation(fields: [toolId], references: [id], onDelete: Restrict)
+  /// Subset of HOOK_EVENT_KINDS; empty = all.
+  events                  String[]          @default([])
+  /// run_completed only: subset of terminal run statuses; empty = all.
+  statuses                String[]          @default([])
+  /// run_completed only: "top_level" | "all" (child runs too).
+  runs                    String            @default("top_level")
+  /// Admin-approved: the run's masked final text goes to the tool.
+  includeFinalText        Boolean           @default(false)
+  /// Plain settings passed to the tool as params.config. Never secrets.
+  config                  Json              @default("{}")
+  allowedSecrets          Json              @default("[]")
+  allowedHosts            Json              @default("[]")
+  enabled                 Boolean           @default(true)
+  /// Set when a delivery fails permanently; cleared by update_run_hook.
+  lastError               String?
+  lastErrorAt             DateTime?
+  /// Audit only: plain text, no FK.
+  createdById             String
+  /// The principal whose consent allowedSecrets/allowedHosts carry; honoured
+  /// only while it equals the agent's current ownerId (as AgentTool).
+  capabilitiesGrantedById String?
+  /// The admin who approved includeFinalText. Plain text, no FK.
+  finalTextApprovedById   String?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+  deliveries              RunHookDelivery[]
+
+  @@index([agentId])
+  @@index([toolId])
+}
+
+/// One call of one run hook for one workflow event.
+model RunHookDelivery {
+  id            String        @id @default(cuid())
+  eventId       String
+  event         WorkflowEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  hookId        String
+  hook          RunHook       @relation(fields: [hookId], references: [id], onDelete: Cascade)
+  /// "pending" | "delivered" | "failed"
+  state         String        @default("pending")
+  attempts      Int           @default(0)
+  nextAttemptAt DateTime      @default(now())
+  lastError     String?
+  deliveredAt   DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@unique([eventId, hookId])
+  @@index([state, nextAttemptAt])
+  @@index([hookId])
 }
 
 /// One event's delivery to one channel (the outbox row the dispatcher works).
