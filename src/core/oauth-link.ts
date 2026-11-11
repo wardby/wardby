@@ -141,38 +141,40 @@ export async function completeOAuthCallback(input: {
   const adapter = input.adapters.get(request.purpose);
   if (!adapter) return { kind: "invalid" };
 
-  let done: { result: unknown; payload?: string };
+  // Everything after the provider has been asked fails closed: the request is
+  // spent (its verifier with it) and the route sees `failed`, never a raw error.
   try {
-    done = await adapter.complete({
+    const done = await adapter.complete({
       code: input.code,
       codeVerifier: request.codeVerifier,
       redirectUri: input.redirectUri,
       context: request.context,
     });
+    const code = confirmationCode();
+    const payloadCiphertext = done.payload ? await input.cipher.encrypt(done.payload) : null;
+    const described = adapter.describe(done.result);
+    await input.db.oAuthLinkRequest.update({
+      where: { id: request.id },
+      data: {
+        result: done.result as Prisma.InputJsonValue,
+        payloadCiphertext,
+        confirmHash: sha256(code),
+        // The verifier has done its job; keep nothing reusable.
+        codeVerifier: "",
+      },
+    });
+    return {
+      kind: "confirm",
+      code: `${code.slice(0, 4)}-${code.slice(4)}`,
+      ...described,
+      subject: request.principal.subject,
+    };
   } catch {
-    // Never log the error: an adapter's message may echo a token.
-    log.warn({ purpose: request.purpose }, "oauth link: the provider refused the authorization");
+    // Never log the error: an adapter's or a KMS message may echo a token.
+    log.warn({ purpose: request.purpose }, "oauth link: the callback failed; the request is spent");
     await input.db.oAuthLinkRequest.delete({ where: { id: request.id } }).catch(() => undefined);
     return { kind: "failed" };
   }
-  const code = confirmationCode();
-  const payloadCiphertext = done.payload ? await input.cipher.encrypt(done.payload) : null;
-  await input.db.oAuthLinkRequest.update({
-    where: { id: request.id },
-    data: {
-      result: done.result as Prisma.InputJsonValue,
-      payloadCiphertext,
-      confirmHash: sha256(code),
-      // The verifier has done its job; keep nothing reusable.
-      codeVerifier: "",
-    },
-  });
-  return {
-    kind: "confirm",
-    code: `${code.slice(0, 4)}-${code.slice(4)}`,
-    ...adapter.describe(done.result),
-    subject: request.principal.subject,
-  };
 }
 
 /** Checks the code for the principal's newest pending request of `purpose`, consumes it, then runs `finish` in the same transaction. */

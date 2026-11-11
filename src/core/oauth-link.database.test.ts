@@ -9,6 +9,22 @@ import {
   type OAuthLinkAdapter,
 } from "./oauth-link.js";
 
+const logged = vi.hoisted(() => vi.fn());
+vi.mock("./logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    if (bindings.module === "oauth-link") {
+      for (const level of ["trace", "debug", "info", "warn", "error", "fatal"] as const) {
+        vi.spyOn(log, level).mockImplementation(logged);
+      }
+    }
+    return log;
+  });
+  return real;
+});
+
 const db = createPrismaClient();
 const principalIds: string[] = [];
 const REDIRECT = "https://wardby.example/oauth/callback";
@@ -264,8 +280,12 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
 
   it("marks a request dead when the exchange fails, never logs its message, and limits pending requests", async () => {
     const p = await principal();
+    logged.mockClear();
     const { outcome, params } = await link(p.id, { code: "bad" });
     expect(outcome).toEqual({ kind: "failed" });
+    expect(logged).toHaveBeenCalled();
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("fake-access-AAAA");
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("idp refused");
     expect(
       await completeOAuthCallback({
         db,
@@ -319,5 +339,37 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     await expect(confirm(p.id, outcome.code, { prepare, finish })).resolves.toBe("prepared-value");
     expect(prepare).toHaveBeenCalledTimes(1);
     expect(finish.mock.calls[0][2]).toBe("prepared-value");
+  });
+
+  it("fails closed when a step after the exchange throws: row gone, failed, nothing logged", async () => {
+    const p = await principal();
+    const failing = {
+      encrypt: async (v: string) => {
+        throw new Error(`kms down for ${v}`);
+      },
+    };
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "one" },
+      redirectUri: REDIRECT,
+    });
+    logged.mockClear();
+    const outcome = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher: failing,
+      state: new URL(started.authorizeUrl).searchParams.get("state"),
+      code: "idp-code",
+      redirectUri: REDIRECT,
+    });
+    expect(outcome).toEqual({ kind: "failed" });
+    expect(await db.oAuthLinkRequest.count({ where: { principalId: p.id } })).toBe(0);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged.mock.calls[0][0]).toEqual({ purpose: "test" });
+    const text = JSON.stringify(logged.mock.calls);
+    expect(text).not.toContain("fake-access-AAAA");
+    expect(text).not.toContain("kms down");
   });
 });
