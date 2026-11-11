@@ -14,6 +14,7 @@ import {
   currentOAuthPayload,
   OAuthSecretFlowError,
   SECRET_OAUTH_REFRESH_FAILED,
+  storedSecretRedactionValues,
   type OAuthResolveOptions,
 } from "./oauth-secrets.js";
 import {
@@ -41,6 +42,11 @@ export interface SecretsAccessor {
   resolve?(name: string): Promise<SecretEntry | undefined>;
   /** OAuth only: refresh now unless another caller already replaced `usedValue`; resolves the fresh entry. */
   refresh?(name: string, usedValue: string): Promise<SecretEntry | undefined>;
+  /**
+   * For redaction lists only: the entry as stored, never refreshed and never refused for its OAuth
+   * status (a reauth_required secret's tokens are still listed). Its value is not for sending.
+   */
+  storedEntry?(name: string): Promise<SecretEntry | undefined>;
 }
 
 /** The fetch policy an OAuth refresh uses: what the caller's brokered fetches already use. */
@@ -273,6 +279,18 @@ export async function decryptEntry(
 }
 
 /**
+ * A stored secret as an entry for redaction: decrypted, an OAuth secret's tokens and client secret
+ * listed, with no refresh and no status check. Only a failed decrypt rejects (callers fail closed).
+ */
+export async function storedEntry(cipher: Pick<SecretCipher, "decrypt">, row: StoredSecretRow): Promise<SecretEntry> {
+  const broker = brokerOf({ broker: row.broker as Secret["broker"] });
+  const plaintext = await cipher.decrypt(row.ciphertext);
+  if (row.oauth === null || row.oauth === undefined) return { value: plaintext, broker };
+  const [value, ...rest] = storedSecretRedactionValues(plaintext, row.oauth);
+  return { value, broker, oauth: { redact: [value, ...rest] } };
+}
+
+/**
  * Decrypt-on-demand: only the ONE secret actually requested by name is
  * decrypted, never the agent's whole attached set eagerly — a lookup
  * that returns nothing (unattached name) is indistinguishable from one
@@ -350,6 +368,10 @@ export function buildSecretsAccessor(
       if (!row || row.oauth === null || row.oauth === undefined) return undefined;
       return entryOf(row, usedValue);
     },
+    async storedEntry(name: string): Promise<SecretEntry | undefined> {
+      const row = await load(name);
+      return row ? storedEntry(cipher, row) : undefined;
+    },
   };
 }
 
@@ -373,6 +395,9 @@ export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: re
     ...(accessor.refresh && {
       refresh: async (name: string, usedValue: string) =>
         allowed.has(name) ? accessor.refresh!(name, usedValue) : undefined,
+    }),
+    ...(accessor.storedEntry && {
+      storedEntry: async (name: string) => (allowed.has(name) ? accessor.storedEntry!(name) : undefined),
     }),
   };
 }

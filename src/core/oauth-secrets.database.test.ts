@@ -20,10 +20,13 @@ import {
   startOAuthSecretConnect,
 } from "./oauth-secrets.js";
 import { loadServerSecrets, redactForServer } from "./mcp-servers.js";
-import { mcpNamedSecretValues } from "./mcp-tools.js";
+import { handleMcpTool, loadMcpToolPins, mcpNamedSecretValues, SHARED_CREDENTIALS_MESSAGE } from "./mcp-tools.js";
+import { loadAgentSecretValues } from "./secret-guard.js";
+import { readRedactionValues } from "./runner.js";
 import { withEscapedForms } from "./secret-spans.js";
 import { buildSecretsAccessor, decryptEntry } from "./secrets.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
+import { fakeMcpServer, textResult } from "./mcp-tools.test-support.js";
 import { parseSecretBrokerConfig } from "./secret-broker-config.js";
 
 const logged = vi.hoisted(() => vi.fn());
@@ -133,6 +136,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     await fake.close();
   });
   afterAll(async () => {
+    await db.resourceGrant.deleteMany({ where: { grantedById: { in: principalIds } } });
     await db.agentMcpServer.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.agentSecret.deleteMany({ where: { agentId: { in: agentIds } } });
@@ -725,6 +729,271 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect((await accessor.refresh!("BS", "fake-access-2"))?.value).toBe("fake-access-3");
       expect(await accessor.refresh!("NOPE", "x")).toBeUndefined();
       expect(fake.tokenRequests).toBe(2);
+    });
+
+    /** Connects `name` for an existing owner; its first access token lives `ttl` seconds. */
+    async function connectAs(ownerId: string, name: string, ttl = 3600) {
+      fake.accessTtlSeconds = ttl;
+      const { outcome } = await connect(ownerId, name);
+      if (outcome.kind !== "confirm") throw new Error("unreachable");
+      await confirmCode(ownerId, name, outcome.code);
+      fake.accessTtlSeconds = 3600;
+      return row(ownerId, name);
+    }
+
+    async function agentOf(ownerId: string): Promise<string> {
+      const agentId = `oauth-agent-${randomUUID()}`;
+      agentIds.push(agentId);
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId },
+      });
+      return agentId;
+    }
+
+    /** Ciphertext with no refresh token, and an expiry `msFromNow` away. */
+    async function withoutRefreshToken(id: string, oauth: unknown, msFromNow: number) {
+      const ciphertext = await cipher.encrypt(JSON.stringify({ accessToken: "fake-access-norefresh" }));
+      await db.secret.update({
+        where: { id },
+        data: { ciphertext, oauth: { ...metaOf(oauth), expiresAt: new Date(Date.now() + msFromNow).toISOString() } },
+      });
+    }
+
+    it("redaction lists read attached OAuth secrets as stored: no refresh, and reauth_required still listed", async () => {
+      const ownerId = await owner();
+      const due = await connectAs(ownerId, "list-due", 30);
+      const broken = await connectAs(ownerId, "list-broken");
+      await db.secret.update({
+        where: { id: broken.id },
+        data: { oauth: { ...metaOf(broken.oauth), status: "reauth_required", reauthReason: "invalid_grant" } },
+      });
+      const agentId = await agentOf(ownerId);
+      await db.agentSecret.create({ data: { agentId, secretId: due.id, boundName: "DUE" } });
+      await db.agentSecret.create({ data: { agentId, secretId: broken.id, boundName: "BROKEN" } });
+      const dueTokens = Object.values(await payloadOf(due.ciphertext));
+      const brokenTokens = Object.values(await payloadOf(broken.ciphertext));
+      expect(dueTokens.length + brokenTokens.length).toBe(4);
+
+      const named = await loadAgentSecretValues(db, cipher, agentId);
+      const byName = new Map(named.map((n) => [n.name, n.values]));
+      expect(byName.get("DUE")).toEqual(expect.arrayContaining(dueTokens));
+      expect(byName.get("BROKEN")).toEqual(expect.arrayContaining(brokenTokens));
+
+      const accessor = buildSecretsAccessor(agentId, cipher, db, { options: OPTS });
+      const listed = await readRedactionValues(accessor, ["DUE", "BROKEN"]);
+      expect(listed).toEqual(expect.arrayContaining([...dueTokens, ...brokenTokens]));
+      expect(listed.some((v) => v.includes("accessToken"))).toBe(false);
+
+      expect(fake.tokenRequests).toBe(0);
+      expect(metaOf((await row(ownerId, "list-due")).oauth).status).toBe("connected");
+      // Only an actual use refreshes or fails.
+      await expect(accessor.resolve!("BROKEN")).rejects.toThrow(SECRET_REAUTH_REQUIRED("list-broken"));
+      expect((await accessor.resolve!("DUE"))?.value).toBe("fake-access-3");
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("marks an access token past its expiry with no refresh token reauth_required (expired), with an audit row", async () => {
+      const { ownerId, read } = await connected("expired");
+      const current = await read();
+      await withoutRefreshToken(current.id, current.oauth, -1000);
+      const error = await decryptEntry(db, cipher, await read(), { options: OPTS }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_REAUTH_REQUIRED("expired"));
+      expect((error as Error).cause).toBeUndefined();
+      expect(fake.tokenRequests).toBe(0);
+      expect(metaOf((await read()).oauth)).toMatchObject({ status: "reauth_required", reauthReason: "expired" });
+      const change = await db.secretBrokerChange.findFirstOrThrow({
+        where: { secretId: current.id },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(change).toMatchObject({ ownerId, secretName: "expired", actorId: ownerId });
+      expect(change.before).toMatchObject({ oauthStatus: "connected" });
+      expect(change.after).toMatchObject({ oauthStatus: "reauth_required" });
+      expect(logText()).toContain("expired");
+      expect(logText()).not.toContain("fake-");
+    });
+
+    it("sends an access token inside the early window with no refresh token as is", async () => {
+      const { read } = await connected("window");
+      const current = await read();
+      await withoutRefreshToken(current.id, current.oauth, 30_000);
+      const entry = await decryptEntry(db, cipher, await read(), { options: OPTS });
+      expect(entry.value).toBe("fake-access-norefresh");
+      expect(fake.tokenRequests).toBe(0);
+      expect(metaOf((await read()).oauth).status).toBe("connected");
+      expect(await db.secretBrokerChange.count({ where: { secretId: current.id } })).toBe(1); // the connect's
+    });
+
+    /** Delays every token request by `ms`; everything else goes straight to the fake. */
+    const slowToken =
+      (ms: number): typeof safeFetch =>
+      async (url, init, options) => {
+        if (url.endsWith("/token")) await new Promise((r) => setTimeout(r, ms));
+        return safeFetch(url, init, options);
+      };
+
+    it("a caller that waited for the lock refreshes within its budget, and the newest refresh token is stored", async () => {
+      const { read } = await connected("slow-ok", 30);
+      // Every refreshed token is also due, so the waiter must refresh again after the lock.
+      fake.accessTtlSeconds = 30;
+      const stale = await read();
+      const fetchImpl = slowToken(2000);
+      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      await new Promise((r) => setTimeout(r, 200));
+      const second = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.value).toBe("fake-access-2");
+      expect(b.value).toBe("fake-access-3");
+      expect(fake.tokenRequests).toBe(2);
+      const after = await read();
+      expect((await payloadOf(after.ciphertext)).refreshToken).toBe("fake-refresh-3");
+      expect(metaOf(after.oauth).status).toBe("connected");
+    }, 20_000);
+
+    it("a caller whose lock wait runs out gets the retryable error, and the holder's rotated token is kept", async () => {
+      const { read } = await connected("slow-wait", 30);
+      fake.accessTtlSeconds = 30;
+      const stale = await read();
+      const fetchImpl = slowToken(5500);
+      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      await new Promise((r) => setTimeout(r, 200));
+      const second = await decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl }).catch((e: unknown) => e);
+      expect((second as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((second as { retryable?: boolean }).retryable).toBe(true);
+      expect((second as Error).cause).toBeUndefined();
+      expect((await first).value).toBe("fake-access-2");
+      expect(fake.tokenRequests).toBe(1);
+      const after = await read();
+      expect((await payloadOf(after.ciphertext)).refreshToken).toBe("fake-refresh-2");
+      expect(metaOf(after.oauth).status).toBe("connected");
+      expect(logText()).toContain("lock_timeout");
+      expect(logText()).not.toContain("fake-");
+    }, 20_000);
+
+    it("gives the retryable error, with no Prisma text, when another transaction holds the lock past 4 s", async () => {
+      const { read } = await connected("held", 30);
+      const stale = await read();
+      let release!: () => void;
+      const released = new Promise<void>((r) => (release = r));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((r) => (locked = r));
+      const holder = db.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "id" = ${stale.id} FOR UPDATE`;
+          locked();
+          await released;
+        },
+        { timeout: 15_000 },
+      );
+      await isLocked;
+      try {
+        const started = Date.now();
+        const error = await decryptEntry(db, cipher, stale, { options: OPTS }).catch((e: unknown) => e);
+        expect(Date.now() - started).toBeGreaterThanOrEqual(3900);
+        expect((error as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+        expect((error as { retryable?: boolean }).retryable).toBe(true);
+        expect((error as Error).cause).toBeUndefined();
+        expect(fake.tokenRequests).toBe(0);
+        expect(logText()).toContain("lock_timeout");
+        expect(logText()).not.toMatch(/prisma|55P03|fake-/i);
+      } finally {
+        release();
+        await holder;
+      }
+      expect((await read()).ciphertext).toBe(stale.ciphertext);
+    }, 20_000);
+
+    it("refuses, sending no request, when less than 3 s would be left for the token request", async () => {
+      const { read } = await connected("no-budget", 30);
+      const before = await read();
+      // The first reading starts the budget; every later one is 15 s on, leaving 5 s - 3 s = 2 s.
+      let calls = 0;
+      const clock = () => (calls++ === 0 ? 0 : 15_000);
+      const error = await decryptEntry(db, cipher, before, { options: OPTS, clock }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((error as { retryable?: boolean }).retryable).toBe(true);
+      expect(fake.tokenRequests).toBe(0);
+      const after = await read();
+      expect(after.ciphertext).toBe(before.ciphertext);
+      expect(metaOf(after.oauth).status).toBe("connected");
+    });
+
+    it("a grantee whose call hits reauth mid-call gets the shared message; the owner gets the specific one", async () => {
+      const ownerId = await owner();
+      const guestId = await owner();
+      await connectAs(ownerId, "midcall");
+      // Brokered secrets go only over https: the MCP side is a stand-in on the resource's host.
+      const mcpUrl = `https://${HOST}/mcp`;
+      const mcp = fakeMcpServer(() => textResult("never"));
+      const server = await db.mcpServer.create({
+        data: {
+          ownerId,
+          name: "fk",
+          url: mcpUrl,
+          secretNames: ["midcall"],
+          toolSnapshot: [{ name: "echo", description: "Echo.", inputSchema: { type: "object" } }],
+        },
+      });
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "mcp_server",
+          resourceId: server.id,
+          granteeKind: "principal",
+          granteePrincipalId: guestId,
+          granteeKey: `principal:${guestId}`,
+          level: "use",
+          source: "owner",
+          grantedById: ownerId,
+        },
+      });
+      const ownAgent = await agentOf(ownerId);
+      const guestAgent = await agentOf(guestId);
+      for (const [agentId, by] of [
+        [ownAgent, ownerId],
+        [guestAgent, guestId],
+      ]) {
+        await db.agentMcpServer.create({
+          data: { agentId, serverId: server.id, allowedTools: ["echo"], attachedById: by },
+        });
+      }
+      // Loading finds the token good; once initialize is sent, it expires with no refresh token, so
+      // the next request's resolve marks the secret reauth_required (the handler's refresh has no
+      // fetch-policy override, so it could not reach this http fake's token endpoint).
+      const midCall: typeof safeFetch = async (url, init, options) => {
+        if (url !== mcpUrl) throw new Error("unexpected request");
+        if (init?.body?.includes('"initialize"')) {
+          const current = await row(ownerId, "midcall");
+          await withoutRefreshToken(current.id, current.oauth, -1000);
+        }
+        return mcp.impl(url, init, options);
+      };
+      const call = async (agentId: string) => {
+        const pin = (await loadMcpToolPins(db, agentId)).find((p) => p.toolName === "echo");
+        if (!pin) throw new Error("no pin");
+        const log = { info: vi.fn(), warn: vi.fn() };
+        const out = await handleMcpTool(pin, "{}", {
+          db,
+          cipher,
+          agentId,
+          runId: `run-${randomUUID()}`,
+          signal: new AbortController().signal,
+          fetchImpl: midCall,
+          log: log as never,
+        });
+        return JSON.parse(out) as { error?: string; message?: string };
+      };
+
+      const guest = await call(guestAgent);
+      expect(guest).toEqual({ error: "mcp_server_error", message: SHARED_CREDENTIALS_MESSAGE });
+      expect(JSON.stringify(guest)).not.toContain("midcall");
+
+      await connectAs(ownerId, "midcall"); // connected again, for the owner's own call
+      const own = await call(ownAgent);
+      expect(own).toEqual({ error: "mcp_server_error", message: SECRET_REAUTH_REQUIRED("midcall") });
+      expect(fake.tokenRequests).toBe(0);
+      // Each call got as far as initialize, then failed resolving the secret for the next request.
+      expect(mcp.seen.filter((s) => s.method === "initialize")).toHaveLength(2);
+      expect(mcp.seen.filter((s) => s.method === "tools/call")).toEqual([]);
+      expect(metaOf((await row(ownerId, "midcall")).oauth)).toMatchObject({ reauthReason: "expired" });
     });
   });
 });

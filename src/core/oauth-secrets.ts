@@ -71,6 +71,12 @@ const REFRESH_EARLY_MS = 60_000;
 /** The token request's own limit; the transaction holding the row lock allows a little more. */
 const REFRESH_TIMEOUT_MS = 15_000;
 const REFRESH_TRANSACTION_TIMEOUT_MS = 20_000;
+/** How long a caller waits for another caller's row lock before giving up (retryable). */
+const REFRESH_LOCK_TIMEOUT = "4s";
+/** Kept free at the end of the transaction, so a refreshed (rotated) token is always committed. */
+const REFRESH_COMMIT_MARGIN_MS = 3_000;
+/** A token request given less time than this is not sent. */
+const REFRESH_MIN_REQUEST_MS = 3_000;
 
 const log = logger.child({ module: "oauth-secrets" });
 
@@ -89,9 +95,11 @@ export interface OAuthSecretMeta {
   expiresAt: string | null;
   status: "connected" | "reauth_required";
   connectedAt: string;
-  /** A fixed code, never provider text. */
-  reauthReason?: "invalid_grant" | "invalid_client";
+  /** A fixed code, never provider text. `expired`: past expiresAt with no refresh token. */
+  reauthReason?: ReauthReason;
 }
+
+type ReauthReason = "invalid_grant" | "invalid_client" | "expired";
 
 /** The `oauth` JSON of a Secret: what is not secret about the connection. */
 export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
@@ -107,7 +115,7 @@ export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
     expiresAt: z.string().nullable(),
     status: z.enum(["connected", "reauth_required"]),
     connectedAt: z.string(),
-    reauthReason: z.enum(["invalid_grant", "invalid_client"]).optional(),
+    reauthReason: z.enum(["invalid_grant", "invalid_client", "expired"]).optional(),
   })
   .strict();
 
@@ -474,6 +482,8 @@ export interface OAuthResolveOptions {
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
   now?: Date;
+  /** Milliseconds on a monotonic clock, for the transaction's time budget; tests replace it. */
+  clock?: () => number;
 }
 
 /** The connected meta; reauth_required (or meta that can't be read) throws SECRET_REAUTH_REQUIRED. */
@@ -506,11 +516,18 @@ function wantsRefresh(
   return meta.expiresAt !== null && Date.parse(meta.expiresAt) - now.getTime() <= REFRESH_EARLY_MS;
 }
 
+/** Past expiresAt, not merely inside the early-refresh window. */
+function isExpired(meta: OAuthSecretMeta, now: Date): boolean {
+  return meta.expiresAt !== null && Date.parse(meta.expiresAt) <= now.getTime();
+}
+
 /**
  * The OAuth secret's current tokens. When the access token is due (expires within 60 s) or is the
  * one `forceRefreshIfStill` names, it is refreshed first, under a row lock, so concurrent callers
  * spend a refresh token once. A provider that refuses the grant or the client marks the secret
- * reauth_required. Every error is an OAuthSecretFlowError with a fixed message and no cause.
+ * reauth_required, and so does an access token past its expiry with no refresh token; one inside
+ * the early window with no refresh token is sent as is. Every error is an OAuthSecretFlowError with
+ * a fixed message and no cause.
  */
 export async function currentOAuthPayload(
   db: Pick<PrismaClient, "$transaction" | "secret">,
@@ -521,14 +538,59 @@ export async function currentOAuthPayload(
   const now = opts.now ?? new Date();
   const meta = connectedMeta(row.oauth, row.name);
   const payload = await storedPayload(cipher, row.ciphertext);
-  if (!wantsRefresh(meta, payload, opts, now) || !payload.refreshToken) return payload;
+  if (!wantsRefresh(meta, payload, opts, now)) return payload;
+  if (!payload.refreshToken && !isExpired(meta, now)) return payload;
   return refreshLocked(db, cipher, row, opts, now);
 }
 
 type LockedOutcome =
   | { kind: "current"; payload: OAuthSecretPayload }
   | { kind: "refreshed"; payload: OAuthSecretPayload }
-  | { kind: "reauth"; reason: "invalid_grant" | "invalid_client" };
+  | { kind: "reauth"; reason: ReauthReason };
+
+type LockedRow = { ciphertext: string; oauth: unknown; broker: unknown; ownerId: string };
+
+/** Marks the locked secret reauth_required, with its audit row; both commit with the transaction. */
+async function markReauth(
+  tx: Prisma.TransactionClient,
+  row: StoredOAuthSecret,
+  locked: LockedRow,
+  meta: OAuthSecretMeta,
+  reason: ReauthReason,
+): Promise<LockedOutcome> {
+  const reauth: OAuthSecretMeta = { ...meta, status: "reauth_required", reauthReason: reason };
+  await tx.secret.update({ where: { id: row.id }, data: { oauth: reauth as unknown as Prisma.InputJsonValue } });
+  const broker =
+    locked.broker !== null && typeof locked.broker === "object" ? (locked.broker as Record<string, unknown>) : {};
+  await tx.secretBrokerChange.create({
+    data: {
+      secretId: row.id,
+      ownerId: locked.ownerId,
+      secretName: row.name,
+      actorId: locked.ownerId,
+      before: { ...broker, oauthStatus: "connected" },
+      after: { ...broker, oauthStatus: "reauth_required" },
+      via: "mcp",
+    },
+  });
+  return { kind: "reauth", reason };
+}
+
+function refreshUnavailable(): OAuthSecretFlowError {
+  return new OAuthSecretFlowError("refresh_unavailable", SECRET_OAUTH_REFRESH_UNAVAILABLE, true);
+}
+
+/** Postgres lock_not_available (55P03): the lock_timeout ran out. Only the code is read, never logged text. */
+function isLockTimeout(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let e: unknown = err; e && typeof e === "object" && !seen.has(e); e = (e as { cause?: unknown }).cause) {
+    seen.add(e);
+    const o = e as { code?: unknown; meta?: { code?: unknown } };
+    if (o.code === "55P03" || o.meta?.code === "55P03") return true;
+    if (e instanceof Error && /\b55P03\b|lock timeout/.test(e.message)) return true;
+  }
+  return false;
+}
 
 async function refreshLocked(
   db: Pick<PrismaClient, "$transaction">,
@@ -538,18 +600,31 @@ async function refreshLocked(
   now: Date,
 ): Promise<OAuthSecretPayload> {
   let outcome: LockedOutcome;
+  const clock = opts.clock ?? (() => performance.now());
+  // Measured from before the transaction starts, so the budget errs short, never long.
+  const startedAt = clock();
   try {
     // The token request runs inside the transaction on purpose: the row lock must cover it, so a
     // rotating refresh token is spent once however many callers found the access token due.
     outcome = await db.$transaction(
       async (tx): Promise<LockedOutcome> => {
-        const locked = await tx.$queryRaw<{ ciphertext: string; oauth: unknown; broker: unknown; ownerId: string }[]>`
+        // A caller waits a bounded time for another's lock, so the wait can't eat the refresh's budget.
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${REFRESH_LOCK_TIMEOUT}'`);
+        const locked = await tx.$queryRaw<LockedRow[]>`
           SELECT "ciphertext", "oauth", "broker", "ownerId" FROM "Secret" WHERE "id" = ${row.id} FOR UPDATE`;
         if (!locked.length) throw reauthRequired(row.name);
         const meta = connectedMeta(locked[0].oauth, row.name);
         const payload = await storedPayload(cipher, locked[0].ciphertext);
         // Another caller may have refreshed while this one waited for the lock.
-        if (!wantsRefresh(meta, payload, opts, now) || !payload.refreshToken) return { kind: "current", payload };
+        if (!wantsRefresh(meta, payload, opts, now)) return { kind: "current", payload };
+        if (!payload.refreshToken) {
+          return isExpired(meta, now) ? markReauth(tx, row, locked[0], meta, "expired") : { kind: "current", payload };
+        }
+        // The request gets what is left of the transaction less a margin to commit what it returns,
+        // so a rotated refresh token is never spent by a request whose result can't be stored.
+        const left = REFRESH_TRANSACTION_TIMEOUT_MS - (clock() - startedAt);
+        const timeoutMs = Math.min(REFRESH_TIMEOUT_MS, left - REFRESH_COMMIT_MARGIN_MS);
+        if (timeoutMs < REFRESH_MIN_REQUEST_MS) throw refreshUnavailable();
         const client: OAuthClient = {
           clientId: meta.clientId,
           ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
@@ -561,38 +636,16 @@ async function refreshLocked(
             meta,
             client,
             payload.refreshToken,
-            { ...opts.options, timeoutMs: REFRESH_TIMEOUT_MS },
+            { ...opts.options, timeoutMs },
             opts.fetchImpl,
             now,
           );
         } catch (err) {
           // Only the fixed code is read: an OAuthProtocolError's message is fixed, anything else is dropped.
           const code = err instanceof OAuthProtocolError ? err.code : "unknown";
-          if (code === "invalid_grant" || code === "invalid_client") {
-            const reauth: OAuthSecretMeta = { ...meta, status: "reauth_required", reauthReason: code };
-            await tx.secret.update({
-              where: { id: row.id },
-              data: { oauth: reauth as unknown as Prisma.InputJsonValue },
-            });
-            const broker =
-              locked[0].broker !== null && typeof locked[0].broker === "object"
-                ? (locked[0].broker as Record<string, unknown>)
-                : {};
-            await tx.secretBrokerChange.create({
-              data: {
-                secretId: row.id,
-                ownerId: locked[0].ownerId,
-                secretName: row.name,
-                actorId: locked[0].ownerId,
-                before: { ...broker, oauthStatus: "connected" },
-                after: { ...broker, oauthStatus: "reauth_required" },
-                via: "mcp",
-              },
-            });
-            return { kind: "reauth", reason: code };
-          }
+          if (code === "invalid_grant" || code === "invalid_client") return markReauth(tx, row, locked[0], meta, code);
           throw code === "provider_unavailable"
-            ? new OAuthSecretFlowError("refresh_unavailable", SECRET_OAUTH_REFRESH_UNAVAILABLE, true)
+            ? refreshUnavailable()
             : new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
         }
         const next: OAuthSecretPayload = {
@@ -620,9 +673,13 @@ async function refreshLocked(
         log.warn({ secretId: row.id, reason: err.reason }, "OAuth secret refresh failed");
       throw err;
     }
-    // A database or transaction error: its message may quote query arguments, so it is dropped.
-    log.warn({ secretId: row.id, reason: "store_failed" }, "OAuth secret refresh failed");
-    throw new OAuthSecretFlowError("refresh_unavailable", SECRET_OAUTH_REFRESH_UNAVAILABLE, true);
+    // A database or transaction error (a lock wait that ran out among them): its message may quote
+    // query arguments, so it is dropped.
+    log.warn(
+      { secretId: row.id, reason: isLockTimeout(err) ? "lock_timeout" : "store_failed" },
+      "OAuth secret refresh failed",
+    );
+    throw refreshUnavailable();
   }
   if (outcome.kind === "reauth") {
     log.warn({ secretId: row.id, reason: outcome.reason }, "OAuth secret needs connecting again");

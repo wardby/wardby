@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { MCP_PROTOCOL_VERSION, findResponse, hasServerRequest } from "./jsonrpc.js";
+import { McpServerInputError } from "../resource-url.js";
 
 /** The package version, sent as the client version (package.json sits three levels up from src/core/mcp-client and dist/core/mcp-client). */
 const CLIENT_VERSION = (
@@ -81,6 +82,9 @@ export class McpHttpClient {
         this.signal,
       );
     } catch (error) {
+      // Wardby's own fixed-message input error (an OAuth secret that needs connecting again, say):
+      // the caller maps it, hiding the owner's detail from a grantee.
+      if (error instanceof McpServerInputError) throw error;
       const message = error instanceof Error ? error.message : "";
       if (this.signal.aborted || message.startsWith("fetch_cancelled_or_timeout")) {
         throw new McpClientError("mcp_call_timeout", "The MCP server call timed out or was cancelled.");

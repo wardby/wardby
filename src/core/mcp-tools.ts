@@ -219,6 +219,8 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
   const fail = (code: string, message: string) => done(error(code, message), code);
 
   let values: string[] = [];
+  // A grantee's run (the agent's owner is not the server's): the owner's secret names stay out of what it gets.
+  let shared = false;
   try {
     if (loadMcpServersMode() === "off") return fail("mcp_servers_off", MCP_SERVERS_OFF_MESSAGE);
     const row = await ctx.db.agentMcpServer.findUnique({
@@ -271,13 +273,13 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
       url: row.server.url,
       secretNames: row.server.secretNames,
     };
+    shared = row.agent.ownerId !== server.ownerId;
     let secrets: Awaited<ReturnType<typeof loadServerSecrets>>;
     try {
       secrets = await loadServerSecrets(ctx.db, ctx.cipher, server, {
         ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
       });
     } catch (err) {
-      const shared = row.agent.ownerId !== server.ownerId;
       if (err instanceof McpCredentialsUnavailableError) {
         logCredentialsUnavailable(ctx.log, err);
         return fail(err.code, shared ? SHARED_CREDENTIALS_MESSAGE : err.message);
@@ -336,7 +338,9 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
   } catch (err) {
     const message = redactForServer(err instanceof Error ? err.message : "The MCP server call failed.", values);
     if (err instanceof McpClientError) return fail(err.code, message);
-    if (err instanceof McpServerInputError) return fail("mcp_server_error", message);
+    // Mid-call (an OAuth secret's refresh, say), the same rule as at load: the detail is the owner's.
+    if (err instanceof McpServerInputError)
+      return fail("mcp_server_error", shared ? SHARED_CREDENTIALS_MESSAGE : message);
     return fail("mcp_server_unreachable", "The MCP server could not be reached.");
   }
 }
