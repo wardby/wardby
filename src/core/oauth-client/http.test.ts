@@ -33,7 +33,7 @@ describe("oauthFetch body handling", () => {
     });
   });
 
-  it("does not read the body at all with ignoreBody", async () => {
+  it("discards the body with ignoreBody: not parsed, and no 64 KiB cap", async () => {
     await withServer(200, "text/event-stream", big, async (url) => {
       const r = await oauthFetch(url, { method: "GET", ignoreBody: true }, options);
       expect(r).toMatchObject({ status: 200, json: undefined });
