@@ -10,6 +10,8 @@ import type { AddressInfo } from "node:net";
 export interface FakeOAuthServer {
   /** Origin, e.g. http://127.0.0.1:PORT. */
   url: string;
+  /** The plain-http origin it listens on, http://127.0.0.1:PORT (the same as `url` without `publicHost`). */
+  listenUrl: string;
   /** `${url}/mcp`, protected. */
   mcpUrl: string;
   accessTtlSeconds: number;
@@ -55,6 +57,13 @@ export async function startFakeOAuthServer(
      * listen address.
      */
     publicHost?: string;
+    /**
+     * The scheme the metadata advertises with `publicHost` (default http). With "https" the origin is
+     * `https://<publicHost>` on the default port, and a client reaches the server through a fetch
+     * that maps it onto `listenUrl`, as a TLS front would; the paths that refuse plain http (or a
+     * non-default https port) then run unchanged.
+     */
+    publicScheme?: "http" | "https";
     /**
      * Opt-in: a refresh must name a client the server registered, by `client_id` in the form or
      * HTTP Basic credentials; any other answers 401 `invalid_client`.
@@ -317,10 +326,15 @@ export async function startFakeOAuthServer(
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
   const port = (http.address() as AddressInfo).port;
   listenOrigin = `http://127.0.0.1:${port}`;
-  origin = opts.publicHost ? `http://${opts.publicHost}:${port}` : listenOrigin;
+  origin = !opts.publicHost
+    ? listenOrigin
+    : opts.publicScheme === "https"
+      ? `https://${opts.publicHost}`
+      : `http://${opts.publicHost}:${port}`;
 
   const server: FakeOAuthServer = {
     url: origin,
+    listenUrl: listenOrigin,
     mcpUrl: `${origin}/mcp`,
     accessTtlSeconds: 3600,
     rotateRefresh: true,
