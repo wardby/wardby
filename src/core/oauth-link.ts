@@ -179,15 +179,25 @@ export async function completeOAuthCallback(input: {
   }
 }
 
-/** Checks the code for the principal's newest pending request of `purpose`, consumes it, then runs `finish` in the same transaction. */
+/**
+ * Checks the code for the principal's newest pending request of `purpose`, consumes it, then runs `finish` in the same transaction.
+ * `prepare` runs once; `finish` may run more than once (a serialization conflict retries it), so it must touch only `tx`.
+ */
 export async function confirmOAuthLink<Result, P, T>(input: {
   db: OAuthLinkDb;
   purpose: string;
   principalId: string;
   confirmationCode: string;
   cipher: Pick<SecretCipher, "decrypt">;
-  /** Runs after the code is right and before the transaction opens, so slow work never holds it. */
+  /**
+   * Runs once, after the code is right and before the transaction opens, so slow work never holds it.
+   * Non-transactional work (encryption, network calls) goes here.
+   */
   prepare?: (done: { result: Result; payload: string | undefined; context: unknown }) => Promise<P>;
+  /**
+   * Runs inside the transaction and may run more than once on a serialization conflict.
+   * Read and write only through `tx`; no other side effects (KMS, audit, notifications, cache writes).
+   */
   finish: (
     tx: Prisma.TransactionClient,
     done: { result: Result; payload: string | undefined; context: unknown },
