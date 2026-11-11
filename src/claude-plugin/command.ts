@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
+import { atLeast, parseClaudeVersion } from "../coding/transcript/resume/launch.js";
 
 export const PLUGIN = "wardby-runs";
 export const DEFAULT_MARKETPLACE = "wardby/wardby";
@@ -32,6 +33,13 @@ export function paneTools(server: string): string[] {
   );
 }
 export const PANE_TOOLS = paneTools(MCP_SERVER);
+
+/**
+ * The first Claude Code release that draws the pane: an older one refuses its tree (Text size, weight, mono
+ * and tabular; spacing tokens; Text children in a Button) and shows nothing, and before about 2.1.290 the
+ * plugin does not load at all. Keep in step with MIN_CLAUDE_CODE in plugins/claude-code/hooks/register.tsx.
+ */
+export const PANE_MIN_CLAUDE_CODE = "2.1.299";
 
 /** How long one `claude` call may take: `claude mcp get` can check its server, which shouldn't stall doctor. */
 const CLAUDE_TIMEOUT_MS = 20_000;
@@ -151,6 +159,15 @@ function claudeAvailable(deps: ClaudePluginDeps): boolean {
   return deps.run("claude", ["--version"]).status === 0;
 }
 
+/** The warning for a Claude Code older than the pane needs, or null when it is new enough or unreadable. */
+function claudeTooOldLine(deps: ClaudePluginDeps): string | null {
+  const output = deps.run("claude", ["--version"]).stdout;
+  const version = parseClaudeVersion(output);
+  const min = parseClaudeVersion(PANE_MIN_CLAUDE_CODE) as [number, number, number];
+  if (!version || atLeast(version, min)) return null;
+  return `! The wardby runs pane needs Claude Code ${PANE_MIN_CLAUDE_CODE} or later; this is ${version.join(".")}. Run \`claude update\`, then restart Claude Code.`;
+}
+
 function hasMcpServer(deps: ClaudePluginDeps, server = MCP_SERVER): boolean {
   return deps.run("claude", ["mcp", "get", server]).status === 0;
 }
@@ -201,6 +218,9 @@ export async function installPlugin(
     deps.out("Claude Code (claude) wasn't found on PATH. Install it, then run this again.");
     return 1;
   }
+  // Installing still helps (the pane works once Claude Code is updated); say so first.
+  const tooOld = claudeTooOldLine(deps);
+  if (tooOld) deps.out(tooOld);
   const server = options.serverName ?? MCP_SERVER;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(server)) {
     deps.out(`--server-name "${server}" isn't a server name (letters, digits, - and _).`);
@@ -419,6 +439,8 @@ export function claudePluginDoctorLines(deps: ClaudePluginDeps, serverName = MCP
           (e) =>
             `! ${e.id} is installed but turned off, so the pane never loads (claude plugin enable ${e.id}, or re-run claude-plugin install)`,
         );
+  const tooOld = claudeTooOldLine(deps);
+  if (tooOld) lines.push(tooOld);
   lines.push(
     hasMcpServer(deps, serverName)
       ? `✓ ${serverName} MCP server configured in Claude Code`

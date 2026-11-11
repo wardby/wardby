@@ -97,7 +97,8 @@ export function parseClaudeVersion(output: string): [number, number, number] | u
   return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
 }
 
-function atLeast(version: [number, number, number], min: [number, number, number]): boolean {
+/** Whether a parsed Claude Code version is `min` or later. */
+export function atLeast(version: [number, number, number], min: [number, number, number]): boolean {
   for (let i = 0; i < 3; i++) if (version[i] !== min[i]) return version[i] > min[i];
   return true;
 }

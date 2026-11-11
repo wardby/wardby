@@ -20,6 +20,9 @@ later; the pane checks again every few refreshes.
 
 ## Install
 
+The pane needs Claude Code 2.1.299 or later (`claude --version`; update with
+`claude update`). See [The pane opens nothing](#the-pane-opens-nothing).
+
 ### With the wardby CLI
 
 ```sh
@@ -236,6 +239,21 @@ When managed settings set `allowManagedHooksOnly`, a plugin a user installs
 loads no hooks: install it through managed settings instead.
 
 ## Troubleshooting
+
+### The pane opens nothing
+
+The pane needs Claude Code 2.1.299 or later. An older Claude Code refuses the
+pane's drawing (its text styles and spacing), so the pane stays empty, and
+before about 2.1.290 the plugin does not load at all.
+
+- On a release that loads the plugin, `/wardby-runs` says so instead of
+  opening the pane: "The wardby runs pane needs Claude Code 2.1.299 or later;
+  this is 2.1.295."
+- `wardby claude-plugin install` and `wardby doctor` print the same warning
+  for any older release.
+
+Run `claude update` (or update the desktop app), restart Claude Code, then
+run `/wardby-runs` again.
 
 ### `list_runs: ... exceeds maximum allowed tokens`
 

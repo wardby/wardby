@@ -20,6 +20,35 @@ const MAX_TEXT_PIECES = 64;
 const UNKNOWN_TOOL = /\btool\b[^\n]*\bnot found\b|unknown tool|no such tool/i;
 // The timer ticks this often; each tick refreshes only when one is due.
 const TICK_MS = 5000;
+// The first Claude Code release whose pane accepts every prop the pane draws (Text size, weight, mono and
+// tabular; spacing tokens; Text children in a Button). An older engine refuses the whole tree and draws
+// nothing, so /wardby-runs says so instead. Keep in step with PANE_MIN_CLAUDE_CODE in src/claude-plugin/command.ts.
+const MIN_CLAUDE_CODE = "2.1.299";
+
+/** The x.y.z at the start of a version string, or null when it has none. */
+const versionParts = (version: string): [number, number, number] | null => {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+};
+
+/**
+ * The Claude Code version when it is older than MIN_CLAUDE_CODE; null when it is new enough or reads as no
+ * release. An engine without session.version() predates it (it arrived before the pane's props did).
+ */
+async function engineTooOld($: { session: { version: () => Promise<{ version: string; base?: string }> } }) {
+  let version: string;
+  try {
+    const answer = await $.session.version();
+    version = answer.base ?? answer.version;
+  } catch {
+    return "an older release";
+  }
+  const have = versionParts(version);
+  const min = versionParts(MIN_CLAUDE_CODE) as [number, number, number];
+  if (!have) return null;
+  for (let i = 0; i < 3; i++) if (have[i] !== min[i]) return have[i] < min[i] ? version : null;
+  return null;
+}
 
 /** The run's repository and pull request, which say where a missing clone can come from. */
 type ResumeRepo = { repository: string | null; pullRequestUrl: string | null } | null;
@@ -1595,6 +1624,13 @@ export const register: Register = (on, options) => {
     if ((e.args ?? "").trim() === "close") {
       await $.ui.close({ id: PANE });
       return { text: "wardby runs pane closed." };
+    }
+    // An engine that refuses the pane's tree would open an empty pane: say what to update instead.
+    const old = await engineTooOld($);
+    if (old) {
+      return {
+        text: `The wardby runs pane needs Claude Code ${MIN_CLAUDE_CODE} or later; this is ${old}. Run \`claude update\`, restart Claude Code, then run /wardby-runs again.`,
+      };
     }
     // Beside the transcript in a fullscreen terminal (the dock); above the prompt otherwise.
     await $.ui.open({ id: PANE, title: "wardby runs", focus: true, closeOnEscape: true, columns: 56 });

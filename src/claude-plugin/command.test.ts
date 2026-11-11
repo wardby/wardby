@@ -2,7 +2,13 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudePluginCommand, claudePluginDoctorLines, PANE_TOOLS, type ClaudePluginDeps } from "./command.js";
+import {
+  claudePluginCommand,
+  claudePluginDoctorLines,
+  PANE_MIN_CLAUDE_CODE,
+  PANE_TOOLS,
+  type ClaudePluginDeps,
+} from "./command.js";
 
 /** A fake `claude`: answers by subcommand, records every call. */
 function fakeDeps(
@@ -18,6 +24,8 @@ function fakeDeps(
     listOutput?: string;
     confirm?: boolean;
     settings?: unknown;
+    /** What `claude --version` prints (default a release new enough for the pane). */
+    version?: string;
   } = {},
 ) {
   const configDir = mkdtempSync(join(tmpdir(), "claude-config-"));
@@ -37,7 +45,7 @@ function fakeDeps(
       calls.push([command, ...args]);
       const ok = { status: 0, stdout: "", stderr: "" };
       if (opts.hasClaude === false) return { status: 127, stdout: "", stderr: "not found" };
-      if (args[0] === "--version") return { ...ok, stdout: "2.1.311 (Claude Code)" };
+      if (args[0] === "--version") return { ...ok, stdout: opts.version ?? "2.1.311 (Claude Code)" };
       if (args[0] === "mcp" && args[1] === "get")
         return opts.hasServer ? ok : { status: 1, stdout: "", stderr: "No MCP server" };
       if (args[0] === "plugin" && args[1] === "install") {
@@ -456,5 +464,36 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
     const failed = await run({}, true, 1);
     expect(failed.result).toBe("failed");
     expect(failed.warnings[0]).toMatch(/claude-plugin install/);
+  });
+});
+
+describe("Claude Code older than the pane needs", () => {
+  const warning =
+    "! The wardby runs pane needs Claude Code 2.1.299 or later; this is 2.1.295. Run `claude update`, then restart Claude Code.";
+
+  it("install warns and still installs", async () => {
+    const { deps, lines } = fakeDeps({ hasServer: true, version: "2.1.295 (Claude Code)" });
+    expect(await claudePluginCommand(["install"], deps)).toBe(0);
+    expect(lines[0]).toBe(warning);
+  });
+
+  it("doctor warns once the plugin is installed", async () => {
+    const { deps } = fakeDeps({ hasServer: true, version: "2.1.295 (Claude Code)" });
+    await claudePluginCommand(["install"], deps);
+    expect(claudePluginDoctorLines(deps)).toContain(warning);
+  });
+
+  it("says nothing for the minimum, a newer release, or an unreadable version", async () => {
+    for (const version of ["2.1.299 (Claude Code)", "2.2.0 (Claude Code)", "unknown"]) {
+      const { deps, lines } = fakeDeps({ hasServer: true, version });
+      await claudePluginCommand(["install"], deps);
+      expect(lines.some((line) => line.includes("needs Claude Code"))).toBe(false);
+      expect(claudePluginDoctorLines(deps).some((line) => line.includes("needs Claude Code"))).toBe(false);
+    }
+  });
+
+  it("matches the minimum the plugin itself checks", () => {
+    const source = readFileSync(new URL("../../plugins/claude-code/hooks/register.tsx", import.meta.url), "utf8");
+    expect(/const MIN_CLAUDE_CODE = "([^"]+)"/.exec(source)?.[1]).toBe(PANE_MIN_CLAUDE_CODE);
   });
 });
