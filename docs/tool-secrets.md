@@ -78,6 +78,91 @@ best-effort text scan and never block the call.
 normal fetch policy still applies on top of the broker: a brokered request to a
 host the attachment does not list is refused like any other fetch.
 
+## OAuth secrets
+
+Some services, such as a hosted MCP server, only offer OAuth sign-in and give
+you no API key to paste. An **OAuth secret** connects one of them once, as a
+shared service identity: you sign in as a dedicated service user, and Wardby
+keeps the resulting access token (and refresh token) as a brokered secret.
+Agents then use the service as that user, so create or pick a service account
+whose permissions are what you want every agent using the secret to have.
+
+### Connect
+
+1. Call `create_secret { name, oauth: { resource, scope?, clientId? } }`.
+   `resource` is the service's URL, for example `https://mcp.example.com/mcp`
+   (https only). Do not also pass `value` or `broker`; Wardby sets the broker
+   itself: the access token as `Authorization: Bearer {value}` to the
+   resource's host only.
+2. The call returns `status: "pending"` and a `url`. Open it in your browser
+   and sign in as the service user.
+3. The page shows a confirmation code. Call
+   `create_secret { name, confirmationCode }` with the same name. The result is
+   `{ name, kind: "oauth", status: "connected", expiresAt }`. The code is checked against the
+   same owner who started the sign-in, and has a limited number of attempts;
+   when they run out or the request expired, start again from step 1.
+
+Connecting needs Wardby's HTTP transport, because the provider sends the
+browser back to `https://<your-wardby-host>/oauth/callback` (the host of
+`MCP_CANONICAL_URI`). Over stdio the call is refused.
+
+Provider requirements:
+
+- The service publishes OAuth metadata (protected-resource and
+  authorization-server metadata, with PKCE `S256`). Otherwise the call fails
+  with [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md).
+- Wardby registers itself with the provider (dynamic client registration). If
+  the provider does not offer that, register a client yourself with the redirect
+  URI `https://<your-wardby-host>/oauth/callback` and pass its id as
+  `oauth.clientId`; without it the call fails with
+  [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md).
+- `oauth.scope` asks for specific scopes. Omit it to use what the provider
+  grants by default; pick the narrowest scope that does the job, since the
+  signed-in user's access is what every agent gets.
+- Wardby's requests to the provider send `User-Agent: wardby/<version>`.
+
+### Refresh, reconnect, disconnect
+
+- **Refresh is automatic.** Wardby refreshes the access token 60 seconds before
+  it expires, and once more, with a single retry of the request, when a
+  brokered request to the service gets a 401. Refresh tokens that rotate are
+  stored as they change.
+- **When it cannot refresh.** If the provider refuses the grant or the client
+  (`invalid_grant`, `invalid_client`), or the token is past its expiry with no
+  refresh token (`expired`), the secret becomes `reauth_required` and uses of
+  it fail with [`secret_reauth_required`](../help/errors/secret-reauth-required.md).
+  A provider that is only unreachable or answers badly leaves the secret as it
+  was; see [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)
+  and [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md).
+- **Reconnect** by running the connect steps again under the **same name**. The
+  secret is updated in place, so attachments and MCP servers that use it keep
+  working.
+- **Disconnect** with `delete_secret`. Wardby first revokes the tokens at the
+  provider when it has a revocation endpoint (best effort: a failure does not
+  stop the delete), and the disconnect is audited. A secret still used by an MCP
+  server or host provider is not deleted until you update or delete them.
+- `list_secrets` shows `kind: "oauth"` and an `oauth` object with the
+  `resource`, `status` (`connected` or `reauth_required`), `expiresAt`,
+  `connectedAt` and, when reconnecting is needed, `reauthReason`. It never
+  shows token values.
+
+### Rules
+
+- Token values are never readable: `secrets.get` fails as for any brokered
+  secret, and they are scrubbed from responses and console output.
+- The value and broker of an OAuth secret cannot be set by hand. `set_secret_broker` and
+  similar changes are refused with
+  [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md); connect
+  again instead.
+- A name already used by an ordinary secret is refused with
+  [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md).
+- Everyone an MCP server (or agent) is shared with uses the same service
+  identity, with the owner's credentials: share it as carefully as the access
+  of the signed-in user.
+
+To use an OAuth secret with a remote MCP server, see
+[OAuth-only servers](mcp-servers.md#oauth-only-servers).
+
 ## Placements
 
 Each placement is one example config. Replace the host with your service's.
@@ -280,6 +365,14 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 | [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)           | The value is too short, or is not the JSON a SigV4 secret needs.           |
 | [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                       | A removal link was created before the broker config last changed.          |
 | [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)         | The broker config failed validation.                                       |
+| [`secret_reauth_required`](../help/errors/secret-reauth-required.md)                     | An OAuth secret must be connected again.                                   |
+| [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md)       | The service has no usable OAuth metadata.                                  |
+| [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md)                         | An OAuth secret's value or broker cannot be changed by hand.               |
+| [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md)                   | The name belongs to a secret that is not an OAuth secret.                  |
+| [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md)   | The provider needs a `clientId` you registered.                            |
+| [`secret_oauth_encryption_failed`](../help/errors/secret-oauth-encryption-failed.md)     | The OAuth secret could not be encrypted or decrypted.                      |
+| [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md) | The provider could not be reached to refresh the token.                    |
+| [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md)           | The provider did not refresh the token.                                    |
 | [`secret_in_value`](../help/errors/secret-in-value.md)                                   | A datastore or memory write contains an attached secret's value.           |
 | [`secret_check_unavailable`](../help/errors/secret-in-value.md)                          | The write or posting could not be checked because secrets were unreadable. |
 

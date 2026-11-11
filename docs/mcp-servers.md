@@ -72,6 +72,46 @@ most 64 characters. The description starts with `From MCP server <server name>: 
 Attaching is refused if the name clashes with another tool on the agent
 (attached, another MCP tool, or a built-in name).
 
+## OAuth-only servers
+
+A hosted MCP server that only offers OAuth sign-in, such as BrowserStack's, has
+no token to paste into a header secret. Connect it as an
+[OAuth secret](tool-secrets.md#oauth-secrets) instead: you sign in once as a
+service user, and Wardby keeps the token fresh. The secret is brokered to the
+server's host, so register the server with it like any other.
+
+1. Connect the secret. Use the server's URL as `resource`:
+
+   ```json
+   { "name": "EXAMPLE_MCP", "oauth": { "resource": "https://mcp.example.com/mcp" } }
+   ```
+
+   Open the returned link, sign in, then call `create_secret` again with the
+   same `name` and the `confirmationCode` the page shows. Connecting needs the
+   HTTP transport; the provider returns the browser to
+   `https://wardby.example.com/oauth/callback` (your Wardby host).
+
+2. `register_mcp_server` with the `url` and `secretNames: ["EXAMPLE_MCP"]`.
+3. `attach_mcp_server` to a native or coding agent with the `allowedTools` you
+   want.
+
+For BrowserStack's public endpoint the same steps are:
+
+```json
+{ "name": "BROWSERSTACK", "oauth": { "resource": "https://mcp.browserstack.com/mcp" } }
+```
+
+then `register_mcp_server { name: "browserstack", url: "https://mcp.browserstack.com/mcp", secretNames: ["BROWSERSTACK"] }`
+and `attach_mcp_server` with the coding agent, the server and the tools it
+needs.
+
+The account you sign in with sets what every agent using the server can do, so
+sign in as a dedicated service user with only the access the agents need, and
+allow only the tools they need. When the token cannot be refreshed, calls fail
+with [`mcp_server_auth_failed`](../help/errors/mcp-server-auth-failed.md) or
+[`secret_reauth_required`](../help/errors/secret-reauth-required.md); connect
+the secret again under the same name and the server keeps working.
+
 ## Coding agents
 
 A Claude Code or Codex agent can use attached servers too. Attach them the same way, with
@@ -181,8 +221,8 @@ URL. Secret values are removed from results, errors and logs.
 
 ## Not supported
 
-stdio servers, OAuth to a server (use a header secret), MCP resources,
-prompts and sampling.
+stdio servers, MCP resources, prompts and sampling. A server that only
+offers OAuth sign-in works through an [OAuth secret](#oauth-only-servers).
 
 ## Trust
 

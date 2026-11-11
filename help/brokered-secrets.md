@@ -3,7 +3,7 @@ id: brokered-secrets
 title: Brokered secrets and the secret broker
 summary: Let tools use a secret only by sending it to hosts you choose, without ever reading its value.
 audience: operator
-tags: [secrets, brokered, secret broker, security, tools, fetch, sigv4, set_secret_broker]
+tags: [secrets, brokered, secret broker, set_secret_broker, oauth, browserstack, connect, reauth, create_secret oauth]
 appliesTo: ">=0.6.0"
 ---
 
@@ -65,6 +65,25 @@ Only removal is confirmed: `set_secret_broker { name, broker: null }` returns a
 browser link, and a person confirms by typing the secret's name. The MCP call
 alone never removes it. Every change is audited.
 
+## OAuth secrets
+
+For a service that only offers OAuth sign-in, such as a hosted MCP server, connect it once
+instead of pasting a token:
+
+1. `create_secret { name, oauth: { resource, scope?, clientId? } }` returns a sign-in `url`.
+   Over HTTP only; `resource` must be https.
+2. Open it, sign in as a service user, and copy the confirmation code.
+3. Call `create_secret { name, confirmationCode }` with the same name. The secret is now
+   brokered to the resource's host as `Authorization: Bearer`.
+
+Wardby refreshes the token before it expires and retries once on a 401. Add `clientId` only
+when the provider has no dynamic client registration; register it with the redirect URI
+`https://<your-wardby-host>/oauth/callback`. To reconnect, repeat the steps under the same
+name. `delete_secret` disconnects (and revokes at the provider where supported). `list_secrets`
+shows `status` (`connected` or `reauth_required`), never a token. Everything signed in as
+that user is shared by all agents using the secret. Use it with a server as in
+[Remote MCP servers](mcp-servers.md#oauth-only-servers).
+
 ## Related
 
 - [Host providers](../docs/host-providers.md): a provider's credentials must be brokered
@@ -79,4 +98,12 @@ alone never removes it. Every change is audited.
   [`secret_broker_body_invalid`](errors/secret-broker-body-invalid.md),
   [`secret_broker_value_invalid`](errors/secret-broker-value-invalid.md),
   [`secret_broker_changed`](errors/secret-broker-changed.md),
-  [`secret_broker_config_invalid`](errors/secret-broker-config-invalid.md)
+  [`secret_broker_config_invalid`](errors/secret-broker-config-invalid.md),
+  [`secret_reauth_required`](errors/secret-reauth-required.md),
+  [`secret_oauth_discovery_failed`](errors/secret-oauth-discovery-failed.md),
+  [`secret_oauth_managed`](errors/secret-oauth-managed.md),
+  [`secret_oauth_name_taken`](errors/secret-oauth-name-taken.md),
+  [`secret_oauth_client_id_required`](errors/secret-oauth-client-id-required.md),
+  [`secret_oauth_encryption_failed`](errors/secret-oauth-encryption-failed.md),
+  [`secret_oauth_refresh_unavailable`](errors/secret-oauth-refresh-unavailable.md),
+  [`secret_oauth_refresh_failed`](errors/secret-oauth-refresh-failed.md)

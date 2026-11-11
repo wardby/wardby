@@ -3,7 +3,7 @@ id: mcp-servers
 title: Remote MCP server tools for native and coding agents
 summary: Register a remote MCP server, then attach an allowlist of its tools to a native, Claude Code or Codex agent; credentials stay in brokered secrets.
 audience: operator
-tags: [mcp, mcp server, coding-agent, codex, register_mcp_server, attach_mcp_server, readOnlyHint, WARDBY_MCP_SERVERS]
+tags: [mcp, codex, register_mcp_server, attach_mcp_server, readOnlyHint, oauth, browserstack, create_secret oauth]
 appliesTo: ">=0.8.0"
 ---
 
@@ -22,13 +22,22 @@ A native, Claude Code or Codex agent can call tools from a remote MCP server (St
 
 Each call has `callTimeoutMs` (default `30000`, at most `WARDBY_TOOL_MAX_TIMEOUT_MS`, and never
 past the run's deadline). Results are untrusted input; the allowlist is the control. stdio servers
-and OAuth are not supported.
+are not supported.
 
 `WARDBY_MCP_SERVERS` is `owners` (default), `admins` (registering needs `hosts:admin`) or `off`
 (only `detach_mcp_server` and `delete_mcp_server` still work, for cleanup).
 
 Each call opens a fresh MCP session, so a server that keeps state between calls in one session
 won't see it. Arguments that aren't a JSON object return `invalid_arguments`.
+
+## OAuth-only servers
+
+For a hosted server that only offers OAuth sign-in (BrowserStack's `https://mcp.browserstack.com/mcp`,
+for example), connect the secret instead of pasting a token: `create_secret { name, oauth: { resource } }`,
+open the link, sign in as a service user, then call again with the `confirmationCode`. Register the
+server with that secret in `secretNames` and attach it as usual. The account you sign in with sets
+what agents can do. If calls fail with [`secret_reauth_required`](errors/secret-reauth-required.md),
+connect the secret again under the same name. See [Brokered secrets](brokered-secrets.md#oauth-secrets).
 
 ## Coding agents
 
