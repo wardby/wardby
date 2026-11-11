@@ -90,11 +90,21 @@ export type Poll = {
 export type Resume = {
   runId: string;
   dir: string;
-  phase: "idle" | "running" | "done" | "error";
+  /** missing: no folder at `dir`; `clones` and `cloneUrl` say what the pane can offer instead. */
+  phase: "idle" | "running" | "done" | "error" | "missing" | "cloning";
   /** What the import printed, with the download link cut out. */
   output: string;
   /** The claude command it printed, if any. */
   command: string | null;
+  /** Folders near this one whose git remote is the run's repository (phase missing). */
+  clones?: string[];
+  /** Where the repository can be cloned from, when the run's pull request names its host (phase missing). */
+  cloneUrl?: string | null;
+  /**
+   * What the import said to remove later (its "To remove the import later" line), shown as commands: the
+   * session folder, and the worktree when the import created it (null when it reused one or used the folder).
+   */
+  cleanup?: { session: string; worktree: string | null } | null;
 };
 
 export type Filter = { status: "all" | "active" | "failed" | "done"; text: string };

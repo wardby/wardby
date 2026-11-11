@@ -20,6 +20,24 @@ const MAX_TEXT_PIECES = 64;
 const UNKNOWN_TOOL = /\btool\b[^\n]*\bnot found\b|unknown tool|no such tool/i;
 // The timer ticks this often; each tick refreshes only when one is due.
 const TICK_MS = 5000;
+
+/** The run's repository and pull request, which say where a missing clone can come from. */
+type ResumeRepo = { repository: string | null; pullRequestUrl: string | null } | null;
+
+/**
+ * The https clone URL of the repository a pull request link is in (GitHub, GitHub Enterprise, Bitbucket
+ * Cloud), or null when the link does not say. Names are held to the characters a host allows.
+ */
+function cloneUrlOf(pullRequestUrl: string | null): string | null {
+  if (!pullRequestUrl) return null;
+  const name = "[A-Za-z0-9][A-Za-z0-9._-]*";
+  const host = "[A-Za-z0-9.-]+(?::[0-9]+)?";
+  const pr = new RegExp(`^https://(${host})/(${name})/(${name})/(?:pull|pull-requests)/[0-9]+(?:[/?#].*)?$`);
+  const match = pr.exec(pullRequestUrl);
+  if (!match) return null;
+  const repo = match[3].replace(/\.git$/, "");
+  return `https://${match[1]}/${match[2]}/${repo}.git`;
+}
 // An incremental refresh asks for changes since the last one, less this overlap for clock skew;
 // every FULL_EVERY refreshes asks for the whole day again to correct any drift.
 const OVERLAP_MS = 30_000;
@@ -67,7 +85,7 @@ const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { 
 const openStep = atom({ plugin: "wardby-runs", key: "openStep" } as const, null, { shape: "open-step-1" });
 const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-2" });
 // Continue locally: the folder to import into, and how the last import went. Never the download link.
-const resume = atom({ plugin: "wardby-runs", key: "resume" } as const, null, { shape: "resume-1" });
+const resume = atom({ plugin: "wardby-runs", key: "resume" } as const, null, { shape: "resume-2" });
 // The run whose long fields (request, task, final text) are shown in full, not cut to a line.
 const expanded = atom({ plugin: "wardby-runs", key: "expanded" } as const, null);
 // The ledger's groups the person opened or folded, by group key (a pull request, or "other").
@@ -1254,10 +1272,112 @@ export const register: Register = (on, options) => {
       return shellNpxFound;
     }
 
-    async function continueLocally(runId: string, dir: string): Promise<void> {
+    /**
+     * Folders beside `dir` and beside this session's folder, and one level inside those, whose git remote is
+     * `repository` (owner/name): a clone the person already has, under another name or in a subfolder. A
+     * git repository is not searched inside, nor are hidden folders and node_modules; the search stops
+     * after 1,000 folders and 5 matches.
+     */
+    async function findClones(repository: string, dir: string): Promise<string[]> {
+      const want = repository.toLowerCase().replace(/\.git$/, "");
+      const roots = [...new Set([parentOf(dir), parentOf(pane.cwd)].filter((root) => root !== ""))];
+      const found: string[] = [];
+      let budget = 1000;
+      const remoteIsWanted = (config: string) =>
+        [...config.matchAll(/^\s*url\s*=\s*(\S+)\s*$/gm)]
+          .map((m) =>
+            m[1]
+              .toLowerCase()
+              .replace(/\.git$/, "")
+              .replace(/\/$/, ""),
+          )
+          .some((url) => url.endsWith(`/${want}`) || url.endsWith(`:${want}`));
+      const search = async (folder: string, depth: number): Promise<void> => {
+        const entries = await $.fs.list(folder).catch(() => []);
+        for (const entry of entries) {
+          if (found.length >= 5 || budget <= 0) return;
+          if (entry.kind !== "dir" || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+          budget -= 1;
+          const path = `${folder}/${entry.name}`;
+          const config = await $.fs.read(`${path}/.git/config`).catch(() => null);
+          if (typeof config === "string") {
+            if (remoteIsWanted(config) && !found.includes(path)) found.push(path);
+          } else if (depth > 0) {
+            await search(path, depth - 1);
+          }
+        }
+      };
+      for (const root of roots) await search(root, 1);
+      return found;
+    }
+
+    /** Clones the repository into `dir` with the person's own git and credentials, then continues there. */
+    async function cloneAndContinue(runId: string, dir: string, repo: ResumeRepo): Promise<void> {
+      const cloneUrl = cloneUrlOf(repo?.pullRequestUrl ?? null);
+      if (!cloneUrl) return;
+      await update($, resume, (old): Resume => ({
+        runId,
+        dir,
+        phase: "cloning",
+        output: "",
+        command: null,
+        clones: old?.runId === runId ? old.clones : [],
+        cloneUrl,
+      }));
+      let result: Awaited<ReturnType<typeof $.process.run>> | null = null;
+      let failure: string | null = null;
+      try {
+        // No terminal answers a password prompt here: one that needs a login fails at once instead of waiting.
+        result = await $.process.run(["git", "clone", "--", cloneUrl, dir], {
+          env: { GIT_TERMINAL_PROMPT: "0" },
+          timeoutMs: 10 * 60 * 1000,
+        });
+      } catch (err) {
+        failure = err instanceof Error ? err.message : "git clone could not start";
+      }
+      if (failure !== null || result?.exitCode !== 0) {
+        const why = failure ?? (result?.stderr.trim().slice(-600) || `git clone exited ${result?.exitCode}`);
+        await update($, resume, (): Resume => ({
+          runId,
+          dir,
+          phase: "error",
+          output: `could not clone ${cloneUrl}: ${why}`.slice(0, 800),
+          command: null,
+        }));
+        return;
+      }
+      await continueLocally(runId, dir, repo);
+    }
+
+    async function continueLocally(runId: string, dir: string, repo: ResumeRepo): Promise<void> {
       await update($, resume, (): Resume => ({ runId, dir, phase: "running", output: "", command: null }));
       let url: string | null = null;
       try {
+        // A missing working folder fails to start the command with the same ENOENT as a missing npx,
+        // so check it first and say which it is.
+        const kind = await $.fs.stat(dir).then(
+          (s) => s.kind,
+          () => null,
+        );
+        if (kind === "other" || kind === "file") {
+          throw new Error(`${dir} is not a folder: enter the path of your clone of the repository`);
+        }
+        if (kind === null) {
+          const clones = repo?.repository ? await findClones(repo.repository, dir) : [];
+          const cloneUrl = cloneUrlOf(repo?.pullRequestUrl ?? null);
+          await update($, resume, (): Resume => ({
+            runId,
+            dir,
+            phase: "missing",
+            output: `no folder at ${dir}: ${
+              clones.length > 0 ? "use a clone found nearby, " : ""
+            }${cloneUrl ? "clone the repository there, " : "clone the repository there yourself, "}or enter the path of your clone`,
+            command: null,
+            clones,
+            cloneUrl,
+          }));
+          return;
+        }
         const info = (await call("get_run_transcript", { runId })) as Record<string, unknown>;
         const download = info.download as { url?: unknown } | undefined;
         if (info.status !== "stored" || typeof download?.url !== "string") {
@@ -1294,6 +1414,7 @@ export const register: Register = (on, options) => {
           phase: result.exitCode === 0 ? "done" : "error",
           output,
           command,
+          cleanup: result.exitCode === 0 ? cleanupOf(scrub(result.stderr)) : null,
         }));
       } catch (err) {
         const raw = err instanceof Error ? err.message : "could not continue the run";
@@ -1379,6 +1500,7 @@ export const register: Register = (on, options) => {
     // Called without await from the pane's handlers: a pane closed or reloaded mid-search drops it quietly.
     pane.searchOlder = (text, more) => searchOlder(text, more).catch(() => {});
     pane.continueLocally = continueLocally;
+    pane.cloneAndContinue = cloneAndContinue;
     // Only for suggesting where to import; the pane works without it.
     pane.cwd = await $.session.cwd().catch(() => "");
     pane.loadDetail = loadDetail;
@@ -1409,7 +1531,8 @@ export const register: Register = (on, options) => {
     refresh: () => Promise<void>;
     searchOlder: (text: string, more: boolean) => Promise<void>;
     start: () => void;
-    continueLocally: (runId: string, dir: string) => Promise<void>;
+    continueLocally: (runId: string, dir: string, repo: ResumeRepo) => Promise<void>;
+    cloneAndContinue: (runId: string, dir: string, repo: ResumeRepo) => Promise<void>;
     cwd: string;
   } = {
     loadDetail: async () => {},
@@ -1419,8 +1542,40 @@ export const register: Register = (on, options) => {
     searchOlder: async () => {},
     start: () => {},
     continueLocally: async () => {},
+    cloneAndContinue: async () => {},
     cwd: "",
   };
+
+  /**
+   * What `wardby resume` said to remove later ("To remove the import later: delete <session> and run git
+   * worktree remove <worktree>."), or null when it printed no such line.
+   */
+  function cleanupOf(stderr: string): { session: string; worktree: string | null } | null {
+    const match = /^To remove the import later: delete (.+?)(?: and run git worktree remove (.+))?\.$/m.exec(stderr);
+    if (!match || !match[1].startsWith("/") || (match[2] !== undefined && !match[2].startsWith("/"))) return null;
+    return { session: match[1], worktree: match[2] ?? null };
+  }
+
+  /** POSIX shell quoting, as `wardby resume` prints its command, so a pasted line names the same path. */
+  function shellQuote(arg: string): string {
+    return /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+  }
+
+  /**
+   * The commands that remove an import once the person is done with it: the worktree, then the session.
+   * `git -C <clone>`, as git finds the worktree only from inside its repository, and a terminal may be anywhere.
+   */
+  function cleanupCommands(clone: string, cleanup: { session: string; worktree: string | null }): string {
+    return [
+      ...(cleanup.worktree ? [`git -C ${shellQuote(clone)} worktree remove ${shellQuote(cleanup.worktree)}`] : []),
+      `rm -r ${shellQuote(cleanup.session)}`,
+    ].join("\n");
+  }
+
+  /** The folder that holds `path`, or "" at the top. */
+  function parentOf(path: string): string {
+    return path.replace(/\/+$/, "").replace(/\/[^/]*$/, "");
+  }
 
   /** Where the pane suggests importing: a local: repository's own path, else a sibling of this session's folder. */
   function suggestedDir(repository: string | null): string {
@@ -2191,6 +2346,8 @@ export const register: Register = (on, options) => {
                 {(() => {
                   const state = resumeState?.runId === open.id ? resumeState : null;
                   const dir = state?.dir ?? suggestedDir(shown.repository);
+                  const repo: ResumeRepo = { repository: shown.repository, pullRequestUrl: shown.pullRequestUrl };
+                  const busy = state?.phase === "running" || state?.phase === "cloning";
                   return (
                     <Box flexDirection="column">
                       <Input
@@ -2201,20 +2358,28 @@ export const register: Register = (on, options) => {
                           void update($, resume, (old): Resume => ({
                             runId: open.id,
                             dir: value,
-                            phase: old?.runId === open.id ? old.phase : "idle",
+                            phase: old?.runId === open.id && old.phase !== "missing" ? old.phase : "idle",
                             output: old?.runId === open.id ? old.output : "",
                             command: old?.runId === open.id ? old.command : null,
                           }))
                         }
-                        onSubmit={(value: string) => void pane.continueLocally(open.id, value)}
+                        onSubmit={(value: string) => {
+                          if (!busy) void pane.continueLocally(open.id, value, repo);
+                        }}
                       />
                       <Box gap={1}>
                         <Button
                           key="continue-locally"
-                          label={state?.phase === "running" ? "Importing…" : "Continue locally"}
+                          label={
+                            state?.phase === "running"
+                              ? "Importing…"
+                              : state?.phase === "cloning"
+                                ? "Cloning…"
+                                : "Continue locally"
+                          }
                           {...hk("c")}
                           onPress={() => {
-                            if (state?.phase !== "running") void pane.continueLocally(open.id, dir);
+                            if (!busy) void pane.continueLocally(open.id, dir, repo);
                           }}
                         />
                         {state?.command && (
@@ -2234,6 +2399,43 @@ export const register: Register = (on, options) => {
                         <Text mono wrap="truncate-end">
                           {state.command.length > 160 ? `${state.command.slice(0, 160)}…` : state.command}
                         </Text>
+                      )}
+                      {state?.phase === "missing" && (
+                        <Box flexDirection="column">
+                          <Text>{`No folder at ${state.dir}.`}</Text>
+                          {(state.clones ?? []).length > 0 && <Text>Found your clone nearby:</Text>}
+                          {(state.clones ?? []).map((path, i) => (
+                            <Button
+                              key={`use-clone-${i}`}
+                              label={`Use ${path}`}
+                              onPress={() => void pane.continueLocally(open.id, path, repo)}
+                            />
+                          ))}
+                          {state.cloneUrl && (
+                            <Button
+                              key="clone-repo"
+                              label={`Clone ${shown.repository ?? "the repository"} into ${state.dir}`}
+                              onPress={() => void pane.cloneAndContinue(open.id, state.dir, repo)}
+                            />
+                          )}
+                          {state.cloneUrl && <Text dimColor>{`from ${state.cloneUrl}`}</Text>}
+                          <Text dimColor>
+                            {state.cloneUrl || (state.clones ?? []).length > 0
+                              ? "Or edit the path above and press Continue locally."
+                              : "Clone the repository there, or edit the path above and press Continue locally."}
+                          </Text>
+                        </Box>
+                      )}
+                      {state?.phase === "done" && state.cleanup && (
+                        <Box flexDirection="column">
+                          <Text>When you are done with it, remove the import:</Text>
+                          <Text mono>{cleanupCommands(state.dir, state.cleanup)}</Text>
+                          <Button
+                            key="copy-cleanup"
+                            label="Copy cleanup"
+                            onPress={copyText(cleanupCommands(state.dir, state.cleanup))}
+                          />
+                        </Box>
                       )}
                       {state?.phase === "error" && <Text color={FAILED_COLOR}>{state.output.slice(-600)}</Text>}
                       {state?.phase === "done" && !state.command && <Text dimColor>{state.output.slice(-600)}</Text>}

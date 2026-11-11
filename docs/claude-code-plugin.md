@@ -118,6 +118,16 @@ Plugins are not sandboxed: they run as you. **Continue locally** runs
 `npx @wardby/cli@latest resume - --print` in the folder you give it, passing the
 transcript's download link on standard input; the link is never drawn, stored
 or logged. The import writes only under `~/.wardby/` and the new worktree.
+When that folder does not exist, the pane checks the folders beside it and
+beside the session's folder for a clone of the repository (by its git remote)
+and offers each as **Use**. When the run's pull request link names the host
+(GitHub, GitHub Enterprise, Bitbucket Cloud), it also offers **Clone**, which runs
+`git clone -- https://<host>/<owner>/<repo>.git <folder>` with your own git
+credentials (no password prompt; a clone that needs one fails with git's
+error), then continues there. After an import, the pane shows the commands the import
+printed for removing it later (**Copy cleanup**): `git -C <clone> worktree remove` for the
+worktree it created and `rm -r` for its folder under `~/.wardby/sessions/`. The
+pane runs neither.
 
 ## Using the pane
 
