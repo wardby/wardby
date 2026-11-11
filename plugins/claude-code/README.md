@@ -28,6 +28,9 @@ top of the list.
 
 ## Install
 
+The pane needs Claude Code 2.1.299 or later; on an older release
+`/wardby-runs` says which version to update to.
+
 The quickest way is the wardby CLI, which also offers the permission rules the
 pane needs:
 

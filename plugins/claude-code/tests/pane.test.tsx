@@ -68,7 +68,12 @@ function fakeServer(on: Parameters<Parameters<typeof test>[1]>[1], state: { stat
   return calls;
 }
 
-function engine(on: Parameters<Parameters<typeof test>[1]>[1], toasts: string[]) {
+/** The engine calls the pane makes; `version` is what session.version() answers (null: an engine without it). */
+function engine(
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  toasts: string[],
+  version: { version: string; base?: string } | null = { version: "2.1.322", base: "2.1.322" },
+) {
   on("command.register", () => ({ value: { command: "wardby-runs" } }));
   on("ui.open", () => ({ value: { isPlaced: true } }));
   on("ui.toast", (_, e) => {
@@ -77,6 +82,7 @@ function engine(on: Parameters<Parameters<typeof test>[1]>[1], toasts: string[])
   });
   on("ui.status", () => ({ value: {} }));
   on("session.start", (_, e) => ({ cwd: e.cwd }));
+  if (version) on("session.version", () => ({ value: version }));
 }
 
 test("lists a running run and opens its detail, on every surface", async ($, on) => {
@@ -2882,3 +2888,45 @@ test("a failed clone shows git's error", async ($, on) => {
   expect(await ui.find({ type: "Text", text: /could not clone .*fatal: repository not found/ })).toBeDefined();
   await ui.unmount();
 });
+
+/** Runs /wardby-runs on an engine that answers session.version() with `version`; resolves its text and whether the pane opened and polled. */
+async function openOn(
+  $: Parameters<Parameters<typeof test>[1]>[0],
+  on: Parameters<Parameters<typeof test>[1]>[1],
+  version: { version: string; base?: string } | null,
+) {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, [], version);
+  const calls = fakeServer(on, { status: "running" });
+  await $.session.start({ cwd: "/", surface: "terminal", isInteractive: true });
+  const result = await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  // An opened pane starts polling, so the server sees list_runs.
+  return { text: result.text, polled: calls.length > 0 };
+}
+
+test("an older Claude Code: /wardby-runs says which version the pane needs and opens nothing", async ($, on) => {
+  const { text, polled } = await openOn($, on, { version: "2.1.295", base: "2.1.295" });
+  expect(text).toBe(
+    "The wardby runs pane needs Claude Code 2.1.299 or later; this is 2.1.295. Run `claude update`, restart Claude Code, then run /wardby-runs again.",
+  );
+  expect(polled).toBe(false);
+});
+
+test("an engine without session.version reads as older than the pane needs", async ($, on) => {
+  const { text, polled } = await openOn($, on, null);
+  expect(text).toContain("needs Claude Code 2.1.299 or later; this is an older release.");
+  expect(polled).toBe(false);
+});
+
+for (const [version, base] of [
+  ["2.1.299", "2.1.299"],
+  ["2.2.0", "2.2.0"],
+  ["2.1.330-dev.20261201.t101500.sha1a2b3c4", "2.1.330-dev"],
+] as const) {
+  test(`Claude Code ${base} opens the pane`, async ($, on) => {
+    const { text, polled } = await openOn($, on, { version, base });
+    expect(text).toContain("pane opened");
+    expect(polled).toBe(true);
+  });
+}

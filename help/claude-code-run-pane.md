@@ -3,7 +3,7 @@ id: claude-code-run-pane
 title: See your runs in Claude Code (the wardby-runs plugin)
 summary: Install the wardby-runs Claude Code plugin to see your runs beside the chat, grouped by pull request, with run details and Continue locally.
 audience: operator
-tags: [run steps, search, filter, query, get_run_steps, get_run_text, claude code, plugin, wardby-runs, pane, auto mode]
+tags: [claude code version, claude update, pane opens nothing, run steps, search, filter, query, get_run_steps, get_run_text, claude code, plugin, wardby-runs, pane, auto mode]
 appliesTo: >=0.8.0
 ---
 
@@ -12,6 +12,12 @@ appliesTo: >=0.8.0
 The `wardby-runs` plugin opens a pane in Claude Code that lists your wardby
 runs, grouped by pull request, and shows each run's details. It uses the
 `wardby` MCP server your session already has and only reads.
+
+The pane needs Claude Code 2.1.299 or later. On an older release
+`/wardby-runs` opens nothing and says "The wardby runs pane needs Claude Code
+2.1.299 or later; this is <version>", and `wardby claude-plugin install` and
+`wardby doctor` warn the same way. Run `claude update`, restart Claude Code,
+and run `/wardby-runs` again.
 
 Install it, allow its read-only tools for auto mode, and switch the terminal
 to the fullscreen view the side pane needs, with:
