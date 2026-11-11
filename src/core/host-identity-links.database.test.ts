@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import type { HostUserAuthorizer } from "../providers/review-host/types.js";
+import { ReviewHostError, type HostUserAuthorizer } from "../providers/review-host/types.js";
 import { createPrismaClient } from "./db.js";
 import {
   completeHostIdentityCallback,
   confirmHostIdentityLink,
   HostLinkError,
+  hostIdentityAdapter,
+  hostIdentityPurpose,
+  oauthRedirectUri,
   startHostIdentityLink,
 } from "./host-identity-links.js";
+import { completeOAuthCallback } from "./oauth-link.js";
 
 const db = createPrismaClient();
 const principalIds: string[] = [];
@@ -265,5 +269,43 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
     await expect(
       startHostIdentityLink({ db, authorizer, principalId: q.id, redirectUri: REDIRECT }),
     ).rejects.toMatchObject({ status: 429 });
+  });
+  it("the callback exchanges with the same redirect_uri the authorize URL carried", async () => {
+    const p = await principal();
+    const origin = "https://wardby.example";
+    const { authorizer, complete } = fakeAuthorizer({ hostUserId: uniqueUserId(), login: "octo" });
+    const purpose = hostIdentityPurpose("github");
+    const started = await startHostIdentityLink({
+      db,
+      authorizer,
+      principalId: p.id,
+      redirectUri: oauthRedirectUri(origin, purpose),
+    });
+    const params = new URL(started.authorizeUrl).searchParams;
+    expect(params.get("redirect_uri")).toBe(`${origin}/hosts/github/user-callback`);
+    const adapter = hostIdentityAdapter(authorizer);
+    const outcome = await completeOAuthCallback({
+      db,
+      adapters: new Map([[purpose, adapter]]),
+      cipher: { encrypt: () => Promise.reject(new Error("no payload")) },
+      state: params.get("state"),
+      code: "gh-code",
+      // The same composition src/mcp/index.ts hands the callback handler.
+      redirectUri: (p2: string) => oauthRedirectUri(origin, p2),
+    });
+    expect(outcome.kind).toBe("confirm");
+    expect(complete.mock.calls[0][0].redirectUri).toBe(params.get("redirect_uri"));
+  });
+
+  it("the host adapter's safeReason keeps only a ReviewHostError's code:subcode", () => {
+    const { authorizer } = fakeAuthorizer({ hostUserId: "1", login: "x" });
+    const { safeReason } = hostIdentityAdapter(authorizer);
+    expect(
+      safeReason(
+        new ReviewHostError("host_api_error", "github_oauth_exchange_failed:redirect_uri_mismatch: fake-access-AAAA"),
+      ),
+    ).toBe("github_oauth_exchange_failed:redirect_uri_mismatch");
+    expect(safeReason(new Error("boom fake-access-AAAA"))).toBe("unknown");
+    expect(safeReason("fake-access-AAAA")).toBe("unknown");
   });
 });

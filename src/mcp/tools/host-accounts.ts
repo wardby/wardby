@@ -11,8 +11,8 @@ import {
   confirmHostIdentityLink,
   HostLinkError,
   hostIdentityPurpose,
+  oauthRedirectUri,
   startHostIdentityLink,
-  userCallbackPath,
 } from "../../core/host-identity-links.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -82,7 +82,7 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
           db: ctx.db,
           authorizer,
           principalId: ctx.principal.id,
-          redirectUri: `${origin}${userCallbackPath(provider)}`,
+          redirectUri: oauthRedirectUri(origin, hostIdentityPurpose(provider)),
         });
         return textResult({
           authorizeUrl: started.authorizeUrl,

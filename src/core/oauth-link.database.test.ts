@@ -372,4 +372,37 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     expect(text).not.toContain("fake-access-AAAA");
     expect(text).not.toContain("kms down");
   });
+  it("logs only the adapter's fixed safeReason when the exchange fails, never the error text", async () => {
+    const p = await principal();
+    const withReason: OAuthLinkAdapter<{ label: string }, { login: string }> = {
+      ...testAdapter,
+      complete: async () => {
+        throw new Error("github_oauth_exchange_failed:redirect_uri_mismatch: fake-access-AAAA leaked");
+      },
+      safeReason: (err) => (err instanceof Error ? err.message.split(":").slice(0, 2).join(":") : "unknown"),
+    };
+    const started = await startOAuthLink({
+      db,
+      adapter: withReason,
+      principalId: p.id,
+      context: { label: "one" },
+      redirectUri: REDIRECT,
+    });
+    logged.mockClear();
+    const outcome = await completeOAuthCallback({
+      db,
+      adapters: new Map([["test", withReason]]),
+      cipher,
+      state: new URL(started.authorizeUrl).searchParams.get("state"),
+      code: "idp-code",
+      redirectUri: REDIRECT,
+    });
+    expect(outcome).toEqual({ kind: "failed" });
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged.mock.calls[0][0]).toEqual({
+      purpose: "test",
+      reason: "github_oauth_exchange_failed:redirect_uri_mismatch",
+    });
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("fake-access-AAAA");
+  });
 });

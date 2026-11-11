@@ -43,7 +43,7 @@ import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
 import { buildChatProviders } from "../providers/chat/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
-import { hostIdentityAdapter, oauthRedirectPath } from "../core/host-identity-links.js";
+import { hostIdentityAdapter, oauthRedirectUri } from "../core/host-identity-links.js";
 import type { OAuthLinkAdapter } from "../core/oauth-link.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
@@ -523,7 +523,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           db: prisma,
           cipher: providers.secrets,
           adapters: oauthAdapters,
-          redirectUri: (purpose: string) => `${httpOrigin}${oauthRedirectPath(purpose)}`,
+          redirectUri: (purpose: string) => oauthRedirectUri(httpOrigin, purpose),
         }
       : undefined;
   mcpLog.info({ enabled: Boolean(githubAuthorizer) }, "GitHub account linking");

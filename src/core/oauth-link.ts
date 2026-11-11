@@ -54,6 +54,8 @@ export interface OAuthLinkAdapter<Ctx, Result> {
     result: Result;
     payload?: string;
   }>;
+  /** A fixed code for why `complete` failed, safe to log (never the error's own text). Omit to log none. */
+  safeReason?(err: unknown): string;
   /** Shown on the callback page: what was signed in to, never a token. */
   describe(result: Result): { signedInAs: string; target: string; tool: string };
 }
@@ -171,9 +173,18 @@ export async function completeOAuthCallback(input: {
       ...described,
       subject: request.principal.subject,
     };
-  } catch {
-    // Never log the error: an adapter's or a KMS message may echo a token.
-    log.warn({ purpose: request.purpose }, "oauth link: the callback failed; the request is spent");
+  } catch (err) {
+    // Never log the error: an adapter's or a KMS message may echo a token. Only the adapter's fixed code goes out.
+    let reason: string | undefined;
+    try {
+      reason = adapter.safeReason?.(err);
+    } catch {
+      reason = undefined;
+    }
+    log.warn(
+      reason === undefined ? { purpose: request.purpose } : { purpose: request.purpose, reason },
+      "oauth link: the callback failed; the request is spent",
+    );
     await input.db.oAuthLinkRequest.delete({ where: { id: request.id } }).catch(() => undefined);
     return { kind: "failed" };
   }

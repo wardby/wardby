@@ -20,6 +20,7 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import {
   HOST_ACCOUNT_PROVIDERS,
+  ReviewHostError,
   type HostUserAuthorizer,
   type ReviewHostProvider,
 } from "../providers/review-host/types.js";
@@ -66,6 +67,11 @@ export function oauthRedirectPath(purpose: string): string {
   return provider ? userCallbackPath(provider) : OAUTH_CALLBACK_PATH;
 }
 
+/** The full redirect URI for a purpose: used by the authorize URL and by the callback's code exchange, which must match. */
+export function oauthRedirectUri(origin: string, purpose: string): string {
+  return `${origin}${oauthRedirectPath(purpose)}`;
+}
+
 const PROVIDER_NAMES: Partial<Record<string, string>> = { github: "GitHub" };
 
 export function hostIdentityAdapter(authorizer: HostUserAuthorizer) {
@@ -76,6 +82,9 @@ export function hostIdentityAdapter(authorizer: HostUserAuthorizer) {
     complete: async ({ code, codeVerifier, redirectUri }) => ({
       result: await authorizer.complete({ code, codeVerifier, redirectUri }),
     }),
+    // Only a ReviewHostError's leading code:subcode (e.g. github_oauth_exchange_failed:redirect_uri_mismatch).
+    safeReason: (err) =>
+      err instanceof ReviewHostError ? err.message.split(":").slice(0, 2).join(":") || "unknown" : "unknown",
     describe: (r) => ({
       signedInAs: `@${r.login}`,
       target: PROVIDER_NAMES[authorizer.provider] ?? authorizer.provider,
