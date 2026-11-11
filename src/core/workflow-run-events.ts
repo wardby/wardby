@@ -11,7 +11,7 @@ import { pullRequestWebUrl } from "../coding/code-host.js";
 import { packageAuditDigest } from "../coding/registry/audit-mode.js";
 import { blockingRefusals, collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
-import { dedupeKeys, emitWorkflowEvent, shortReason } from "./workflow-events.js";
+import { dedupeKeys, emitWorkflowEvent, RUN_END_STATUSES, shortReason, type RunEndStatus } from "./workflow-events.js";
 
 const log = logger.child({ module: "workflow-run-events" });
 const FAILED = new Set(["failed", "budget_exhausted", "cancelled", "lost", "refused"]);
@@ -19,8 +19,84 @@ const VERDICTS = new Set(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]);
 
 export type RunEventsDb = Pick<
   PrismaClient,
-  "agent" | "runHostCheck" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
+  "agent" | "runHostCheck" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord" | "runHook"
 >;
+
+export type RunCompletedDb = Pick<
+  PrismaClient,
+  "run" | "runHook" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
+>;
+
+const RUN_ENDS = new Set<string>(RUN_END_STATUSES);
+
+/**
+ * run_completed for a finished run, for run hooks only (Slack links never
+ * match it). Every terminal status of a top-level run; a child run only when
+ * a hook on its agent asks for child runs. The payload is metadata: the final
+ * text is read at delivery time, never stored on the event. Never throws.
+ */
+export async function emitRunCompletedEvent(db: RunCompletedDb, runId: string): Promise<void> {
+  try {
+    const run = await db.run.findUnique({
+      where: { id: runId },
+      select: {
+        id: true,
+        agentId: true,
+        status: true,
+        trigger: true,
+        startedAt: true,
+        finishedAt: true,
+        costUsd: true,
+        error: true,
+        parentRunId: true,
+        agent: { select: { name: true } },
+      },
+    });
+    if (!run || !RUN_ENDS.has(run.status)) return;
+    if (run.parentRunId) {
+      const wanting = await db.runHook.count({
+        where: {
+          agentId: run.agentId,
+          enabled: true,
+          runs: "all",
+          OR: [{ events: { isEmpty: true } }, { events: { has: "run_completed" } }],
+        },
+      });
+      if (wanting === 0) return;
+    }
+    let pullRequests: { repository: string; number: number; url: string | null; outcome: string }[] = [];
+    try {
+      const outcome = await collectRunOutcome(db, { id: run.id, status: run.status, finalText: null });
+      pullRequests = outcome.pullRequests.map((pr) => ({
+        repository: pr.repository,
+        number: pr.pullRequestNumber,
+        url: pr.pullRequestUrl ?? pullRequestWebUrl(pr.codeProvider, pr.repository, pr.pullRequestNumber),
+        outcome: pr.outcome,
+      }));
+    } catch {
+      // The outcome read is best effort: the event still says how the run ended.
+    }
+    await emitWorkflowEvent({
+      dedupeKey: dedupeKeys.runCompleted(run.id),
+      runId: run.id,
+      agentId: run.agentId,
+      payload: {
+        kind: "run_completed",
+        agentName: run.agent?.name ?? run.agentId,
+        status: run.status as RunEndStatus,
+        trigger: String(run.trigger),
+        parentRunId: run.parentRunId,
+        startedAt: run.startedAt.toISOString(),
+        finishedAt: run.finishedAt ? run.finishedAt.toISOString() : null,
+        costUsd: run.costUsd.toString(),
+        reason: shortReason(run.error),
+        pullRequests,
+      },
+    });
+  } catch (err) {
+    log.warn({ err, runId }, "could not emit run_completed");
+  }
+}
 
 /** Emits top-level run outcomes and published review verdicts. Never throws. */
 export async function emitRunFinishedEvents(
@@ -91,4 +167,5 @@ export async function emitRunFinishedEvents(
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not emit run workflow events");
   }
+  await emitRunCompletedEvent(db, run.id);
 }
