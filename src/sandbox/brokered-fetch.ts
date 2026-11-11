@@ -42,6 +42,9 @@ export async function brokeredFetch(input: BrokeredFetchInput): Promise<unknown>
   }
   boundedString(url, BRIDGE_INPUT_BYTES);
   const brokered: BrokeredSecret[] = [];
+  const oauthNames = new Set<string>();
+  // Every value an OAuth secret lists (refresh token, client secret too) is scrubbed from responses.
+  const extraScrub: string[] = [];
   for (const name of secretNames) {
     boundedString(name, 1024);
     const entry = secrets?.resolve ? await secrets.resolve(name) : undefined;
@@ -50,22 +53,57 @@ export async function brokeredFetch(input: BrokeredFetchInput): Promise<unknown>
     assertBrokerableValue(entry.broker, entry.value);
     const secret: BrokeredSecret = { name, value: entry.value, broker: entry.broker };
     for (const value of consoleRedactionValues(entry)) redactFromConsole(value);
+    if (entry.oauth) {
+      oauthNames.add(name);
+      extraScrub.push(...entry.oauth.redact);
+    }
     brokered.push(secret);
   }
   const sigv4 = brokered.filter((s) => s.broker.placement.kind === "aws-sigv4");
   if (sigv4.length > 1) throw new Error("secret_broker_conflict: at most one AWS SigV4 secret per request");
   checkBrokerDestination(url, brokered);
-  let request = applyBrokerPlacements(
-    { url, method: init.method ?? "GET", headers: init.headers ?? {}, body: init.body },
-    brokered,
-  );
-  if (sigv4.length) request = await signSigV4(request, sigv4[0]);
-  // safeFetch errors are fixed fetch_* codes that never echo the (possibly secret-bearing) URL.
-  // Redirects come back unfollowed: a placed credential must never ride a redirect to another host.
-  const response = await fetchImpl(
-    request.url,
-    { method: request.method, headers: request.headers, body: request.body },
-    { ...policy, followRedirects: false },
-  );
-  return scrubBrokeredResponse(response, brokerScrubValues(brokered));
+  const send = async (list: readonly BrokeredSecret[]) => {
+    let request = applyBrokerPlacements(
+      { url, method: init.method ?? "GET", headers: init.headers ?? {}, body: init.body },
+      list,
+    );
+    const signers = list.filter((s) => s.broker.placement.kind === "aws-sigv4");
+    if (signers.length) request = await signSigV4(request, signers[0]);
+    // safeFetch errors are fixed fetch_* codes that never echo the (possibly secret-bearing) URL.
+    // Redirects come back unfollowed: a placed credential must never ride a redirect to another host.
+    return fetchImpl(
+      request.url,
+      { method: request.method, headers: request.headers, body: request.body },
+      { ...policy, followRedirects: false },
+    );
+  };
+  const response = await send(brokered);
+  if ((response as { status?: unknown }).status !== 401 || oauthNames.size === 0 || !secrets?.refresh) {
+    return scrubBrokeredResponse(response, [...brokerScrubValues(brokered), ...extraScrub]);
+  }
+  // One forced refresh and one retry. A refresh failure surfaces its fixed error, never the 401.
+  const refreshed: BrokeredSecret[] = [];
+  for (const secret of brokered) {
+    if (!oauthNames.has(secret.name)) {
+      refreshed.push(secret);
+      continue;
+    }
+    const entry = await secrets.refresh(secret.name, secret.value);
+    if (!entry?.broker) {
+      refreshed.push(secret);
+      continue;
+    }
+    assertBrokerableValue(entry.broker, entry.value);
+    // New token values join redaction before the retry is sent.
+    for (const value of consoleRedactionValues(entry)) redactFromConsole(value);
+    extraScrub.push(...(entry.oauth?.redact ?? []));
+    refreshed.push({ name: secret.name, value: entry.value, broker: entry.broker });
+  }
+  checkBrokerDestination(url, refreshed);
+  const retried = await send(refreshed);
+  return scrubBrokeredResponse(retried, [
+    ...brokerScrubValues(brokered),
+    ...brokerScrubValues(refreshed),
+    ...extraScrub,
+  ]);
 }
