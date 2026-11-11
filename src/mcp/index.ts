@@ -43,7 +43,8 @@ import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
 import { buildChatProviders } from "../providers/chat/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
-import { userCallbackPath } from "../core/host-identity-links.js";
+import { hostIdentityAdapter, oauthRedirectUri } from "../core/host-identity-links.js";
+import type { OAuthLinkAdapter } from "../core/oauth-link.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
@@ -511,16 +512,21 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       ? { ...(githubEvents ? githubEvents : {}), ...(jiraEvents ? { jira: jiraEvents } : {}) }
       : undefined;
   const githubAuthorizer = providers.hostUserAuthorizers?.github;
-  const hostUserAuth = githubAuthorizer
-    ? {
-        github: {
+  const oauthAdapters = new Map<string, OAuthLinkAdapter<unknown, unknown>>();
+  if (githubAuthorizer) {
+    const adapter = hostIdentityAdapter(githubAuthorizer);
+    oauthAdapters.set(adapter.purpose, adapter);
+  }
+  const oauthCallback =
+    oauthAdapters.size > 0
+      ? {
           db: prisma,
-          authorizer: githubAuthorizer,
-          redirectUri: `${httpOrigin}${userCallbackPath("github")}`,
-        },
-      }
-    : undefined;
-  mcpLog.info({ enabled: Boolean(hostUserAuth) }, "GitHub account linking");
+          cipher: providers.secrets,
+          adapters: oauthAdapters,
+          redirectUri: (purpose: string) => oauthRedirectUri(httpOrigin, purpose),
+        }
+      : undefined;
+  mcpLog.info({ enabled: Boolean(githubAuthorizer) }, "GitHub account linking");
 
   const canonicalHref = canonicalUrl(mcpConfig.canonicalUri).href;
   const viewerBus = process.env.DATABASE_URL
@@ -549,7 +555,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     auth: { authProvider, db: prisma, providers },
     selfHosted,
     hostEvents,
-    hostUserAuth,
+    oauthCallback,
     viewer,
     blobs,
   });

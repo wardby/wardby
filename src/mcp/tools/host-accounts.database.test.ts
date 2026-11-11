@@ -9,7 +9,8 @@ import { GitHubUserAuthorizer } from "../../providers/review-host/github-user-au
 import { fakeGitHub, json } from "../../providers/review-host/github.test-support.js";
 import type { HostUserAuthorizerRegistry } from "../../providers/review-host/types.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
-import { handleHostUserCallback } from "../host-events/github-user-callback.js";
+import { hostIdentityAdapter } from "../../core/host-identity-links.js";
+import { handleOAuthCallback } from "../host-events/oauth-callback.js";
 import { buildMcpServer } from "../server.js";
 import { registerHostAccountTools } from "./host-accounts.js";
 
@@ -84,10 +85,12 @@ async function visitCallback(authorizeUrl: string, authorizers: HostUserAuthoriz
       return res;
     },
   } as unknown as ServerResponse;
-  await handleHostUserCallback(new URL(`${REDIRECT}?code=gh-code&state=${state}`), res, {
+  const adapter = hostIdentityAdapter(authorizers.github!);
+  await handleOAuthCallback(new URL(`${REDIRECT}?code=gh-code&state=${state}`), res, {
     db,
-    authorizer: authorizers.github!,
-    redirectUri: REDIRECT,
+    cipher: { encrypt: () => Promise.reject(new Error("no payload")) },
+    adapters: new Map([[adapter.purpose, adapter]]),
+    redirectUri: () => REDIRECT,
   });
   return /([A-Z2-7]{4}-[A-Z2-7]{4})/.exec(body)?.[1] ?? "";
 }

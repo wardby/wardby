@@ -28,12 +28,12 @@ import { handleJiraEventIngress, type JiraIngressDeps } from "../host-events/jir
 vi.mock("../host-events/jira-ingress.js", () => ({
   handleJiraEventIngress: vi.fn(),
 }));
-vi.mock("../host-events/github-user-callback.js", () => ({
-  handleHostUserCallback: vi.fn(async (_url: URL, res: import("node:http").ServerResponse) => {
+vi.mock("../host-events/oauth-callback.js", () => ({
+  handleOAuthCallback: vi.fn(async (_url: URL, res: import("node:http").ServerResponse) => {
     res.writeHead(200, { "content-type": "text/html" }).end("callback page");
   }),
 }));
-import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-events/github-user-callback.js";
+import { handleOAuthCallback, type OAuthCallbackDeps } from "../host-events/oauth-callback.js";
 
 const fetch: typeof globalThis.fetch = (input, init) =>
   globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
@@ -466,26 +466,29 @@ describe("startHttpServer (Jira events)", () => {
 });
 
 describe("startHttpServer (GitHub user callback)", () => {
-  async function start(hostUserAuth?: StartHttpServerOptions["hostUserAuth"]) {
+  async function start(oauthCallback?: StartHttpServerOptions["oauthCallback"]) {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
     const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: [] }));
     handle = await startHttpServer({
       mcp,
       config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
       auth: { authProvider, db: fakeDb(), providers: fakeProviders },
-      hostUserAuth,
+      oauthCallback,
     });
     return `http://127.0.0.1:${handle.port}`;
   }
 
   it("serves GET /hosts/github/user-callback, unauthenticated, with the full query", async () => {
-    vi.mocked(handleHostUserCallback).mockClear();
-    const deps = { redirectUri: "x" } as unknown as HostUserCallbackDeps;
-    const base = await start({ github: deps });
+    vi.mocked(handleOAuthCallback).mockClear();
+    const deps = {
+      redirectUri: () => "x",
+      adapters: new Map([["host-identity:github", {}]]),
+    } as unknown as OAuthCallbackDeps;
+    const base = await start(deps);
     const res = await fetch(`${base}/hosts/github/user-callback?code=c&state=s`);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("callback page");
-    const [url, , passed] = vi.mocked(handleHostUserCallback).mock.calls[0];
+    const [url, , passed] = vi.mocked(handleOAuthCallback).mock.calls[0];
     expect(url.searchParams.get("state")).toBe("s");
     expect(passed).toBe(deps);
     expect(
@@ -499,11 +502,32 @@ describe("startHttpServer (GitHub user callback)", () => {
     ).toBe(404);
   });
 
+  it("serves GET /oauth/callback through the same handler, and 404s it without an adapter", async () => {
+    vi.mocked(handleOAuthCallback).mockClear();
+    const deps = {
+      redirectUri: () => "x",
+      adapters: new Map([["host-identity:github", {}]]),
+    } as unknown as OAuthCallbackDeps;
+    const base = await start(deps);
+    const res = await fetch(`${base}/oauth/callback?code=c&state=s`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("callback page");
+    const [url, , passed] = vi.mocked(handleOAuthCallback).mock.calls[0];
+    expect(url.pathname).toBe("/oauth/callback");
+    expect(url.searchParams.get("state")).toBe("s");
+    expect(passed).toBe(deps);
+    await handle?.close();
+    const none = await start({ ...deps, adapters: new Map() });
+    expect((await fetch(`${none}/oauth/callback?code=c&state=s`)).status).toBe(404);
+    expect((await fetch(`${none}/hosts/github/user-callback?code=c&state=s`)).status).toBe(404);
+    expect(handleOAuthCallback).toHaveBeenCalledTimes(1);
+  });
+
   it("returns 404 when linking is not configured", async () => {
-    vi.mocked(handleHostUserCallback).mockClear();
+    vi.mocked(handleOAuthCallback).mockClear();
     const base = await start(undefined);
     expect((await fetch(`${base}/hosts/github/user-callback?code=c&state=s`)).status).toBe(404);
-    expect(handleHostUserCallback).not.toHaveBeenCalled();
+    expect(handleOAuthCallback).not.toHaveBeenCalled();
   });
 });
 

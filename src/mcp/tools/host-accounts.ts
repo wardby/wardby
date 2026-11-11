@@ -10,8 +10,9 @@ import { HOST_ACCOUNT_PROVIDERS, type ReviewHostProvider } from "../../providers
 import {
   confirmHostIdentityLink,
   HostLinkError,
+  hostIdentityPurpose,
+  oauthRedirectUri,
   startHostIdentityLink,
-  userCallbackPath,
 } from "../../core/host-identity-links.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -81,7 +82,7 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
           db: ctx.db,
           authorizer,
           principalId: ctx.principal.id,
-          redirectUri: `${origin}${userCallbackPath(provider)}`,
+          redirectUri: oauthRedirectUri(origin, hostIdentityPurpose(provider)),
         });
         return textResult({
           authorizeUrl: started.authorizeUrl,
@@ -126,7 +127,9 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
     handler: async (args: { provider?: ReviewHostProvider }, ctx) => {
       const provider = args.provider ?? "github";
       const { count } = await ctx.db.hostIdentity.deleteMany({ where: { principalId: ctx.principal.id, provider } });
-      await ctx.db.hostIdentityLinkRequest.deleteMany({ where: { principalId: ctx.principal.id, provider } });
+      await ctx.db.oAuthLinkRequest.deleteMany({
+        where: { principalId: ctx.principal.id, purpose: hostIdentityPurpose(provider) },
+      });
       return textResult({ unlinked: count > 0 });
     },
   });

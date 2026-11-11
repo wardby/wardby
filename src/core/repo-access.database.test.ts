@@ -115,10 +115,10 @@ describe.skipIf(!process.env.DATABASE_URL)("repository access authorization sche
     await expect(
       db.hostIdentity.create({ data: { principalId: p2.id, provider: "github", hostUserId, login: "octo" } }),
     ).rejects.toMatchObject({ code: "P2002" });
-    await db.hostIdentityLinkRequest.create({
+    await db.oAuthLinkRequest.create({
       data: {
         principalId: p1.id,
-        provider: "github",
+        purpose: "host-identity:github",
         stateHash: randomUUID(),
         codeVerifier: "v".repeat(43),
         expiresAt: new Date(Date.now() + 600_000),
@@ -127,7 +127,7 @@ describe.skipIf(!process.env.DATABASE_URL)("repository access authorization sche
 
     await db.principal.delete({ where: { id: p1.id } });
     expect(await db.hostIdentity.count({ where: { principalId: p1.id } })).toBe(0);
-    expect(await db.hostIdentityLinkRequest.count({ where: { principalId: p1.id } })).toBe(0);
+    expect(await db.oAuthLinkRequest.count({ where: { principalId: p1.id } })).toBe(0);
   });
 
   it("a run's host check records the pull request it was dispatched for", async () => {

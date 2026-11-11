@@ -12,7 +12,9 @@ import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
 import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
 import { handleJiraEventIngress, type JiraIngressDeps } from "../host-events/jira-ingress.js";
-import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-events/github-user-callback.js";
+import { handleOAuthCallback, type OAuthCallbackDeps } from "../host-events/oauth-callback.js";
+import { OAUTH_CALLBACK_PATH } from "../../core/oauth-link.js";
+import { hostIdentityPurpose, userCallbackPath } from "../../core/host-identity-links.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
@@ -47,8 +49,8 @@ export interface StartHttpServerOptions {
   selfHosted?: SelfHostedAuthProvider;
   /** Code-review host webhooks; absent = the endpoints answer 404. */
   hostEvents?: { github?: GitHubIngressDeps; jira?: JiraIngressDeps };
-  /** The host identity-link browser callback (link_host_account); absent = 404. */
-  hostUserAuth?: { github?: HostUserCallbackDeps };
+  /** The OAuth link browser callback (link_host_account and later purposes); absent = 404. */
+  oauthCallback?: OAuthCallbackDeps;
   /** The admin viewer API (/admin/api/*); absent = those paths answer 404. */
   viewer?: ViewerApi;
   /** The blob store run transcripts are served from (get_run_transcript links); absent = they answer 503. */
@@ -235,15 +237,25 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       }
       return;
     }
-    if (url.pathname === "/hosts/github/user-callback" && req.method === "GET") {
+    if (url.pathname === userCallbackPath("github") && req.method === "GET") {
       // Unauthenticated by design (a browser redirect from GitHub): the
       // single-use, hashed OAuth state is what binds it to a link request,
-      // and the canonical-Host check above has already run.
-      if (!opts.hostUserAuth?.github) {
+      // and the canonical-Host check above has already run. The GitHub App's
+      // registered Callback URL, so it stays an alias of OAUTH_CALLBACK_PATH.
+      if (!opts.oauthCallback?.adapters.has(hostIdentityPurpose("github"))) {
         sendJson(res, 404, { error: "not_found" });
         return;
       }
-      await handleHostUserCallback(url, res, opts.hostUserAuth.github);
+      await handleOAuthCallback(url, res, opts.oauthCallback, { target: "GitHub", tool: "link_host_account" });
+      return;
+    }
+    if (url.pathname === OAUTH_CALLBACK_PATH && req.method === "GET") {
+      // Unauthenticated for the same reason as the GitHub callback above.
+      if (!opts.oauthCallback?.adapters.size) {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      await handleOAuthCallback(url, res, opts.oauthCallback);
       return;
     }
     if (url.pathname.startsWith(VIEWER_API_PREFIX)) {
