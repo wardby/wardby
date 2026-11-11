@@ -3239,7 +3239,7 @@ function storedField(value: unknown, key: string): unknown {
 }
 
 /** Stored test results the PR body can list (command + outcome); anything else is dropped. */
-function storedTests(value: unknown): Array<{ command: string; outcome: TestOutcome }> {
+export function storedTests(value: unknown): Array<{ command: string; outcome: TestOutcome }> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((test) => {
     const command = storedField(test, "command");

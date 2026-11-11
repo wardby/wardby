@@ -64,6 +64,7 @@ import {
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
   type ProvisioningClaim,
+  storedTests,
 } from "./container.js";
 import type { RecordResult, RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
 
@@ -5111,5 +5112,25 @@ describe("CATEGORY_BY_PREFIX", () => {
     for (const [, category] of CATEGORY_BY_PREFIX) {
       expect(CHILD_RUN_FAILURE_CODES.has(`coding_failure_${category}`), category).toBe(true);
     }
+  });
+});
+
+describe("storedTests", () => {
+  it("keeps every known outcome, expected_failure included, and drops malformed entries", () => {
+    expect(
+      storedTests([
+        { command: "npx jest a.test.ts", outcome: "expected_failure" },
+        { command: "npm test", outcome: "passed" },
+        { command: "npm audit", outcome: "skipped" },
+        { command: "npm run lint", outcome: "failed" },
+        { command: "npm run x", outcome: "weird" },
+        { outcome: "passed" },
+      ]),
+    ).toEqual([
+      { command: "npx jest a.test.ts", outcome: "expected_failure" },
+      { command: "npm test", outcome: "passed" },
+      { command: "npm audit", outcome: "skipped" },
+      { command: "npm run lint", outcome: "failed" },
+    ]);
   });
 });
