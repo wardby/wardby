@@ -14,6 +14,38 @@ export const WORKFLOW_EVENT_KINDS = [
 ] as const;
 export type WorkflowEventKind = (typeof WORKFLOW_EVENT_KINDS)[number];
 
+/**
+ * What a run hook can subscribe to: every Slack workflow event kind plus
+ * run_completed, which only hooks receive (Slack links never match it).
+ */
+export const HOOK_EVENT_KINDS = [...WORKFLOW_EVENT_KINDS, "run_completed"] as const;
+export type HookEventKind = (typeof HOOK_EVENT_KINDS)[number];
+
+/** The statuses a finished run can end in. */
+export const RUN_END_STATUSES = ["succeeded", "failed", "budget_exhausted", "cancelled", "lost", "refused"] as const;
+export type RunEndStatus = (typeof RUN_END_STATUSES)[number];
+
+/**
+ * run_completed's payload: metadata only, never run output (the run's final
+ * text is read from the run at delivery time, for hooks allowed to see it).
+ */
+export type RunCompletedPayload = {
+  kind: "run_completed";
+  agentName: string;
+  status: RunEndStatus;
+  trigger: string;
+  parentRunId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  costUsd: string;
+  /** shortReason of the run's (already masked) error. */
+  reason: string | null;
+  pullRequests: { repository: string; number: number; url: string | null; outcome: string }[];
+};
+
+/** Every payload the recorder stores: the Slack kinds plus hook-only kinds. */
+export type RecordedPayload = WorkflowPayload | RunCompletedPayload;
+
 /** Template inputs per kind. Every string here may be shown in Slack (escaped). */
 export type WorkflowPayload =
   | { kind: "run_blocked"; agentName: string; packageRefusals: RegistryRefusalSummary[] }
@@ -55,6 +87,7 @@ export const dedupeKeys = {
     `review_fix:${repository}#${n}:${round}:${state}`,
   prClosed: (codeProvider: string, repository: string, n: number) => `pr_closed:${codeProvider}:${repository}#${n}`,
   packagesAudited: (runId: string) => `packages_audited:${runId}`,
+  runCompleted: (runId: string) => `run_completed:${runId}`,
 };
 
 export const threadKeys = {
@@ -71,7 +104,7 @@ export function shortReason(error: string | null | undefined): string | null {
 
 export interface WorkflowEventInput {
   dedupeKey: string;
-  payload: WorkflowPayload;
+  payload: RecordedPayload;
   /** The run the event is about (its attribution names the work item). */
   runId?: string;
   /** The agent the event is about (agent links match on it). */

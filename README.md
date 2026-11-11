@@ -384,6 +384,9 @@ for the repository's own dependency-override policy.
 - Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md) (0.6.0+):
   link a channel to a Jira project or an agent to follow a card from pickup
   to merge.
+- [Run hooks](https://github.com/wardby/wardby/blob/main/docs/run-hooks.md) (0.9.8+): wardby calls your own
+  sandbox tool when an agent's run finishes (or a PR opens, a review posts), to
+  send results to Slack, email or any API.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
   repository and allowed per agent, for Codex and Claude Code runs on the
   Kubernetes and Docker launchers.

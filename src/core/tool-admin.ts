@@ -92,15 +92,23 @@ export async function prepareToolUpdate(
 }
 
 /** The agents `toolId` is attached to, read inside the caller's transaction. */
+/**
+ * The agents a tool runs for: attached to them, or hooked to their events
+ * (a run hook runs the tool with the agent owner's grants, like an
+ * attachment). One entry per agent.
+ */
 export async function attachedAgents(
-  tx: Pick<Prisma.TransactionClient, "agentTool">,
+  tx: Pick<Prisma.TransactionClient, "agentTool" | "runHook">,
   toolId: string,
 ): Promise<AttachedAgent[]> {
-  const rows = await tx.agentTool.findMany({
-    where: { toolId },
-    select: { agent: { select: { id: true, name: true, ownerId: true } } },
-  });
-  return rows.map((row) => row.agent);
+  const select = { agent: { select: { id: true, name: true, ownerId: true } } };
+  const [attached, hooked] = await Promise.all([
+    tx.agentTool.findMany({ where: { toolId }, select }),
+    tx.runHook.findMany({ where: { toolId }, select }),
+  ]);
+  const byId = new Map<string, AttachedAgent>();
+  for (const row of [...attached, ...hooked]) byId.set(row.agent.id, row.agent);
+  return [...byId.values()];
 }
 
 /** Refuses (by throwing) unless the caller may change this tool; receives the row read inside the transaction. */
@@ -142,6 +150,7 @@ export async function deleteToolGuarded(
         if (own.length > 0 && !options.detach) throw new ToolAttachedError("needs_detach", own);
         if (own.length > 0) {
           await tx.agentTool.deleteMany({ where: { toolId, agentId: { in: own.map((agent) => agent.id) } } });
+          await tx.runHook.deleteMany({ where: { toolId, agentId: { in: own.map((agent) => agent.id) } } });
         }
         await tx.tool.delete({ where: { id: toolId } });
         return own.map((agent) => agent.id);
@@ -149,8 +158,9 @@ export async function deleteToolGuarded(
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
   } catch (err) {
-    // AgentTool.toolId is ON DELETE RESTRICT: an attachment that raced in
-    // past the check above still stops the delete, as P2003.
+    // AgentTool.toolId and RunHook.toolId are ON DELETE RESTRICT: an
+    // attachment or hook that raced in past the check above still stops the
+    // delete, as P2003.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
       throw new ToolAttachedError("race", []);
     }
