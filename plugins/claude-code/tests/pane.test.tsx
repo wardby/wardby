@@ -2564,3 +2564,67 @@ test("auto mode refusing get_run_text: the first page stays, and a toast names t
   expect(await ui.find({ type: "Text", text: /^wardby: / })).toBeUndefined();
   await ui.unmount();
 });
+
+test("the filter text also searches the server for older runs, and an older run opens", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const today = { ...runRow("r1", "succeeded", 60_000), agentName: "reviewer" };
+  const yearOld = {
+    ...runRow("old1", "failed", 365 * 24 * 3_600_000),
+    agentName: "builder",
+    finishedAt: iso(365 * 24 * 3_600_000),
+  };
+  const queries: Record<string, unknown>[] = [];
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs" && e.args.query !== undefined) {
+      queries.push(e.args);
+      if (e.args.query === "wardby-runs-probe-no-such-run-3f9c1d") return reply([]);
+      // The server matches the repository, which the day's rows don't show: today's run, and a year-old one.
+      return reply(e.args.before === undefined ? [today, yearOld] : []);
+    }
+    if (e.tool === "list_runs") return reply([today]);
+    if (e.tool === "get_run") return reply({ id: "old1", status: "failed", request: "Fix the login page" });
+    return reply({});
+  });
+
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.input({ key: "filter-text", text: "your-org/web", kind: "change" });
+  await clock.advance(1_000);
+  await clock.settle();
+  // A probe, then the search itself; nothing sent before typing paused.
+  expect(queries.map((q) => q.query)).toEqual(["wardby-runs-probe-no-such-run-3f9c1d", "your-org/web"]);
+  expect(await ui.find({ type: "Text", text: "Older runs" })).toBeDefined();
+  // Today's run is in the list above already; only the older one is added.
+  expect(await ui.find({ key: "older-run-r1" })).toBeUndefined();
+  const button = await ui.find({ key: "older-run-old1" });
+  expect(button?.props.label).toBe("builder · failed · 2025-11-06");
+  await ui.press({ key: "older-run-old1" });
+  await clock.settle();
+  expect((await ui.find({ key: "request-text" }))?.props.text).toContain("Fix the login page");
+  await ui.press({ key: "back" });
+  await ui.press({ key: "clear-filter" });
+  expect(await ui.find({ type: "Text", text: "Older runs" })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("an older server, which ignores query, gets no older-runs search", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  recordingServer(on, () => [runRow("r1", "succeeded", 60_000)]);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.input({ key: "filter-text", text: "zzz", kind: "change" });
+  await clock.advance(1_000);
+  await clock.settle();
+  expect(await ui.find({ type: "Text", text: /needs 0\.9\.7 or later/ })).toBeDefined();
+  expect(await ui.find({ key: "older-run-r1" })).toBeUndefined();
+  await ui.unmount();
+});

@@ -1,7 +1,7 @@
 import { atom, read, update } from "claude-code";
 import type { Register, UiCopyArgs } from "claude-code";
 
-import type { Filter, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps, TextField } from "../types";
+import type { Filter, Older, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps, TextField } from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -80,6 +80,15 @@ const filter = atom(
   { status: "all", text: "" },
   { shape: "filter-1" },
 );
+
+// Older runs the server found for the filter text, beyond the day the pane holds.
+const IDLE_OLDER: Older = { text: "", rows: [], next: null, state: "idle", error: null };
+const older = atom({ plugin: "wardby-runs", key: "older" } as const, IDLE_OLDER, { shape: "older-1" });
+// How long typing must pause before the filter text is sent to the server.
+const SEARCH_PAUSE_MS = 600;
+// A query no run's id, agent name, status, trigger, repository or branch holds: a server that answers it
+// with runs ignores query (older than 0.9.7), so the pane doesn't search it.
+const PROBE_QUERY = "wardby-runs-probe-no-such-run-3f9c1d";
 
 // The status filter's choices: label, hotkey, and which statuses each keeps.
 const STATUS_FILTERS: { value: Filter["status"]; label: string; hotkey: string; keeps: (status: string) => boolean }[] =
@@ -907,6 +916,10 @@ export const register: Register = (on, options) => {
   // Whether the server has get_run_steps and records steps: unknown until asked, and asked again
   // every AGENTS_EVERY polls after a no or an off, since a server may be upgraded or reset.
   let stepsSupport: "unknown" | "yes" | "no" | "off" = "unknown";
+  // Whether list_runs takes query (wardby 0.9.7+): unknown until the first search, asked again like the above.
+  let querySupport: "unknown" | "yes" | "no" = "unknown";
+  // Each search's number: a search that a later keystroke replaced never writes its reply.
+  let searchSeq = 0;
   // When the next refresh is due, and the last successful one's time (the next `since`).
   let nextAt = 0;
   let lastOkAt = 0;
@@ -927,6 +940,7 @@ export const register: Register = (on, options) => {
         // An older server may be upgraded under the pane: ask again now and then.
         if (acrossAgents === false && polls % AGENTS_EVERY === 0) acrossAgents = null;
         if ((stepsSupport === "no" || stepsSupport === "off") && polls % AGENTS_EVERY === 0) stepsSupport = "unknown";
+        if (querySupport === "no" && polls % AGENTS_EVERY === 0) querySupport = "unknown";
         if (acrossAgents !== false) {
           // One call: list_runs without an agentId (wardby 0.8.0+).
           try {
@@ -1268,6 +1282,72 @@ export const register: Register = (on, options) => {
       }
     }
 
+    /**
+     * The server's runs for the filter text, at any date (list_runs' query, wardby 0.9.7+): a fresh search
+     * waits for typing to pause; `more` reads the next page of the current one. A reply that arrives after
+     * the text changed is dropped.
+     */
+    async function searchOlder(text: string, more: boolean): Promise<void> {
+      const query = text.trim();
+      const seq = ++searchSeq;
+      if (query === "") {
+        await update($, older, () => IDLE_OLDER);
+        return;
+      }
+      const current = await read($, older);
+      if (more && (current.text !== query || current.next === null || current.state === "loading")) return;
+      if (!more) {
+        await $.clock.sleep(SEARCH_PAUSE_MS);
+        if (seq !== searchSeq) return;
+      }
+      const stillAsked = async () => seq === searchSeq && (await read($, filter)).text.trim() === query;
+      await update($, older, (old): Older =>
+        more ? { ...old, state: "loading" } : { text: query, rows: [], next: null, state: "loading", error: null },
+      );
+      try {
+        if (acrossAgents === false) querySupport = "no";
+        if (querySupport === "unknown") {
+          const probe = (await call("list_runs", { query: PROBE_QUERY, limit: 1 })) as unknown[];
+          querySupport = Array.isArray(probe) && probe.length === 0 ? "yes" : "no";
+        }
+        if (querySupport === "no") {
+          if (await stillAsked()) await update($, older, (old): Older => ({ ...old, state: "unsupported" }));
+          return;
+        }
+        const before = more ? (current.next ?? undefined) : undefined;
+        const list = (await call("list_runs", {
+          query,
+          limit: PAGE_SIZE,
+          ...(before === undefined ? {} : { before }),
+        })) as Record<string, unknown>[];
+        if (!(await stillAsked())) return;
+        const found = list.map((run) =>
+          toRow(run, {
+            id: String(run.agentId),
+            name: String(run.agentName ?? run.agentId),
+            budgetUsd: run.agentBudgetUsd == null ? null : Number(run.agentBudgetUsd),
+          }),
+        );
+        await update($, older, (old): Older => {
+          const kept = more ? old.rows : [];
+          const seen = new Set(kept.map((row) => row.id));
+          return {
+            text: query,
+            rows: [...kept, ...found.filter((row) => !seen.has(row.id))],
+            next: list.length === PAGE_SIZE ? String(list[list.length - 1].id) : null,
+            state: "done",
+            error: null,
+          };
+        });
+      } catch (err) {
+        if (!(await stillAsked())) return;
+        const error = err instanceof Error ? err.message : "the search failed";
+        await update($, older, (old): Older => ({ ...old, state: "error", error }));
+      }
+    }
+
+    // Called without await from the pane's handlers: a pane closed or reloaded mid-search drops it quietly.
+    pane.searchOlder = (text, more) => searchOlder(text, more).catch(() => {});
     pane.continueLocally = continueLocally;
     // Only for suggesting where to import; the pane works without it.
     pane.cwd = await $.session.cwd().catch(() => "");
@@ -1297,6 +1377,7 @@ export const register: Register = (on, options) => {
     loadFullText: (runId: string) => Promise<RunDetail | null>;
     loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
+    searchOlder: (text: string, more: boolean) => Promise<void>;
     start: () => void;
     continueLocally: (runId: string, dir: string) => Promise<void>;
     cwd: string;
@@ -1305,6 +1386,7 @@ export const register: Register = (on, options) => {
     loadFullText: async () => null,
     loadMoreSteps: async () => {},
     refresh: async () => {},
+    searchOlder: async () => {},
     start: () => {},
     continueLocally: async () => {},
     cwd: "",
@@ -1322,6 +1404,7 @@ export const register: Register = (on, options) => {
   on("command.run", { command: "wardby-runs" }, async ($, e) => {
     if ((e.args ?? "").trim() === "clear") {
       await update($, filter, (): Filter => ({ status: "all", text: "" }));
+      await pane.searchOlder("", false);
       return { text: "wardby runs filter cleared." };
     }
     if ((e.args ?? "").trim() === "close") {
@@ -1400,7 +1483,11 @@ export const register: Register = (on, options) => {
       </Box>
     );
 
-    const open = openId ? rows.find((row) => row.id === openId) : undefined;
+    const olderRuns = await read($, older);
+    // A run opened from the older runs the search found is drawn the same way as one of the day's.
+    const open = openId
+      ? (rows.find((row) => row.id === openId) ?? olderRuns.rows.find((row) => row.id === openId))
+      : undefined;
     if (open) {
       const info = await read($, detail);
       const shownDetail = info && info.id === open.id ? info : null;
@@ -2236,10 +2323,16 @@ export const register: Register = (on, options) => {
           {Input && (
             <Input
               key="filter-text"
-              placeholder="Filter by agent, status, trigger or task"
+              placeholder="Filter by agent, status, trigger, task, repository or branch"
               value={f.text}
-              onInput={(value: string) => void update($, filter, (old): Filter => ({ ...old, text: value }))}
-              onSubmit={(value: string) => void update($, filter, (old): Filter => ({ ...old, text: value }))}
+              onInput={(value: string) => {
+                void update($, filter, (old): Filter => ({ ...old, text: value }));
+                void pane.searchOlder(value, false);
+              }}
+              onSubmit={(value: string) => {
+                void update($, filter, (old): Filter => ({ ...old, text: value }));
+                void pane.searchOlder(value, false);
+              }}
             />
           )}
           {isFiltered && (
@@ -2247,7 +2340,10 @@ export const register: Register = (on, options) => {
               key="clear-filter"
               label={e.surface === "desktop" ? "Clear" : "Clear (l)"}
               {...(e.surface === "desktop" ? {} : { hotkey: "l" })}
-              onPress={() => void update($, filter, (): Filter => ({ status: "all", text: "" }))}
+              onPress={() => {
+                void update($, filter, (): Filter => ({ status: "all", text: "" }));
+                void pane.searchOlder("", false);
+              }}
             />
           )}
         </Box>
@@ -2636,6 +2732,54 @@ export const register: Register = (on, options) => {
             })()}
           </Box>
         )}
+        {(() => {
+          // The server's matches for the filter text beyond the day above (wardby 0.9.7+), at any date.
+          const query = f.text.trim();
+          if (query === "" || olderRuns.text !== query || olderRuns.state === "idle") return null;
+          const day = new Set(rows.map((row) => row.id));
+          const keeps = STATUS_FILTERS.find((choice) => choice.value === f.status)?.keeps ?? (() => true);
+          const found = olderRuns.rows.filter((row) => !day.has(row.id) && keeps(row.status));
+          return (
+            <Box key="older" flexDirection="column" marginTop={1}>
+              <Text weight="semibold" bold>
+                Older runs
+              </Text>
+              {olderRuns.state === "unsupported" && (
+                <Text dimColor wrap="wrap">
+                  This wardby server can't search older runs (it needs 0.9.7 or later).
+                </Text>
+              )}
+              {olderRuns.state === "error" && (
+                <Text color={FAILED_COLOR} wrap="wrap">
+                  Couldn't search older runs: {olderRuns.error}
+                </Text>
+              )}
+              {olderRuns.state === "loading" && found.length === 0 && <Text dimColor>Searching…</Text>}
+              {olderRuns.state === "done" && found.length === 0 && (
+                <Text dimColor>No older runs match by id, agent, status, trigger, repository or branch.</Text>
+              )}
+              {found.map((row) => (
+                <Box key={`older-${row.id}`}>
+                  <Button
+                    key={`older-run-${row.id}`}
+                    label={`${row.agentName} · ${row.status.replaceAll("_", " ")} · ${row.startedAt.slice(0, 10)}`}
+                    onPress={() => {
+                      void update($, selected, () => row.id);
+                      void pane.loadDetail(row.id);
+                    }}
+                  />
+                </Box>
+              ))}
+              {olderRuns.next !== null && (
+                <Button
+                  key="older-more"
+                  label={olderRuns.state === "loading" ? "Loading…" : "Load more"}
+                  onPress={() => void pane.searchOlder(f.text, true)}
+                />
+              )}
+            </Box>
+          );
+        })()}
       </Box>
     );
   });
