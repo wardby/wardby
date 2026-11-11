@@ -27,6 +27,7 @@ import { linkedPullRequestAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./a
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { postMentionStatus, TERMINAL_RUN_STATUSES } from "./host-status.js";
 import { splitTaskOverride } from "./untrusted-content.js";
+import { MAX_REVIEW_BODY_CHARS, REVIEW_CUT_NOTE } from "./review-host-tools.js";
 import {
   capBody,
   reviewFixTaskText,
@@ -204,7 +205,9 @@ describe("startReviewFixRound", () => {
     expect(await startReviewFixRound(REQ, deps)).toMatchObject({ kind: "dispatched", round: 2 });
   });
 
-  it("caps the review text in the untrusted context", () => {
+  it("hands a maximum-size review to the fix round whole, in the untrusted context", () => {
+    const tail = "## Recommendations\n- MUST_FIX: the last item";
+    const reviewBody = "x".repeat(MAX_REVIEW_BODY_CHARS - tail.length) + tail;
     const task = reviewFixTaskText({
       repository: REPO,
       prNumber: 7,
@@ -212,12 +215,26 @@ describe("startReviewFixRound", () => {
       round: 1,
       maxRounds: 2,
       priorRunId: "run_1",
-      reviewBody: "x".repeat(30_000),
+      reviewBody,
     });
-    expect(task.length).toBeLessThan(21_500);
     const { untrustedContext } = splitTaskOverride(task);
-    expect(untrustedContext).toContain("x".repeat(1000));
+    expect(untrustedContext).toContain(reviewBody);
     expect(splitTaskOverride(task).task).not.toContain("xxxx");
+  });
+
+  it("cuts review text past the published maximum and says so at the end", () => {
+    const task = reviewFixTaskText({
+      repository: REPO,
+      prNumber: 7,
+      headSha: SHA,
+      round: 1,
+      maxRounds: 2,
+      priorRunId: "run_1",
+      reviewBody: "x".repeat(MAX_REVIEW_BODY_CHARS + 5_000),
+    });
+    const { untrustedContext } = splitTaskOverride(task);
+    expect(untrustedContext).not.toContain("x".repeat(MAX_REVIEW_BODY_CHARS));
+    expect(untrustedContext?.trimEnd().endsWith(REVIEW_CUT_NOTE.trim())).toBe(true);
   });
 
   it("does not dispatch when recording the round fails", async () => {
