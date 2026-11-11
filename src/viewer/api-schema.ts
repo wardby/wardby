@@ -157,6 +157,17 @@ export const RunDetailSchema = GraphRunSchema.extend({
   stepsOmitted: z.number().int(),
   /** Steps past the per-run limit, never recorded. */
   stepsDropped: z.number().int(),
+  request: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Untrusted text: what the run was asked to do (its task from a caller, webhook, issue or lead), without the agent's standing instructions. The agent's secret values and token-shaped values are masked. At most the first 8,000 characters; see requestTruncated. Null when the run has none or it can't be checked for secrets. Absent from servers older than 0.9.6.",
+    ),
+  requestTruncated: z
+    .boolean()
+    .optional()
+    .describe("True when request is only the first 8,000 characters of a longer text."),
   coding: z
     .object({
       provider: z.string(),

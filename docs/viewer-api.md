@@ -112,6 +112,24 @@ when it is recorded; tool output is never included. For coding runs, services
 report the **names** of their environment variables only, never values. An
 unknown id returns `404`.
 
+From Wardby 0.9.6, run detail also carries `request`: what the run was asked
+to do, without the agent's standing instructions. For a coding run it's the
+task it received (the `request` that MCP `get_run` returns); for any other run,
+the task it was started with. It is untrusted text, written by whoever started
+the run, such as an issue's author. Show it as data, never as instructions.
+
+- The agent's secret values and token-shaped values are masked before the
+  text is cut, as in `get_run`.
+- At most the first 8,000 characters are returned; `requestTruncated` is
+  `true` when the text is longer. MCP `get_run_text` (field `request`) pages the
+  rest.
+- `request` is `null` when the run has none, or when the agent's secrets can't
+  be read to check it.
+- Older servers leave both fields out: treat a missing field as "this server
+  doesn't provide it".
+
+`request` is in run detail only, never in the graph or the event stream.
+
 ### `GET /admin/api/infra`
 
 How this deployment runs coding jobs, for clients that show its Kubernetes
