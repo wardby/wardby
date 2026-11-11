@@ -543,6 +543,12 @@ test("Continue locally pipes the link to wardby resume and shows only the comman
       });
     return reply({});
   });
+  on("fs.stat", () => ({ value: { kind: "dir", size: 0, mtimeMs: 0, isLink: false } }));
+  const copied: string[] = [];
+  on("ui.copy", (_, e) => {
+    copied.push(e.text);
+    return { value: { isCopied: true } };
+  });
   const spawned: { argv: readonly string[]; cwd?: string; stdin?: string }[] = [];
   on("process.run", (_, e) => {
     spawned.push({ argv: e.argv, cwd: e.init?.cwd, stdin: e.init?.stdin });
@@ -551,7 +557,9 @@ test("Continue locally pipes the link to wardby resume and shows only the comman
         exitCode: 0,
         // A command that echoed the link would still not show it.
         stdout: `Imported run r1 from ${LINK}\ncd '/home/me/code/api-run-r1' && claude --resume /x/s.jsonl --append-system-prompt 'moved'\n`,
-        stderr: "",
+        stderr:
+          "Checkout:     /home/me/code/api run r1 at wardby/r1\n" +
+          "To remove the import later: delete /home/me/.wardby/sessions/r1 and run git worktree remove /home/me/code/api run r1.\n",
       },
     };
   });
@@ -574,6 +582,13 @@ test("Continue locally pipes the link to wardby resume and shows only the comman
 
   expect(await ui.find({ type: "Text", text: /cd '\/home\/me\/code\/api-run-r1' && claude --resume/ })).toBeDefined();
   expect(await ui.find({ key: "copy-command" })).toBeDefined();
+  // What the import said to remove later, as commands to paste once done, quoted as the import quotes.
+  const cleanup =
+    "git -C /home/me/code/api worktree remove '/home/me/code/api run r1'\nrm -r /home/me/.wardby/sessions/r1";
+  expect(await ui.find({ type: "Text", text: cleanup })).toBeDefined();
+  await ui.press({ key: "copy-cleanup" });
+  await clock.settle();
+  expect(copied).toEqual([cleanup]);
   // The link is nowhere in what the pane draws.
   const texts = (await ui.findAll({ type: "Text" })).map((el) => el.text).join("\n");
   expect(texts).not.toContain("FAKE-SIGNED-STATE-123");
@@ -2654,6 +2669,7 @@ test("Continue locally without npx on the session's PATH runs the login shell's 
       });
     return reply({});
   });
+  on("fs.stat", () => ({ value: { kind: "dir", size: 0, mtimeMs: 0, isLink: false } }));
   const spawned: { argv: readonly string[]; env?: Record<string, string> }[] = [];
   on("process.run", (_, e) => {
     spawned.push({ argv: e.argv, env: e.init?.env });
@@ -2685,5 +2701,184 @@ test("Continue locally without npx on the session's PATH runs the login shell's 
   expect(spawned[2].argv.slice(1)).toEqual(["-y", "@wardby/cli@latest", "resume", "-", "--print"]);
   expect(spawned[2].env).toEqual({ PATH: "/home/me/.nvm/bin:/usr/bin" });
   expect(await ui.find({ type: "Text", text: /claude --resume/ })).toBeDefined();
+  await ui.unmount();
+});
+
+/** A finished coding run in your-org/api with a pull request, and its stored transcript. */
+function resumeServer(on: Parameters<Parameters<typeof test>[1]>[1], asked: string[]) {
+  on("mcp.call", (_, e) => {
+    asked.push(e.tool);
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status: "succeeded",
+        codingResult: {
+          outcome: "pull_request_opened",
+          repository: "your-org/api",
+          pullRequestUrl: "https://github.com/your-org/api/pull/9",
+        },
+      });
+    if (e.tool === "get_run_transcript")
+      return reply({ runId: "r1", status: "stored", download: { url: "https://wardby.example/dl?s=FAKE" } });
+    return reply({});
+  });
+}
+
+const DIR_STAT = { kind: "dir", size: 0, mtimeMs: 0, isLink: false } as const;
+const dirEntry = (name: string) => ({ name, kind: "dir", size: 0, mtimeMs: 0, isLink: false }) as const;
+
+test("Continue locally into a folder that is not there says so, offers a clone, and starts nothing", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  const asked: string[] = [];
+  resumeServer(on, asked);
+  on("fs.stat", () => ({ deny: "ENOENT: no such file or directory" }));
+  on("fs.list", () => ({ value: [dirEntry("wardby"), dirEntry("other")] }));
+  on("fs.read", (_, e) =>
+    e.path === "/home/me/code/other/.git/config"
+      ? { value: '[remote "origin"]\n\turl = git@github.com:your-org/web.git\n' }
+      : { deny: "ENOENT" },
+  );
+  const spawned: string[][] = [];
+  on("process.run", (_, e) => {
+    spawned.push([...e.argv]);
+    return { deny: "failed to start: ENOENT: posix_spawn" };
+  });
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "continue-locally" });
+  await clock.settle();
+  expect(spawned).toEqual([]);
+  expect(asked).not.toContain("get_run_transcript");
+  expect(await ui.find({ type: "Text", text: /No folder at \/home\/me\/code\/api\./ })).toBeDefined();
+  expect(await ui.find({ key: "use-clone-0" })).toBeUndefined();
+  expect((await ui.find({ key: "clone-repo" }))?.text).toContain("Clone your-org/api into /home/me/code/api");
+  expect(await ui.find({ type: "Text", text: /npx/ })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("Continue locally finds a clone in a subfolder nearby, and Use continues there", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  resumeServer(on, []);
+  on("fs.stat", (_, e) => (e.path === "/home/me/code/api" ? { deny: "ENOENT" } : { value: DIR_STAT }));
+  const listed: string[] = [];
+  on("fs.list", (_, e) => {
+    listed.push(e.path);
+    if (e.path === "/home/me/code")
+      return { value: [dirEntry("wardby"), dirEntry("work"), dirEntry(".hidden"), dirEntry("node_modules")] };
+    if (e.path === "/home/me/code/work") return { value: [dirEntry("my-api")] };
+    return { value: [] };
+  });
+  on("fs.read", (_, e) =>
+    e.path === "/home/me/code/wardby/.git/config"
+      ? { value: '[remote "origin"]\n\turl = https://github.com/your-org/wardby.git\n' }
+      : e.path === "/home/me/code/work/my-api/.git/config"
+        ? { value: '[remote "origin"]\n\turl = https://github.com/Your-Org/api.git\n' }
+        : { deny: "ENOENT" },
+  );
+  const spawned: { argv: readonly string[]; cwd?: string }[] = [];
+  on("process.run", (_, e) => {
+    spawned.push({ argv: e.argv, cwd: e.init?.cwd });
+    return {
+      value: { exitCode: 0, stdout: "cd '/home/me/code/my-api-run-r1' && claude --resume /x/s.jsonl\n", stderr: "" },
+    };
+  });
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "continue-locally" });
+  await clock.settle();
+  expect((await ui.find({ key: "use-clone-0" }))?.text).toContain("Use /home/me/code/work/my-api");
+  expect(await ui.find({ key: "use-clone-1" })).toBeUndefined();
+  // Another repository is a clone, so it is not searched inside.
+  expect(listed).not.toContain("/home/me/code/wardby");
+
+  await ui.press({ key: "use-clone-0" });
+  await clock.settle();
+  expect(spawned).toHaveLength(1);
+  expect(spawned[0].argv[0]).toBe("npx");
+  expect(spawned[0].cwd).toBe("/home/me/code/work/my-api");
+  expect((await ui.find({ key: "resume-dir" }))?.props.value).toBe("/home/me/code/work/my-api");
+  expect(await ui.find({ type: "Text", text: /my-api-run-r1/ })).toBeDefined();
+  await ui.unmount();
+});
+
+test("Clone runs git clone from the pull request's host, then continues in the new clone", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  resumeServer(on, []);
+  let cloned = false;
+  on("fs.stat", () => (cloned ? { value: DIR_STAT } : { deny: "ENOENT" }));
+  on("fs.list", () => ({ value: [] }));
+  const spawned: { argv: readonly string[]; cwd?: string }[] = [];
+  on("process.run", (_, e) => {
+    spawned.push({ argv: e.argv, cwd: e.init?.cwd });
+    if (e.argv[0] === "git") {
+      cloned = true;
+      return { value: { exitCode: 0, stdout: "", stderr: "Cloning into '/home/me/code/api'...\n" } };
+    }
+    return {
+      value: { exitCode: 0, stdout: "cd '/home/me/code/api-run-r1' && claude --resume /x/s.jsonl\n", stderr: "" },
+    };
+  });
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "continue-locally" });
+  await clock.settle();
+  await ui.press({ key: "clone-repo" });
+  await clock.settle();
+  expect(spawned.map((s) => s.argv)).toEqual([
+    ["git", "clone", "--", "https://github.com/your-org/api.git", "/home/me/code/api"],
+    ["npx", "-y", "@wardby/cli@latest", "resume", "-", "--print"],
+  ]);
+  expect(spawned[1].cwd).toBe("/home/me/code/api");
+  expect(await ui.find({ type: "Text", text: /api-run-r1/ })).toBeDefined();
+  await ui.unmount();
+});
+
+test("a failed clone shows git's error", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  resumeServer(on, []);
+  on("fs.stat", () => ({ deny: "ENOENT" }));
+  on("fs.list", () => ({ value: [] }));
+  on("process.run", () => ({
+    value: { exitCode: 128, stdout: "", stderr: "fatal: repository not found\n" },
+  }));
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  await ui.press({ key: "continue-locally" });
+  await clock.settle();
+  await ui.press({ key: "clone-repo" });
+  await clock.settle();
+  expect(await ui.find({ type: "Text", text: /could not clone .*fatal: repository not found/ })).toBeDefined();
   await ui.unmount();
 });

@@ -136,3 +136,13 @@ See also [Choose a native or coding agent](help://creating-agents).
 
 The `wardby-runs` Claude Code plugin can start the import from a run's detail
 (**Continue locally**); see `claude-code-run-pane` (Wardby 0.8.0 and later).
+It runs the import in your clone of the run's repository, suggested as a folder
+of that name beside the session's folder. When no folder is there, the pane
+lists any folders nearby whose git remote is the repository (**Use**, which
+continues there) and, when the run's pull request names its host, offers
+**Clone** to clone it there with your own git login first. Or type the path of
+your clone and press **Continue locally** again. After the import, the pane shows the
+command to continue the session and, under it, the commands that remove the
+import once you are done (`git -C <clone> worktree remove <worktree>` and
+`rm -r ~/.wardby/sessions/<run id>`), with **Copy cleanup**. Your clone is
+left as it is.
