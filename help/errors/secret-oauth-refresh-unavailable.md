@@ -11,7 +11,7 @@ appliesTo: ">=0.9.11"
 
 ## What happened
 
-The message is `secret_oauth_refresh_unavailable: the OAuth provider could not be reached to refresh the token; try again`. The provider timed out, returned a server error, or rate limited the refresh. The stored token is unchanged.
+The message is `secret_oauth_refresh_unavailable: the OAuth provider could not be reached to refresh the token; try again`. The provider timed out, returned a server error, or rate limited the refresh; or the refresh could not take its turn because another request held the secret for too long, or the store failed. The stored token is unchanged.
 
 ## What to do
 

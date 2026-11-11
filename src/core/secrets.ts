@@ -448,7 +448,11 @@ export function buildSecretsAccessor(
   return {
     resolve,
     async get(name: string): Promise<string | undefined> {
-      const entry = await resolve(name);
+      const row = await load(name);
+      if (!row) return undefined;
+      // An OAuth secret is brokered by definition: refusing before resolve keeps get from refreshing it.
+      if (row.oauth !== null && row.oauth !== undefined) throw new Error(BROKERED_GET_MESSAGE);
+      const entry = await entryOf(row);
       if (entry?.broker) throw new Error(BROKERED_GET_MESSAGE);
       return entry?.value;
     },

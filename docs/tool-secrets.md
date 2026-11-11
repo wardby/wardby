@@ -123,8 +123,9 @@ Provider requirements:
 
 ### Refresh, reconnect, disconnect
 
-- **Refresh is automatic.** Wardby refreshes the access token 60 seconds before
-  it expires, and once more, with a single retry of the request, when a
+- **Refresh is automatic.** Wardby refreshes the access token when the secret is
+  used within 60 seconds of its expiry or after it has expired (there is no background
+  refresher), and once more, with a single retry of the request, when a
   brokered request to the service gets a 401. Refresh tokens that rotate are
   stored as they change.
 - **When it cannot refresh.** If the provider refuses the grant or the client
@@ -359,26 +360,27 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 
 ## Errors
 
-| Code                                                                                     | Meaning                                                                    |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [`secret_brokered`](../help/errors/secret-brokered.md)                                   | A tool read a brokered secret with `secrets.get`.                          |
-| [`secret_not_brokered`](../help/errors/secret-not-brokered.md)                           | `fetch` named a secret that is not brokered or not granted to the tool.    |
-| [`secret_broker_destination_denied`](../help/errors/secret-broker-destination-denied.md) | The URL is not https, or its host, port, or path is outside the config.    |
-| [`secret_broker_conflict`](../help/errors/secret-broker-conflict.md)                     | The request sets what a broker places, or brokers collide.                 |
-| [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md)             | Body placement needs a JSON-object or form-encoded body.                   |
-| [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)           | The value is too short, or is not the JSON a SigV4 secret needs.           |
-| [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                       | A removal link was created before the broker config last changed.          |
-| [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)         | The broker config failed validation.                                       |
-| [`secret_reauth_required`](../help/errors/secret-reauth-required.md)                     | An OAuth secret must be connected again.                                   |
-| [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md)       | The service has no usable OAuth metadata.                                  |
-| [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md)                         | An OAuth secret's value or broker cannot be changed by hand.               |
-| [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md)                   | The name belongs to a secret that is not an OAuth secret.                  |
-| [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md)   | The provider needs a `clientId` you registered.                            |
-| [`secret_oauth_encryption_failed`](../help/errors/secret-oauth-encryption-failed.md)     | The OAuth secret could not be encrypted or decrypted.                      |
-| [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md) | The provider could not be reached to refresh the token.                    |
-| [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md)           | The provider did not refresh the token.                                    |
-| [`secret_in_value`](../help/errors/secret-in-value.md)                                   | A datastore or memory write contains an attached secret's value.           |
-| [`secret_check_unavailable`](../help/errors/secret-in-value.md)                          | The write or posting could not be checked because secrets were unreadable. |
+| Code                                                                                       | Meaning                                                                    |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| [`secret_brokered`](../help/errors/secret-brokered.md)                                     | A tool read a brokered secret with `secrets.get`.                          |
+| [`secret_not_brokered`](../help/errors/secret-not-brokered.md)                             | `fetch` named a secret that is not brokered or not granted to the tool.    |
+| [`secret_broker_destination_denied`](../help/errors/secret-broker-destination-denied.md)   | The URL is not https, or its host, port, or path is outside the config.    |
+| [`secret_broker_conflict`](../help/errors/secret-broker-conflict.md)                       | The request sets what a broker places, or brokers collide.                 |
+| [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md)               | Body placement needs a JSON-object or form-encoded body.                   |
+| [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)             | The value is too short, or is not the JSON a SigV4 secret needs.           |
+| [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                         | A removal link was created before the broker config last changed.          |
+| [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)           | The broker config failed validation.                                       |
+| [`secret_reauth_required`](../help/errors/secret-reauth-required.md)                       | An OAuth secret must be connected again.                                   |
+| [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md)         | The service has no usable OAuth metadata.                                  |
+| [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md)                           | An OAuth secret's value or broker cannot be changed by hand.               |
+| [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md)                     | The name belongs to a secret that is not an OAuth secret.                  |
+| [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md)     | The provider needs a `clientId` you registered.                            |
+| [`secret_oauth_encryption_failed`](../help/errors/secret-oauth-encryption-failed.md)       | The OAuth secret could not be encrypted or decrypted.                      |
+| [`secret_oauth_provider_unavailable`](../help/errors/secret-oauth-provider-unavailable.md) | The provider could not be reached while connecting.                        |
+| [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)   | The provider could not be reached to refresh the token.                    |
+| [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md)             | The provider did not refresh the token.                                    |
+| [`secret_in_value`](../help/errors/secret-in-value.md)                                     | A datastore or memory write contains an attached secret's value.           |
+| [`secret_check_unavailable`](../help/errors/secret-in-value.md)                            | The write or posting could not be checked because secrets were unreadable. |
 
 See also the short help article
 [Brokered secrets](../help/brokered-secrets.md).

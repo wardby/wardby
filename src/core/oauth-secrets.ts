@@ -58,6 +58,9 @@ export const SECRET_OAUTH_CLIENT_ID_REQUIRED =
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
 
+/** Connecting (discovery, registration, start or finish) could not reach the provider: nothing changed. */
+export const SECRET_OAUTH_PROVIDER_UNAVAILABLE =
+  "secret_oauth_provider_unavailable: the OAuth provider could not be reached; try again";
 /** A refresh the provider could not answer (network, 5xx, 429), or the store failed: nothing changed. */
 export const SECRET_OAUTH_REFRESH_UNAVAILABLE =
   "secret_oauth_refresh_unavailable: the OAuth provider could not be reached to refresh the token; try again";

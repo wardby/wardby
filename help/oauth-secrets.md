@@ -27,7 +27,7 @@ sets what every agent using the secret can do.
 
 ## Refresh, reauth and reconnecting
 
-Wardby refreshes the token before it expires and retries once on a 401. A refresh that cannot reach the provider
+Wardby refreshes the token when the secret is used within 60 seconds of its expiry (or after it), not in the background, and retries once on a 401. A refresh that cannot reach the provider
 or gets an unusable answer changes nothing; try again
 ([`secret_oauth_refresh_unavailable`](errors/secret-oauth-refresh-unavailable.md),
 [`secret_oauth_refresh_failed`](errors/secret-oauth-refresh-failed.md)). When the provider refuses the refresh
@@ -50,6 +50,8 @@ still used by an MCP server or host provider is not deleted until you update or 
   [`secret_oauth_name_taken`](errors/secret-oauth-name-taken.md).
 - A provider without usable OAuth metadata fails with
   [`secret_oauth_discovery_failed`](errors/secret-oauth-discovery-failed.md).
+- If the provider cannot be reached while you connect, you get
+  [`secret_oauth_provider_unavailable`](errors/secret-oauth-provider-unavailable.md); try again.
 - If tokens cannot be encrypted or decrypted you get
   [`secret_oauth_encryption_failed`](errors/secret-oauth-encryption-failed.md); check the secret key.
 
@@ -80,5 +82,6 @@ owner sees the specific error and can reconnect.
   [`secret_oauth_name_taken`](errors/secret-oauth-name-taken.md),
   [`secret_oauth_client_id_required`](errors/secret-oauth-client-id-required.md),
   [`secret_oauth_encryption_failed`](errors/secret-oauth-encryption-failed.md),
+  [`secret_oauth_provider_unavailable`](errors/secret-oauth-provider-unavailable.md),
   [`secret_oauth_refresh_unavailable`](errors/secret-oauth-refresh-unavailable.md),
   [`secret_oauth_refresh_failed`](errors/secret-oauth-refresh-failed.md)

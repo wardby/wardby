@@ -734,6 +734,27 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(fake.tokenRequests).toBe(2);
     });
 
+    it("get refuses a due or reauth_required OAuth secret as brokered, without any token request", async () => {
+      const { ownerId, read } = await connected("getdue", 30);
+      const agentId = `oauth-agent-${randomUUID()}`;
+      agentIds.push(agentId);
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId },
+      });
+      const secret = await read();
+      await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: "BS" } });
+      const accessor = buildSecretsAccessor(agentId, cipher, db, { options: OPTS });
+      const before = fake.tokenRequests;
+      await expect(accessor.get("BS")).rejects.toThrow("secret_brokered");
+      expect(fake.tokenRequests).toBe(before);
+      await db.secret.update({
+        where: { id: secret.id },
+        data: { oauth: { ...metaOf(secret.oauth), status: "reauth_required", reauthReason: "invalid_grant" } },
+      });
+      await expect(accessor.get("BS")).rejects.toThrow("secret_brokered");
+      expect(fake.tokenRequests).toBe(before);
+    });
+
     /** Connects `name` for an existing owner; its first access token lives `ttl` seconds. */
     async function connectAs(ownerId: string, name: string, ttl = 3600) {
       fake.accessTtlSeconds = ttl;

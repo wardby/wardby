@@ -181,7 +181,8 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
 
     const down = await call("create_secret", { name: "bs", oauth: { resource: `http://${HOST}:1/mcp` } });
     expect(down.isError).toBe(true);
-    expect(down.text).toContain("secret_oauth_refresh_unavailable");
+    expect(down.text).toContain("secret_oauth_provider_unavailable");
+    expect(down.text).not.toContain("refresh");
 
     const noPkce = await startFakeOAuthServer({ publicHost: HOST, s256: false });
     const noMeta = await call("create_secret", { name: "bs", oauth: { resource: noPkce.mcpUrl } });
@@ -197,6 +198,25 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     const taken = await call("create_secret", { name: "plain", oauth: { resource: fake.mcpUrl } });
     expect(taken.isError).toBe(true);
     expect(taken.text).toContain("secret_oauth_name_taken");
+    await close();
+  });
+
+  it("refuses a value-less create_secret on an OAuth secret's name before minting a link", async () => {
+    const p = await principal();
+    await db.secret.create({
+      data: {
+        ownerId: p.id,
+        name: "oauth-named",
+        ciphertext: await cipher.encrypt("{}"),
+        keyId: "test-key",
+        oauth: { status: "connected" },
+      },
+    });
+    const { call, close } = await connect(p);
+    const r = await call("create_secret", { name: "oauth-named" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("secret_oauth_managed");
+    expect(r.text).not.toContain("x?t=");
     await close();
   });
 });

@@ -24,6 +24,8 @@ import {
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
   SECRET_OAUTH_DISCOVERY_FAILED,
+  SECRET_OAUTH_MANAGED,
+  SECRET_OAUTH_PROVIDER_UNAVAILABLE,
   SECRET_OAUTH_REFRESH_UNAVAILABLE,
   startOAuthSecretConnect,
 } from "../../core/oauth-secrets.js";
@@ -89,7 +91,7 @@ function mapOAuthSecretError(err: unknown): never {
   }
   if (err instanceof OAuthProtocolError) {
     if (err.code === "discovery_failed") throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
-    if (err.code === "provider_unavailable") throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
+    if (err.code === "provider_unavailable") throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
     throw new McpError(502, err.message);
   }
   if (err instanceof OAuthSecretFlowError) {
@@ -103,6 +105,9 @@ function mapOAuthSecretError(err: unknown): never {
   if (message.startsWith("secret_oauth_client_id_required")) throw new McpError(400, SECRET_OAUTH_CLIENT_ID_REQUIRED);
   if (message.startsWith("secret_oauth_name_taken")) throw new McpError(409, SECRET_NOT_OAUTH);
   if (message.startsWith("secret_oauth_encryption_failed")) throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
+  if (message.startsWith("secret_oauth_provider_unavailable")) {
+    throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
+  }
   if (message.startsWith("secret_oauth_refresh_unavailable")) {
     throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
   }
@@ -278,6 +283,13 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         });
       }
       const broker = args.broker === undefined ? undefined : parseBrokerArg(args.broker);
+      if (args.value === undefined) {
+        const named = await ctx.db.secret.findUnique({
+          where: { ownerId_name: { ownerId: ctx.principal.id, name: args.name } },
+          select: { oauth: true },
+        });
+        if (named?.oauth != null) throw new McpError(409, SECRET_OAUTH_MANAGED);
+      }
       if (args.value !== undefined) {
         let secret;
         try {

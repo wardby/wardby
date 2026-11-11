@@ -18,6 +18,6 @@ A call, or a register or refresh, failed with `mcp_server_auth_failed`: the serv
 1. Check that the token behind the server's `secretNames` is current and has access to the tool.
 2. Check the secret's placement with `set_secret_broker`, for example header `Authorization` with format `Bearer {value}`.
 3. If the server's secret is an OAuth secret, connect it again: `create_secret` with `oauth` under the same name (see the secret_reauth_required error and the oauth-secrets help article).
-4. Update the secret, then `refresh_mcp_server` to confirm. Secret values are never shown in the error.
+4. For a header or token secret, update it; for an OAuth secret, connect it again with `create_secret` and `oauth` under the same name (an OAuth secret cannot be updated by hand). Then `refresh_mcp_server` to confirm. Secret values are never shown in the error.
 
 See [Remote MCP servers](../mcp-servers.md).
