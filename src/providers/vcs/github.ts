@@ -1,3 +1,4 @@
+import { testOutcomeLabel, type TestOutcome } from "../../coding/test-outcomes.js";
 import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
@@ -73,7 +74,7 @@ export interface GitHubAppConfig {
 
 export interface PullRequestTestResult {
   command: string;
-  outcome: "passed" | "failed" | "skipped";
+  outcome: TestOutcome;
 }
 
 /** One package the registry proxy served during the run (RegistryFetch outcome "served"). */
@@ -766,7 +767,11 @@ function buildPullRequestBody(input: PullRequestInput, options: { omitPackages?:
   }
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {
-    sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
+    sections.push(
+      ["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${testOutcomeLabel(test.outcome)}`)].join(
+        "\n",
+      ),
+    );
   }
   // The packages section is informational: a failure rendering it (e.g. a
   // malformed report) omits the section and never fails finalization.

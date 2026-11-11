@@ -124,6 +124,7 @@ import type {
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
+import { isTestOutcome, type TestOutcome } from "../../coding/test-outcomes.js";
 import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
 import { isIssueMentionTask } from "../../core/host-status.js";
 import {
@@ -3238,14 +3239,12 @@ function storedField(value: unknown, key: string): unknown {
 }
 
 /** Stored test results the PR body can list (command + outcome); anything else is dropped. */
-function storedTests(value: unknown): Array<{ command: string; outcome: "passed" | "failed" | "skipped" }> {
+function storedTests(value: unknown): Array<{ command: string; outcome: TestOutcome }> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((test) => {
     const command = storedField(test, "command");
     const outcome = storedField(test, "outcome");
-    return typeof command === "string" && (outcome === "passed" || outcome === "failed" || outcome === "skipped")
-      ? [{ command, outcome }]
-      : [];
+    return typeof command === "string" && isTestOutcome(outcome) ? [{ command, outcome }] : [];
   });
 }
 

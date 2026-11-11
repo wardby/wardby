@@ -134,6 +134,64 @@ describe("outcomeBody", () => {
     expect(body).not.toContain("✅");
   });
 
+  it("says how many checks failed and how many were skipped in a mixed run", () => {
+    const body = outcomeBody(run("succeeded"), REPO, [
+      pullRequestOutcome({
+        outcome: "pull_request_opened",
+        repository: REPO,
+        pullRequestNumber: 79,
+        tests: [
+          { command: "npm run typecheck", outcome: "failed" },
+          { command: "npx jest steps.test.ts (before fix)", outcome: "expected_failure" },
+          { command: "npm run export -- --platform web", outcome: "skipped" },
+          { command: "npm test", outcome: "passed" },
+        ],
+      })!,
+    ]);
+    expect(body).toMatch(/^⚠️ Opened #79, but 1 check failed and 1 skipped in the run/);
+  });
+
+  it("does not warn about test-first red runs, whether reported as expected_failure or labelled", () => {
+    const body = outcomeBody(run("succeeded"), REPO, [
+      pullRequestOutcome({
+        outcome: "pull_request_opened",
+        repository: REPO,
+        pullRequestNumber: 79,
+        tests: [
+          {
+            command: "npx jest __tests__/live/steps.test.ts (new mergeSteps identity tests, before fix)",
+            outcome: "failed",
+          },
+          { command: "npx jest __tests__/live (stepStore tests, before implementation)", outcome: "failed" },
+          { command: "npx jest -t 'inset below' (before fix, expected failure)", outcome: "failed" },
+          { command: "npx jest detail.test.tsx", outcome: "expected_failure" },
+          { command: "npm test", outcome: "passed" },
+        ],
+      })!,
+    ]);
+    expect(body).toMatch(/^✅ Opened #79\.\n/);
+    expect(body).not.toContain("failed");
+  });
+
+  it("reports skipped checks neutrally, not as failures", () => {
+    const body = outcomeBody(run("succeeded"), REPO, [
+      pullRequestOutcome({
+        outcome: "pull_request_opened",
+        repository: REPO,
+        pullRequestNumber: 74,
+        tests: [
+          { command: "npm test", outcome: "passed" },
+          { command: "npm run export -- --platform web", outcome: "skipped" },
+        ],
+      })!,
+    ]);
+    expect(body).toMatch(
+      /^✅ Opened #74\. 1 check could not be run and was skipped: see the pull request's description\./,
+    );
+    expect(body).not.toContain("⚠️");
+    expect(body).not.toContain("failed");
+  });
+
   it("shows the agent's reply, quoted and without live @-mentions, when no pull request came out", () => {
     const body = outcomeBody(run("succeeded", "Which file?\n@chfields please say"), REPO, []);
     expect(body).toMatch(/^✅ Finished without opening a pull request\./);
@@ -750,6 +808,7 @@ describe("collectRunOutcome", () => {
     } as never;
     const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
     expect(out.pullRequests[0].failedChecks).toBe(2);
+    expect(out.pullRequests[0].skippedChecks).toBe(1);
   });
 });
 

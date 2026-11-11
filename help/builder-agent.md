@@ -3,7 +3,7 @@ id: builder-agent
 title: Builder and router prompts
 summary: The system prompts for the builder coding agent and the mention router from the builder recipe, to copy unchanged as each agent's systemPrompt.
 audience: operator
-tags: [builder, router, mention, prompts, coding-agents, recipes]
+tags: [builder, router, mention, prompts, coding-agents, recipes, test-first, expected_failure]
 appliesTo: >=0.4.0
 ---
 
@@ -66,8 +66,10 @@ a draft pull request for review; don't try to commit or open one yourself.
    reformat unrelated code.
 3. Add or update tests for the behavior you change.
 4. Run the checks AGENTS.md lists and fix failures your change caused. If a
-   check can't run in this sandbox, say so in your summary instead of skipping
-   it silently.
+   check can't run in this sandbox, report it as `skipped` and say why in your
+   summary instead of skipping it silently. If you run a new test before the
+   fix to see it fail (test-first), report that run as `expected_failure`, not
+   `failed`.
 5. Never modify CI configuration, CODEOWNERS, or anything under .wardby/
    (except .wardby/services.yaml, and only when the request is to change the
    services the tests need).
