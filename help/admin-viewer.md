@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download, openapi, api contract, sign-in]
+tags: [viewer, admin, runs, desktop, infrastructure, kubernetes, download, openapi, api contract, sign-in, request]
 appliesTo: ">=0.4.0"
 ---
 
@@ -28,6 +28,8 @@ Endpoints, all `GET`:
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.
 - `/admin/api/runs/<id>`: one run in full, including its final text and error.
   From Wardby 0.9.0 it also lists the run's newest 200 steps (see `run-steps`).
+  From 0.9.6 it also returns `request`, what the run was asked to do (untrusted
+  text, secrets masked, at most 8,000 characters, with `requestTruncated`).
 - `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 

@@ -2,6 +2,8 @@
 import type { PrismaClient } from "#prisma";
 import type { RunDetail } from "./api-schema.js";
 import { loadGraphRuns, type IssueSites } from "./graph.js";
+import { requestForReader } from "../core/run-request.js";
+import { RUN_TEXT_FIRST_PAGE_CHARS, textPiece } from "../mcp/tools/run-pages.js";
 
 type CodingDetail = NonNullable<RunDetail["coding"]>;
 
@@ -22,10 +24,31 @@ function serviceDetails(snapshot: unknown): CodingDetail["services"] {
 /** The most steps a run detail carries: the newest, oldest first. */
 export const RUN_DETAIL_STEPS = 200;
 
+/** Reads an agent's secret values, to mask them in a run's request (the server's secret cipher). */
+export type RequestSecrets = Parameters<typeof requestForReader>[1];
+
+/**
+ * The run's request as a reader may see it: masked first (so a secret across the cut is masked
+ * whole), then cut to its first RUN_TEXT_FIRST_PAGE_CHARS. Null when there is none or it can't be checked.
+ */
+async function readableRequest(
+  db: PrismaClient,
+  secrets: RequestSecrets,
+  run: { id: string; agentId: string },
+  text: string | null,
+): Promise<{ request: string | null; requestTruncated: boolean }> {
+  if (!text) return { request: null, requestTruncated: false };
+  const read = await requestForReader(db, secrets, run, text);
+  if (!("request" in read)) return { request: null, requestTruncated: false };
+  const piece = textPiece(read.request, 0, RUN_TEXT_FIRST_PAGE_CHARS);
+  return { request: piece.text, requestTruncated: piece.next !== null };
+}
+
 export async function loadRunDetail(
   db: PrismaClient,
   runId: string,
   issueSites: IssueSites = {},
+  secrets?: RequestSecrets,
 ): Promise<RunDetail | null> {
   const [graphRun] = await loadGraphRuns(db, [runId], issueSites);
   if (!graphRun) return null;
@@ -33,11 +56,14 @@ export async function loadRunDetail(
     db.run.findUniqueOrThrow({
       where: { id: runId },
       select: {
+        agentId: true,
         error: true,
         finalText: true,
         stepsDropped: true,
+        taskOverride: true,
         codingRun: {
           select: {
+            request: true,
             provider: true,
             repository: true,
             baseRef: true,
@@ -75,6 +101,10 @@ export async function loadRunDetail(
       status: s.status,
     }));
   const coding = row.codingRun;
+  // A coding run's own request, else the task the run was started with (a native run's).
+  const request = secrets
+    ? await readableRequest(db, secrets, { id: runId, agentId: row.agentId }, coding?.request ?? row.taskOverride)
+    : {};
   return {
     ...graphRun,
     error: row.error,
@@ -83,6 +113,7 @@ export async function loadRunDetail(
     steps,
     stepsOmitted: Math.max(0, stepCount - newest.length),
     stepsDropped: row.stepsDropped,
+    ...request,
     coding: coding
       ? {
           provider: coding.provider,

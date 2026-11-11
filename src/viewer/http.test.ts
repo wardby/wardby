@@ -12,6 +12,8 @@ vi.mock("./graph.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./graph.js")>()),
   loadGraph: vi.fn(),
 }));
+/** The server's secret cipher, as run detail receives it to mask a run's request. */
+const SECRETS = { keyId: () => "test" };
 vi.mock("./run-detail.js", () => ({ loadRunDetail: vi.fn() }));
 import { loadGraph } from "./graph.js";
 import { loadRunDetail } from "./run-detail.js";
@@ -121,7 +123,11 @@ async function start(
 }
 
 const admin = (): McpRequestContext =>
-  ({ scopes: new Set(["admin:view"]), roles: ["admin"] }) as unknown as McpRequestContext;
+  ({
+    scopes: new Set(["admin:view"]),
+    roles: ["admin"],
+    providers: { secrets: SECRETS },
+  }) as unknown as McpRequestContext;
 
 describe("viewer api auth", () => {
   it("rejects a caller without the admin role (403) and one without the scope (403 + challenge)", async () => {
@@ -198,6 +204,8 @@ describe("viewer api validation", () => {
     expect(await unknown.json()).toEqual({ error: "not_found" });
     expect((await fetch(`${base}/admin/api/runs/..%2F`)).status).toBe(404);
     expect(loadRunDetail).toHaveBeenCalledTimes(2);
+    // The request is masked with the server's own secret cipher, from the authenticated context.
+    expect(vi.mocked(loadRunDetail).mock.calls[0][3]).toBe(SECRETS);
     const post = await fetch(`${base}/admin/api/graph`, { method: "POST" });
     expect(post.status).toBe(405);
     expect(await post.json()).toEqual({ error: "method_not_allowed" });

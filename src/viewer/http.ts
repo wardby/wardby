@@ -155,7 +155,9 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
         } catch {
           /* malformed escape: fails the id check below */
         }
-        const detail = RUN_ID.test(id) ? await loadRunDetail(deps.db, id, deps.issueSites) : null;
+        const detail = RUN_ID.test(id)
+          ? await loadRunDetail(deps.db, id, deps.issueSites, ctx.providers.secrets)
+          : null;
         if (!detail) sendJson(res, 404, { error: "not_found" });
         else sendJson(res, 200, detail);
         return true;

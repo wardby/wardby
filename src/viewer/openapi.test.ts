@@ -165,6 +165,8 @@ const DETAIL = {
   steps: [],
   stepsOmitted: 0,
   stepsDropped: 0,
+  request: "Build ticket 8 of the approved plan.",
+  requestTruncated: false,
   coding: null,
 };
 
@@ -193,7 +195,7 @@ async function start(): Promise<string> {
     authenticate: async (authorization) => {
       if (!authorization) throw unauthorized("no token", "https://host/.well-known/oauth-protected-resource");
       const scopes = authorization === "Bearer noscope" ? [] : ["admin:view"];
-      return { scopes: new Set(scopes), roles: ["admin"] } as unknown as McpRequestContext;
+      return { scopes: new Set(scopes), roles: ["admin"], providers: { secrets: {} } } as unknown as McpRequestContext;
     },
     canonicalUri: URI,
     infra: INFRA,

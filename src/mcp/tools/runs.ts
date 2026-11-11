@@ -6,11 +6,7 @@ import { McpError } from "../errors.js";
 import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
 import { loadJiraConfig } from "../../config/providers.js";
 import { findReadableRun } from "./run-access.js";
-import {
-  publicCodingRunResult,
-  redactTokenShapedValues,
-  sanitizeDependencyCacheReport,
-} from "../../coding/protocol.js";
+import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
@@ -29,12 +25,9 @@ import {
   type RunTextField,
 } from "./run-pages.js";
 import { loadBudgetEvents } from "../../core/budget-events.js";
-import { loadAgentSecretValues, maskNamedSecrets } from "../../core/secret-guard.js";
-import { logger } from "../../core/logger.js";
+import { requestForReader as readRequest } from "../../core/run-request.js";
 import { loadLastSteps } from "../../core/run-steps/last-step.js";
 import type { McpRequestContext } from "../context.js";
-
-const runsLog = logger.child({ module: "mcp-runs" });
 
 /**
  * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
@@ -50,27 +43,12 @@ function withOperatorMode<T extends { nativeExecutionMode?: NativeExecutionMode 
   return { ...run, nativeExecutionMode: mode == null ? null : mode === "sandbox" ? "sandbox" : "control-plane" };
 }
 
-/**
- * A coding run's request as its readers may see it. It can be text a caller or an issue wrote, so
- * the agent's secret values and token-shaped values are masked here on every read. A secret that
- * can't be read means the text can't be checked, so it is withheld; the log carries the error name only.
- */
-async function requestForReader(
+/** A coding run's request as get_run returns it: masked by the shared reader (core/run-request.ts). */
+const requestForReader = (
   ctx: Pick<McpRequestContext, "db" | "providers">,
   run: { id: string; agentId: string },
   request: string,
-): Promise<{ request: string } | { requestUnavailable: true }> {
-  try {
-    const named = await loadAgentSecretValues(ctx.db, ctx.providers.secrets, run.agentId);
-    return { request: redactTokenShapedValues(maskNamedSecrets(request, named)) };
-  } catch (err) {
-    runsLog.warn(
-      { runId: run.id, errorName: err instanceof Error ? err.name : typeof err },
-      "could not read the agent's secrets to check a run's request; withholding it",
-    );
-    return { requestUnavailable: true };
-  }
-}
+) => readRequest(ctx.db, ctx.providers.secrets, run, request);
 
 /** The issue-tracker sites issue links are built from (the admin viewer's own source); none when unset or invalid. */
 function issueSites(): IssueSites {
