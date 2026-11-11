@@ -1236,6 +1236,24 @@ export const register: Register = (on, options) => {
      * run in a clone of the repository. The link stays in this function: it is never drawn, stored or
      * logged, and is cut out of the command's output before that is kept.
      */
+    // The login shell's npx and PATH, read once (see continueLocally).
+    let shellNpxFound: { npx: string; path: string } | null | undefined;
+    async function shellNpx(): Promise<{ npx: string; path: string } | null> {
+      if (shellNpxFound !== undefined) return shellNpxFound;
+      const shell = (await $.env.get("SHELL")) || "/bin/zsh";
+      // Interactive and login, so version managers set up in the shell's rc files (nvm, fnm) are loaded;
+      // markers keep whatever the rc files print apart from the answer.
+      const probe = 'printf "\\n@@wardby-npx@@%s@@%s@@\\n" "$(command -v npx)" "$PATH"';
+      try {
+        const { stdout } = await $.process.run([shell, "-lic", probe], { timeoutMs: 20_000 });
+        const match = /@@wardby-npx@@([^@\n]*)@@([^@\n]*)@@/.exec(stdout);
+        shellNpxFound = match && match[1].startsWith("/") ? { npx: match[1], path: match[2] } : null;
+      } catch {
+        shellNpxFound = null;
+      }
+      return shellNpxFound;
+    }
+
     async function continueLocally(runId: string, dir: string): Promise<void> {
       await update($, resume, (): Resume => ({ runId, dir, phase: "running", output: "", command: null }));
       let url: string | null = null;
@@ -1247,11 +1265,23 @@ export const register: Register = (on, options) => {
           throw new Error(`no transcript to continue (${why})`);
         }
         url = download.url;
-        const result = await $.process.run(["npx", "-y", "@wardby/cli@latest", "resume", "-", "--print"], {
-          cwd: dir,
-          stdin: `${url}\n`,
-          timeoutMs: 5 * 60 * 1000,
-        });
+        const args = ["-y", "@wardby/cli@latest", "resume", "-", "--print"];
+        const init = { cwd: dir, stdin: `${url}\n`, timeoutMs: 5 * 60 * 1000 };
+        let result: Awaited<ReturnType<typeof $.process.run>>;
+        try {
+          result = await $.process.run(["npx", ...args], init);
+        } catch (err) {
+          // A session started outside a shell (a desktop app opened from the Dock) may have no npx on its
+          // PATH: ask the login shell where npx is, and run it with that shell's PATH (npx needs node on it).
+          if (!/ENOENT|failed to start/i.test(err instanceof Error ? err.message : "")) throw err;
+          const found = await shellNpx();
+          if (!found) {
+            throw new Error(
+              "npx was not found on this session's PATH or your login shell's: install Node.js, or start Claude Code from a terminal",
+            );
+          }
+          result = await $.process.run([found.npx, ...args], { ...init, env: { PATH: found.path } });
+        }
         const scrub = (text: string) => (url ? text.split(url).join("[link]") : text);
         const output = scrub(`${result.stdout}\n${result.stderr}`).trim().slice(-3000);
         // The printed command (`cd '<checkout>' && claude ...`) is the end of stdout; its quoted note may span lines.
