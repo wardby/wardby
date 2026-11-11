@@ -98,8 +98,12 @@ async function resolveWorkItem(
 
 export function createWorkflowEventRecorder(db: RecorderDb, enabledProviders: readonly string[]): WorkflowEventSink {
   return async (input) => {
-    // Without a chat provider only an agent's run hooks can take the event.
-    if (enabledProviders.length === 0 && !input.agentId) return;
+    // Without a chat provider only an agent's run hooks can take the event:
+    // look for them first, so an event no hook takes costs one query.
+    const noChat = enabledProviders.length === 0;
+    if (noChat && !input.agentId) return;
+    const hookIds = await matchHooks(db, input);
+    if (noChat && hookIds.length === 0) return;
     const existing = await db.workflowEvent.findUnique({
       where: { dedupeKey: input.dedupeKey },
       select: { id: true },
@@ -107,7 +111,6 @@ export function createWorkflowEventRecorder(db: RecorderDb, enabledProviders: re
     if (existing) return;
     const item = await resolveWorkItem(db, input);
     const channels = await matchChannels(db, input, item, enabledProviders);
-    const hookIds = await matchHooks(db, input);
     const threadKey = item
       ? threadKeys.issue(item.provider, item.key)
       : input.pullRequest

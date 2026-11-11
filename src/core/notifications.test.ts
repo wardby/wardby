@@ -9,10 +9,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function fakeDb(): { db: PrismaClient; findUnique: ReturnType<typeof vi.fn> } {
+function fakeDb(): { db: PrismaClient; findUnique: ReturnType<typeof vi.fn>; findHooks: ReturnType<typeof vi.fn> } {
   const findUnique = vi.fn(async () => null);
-  const db = { workflowEvent: { findUnique } } as unknown as PrismaClient;
-  return { db, findUnique };
+  const findHooks = vi.fn(async () => []);
+  const db = { workflowEvent: { findUnique }, runHook: { findMany: findHooks } } as unknown as PrismaClient;
+  return { db, findUnique, findHooks };
 }
 
 describe("installWorkflowEventRecorder", () => {
@@ -26,15 +27,16 @@ describe("installWorkflowEventRecorder", () => {
     expect(findUnique).not.toHaveBeenCalled();
   });
 
-  it("with no chat provider, still records for run hooks: an agent's event is looked up", async () => {
-    const { db, findUnique } = fakeDb();
+  it("with no chat provider, looks only for the agent's run hooks, and stops when none takes the event", async () => {
+    const { db, findUnique, findHooks } = fakeDb();
     installWorkflowEventRecorder(db, {});
     await emitWorkflowEvent({
       dedupeKey: "test:4",
       agentId: "a1",
       payload: { kind: "issue_picked_up", agentName: "a", trigger: "t" },
     });
-    expect(findUnique).toHaveBeenCalled();
+    expect(findHooks).toHaveBeenCalled();
+    expect(findUnique).not.toHaveBeenCalled();
   });
 
   it("installs the recorder sink when a chat provider is configured", async () => {
