@@ -459,3 +459,19 @@ describe("MCP error code help", () => {
     expect(searchHelp(pages, "a_b_c")[0]?.page.id).toBe("errors/a-b-c");
   });
 });
+
+describe("document edits help", () => {
+  it("is found for the tool names, the error code and the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const q of ["list_document_versions", "restore_document_version", "edits tray", "restore version"]) {
+      expect(top3(q), q).toContain("document-edits");
+    }
+    expect(searchHelp(corpus, "document_version_not_found")[0]?.page.id).toBe("errors/document-version-not-found");
+  });
+});

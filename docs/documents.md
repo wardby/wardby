@@ -7,7 +7,7 @@ guests), or with a coding agent that edits it from comments. Available in 0.10.0
 and later.
 
 This is the first phase: Markdown documents only. There is no design canvas,
-PDF/PNG export, version compare or repository export yet.
+PDF/PNG export, comparing two arbitrary versions or repository export yet.
 
 ## What you get
 
@@ -23,21 +23,25 @@ PDF/PNG export, version compare or repository export yet.
   people to mention.
 - Live updates: new comments, replies, resolved threads and new versions show
   up on every open page without a refresh.
+- An Edits tray: every version, who made it and how, the changes each one
+  made shown inline, and restore (see [Edits and restore](#edits-and-restore)).
 - Links to share a document with people who have no account.
 - Send open threads to a coding agent that edits a file in a repository.
 
 ## Tools
 
-| Tool                                                         | Scope             | Purpose                                                                     |
-| ------------------------------------------------------------ | ----------------- | --------------------------------------------------------------------------- |
-| `create_document`                                            | `documents:write` | Create a document; optionally link it to a repository file and coding agent |
-| `publish_version`                                            | `documents:write` | Publish the next version (needs `write`)                                    |
-| `get_document`                                               | `documents:read`  | Read the current or a numbered version                                      |
-| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)       |
-| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                    |
-| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                            |
-| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                             |
-| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                  |
+| Tool                                                         | Scope             | Purpose                                                                      |
+| ------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------- |
+| `create_document`                                            | `documents:write` | Create a document; optionally link it to a repository file and coding agent  |
+| `publish_version`                                            | `documents:write` | Publish the next version (needs `write`)                                     |
+| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                     |
+| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered |
+| `restore_document_version`                                   | `documents:write` | Publish an earlier version's Markdown as a new version (needs `write`)       |
+| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)        |
+| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                     |
+| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                             |
+| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                              |
+| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                   |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
 as untrusted content: agents must treat it as data, never as instructions.
@@ -117,6 +121,47 @@ balancers in front of Wardby must not buffer `text/event-stream` responses
 an idle or read timeout longer than the 15-second heartbeat (60 seconds or
 more is a safe choice).
 
+## Edits and restore
+
+The side panel of a document page has two tabs: **Comments** and **Edits**.
+The Edits tray lists every version, newest first, with who made it, how and
+when:
+
+- Saves from the browser editor by the same person, each within 5 minutes of
+  the one before, share one row ("v4–v5 · Name · 2 edits"). Versions from an
+  agent, from MCP (marked "(MCP)") and restores always have their own row.
+- An agent's version reads "Agent · via <the person who sent the threads>"
+  with a "for thread #N" link that opens that thread in the Comments tray.
+- A restore reads "Restored v3 · Name".
+
+Click a row to see that version read-only, with what it changed against the
+version before the row: added text highlighted, removed text struck through
+where it was. Changes are compared word by word on the document's text, so a
+new heading or list item shows as added text and formatting-only changes are
+not marked. Comment highlights are hidden while you look at an earlier
+version; **Back to latest** (or Esc) returns to the editor. New versions keep
+arriving in the list while you look.
+
+**Restore this version** (members with `write`) publishes that version's
+Markdown as a new version with the summary "Restored v<N>"; nothing is
+deleted, so a restore can itself be undone by restoring again. It goes through
+the same checks as any publish (size limit, redaction, comment re-anchoring),
+and is refused with `document_version_conflict` if someone published after the
+newest version your page shows. Documents the editor opens comment-only
+(images, checklists or HTML) can still be restored, because the stored
+Markdown is copied as it is. Readers and share-link guests see the tray and
+the changes, but not Restore.
+
+Over MCP, `list_document_versions` pages with `before` and `limit` (default
+50, at most 200; pass the returned `nextBefore` for older ones) and returns no
+content; read a version with `get_document` and `versionNumber`.
+`restore_document_version` takes `versionNumber` and an optional `baseNumber`
+(the latest version you saw) for the same conflict check.
+
+The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
+`GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
+with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
+
 ## Names and privacy
 
 Members appear under the display name the identity provider gives
@@ -137,8 +182,9 @@ return the path only (`path`, or `pagePath` where `path` is the repository
 file) with a note, so open it on the address that serves Wardby's pages. `permission` is `view` or `comment`;
 `expiresInDays` is 1-90 (default 14). Guests can read the current version and
 (with `comment`) start threads and reply, 30 an hour per guest; one link
-accepts 20 guest registrations an hour. They cannot edit, see older versions,
-send to an agent or share. Revoking a link signs its guests out at once;
+accepts 20 guest registrations an hour. They can open the Edits tray and see
+earlier versions and their changes, but cannot edit, restore, send to an agent
+or share. Revoking a link signs its guests out at once;
 expiring does the same on their next request.
 
 Treat the URL as a bearer secret: anyone with it has the access, and guest
@@ -211,7 +257,7 @@ any proxy log you cannot protect.
 
 Each error code has an article under `help/errors/`: `document_not_found`,
 `document_access_denied`, `document_too_large`, `document_kind_unsupported`,
-`document_version_conflict`, `document_not_agent_linked`,
+`document_version_conflict`, `document_version_not_found`, `document_not_agent_linked`,
 `document_agent_unavailable`, `document_repo_link_invalid`,
 `document_send_failed`, `document_send_not_available`,
 `document_too_large_for_agent`, `comment_anchor_invalid`, `comment_too_long`,
