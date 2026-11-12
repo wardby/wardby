@@ -207,6 +207,97 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 120_000);
 
+  it("keeps the edits to each rule of a selector the base styles twice, and Style Manager edits, across reloads", async () => {
+    const start = files();
+    // A second `.btn` rule, with the same selectors, state and media as the fixture's first one, and
+    // an edits layer (as another writer saved it) that changes the first `.btn` rule only.
+    const btn = (bg: string) =>
+      `.btn{display:inline-block;padding:12px 26px;border-radius:999px;background:${bg};color:var(--paper);text-decoration:none;font-weight:700;}`;
+    const second = ".btn{outline:3px dotted rgb(1, 2, 3);}";
+    start["boards/home.html"] = start["boards/home.html"].replace(
+      "</style>",
+      `  ${second}\n</style>\n<style data-wardby-edits>${btn("rgb(4, 5, 6)")}${second}</style>`,
+    );
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: start, access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    const sent: Record<string, string | null>[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "PUT")
+        sent.push((JSON.parse(r.postData() ?? "{}") as { files: Record<string, string | null> }).files);
+    });
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const canvas = page.frameLocator(CANVAS);
+    // Styles the element through the Style Manager (component first, so onto its id rule), then
+    // moves that style onto its class rule with the selector manager's sync button.
+    const styleClass = async (selector: string, name: string, value: string) => {
+      await canvas.locator(selector).first().click();
+      await expect.poll(() => page.locator("[data-selected]").first().textContent()).toContain(name);
+      const sector = page.locator(".gjs-sm-sector__dimension");
+      if (!(await sector.locator(".gjs-sm-property__width").isVisible()))
+        await sector.locator(".gjs-sm-sector-title").click();
+      const input = sector.locator(".gjs-sm-property__width input").first();
+      await input.fill(value);
+      await input.press("Enter");
+      await page.locator("[data-sync-style]:visible").first().click();
+    };
+    // Each `.btn` rule keeps its own edits, and the Style Manager edits are on the right elements.
+    const check = async (edited = true) => {
+      const frame = await (await page.$(CANVAS))?.contentFrame();
+      const read = (sel: string, prop: string) =>
+        frame?.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(sel)})).getPropertyValue("${prop}")`);
+      expect(await read("a.btn:not(.secondary)", "background-color")).toBe("rgb(4, 5, 6)"); // first `.btn`
+      expect(await read("a.btn:not(.secondary)", "outline-style")).toBe("dotted"); // second `.btn`
+      if (!edited) return;
+      // GrapesJS's Style Manager styles the last `.btn` rule.
+      expect(await read("a.btn:not(.secondary)", "width")).toBe("123px");
+      expect(await read("span.eyebrow", "width")).toBe("222px"); // a selector the base styles once
+    };
+    await check(false);
+    await styleClass("a.btn:not(.secondary)", "Link", "123px");
+    await styleClass("span.eyebrow", "Text", "222px");
+    await page.locator(".topbar .crumbs").click();
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    const edits = (text: string) => /<style data-wardby-edits>([\s\S]*?)<\/style>/.exec(text)?.[1] ?? "";
+    const saved = edits(sent[0]["boards/home.html"]!);
+    expect(saved).toMatch(/\.btn\{[^}]*width:123px/);
+    expect(saved).toMatch(/\.eyebrow\{[^}]*width:222px/);
+    const pick = (name: string) => page.locator(".boards li", { hasText: name }).locator(".pick");
+    const sizes: number[] = [];
+    for (let i = 1; i <= 2; i++) {
+      // Switch away and back: Home reloads from the version just saved.
+      await pick("Menu").click();
+      await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");
+      await pick("Home").click();
+      await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Home");
+      await check();
+      const h1 = canvas.locator("h1").first();
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type(` e${i}`);
+      await page.locator(".topbar .crumbs").click();
+      await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain(`v${i + 2}`);
+      const home = edits(sent[sent.length - 1]["boards/home.html"]!);
+      expect(home.match(/outline:3px dotted/g)).toHaveLength(1);
+      expect(home.match(/width:123px/g)).toHaveLength(1);
+      expect(home.match(/background:rgb\(4, 5, 6\)/g)).toHaveLength(1);
+      sizes.push(home.length);
+    }
+    expect(sent).toHaveLength(3);
+    expect(Math.abs(sizes[1] - sizes[0])).toBeLessThan(64);
+    // A fresh page load reads the last version from the server.
+    await page.reload();
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Home");
+    await check();
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 120_000);
+
   it("adds, renames, moves and deletes boards, saving the manifest", async () => {
     const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
     const context = await browser.newContext();

@@ -308,6 +308,11 @@ function mount(
   let threads: ThreadView[] = [];
   /** The fidelity pass switches boards: saves, live reloads and the boards list wait until it is done. */
   let measuring = false;
+  /** Runs a board change from a dialog once no fidelity pass is running (one can start while it is open). */
+  const afterMeasuring = (run: () => void) => {
+    if (measuring) setTimeout(() => afterMeasuring(run), 200);
+    else run();
+  };
   const closeMenus = () => {
     for (const m of Array.from(boardsList.querySelectorAll<HTMLElement>(".bmenu"))) m.hidden = true;
   };
@@ -351,7 +356,7 @@ function mount(
           menu,
           item("Rename…", () => {
             void askDialog({ title: "Rename board", value: b.name, ok: "Rename" }).then((name) => {
-              if (name) boards.renameBoard(b.id, name);
+              if (name) afterMeasuring(() => boards.renameBoard(b.id, name));
             });
           }),
           item("Move up", () => boards.moveBoard(b.id, -1), i === 0),
@@ -365,7 +370,7 @@ function mount(
                 ok: "Delete",
                 danger: true,
               }).then((ok) => {
-                if (ok) boards.deleteBoard(b.id);
+                if (ok) afterMeasuring(() => boards.deleteBoard(b.id));
               });
             },
             list.length <= 1,
@@ -399,7 +404,7 @@ function mount(
   addBoardBtn.addEventListener("click", () => {
     if (measuring) return;
     void askDialog({ title: "New board", value: "", ok: "Add board" }).then((name) => {
-      if (name) boards.addBoard(name);
+      if (name) afterMeasuring(() => boards.addBoard(name));
     });
   });
 

@@ -16,7 +16,7 @@
  * GrapesJS's HTML parser drops scripts and on* attributes too, and the page CSP lets no script run in
  * the canvas. Nothing here loads from outside the origin (no icon CDN, no canvas scripts or styles).
  */
-import grapesjs, { type Component, type Editor } from "grapesjs";
+import grapesjs, { type Component, type CssRuleJSON, type Editor, type SelectorProps } from "grapesjs";
 import parserPostCSS from "grapesjs-parser-postcss";
 import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
@@ -236,32 +236,48 @@ export function createBoardsEditor(opts: {
     st.textContent = state.parts.baseCss;
   };
 
+  /** The fields of a parsed CSS rule `setBoardStyle` reads (GrapesJS's own type resolves them to `any`). */
+  type ParsedRule = {
+    selectors?: (string | SelectorProps)[];
+    selectorsAdd?: string;
+    state?: string;
+    mediaText?: string;
+    atRuleType?: string;
+    style?: Record<string, string | string[]>;
+  };
   /**
    * Imports the base CSS, then merges the edits layer over it. The edits layer is the editor's whole
-   * CSS from the last save, so it repeats every base rule GrapesJS imported: `Css.addRules` reuses the
-   * rule with the same selectors, state and media and replaces its style, where importing the two as
-   * one stylesheet would keep both copies and the next save would write the base rules twice. At-rules
-   * with no selector (@font-face, @page) are never reused by GrapesJS, so exact repeats of those are
-   * dropped here.
+   * CSS from the last save, so it repeats every base rule GrapesJS imported, in the same order.
+   * Importing the two as one stylesheet would keep both copies, and the next save would write the
+   * base rules twice. `Css.addRules` is no fix either: it resolves every rule to ONE rule per key
+   * (selectors, state, media, at-rule type, `selectorsAdd`), the one it has cached or else the first,
+   * so for a selector the base styles twice, both edits rules land on the same rule and the other
+   * rule's edits are lost.
+   *
+   * So the edits are matched by occurrence: the nth edits rule with a key replaces the style of the
+   * nth base rule with that key, the same way for at-rules with no selector (@font-face, @page). An
+   * edits rule with no base rule left to match was added in the editor, and is appended as a new rule.
    */
   const setBoardStyle = (baseCss: string, editsCss: string | null) => {
     editor.setStyle(baseCss);
     if (!editsCss) return;
     const css = editor.Css;
-    const before = new Set(css.getAll().models);
-    const seen = new Set(
-      css
-        .getAll()
-        .models.filter((r) => r.get("singleAtRule"))
-        .map((r) => r.toCSS()),
-    );
-    for (const rule of css.addRules(editsCss)) {
-      // A base rule the edits were merged into stays.
-      if (before.has(rule) || !rule.get("singleAtRule")) continue;
-      const text = rule.toCSS();
-      if (seen.has(text)) css.remove(rule);
-      else seen.add(text);
+    const unclaimed = [...css.getAll().models];
+    const added: CssRuleJSON[] = [];
+    for (const def of editor.Parser.parseCss(editsCss) as ParsedRule[]) {
+      if (!def.selectors) continue;
+      const sels = def.selectors.map((n) => editor.Selectors.add(n));
+      const props = { selectorsAdd: def.selectorsAdd, atRuleType: def.atRuleType };
+      const at = unclaimed.findIndex((r) => r.compare(sels, def.state, def.mediaText, props));
+      if (at < 0) {
+        added.push(def as CssRuleJSON);
+        continue;
+      }
+      const [rule] = unclaimed.splice(at, 1);
+      rule?.setStyle(def.style ?? {});
     }
+    // Raw adds: `Css.addRules` would fold these into a matching rule again.
+    if (added.length) css.getAll().add(added);
   };
 
   /** Puts board `id` in the canvas: from its pending text if it has one, otherwise as stored. */
