@@ -139,11 +139,15 @@ export async function createSecret(
       }
       // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
       if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
-      return tx.secret.upsert({
+      const written = await tx.secret.upsert({
         where: { ownerId_name: { ownerId, name } },
         create: { name, ciphertext, keyId, ownerId },
         update: { ciphertext, keyId },
       });
+      // FOR UPDATE locks nothing when the row is missing: a connect may insert it after the read above.
+      // The upsert returns the row it wrote, so an OAuth row here rolls the whole write back.
+      if (written.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+      return written;
     });
   }
   return db.$transaction(async (tx) => {
@@ -160,6 +164,8 @@ export async function createSecret(
       create: { name, ciphertext, keyId, ownerId, broker },
       update: { ciphertext, keyId, broker },
     });
+    // The read above can miss a row a connect inserts before this write; roll back if it landed on one.
+    if (secret.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
     if (JSON.stringify(before) !== JSON.stringify(broker)) {
       await tx.secretBrokerChange.create({
         data: {
