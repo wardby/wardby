@@ -18,6 +18,18 @@ export function validDocumentPath(path: string): string {
   return path;
 }
 
+/** A design's repository directory: "." or safe relative segments, no trailing slash, at most 256 characters. */
+export function validDesignDir(path: string): string {
+  if (path === ".") return path;
+  if (path.length > MAX_DOCUMENT_PATH_CHARS || path.endsWith("/") || !isSafeFilePath(path)) {
+    throw new Error("document_repo_link_invalid");
+  }
+  return path;
+}
+
+/** A file inside a design directory. */
+export const designFilePath = (dir: string, file: string): string => (dir === "." ? file : `${dir}/${file}`);
+
 /** A hosted repository id (owner/name, or provider:workspace/repo), normalized; throws document_repo_link_invalid. */
 export function validDocumentRepository(repository: string): string {
   try {
