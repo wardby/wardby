@@ -19,7 +19,7 @@ import {
 import type { Anchor, ThreadView } from "./api.js";
 import type { BoardsEditor } from "./boards-editor.js";
 import { previewText } from "./comments.js";
-import { clear, h, placeAt } from "./dom.js";
+import { h, placeAt } from "./dom.js";
 import { offsetFraction, pinPoint, type DOMRectLike } from "./pins.js";
 import { quoteClipped, type AnchorSurface, type DraftStart } from "./surface.js";
 
@@ -60,6 +60,12 @@ export class DesignSurface implements AnchorSurface {
   /** Open threads on the board in the canvas whose element was not found, as of the last draw (a key). */
   private lostKey = "";
   private readonly marks: HTMLElement;
+  /**
+   * The pin elements drawn now, by thread id or "draft". A redraw moves and updates them in place
+   * rather than building new ones, so a pin stays the same element while it is shown (keyboard focus on
+   * it survives a redraw, and nothing holding it finds it detached).
+   */
+  private readonly pinEls = new Map<string, HTMLElement>();
   private readonly hint: HTMLElement;
   private readonly wiredWindows = new WeakSet<Window>();
   private readonly observed = new WeakSet<Element>();
@@ -336,12 +342,52 @@ export class DesignSurface implements AnchorSurface {
     });
   }
 
+  /** Removes the pins not drawn this time. */
+  private keepPins(drawn: ReadonlySet<string>): void {
+    for (const [id, el] of this.pinEls) {
+      if (drawn.has(id)) continue;
+      el.remove();
+      this.pinEls.delete(id);
+    }
+  }
+
+  /** Thread `t`'s pin, made the first time it is drawn and brought up to date after. */
+  private threadPin(t: ThreadView): HTMLElement {
+    let pin = this.pinEls.get(t.id);
+    if (!pin) {
+      const id = t.id;
+      pin = h("button", { type: "button", data: { threadId: id }, onClick: () => this.handlers?.activate(id) });
+      this.pinEls.set(id, pin);
+      this.marks.append(pin);
+    }
+    pin.className = `pin${t.status !== "open" ? " resolved" : ""}${this.active === t.id ? " on" : ""}`;
+    pin.title = this.preview(t.comments[0]?.body ?? "");
+    pin.setAttribute(
+      "aria-label",
+      `Thread ${t.number}, ${t.comments.length} message${t.comments.length === 1 ? "" : "s"}`,
+    );
+    const num = String(t.number);
+    if (pin.textContent !== num) pin.replaceChildren(h("span", {}, num));
+    return pin;
+  }
+
+  /** The blue + pin of the comment being written. */
+  private draftPin(): HTMLElement {
+    let pin = this.pinEls.get("draft");
+    if (!pin) {
+      pin = h("div", { class: "pin draft on", aria: { hidden: "true" }, title: "New comment" }, h("span", {}, "+"));
+      this.pinEls.set("draft", pin);
+      this.marks.append(pin);
+    }
+    return pin;
+  }
+
   private draw(): void {
-    clear(this.marks);
     this.points.clear();
     const root = this.boards.root();
     const frameEl = this.boards.editor.Canvas.getFrameEl();
     if (this.suspended || !root || !frameEl) {
+      this.keepPins(new Set());
       this.lostKey = "";
       return;
     }
@@ -380,25 +426,10 @@ export class DesignSurface implements AnchorSurface {
       const p = pinPoint(frame, el.getBoundingClientRect(), anchor.dx, anchor.dy);
       if (p.x < view.left || p.x > view.right || p.y < view.top || p.y > view.bottom) continue;
       this.points.set(id, p);
-      const pin = t
-        ? h(
-            "button",
-            {
-              type: "button",
-              class: `pin${t.status !== "open" ? " resolved" : ""}${this.active === id ? " on" : ""}`,
-              title: this.preview(t.comments[0]?.body ?? ""),
-              aria: {
-                label: `Thread ${t.number}, ${t.comments.length} message${t.comments.length === 1 ? "" : "s"}`,
-              },
-              data: { threadId: id },
-              onClick: () => this.handlers?.activate(id),
-            },
-            h("span", {}, String(t.number)),
-          )
-        : h("div", { class: "pin draft on", aria: { hidden: "true" }, title: "New comment" }, h("span", {}, "+"));
+      const pin = t ? this.threadPin(t) : this.draftPin();
       placeAt(pin, p.x - layer.left, p.y - layer.top);
-      this.marks.append(pin);
     }
+    this.keepPins(new Set(this.points.keys()));
     this.lostKey = `${board}:${lost.join(",")}`;
   }
 }

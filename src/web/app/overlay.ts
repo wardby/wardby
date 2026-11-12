@@ -18,13 +18,19 @@ export function openOverlay(
     className: string;
     label: string;
     /** Cut every other key off from the page (default). A layer beside live controls sets false. */ swallowKeys?: boolean;
+    /**
+     * "dialog" (default): a modal layer over the whole page. "region": a layer over part of a page whose
+     * other controls stay usable (not modal).
+     */
+    role?: "dialog" | "region";
   },
   onEscape: () => void,
 ): Overlay {
+  const region = opts.role === "region";
   const el = h("div", {
     class: `overlay ${opts.className}`,
-    role: "dialog",
-    aria: { modal: "true", label: opts.label },
+    role: region ? "region" : "dialog",
+    aria: region ? { label: opts.label } : { modal: "true", label: opts.label },
   });
   const trap = (e: KeyboardEvent) => {
     if (e.key === "Escape") {

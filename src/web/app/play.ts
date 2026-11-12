@@ -50,8 +50,17 @@ export function openPlay(root: HTMLElement, frames: FrameBoard[], startId: strin
   };
   overlay = openOverlay(root, { className: "play", label: "Play" }, close);
 
-  const frame = h("iframe", { class: "play-frame" });
-  frame.setAttribute("sandbox", "allow-top-navigation-by-user-activation");
+  /**
+   * A new frame for each board shown: changing a loaded frame's srcdoc is a navigation the browser
+   * keeps in the page's history (Back would step through boards), while a new frame's first load is not.
+   */
+  const newFrame = () => {
+    const f = h("iframe", { class: "play-frame" });
+    f.setAttribute("sandbox", "allow-top-navigation-by-user-activation");
+    return f;
+  };
+  let frame = newFrame();
+  let shown = "";
   const stage = h("div", { class: "play-stage" }, frame);
   const bar = h("div", { class: "play-bar", tabIndex: -1, role: "toolbar", aria: { label: "Play" } });
   const boardBtns = new Map<string, HTMLButtonElement>();
@@ -63,9 +72,13 @@ export function openPlay(root: HTMLElement, frames: FrameBoard[], startId: strin
 
   const render = () => {
     const board = byId.get(current());
-    if (board) {
-      frame.title = board.name;
-      frame.srcdoc = board.html;
+    if (board && board.id !== shown) {
+      const next = newFrame();
+      next.title = board.name;
+      next.srcdoc = board.html;
+      frame.replaceWith(next);
+      frame = next;
+      shown = board.id;
     }
     frame.style.width = `${device === "Desktop" ? (board?.width ?? 1280) : WIDTHS[device]}px`;
     for (const [id, btn] of boardBtns) {
@@ -86,6 +99,15 @@ export function openPlay(root: HTMLElement, frames: FrameBoard[], startId: strin
     render();
   };
 
+  /** A board button: the same step as a board link, but the fragment is replaced (no history entry). */
+  const go = (id: string) => {
+    const next = nextPlayState(state, `#board-${id}`, ids);
+    if (next === state) return;
+    state = next;
+    setHash(`#board-${id}`);
+    render();
+  };
+
   const onHash = () => {
     const next = nextPlayState(state, location.hash, ids);
     if (next === state) return;
@@ -95,11 +117,7 @@ export function openPlay(root: HTMLElement, frames: FrameBoard[], startId: strin
   addEventListener("hashchange", onHash);
 
   for (const f of frames) {
-    const btn = h(
-      "button",
-      { type: "button", data: { board: f.id }, onClick: () => (location.hash = `#board-${f.id}`) },
-      f.name,
-    );
+    const btn = h("button", { type: "button", data: { board: f.id }, onClick: () => go(f.id) }, f.name);
     boardBtns.set(f.id, btn);
   }
   for (const d of ["Desktop", "Tablet", "Phone"] as const) {

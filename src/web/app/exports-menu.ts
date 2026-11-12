@@ -68,8 +68,8 @@ export function pdfExportButton(button: HTMLButtonElement, note: HTMLElement, ap
 }
 
 /**
- * The design page's Export menu on `button`. `ctx` is read when an item is chosen: the board in the
- * canvas and the version shown. `canRender` false (no renderer on this server) keeps the PNG and PDF
+ * The design page's Export menu on `button`. `ctx` is read when an item is chosen: the board and the
+ * version shown (an older version while one is being viewed). `canRender` false (no renderer on this server) keeps the PNG and PDF
  * entries but answers them with the fixed "isn't set up" text, with no request.
  */
 export function exportsMenu(
@@ -138,10 +138,17 @@ export function exportsMenu(
     const t = e.target as Node;
     if (!menu.hidden && !menu.contains(t) && !button.contains(t)) hide();
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !menu.hidden) {
+  // Escape closes the menu and nothing else: captured, and registered when the page starts, so it runs
+  // before any layer opened later (an older version's view) and stops the key there.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || menu.hidden) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
       hide();
       button.focus();
-    }
-  });
+    },
+    true,
+  );
 }

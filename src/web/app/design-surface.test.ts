@@ -27,7 +27,7 @@ const thread = (id: string, a: ElementAnchor): ThreadView => ({
 });
 
 /** A BoardsEditor stand-in: the board in the canvas, its root element, and no canvas frame. */
-function setup(root: HTMLElement | null = null) {
+function setup(root: HTMLElement | null = null, frameEl: HTMLElement | null = null) {
   document.body.replaceChildren();
   let current = "home";
   const boards = {
@@ -37,7 +37,7 @@ function setup(root: HTMLElement | null = null) {
     }),
     root: () => root,
     canvasWindow: () => null,
-    editor: { Canvas: { getFrameEl: () => null } },
+    editor: { Canvas: { getFrameEl: () => frameEl } },
   } as unknown as BoardsEditor;
   const els = {
     pins: document.body.appendChild(document.createElement("div")),
@@ -90,6 +90,24 @@ describe("DesignSurface", () => {
     expect(loaded.surface.located("1")).toBe(true);
     expect(loaded.surface.located("2")).toBe(false);
     expect(loaded.surface.located("3")).toBe(true); // another board: the thread's status decides
+  });
+
+  it("keeps a pin the same element across redraws, updating it in place", () => {
+    const root = document.createElement("div");
+    root.innerHTML = "<h1>A short list, made well.</h1>";
+    const { surface } = setup(root, document.createElement("iframe"));
+    const t = thread("1", anchor("home"));
+    surface.mark({ threads: [t], draft: null, active: null });
+    const pin = document.querySelector<HTMLElement>(".pin")!;
+    expect(pin.textContent).toBe("1");
+    expect(pin.classList.contains("on")).toBe(false);
+    surface.mark({ threads: [t], draft: null, active: "1" });
+    expect(document.querySelectorAll(".pin")).toHaveLength(1);
+    expect(document.querySelector(".pin")).toBe(pin);
+    expect(pin.classList.contains("on")).toBe(true);
+    surface.mark({ threads: [], draft: null, active: null });
+    expect(document.querySelectorAll(".pin")).toHaveLength(0);
+    expect(pin.isConnected).toBe(false);
   });
 
   it("cuts only the words of a label, so the board name always shows", () => {

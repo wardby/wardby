@@ -628,6 +628,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.keyboard.type(" (edited)");
     await page.locator(".topbar .crumbs").click();
     await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    // A selected element, so the Style and Settings panes have something to edit.
+    await h1.click();
+    await expect.poll(() => page.frameLocator(CANVAS).locator(".gjs-selected").count()).toBe(1);
     await page.locator("[data-tab=history]").click();
     await expect.poll(() => page.locator(".tp-row").count()).toBe(2);
     expect(await page.locator(".tp-row").first().textContent()).toContain("latest");
@@ -635,12 +638,40 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.locator('.tp-row[data-version="1"]').click();
     const view = page.locator(".overlay.version-view");
     await expect.poll(() => view.isVisible()).toBe(true);
+    // A layer over the canvas beside a usable sidebar: a labelled region, not a modal dialog.
+    expect(await view.getAttribute("role")).toBe("region");
+    expect(await view.getAttribute("aria-modal")).toBeNull();
+    expect(await view.getAttribute("aria-label")).toBe("Version 1");
     expect(await view.locator("iframe").getAttribute("sandbox")).toBe("");
     expect(await view.locator(".vv-boards button").count()).toBe(4);
     await expect.poll(() => view.frameLocator("iframe").locator("h1").first().textContent()).toBe(original);
     expect(await view.textContent()).toContain("Viewing v1");
+    // Nothing is selected, and the Style and Settings panes cannot be used: an attempt saves nothing.
+    expect(await page.frameLocator(CANVAS).locator(".gjs-selected").count()).toBe(0);
+    // The pane that goes with a tab (same order in the right sidebar).
+    const inert = (tab: string) =>
+      page.evaluate<boolean>(`(() => {
+        const tabs = [...document.querySelectorAll(".dside.right [role=tab]")];
+        const i = tabs.indexOf(document.querySelector("[data-tab=${tab}]"));
+        return document.querySelectorAll(".dside.right .tabpane")[i].inert;
+      })()`);
+    expect(await inert("style")).toBe(true);
+    expect(await inert("settings")).toBe(true);
+    expect(await inert("comments")).toBe(false);
+    expect(await inert("history")).toBe(false);
+    const putsBefore = seen.puts.length;
+    await page.locator("[data-tab=style]").click();
+    const stylePane = (await page.locator(".dside.right .gjs-host.styles").boundingBox())!;
+    await page.mouse.click(stylePane.x + 20, stylePane.y + 20);
+    await page.keyboard.type("40px");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(2500); // past the 1.5 s save delay
+    expect(seen.puts.length).toBe(putsBefore);
+    await page.locator("[data-tab=history]").click();
     await page.keyboard.press("Escape");
     await expect.poll(() => view.count()).toBe(0);
+    expect(await inert("style")).toBe(false);
+    expect(await inert("settings")).toBe(false);
     // Restore creates v3, "Restored v1", and the editor shows it.
     await page.locator('.tp-row[data-version="1"]').click();
     await page.getByRole("button", { name: "Restore this version" }).click();
@@ -753,6 +784,14 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.getByRole("button", { name: "Back", exact: true }).click();
       await expect.poll(() => frame.locator("h1").first().textContent()).toContain("Good coffee");
       expect(await page.evaluate<string>("location.hash")).toBe("#board-home");
+      // The bar's board buttons replace the fragment: no new history entry.
+      const entries = await page.evaluate<number>("history.length");
+      await page.locator(".play-bar [data-board=about]").click();
+      await expect.poll(() => frame.locator("h1").first().textContent()).toContain("Named after a plant");
+      expect(await page.evaluate<string>("location.hash")).toBe("#board-about");
+      expect(await page.evaluate<number>("history.length")).toBe(entries);
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await expect.poll(() => frame.locator("h1").first().textContent()).toContain("Good coffee");
       await page.locator("[data-device=Phone]").click();
       await expect.poll(async () => Math.round((await frameEl.boundingBox())!.width)).toBe(390);
       // Esc with focus on the bar closes Play and puts the page's fragment back.
@@ -784,6 +823,44 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect((await choose("Whole prototype (HTML)")).suggestedFilename()).toBe("coffee-prototype.html");
       expect((await choose("This board (PNG)")).suggestedFilename()).toBe("coffee-home.png");
       expect((await choose("All boards (PDF)")).suggestedFilename()).toBe("coffee-boards.pdf");
+      expect(seen.violations).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      await context.close();
+    }, 90_000);
+
+    it("exports the older version on screen, opens no Overview or Play over it, and Esc closes one layer at a time", async () => {
+      const { page, context, seen } = await open(server);
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      const original = (await h1.textContent())!;
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" (edited)");
+      await page.locator(".topbar .crumbs").click();
+      await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+      await page.locator("[data-tab=history]").click();
+      await page.locator('.tp-row[data-version="1"]').click();
+      const view = page.locator(".overlay.version-view");
+      await expect.poll(() => view.isVisible()).toBe(true);
+      // Overview and Play do not open over an older version.
+      for (const action of ["overview", "play"]) {
+        await page.locator(`[data-action=${action}]`).click();
+        await page.waitForTimeout(300);
+        expect(await page.locator(".overlay.overview, .overlay.play").count()).toBe(0);
+      }
+      // Export takes the version shown (v1), not the latest (v2).
+      await page.locator("[data-action=export]").click();
+      const download = page.waitForEvent("download", { timeout: 20_000 });
+      await page.getByRole("menuitem", { name: "This board (HTML)" }).click();
+      const html = readFileSync(await (await download).path(), "utf8");
+      expect(html).toContain(original);
+      expect(html).not.toContain("(edited)");
+      // Esc closes the open menu only (it stays open after a choice); the next Esc leaves the older version.
+      expect(await page.locator(".exp-menu").isVisible()).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect.poll(() => page.locator(".exp-menu").isVisible()).toBe(false);
+      expect(await view.count()).toBe(1);
+      await page.keyboard.press("Escape");
+      await expect.poll(() => view.count()).toBe(0);
       expect(seen.violations).toEqual([]);
       expect(seen.errors).toEqual([]);
       await context.close();

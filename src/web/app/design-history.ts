@@ -55,6 +55,11 @@ export class DesignHistory {
     return this.viewing !== null;
   }
 
+  /** The older version shown and its board on screen, or null when the page shows the latest. */
+  viewed(): { board: string; version: number } | null {
+    return this.viewing ? { board: this.viewing.board, version: this.viewing.number } : null;
+  }
+
   /** Loads the first page the first time the tab is opened. */
   async open(): Promise<void> {
     if (!this.loaded && !this.loading) await this.fetchFirst();
@@ -184,7 +189,7 @@ export class DesignHistory {
     const root = this.host.stage;
     const overlay = openOverlay(
       root,
-      { className: "version-view", label: `Version ${number}`, swallowKeys: false },
+      { className: "version-view", label: `Version ${number}`, swallowKeys: false, role: "region" },
       () => this.escape(),
     );
     const bar = h("div", { class: "vbar", role: "region", aria: { label: "Version" } });

@@ -482,8 +482,12 @@ function mount(
     onViewing: (viewing) => {
       // The editor stays as it is under the older version; it cannot be reached, and comments wait.
       comments.suspend(viewing);
+      // Nothing stays selected, and the Style and Settings panes cannot edit it (Comments and History stay live).
+      if (viewing) boards.editor.select();
       canvasEl.inert = viewing;
       leftSide.inert = viewing;
+      panes.style.inert = viewing;
+      panes.settings.inert = viewing;
       undoBtn.disabled = viewing;
       redoBtn.disabled = viewing;
       if (viewing) (document.activeElement as HTMLElement | null)?.blur();
@@ -689,7 +693,8 @@ function mount(
   let opening = false;
   /** One overlay at a time; the board frames come from the server for the version shown. */
   const openFrames = async (mode: "play" | "overview", open: (frames: FrameBoard[]) => void) => {
-    if (opening || root.querySelector(":scope > .overlay")) return;
+    // Not over an older version either: one layer at a time, so Esc closes just one.
+    if (opening || designHistory.isViewing || root.querySelector(":scope > .overlay")) return;
     opening = true;
     try {
       await flushSave();
@@ -715,7 +720,7 @@ function mount(
   exportsMenu(
     exportBtn,
     api,
-    () => ({ board: boards.currentBoard(), version: baseNumber }),
+    () => designHistory.viewed() ?? { board: boards.currentBoard(), version: baseNumber },
     payload.document.canRender === true,
   );
 
