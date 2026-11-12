@@ -259,6 +259,12 @@ describe("core/webhooks", () => {
       code: "invalid_repositories",
     });
     await expect(fire(["base"])).resolves.toEqual({ ok: false, reason: "repository_ref_unreadable" });
+    // A deployment whose executor cannot resolve extra repositories refuses the same way.
+    await expect(resolveWebhookRun(id, secret, db, executor, undefined, { repositories: ["base"] })).resolves.toEqual({
+      ok: false,
+      reason: "invalid_repositories",
+      code: "coding_repositories_unsupported",
+    });
 
     const native = fakeDb([{ id: "n1", name: "n", kind: "native" }]);
     const hook = await createWebhook("n1", "p1", native);

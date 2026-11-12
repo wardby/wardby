@@ -16,7 +16,8 @@ export const CODING_SET_LINK_FILTER = {
   ],
 } as const satisfies Prisma.AgentRepositoryWhereInput;
 
-export type RepositorySetRefusalCode = "repository_not_listed" | "repository_set_too_large" | "invalid_repositories";
+export type RepositorySetRefusalCode =
+  "repository_not_listed" | "repository_set_too_large" | "invalid_repositories" | "coding_repositories_unsupported";
 export class RepositorySetRefusedError extends Error {
   constructor(
     readonly code: RepositorySetRefusalCode,

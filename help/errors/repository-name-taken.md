@@ -13,7 +13,8 @@ A coding agent's links each have a `name`, the folder a repository gets under
 `/repos/` and the way `repositories` lists refer to it. Names are unique per
 agent. `repository_name_taken` means `link_repository` named, or defaulted to
 (the repository's short name in lower case), a name another link of the agent
-already uses. The same repository may be linked twice under different names.
+already uses. The same repository may be linked more than once under different
+names only as read links; a second write link to one repository is refused.
 Nothing is linked, and Wardby never adds a suffix on its own.
 
 ## What to do

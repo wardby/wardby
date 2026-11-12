@@ -651,6 +651,22 @@ describe("trigger_agent", () => {
           await client.close();
         });
 
+        it("maps a deployment that cannot resolve extras to a 400 coding_repositories_unsupported", async () => {
+          const { db, executor, client } = await withReadLink();
+          const bare = executor as Partial<typeof executor>;
+          delete bare.authorizeCodingRepository;
+          delete bare.readCodingRepositoryFile;
+          delete bare.resolveCodingRepositoryRef;
+          const result = await call(client, { repositories: ["base"] });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain(
+            "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+          );
+          expect(JSON.stringify(result)).not.toMatch(/internal/i);
+          expect(db.runs.size).toBe(0);
+          await client.close();
+        });
+
         it("a non-owner may pass repositories only when the owner opted in", async () => {
           const closed = await withReadLink("g", coding(false), [grant("execute")]);
           const refused = await call(closed.client, { repositories: ["base"] });

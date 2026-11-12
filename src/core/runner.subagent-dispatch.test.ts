@@ -2865,6 +2865,8 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     edges?: FakeEdge[];
     codingRuns?: Record<string, any>[];
     grants?: FakeGrantSeed[];
+    /** An executor without the extra-repository methods (a deployment that cannot resolve them). */
+    noExtraRepositories?: boolean;
   }) {
     const db = fakeDb(
       options.agents ?? [leadAgent(), fixerAgent()],
@@ -2877,6 +2879,12 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     );
     const parentRun = await db.run.create({ data: { agentId: "lead" } });
     const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+    if (options.noExtraRepositories) {
+      const bare = executor as Partial<typeof executor>;
+      delete bare.authorizeCodingRepository;
+      delete bare.readCodingRepositoryFile;
+      delete bare.resolveCodingRepositoryRef;
+    }
     const llm = scriptedLlm([
       ...options.calls.map((args) => toolCall("delegate_to_fixer", args)),
       finalAnswer("reported"),
@@ -3136,6 +3144,21 @@ describe("delegating to a coding sub-agent with a repository list", () => {
           error: "repository_not_listed",
           message:
             "repository_not_listed: name one of this coding agent's repository links: base, service-a, service-b.",
+        }),
+      );
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
+
+    it("returns coding_repositories_unsupported to the model when the executor cannot resolve extras", async () => {
+      const { db, parentRun, results } = await runLead({
+        calls: [fix(SERVICE_A, { repositories: ["base"] })],
+        links: withReadLink(),
+        noExtraRepositories: true,
+      });
+      expect(results[0]).toContain(
+        JSON.stringify({
+          error: "coding_repositories_unsupported",
+          message: "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
         }),
       );
       expect(await childrenOf(db, parentRun.id)).toEqual([]);

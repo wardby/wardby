@@ -798,7 +798,7 @@ export async function authorizeRunRepositories(
   rows: readonly Pick<PlannedRunRepository, "linkId" | "provider" | "repository" | "access">[],
 ): Promise<string | undefined> {
   if (rows.length === 0) return undefined;
-  if (!executor.authorizeCodingRepository) throw new Error(CODING_REPOSITORIES_UNSUPPORTED);
+  if (!executor.authorizeCodingRepository) throw codingRepositoriesUnsupported();
   const linkIds = rows.flatMap((r) => (r.linkId === null ? [] : [r.linkId]));
   const links = await reader.agentRepository.findMany({
     where: { agentId, id: { in: linkIds } },
@@ -820,8 +820,13 @@ export async function authorizeRunRepositories(
   return undefined;
 }
 
-const CODING_REPOSITORIES_UNSUPPORTED =
-  "coding_repositories_unsupported: this deployment cannot resolve extra repositories.";
+/** A deployment whose executor cannot authorize or resolve extra repositories: a set refusal, so every entry point maps it. */
+function codingRepositoriesUnsupported(): RepositorySetRefusedError {
+  return new RepositorySetRefusedError(
+    "coding_repositories_unsupported",
+    "this deployment cannot resolve extra repositories.",
+  );
+}
 
 /** Resolves a plan's refs with the executor; throws coding_repositories_unsupported without its methods. */
 export function resolveExtrasWith(
@@ -832,7 +837,7 @@ export function resolveExtrasWith(
   if (plan.length === 0) return Promise.resolve([]);
   const readFile = executor.readCodingRepositoryFile?.bind(executor);
   const resolveRef = executor.resolveCodingRepositoryRef?.bind(executor);
-  if (!readFile || !resolveRef) throw new Error(CODING_REPOSITORIES_UNSUPPORTED);
+  if (!readFile || !resolveRef) throw codingRepositoriesUnsupported();
   return resolveRepositorySetRefs(plan, { workspace, readFile, resolveRef });
 }
 

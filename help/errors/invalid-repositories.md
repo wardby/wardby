@@ -23,7 +23,9 @@ repository paths. It is refused when:
 A webhook gets a 400 `{ "error": "invalid_repositories" }`. When the list was
 well formed but its content refused, the body also carries
 `error_description`: `repository_not_listed` (a name that is not a link of the
-agent that can be in a set) or `repository_set_too_large`. A webhook may carry
+agent that can be in a set), `repository_set_too_large`, or
+`coding_repositories_unsupported` (this deployment's executor cannot resolve
+extra repositories). A webhook may carry
 the list only when `codingProfile.allowWebhookTaskOverride` is on; with it off
 a well-formed list is refused with 403 `{ "error": "disabled" }`. Likewise,
 `trigger_agent` accepts `repositories` from anyone but the owner only with

@@ -606,54 +606,58 @@ needs Wardby 0.10.0 or later. The run holds three copies of code:
 | `/repos/upstream` | `upstream-org/upstream` at its `main`              | read-only |
 
 The fork keeps a one-line marker file at its root, `upstream-sync`, holding the
-upstream commit the fork was last synced to (a 40-hex SHA, or a tag). The sync never
+upstream commit the fork was last synced to: a full 40-hex commit SHA (or a
+release tag that never moves), never a branch. The sync never
 needs history: it merges each changed file three ways from the fork's version,
 the last-synced version and the new upstream version, then moves the marker.
 
 1. **The agent.** A coding agent with `codingProfile.repository` set to
    `your-org/your-fork` and a `defaultTask` (needed to schedule it).
-2. **Two read links to the same upstream repository** under different names, both in the default set:
+2. **Two read links to the same upstream repository** under different names,
+   both in the default set:
 
-```json
-{
-  "agentId": "<agent id>",
-  "repository": "upstream-org/upstream",
-  "access": "read",
-  "name": "base",
-  "ref": { "fromFile": "upstream-sync" },
-  "inDefaultSet": true
-}
-```
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "base",
+     "ref": { "fromFile": "upstream-sync" },
+     "inDefaultSet": true
+   }
+   ```
 
-```json
-{
-  "agentId": "<agent id>",
-  "repository": "upstream-org/upstream",
-  "access": "read",
-  "name": "upstream",
-  "ref": "main",
-  "inDefaultSet": true
-}
-```
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "upstream",
+     "ref": "main",
+     "inDefaultSet": true
+   }
+   ```
 
-`base` reads its commit from the fork's `upstream-sync` file at dispatch, so
-it follows the marker with no change to the agent. The first time, create
-the marker in the fork with the commit your fork currently matches. If the
-file is missing or does not hold a valid commit, the run is refused with
-`repository_ref_unreadable` and nothing starts. 3. **The task** (`defaultTask`), in your own words, says:
+   `base` reads its commit from the fork's `upstream-sync` file at dispatch, so
+   it follows the marker with no change to the agent. The first time, create
+   the marker in the fork with the commit your fork currently matches. If the
+   file is missing or does not hold a valid commit, the run is refused with
+   `repository_ref_unreadable` and nothing starts.
 
-- compare `/repos/base` with `/repos/upstream` and list the files that
-  changed upstream;
-- for each, merge it three ways into the fork's file at `/workspace`;
-- resolve every conflict by reading both sides, never leaving conflict
-  markers;
-- write the upstream ref the sync reached into `upstream-sync` as a single
-  line (a 40-hex commit SHA, a tag or a branch; the marker is read as a read
-  link's ref). The run lists each folder with only the first seven
-  characters of its commit and has no git history, so the task must say
-  where the agent gets the full value: a release tag, or a tool that asks
-  the host for the upstream tip;
-- run the fork's tests.
+3. **The task** (`defaultTask`), in your own words, says:
+   - compare `/repos/base` with `/repos/upstream` and list the files that
+     changed upstream;
+   - for each, merge it three ways into the fork's file at `/workspace`;
+   - resolve every conflict by reading both sides, never leaving conflict
+     markers;
+   - write `upstream`'s full commit SHA into `upstream-sync` as a single line.
+     The run's task text carries one line per extra repository, giving its
+     folder, repository, full 40-hex commit and access (for example
+     `Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`);
+     the agent copies the value from there. Never write a branch name such as
+     `main`: the next run would then read `base` at the same commit as
+     `upstream`, see no changes, and the fork would silently stop syncing;
+   - run the fork's tests.
 
 4. **The merge command depends on the coding provider.** On Codex, use
    `git merge-file <fork file> <base file> <upstream file>`, which writes the

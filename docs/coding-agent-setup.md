@@ -77,11 +77,14 @@ read-only, each in its own folder under `/repos/<name>`. Its list comes from
 its links:
 
 - `codingProfile.repository` is the **default** repository.
-- `link_repository` adds more. A link on a coding agent takes
-  `access: "write"`, no triggers, no `checkName` and an optional `baseRef`
-  (the base branch for runs in that repository; default: the profile's
-  `baseRef`). The repository must be on GitHub or a `local:` path. Linking the
-  default repository again is refused.
+- `link_repository` adds more. A link on a coding agent takes no triggers and
+  no `checkName`, and either `access: "write"` with an optional `baseRef` (the
+  base branch for runs in that repository; default: the profile's `baseRef`),
+  or `access: "read"` with a required `ref` (or `ref: { fromFile }`) and no
+  `baseRef`. Either can also take `name` and `inDefaultSet`; see
+  [Several repositories in one run](#several-repositories-in-one-run). The
+  repository must be on GitHub or a `local:` path. Linking the default
+  repository again as a write link is refused.
 - `unlink_repository` removes one.
 
 ```json
@@ -143,7 +146,11 @@ and [Repository not on the agent's list](../help/errors/repository-not-listed.md
 
 A run always has its default repository at `/workspace`. Each extra repository
 is a link on the agent and appears in the run at `/repos/<name>`. Extras are
-**writable** (a write link) or **read-only** (a read link).
+**writable** (a write link) or **read-only** (a read link). No folder has git
+metadata, so the run's task text carries one line per extra with its folder,
+repository, full commit and access, for example
+`Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`
+A run with only its default repository gets no such lines.
 
 **Read links.** `link_repository` with `access: "read"` adds a repository the
 run can look at but never change:
@@ -176,8 +183,10 @@ run can look at but never change:
 **`name`.** The folder name under `/repos/` and the way the run, `trigger_agent`
 and delegation refer to the link. It matches `[a-z0-9][a-z0-9._-]{0,62}` and is
 not `workspace`. The default is the repository's short name in lower case
-(`your-org/api` is `api`). Names are unique per agent, and the same repository
-can be linked twice under two names. A name already used by another link is
+(`your-org/api` is `api`). Names are unique per agent. The same repository
+can be linked more than once under different names only as read links: an
+agent has at most one write link per repository, and a second is refused. A
+name already used by another link is
 refused with `repository_name_taken`, and a name (or default name) that does
 not fit the format with `repository_name_invalid`; pass an explicit `name` in
 either case. See [Repository name taken](../help/errors/repository-name-taken.md)
@@ -205,8 +214,10 @@ the default set for that run (`[]` means the default repository only):
 - A webhook body can carry `wardbyRepositories` (up to 32 names) under the same
   `allowWebhookTaskOverride` rule as `wardbyRepository`. A refusal is a 400
   with `{ "error": "invalid_repositories" }`, and for a name or size refusal
-  also `"error_description"` (`repository_not_listed` or
-  `repository_set_too_large`); an unreadable ref is a 400
+  also `"error_description"` (`repository_not_listed`,
+  `repository_set_too_large`, or `coding_repositories_unsupported` when this
+  deployment's executor cannot resolve extra repositories); an unreadable ref
+  is a 400
   `{ "error": "repository_ref_unreadable" }`.
 - A lead's `delegate_to_<name>` call takes `repositories` when the sub-agent
   has any set-eligible link. A set or ref refusal comes back to the lead as

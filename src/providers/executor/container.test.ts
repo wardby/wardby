@@ -5653,6 +5653,73 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     expect("repositories" in (JSON.parse(text) as object)).toBe(false);
   });
 
+  describe("the task text names each extra's full commit", () => {
+    const taskOf = (text: string) => (JSON.parse(text) as { task: string }).task;
+    const extraLines = [
+      `Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`,
+      `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable.`,
+    ].join("\n");
+
+    it.each([
+      ["codex", {}, undefined],
+      [
+        "claude-code",
+        { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      ],
+    ])("for a %s run", async (_label, run, claude) => {
+      const created = await harness(
+        { ...run, repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        claude,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("for a continuation", async () => {
+      const created = await harness(
+        {
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+          repositories: [
+            readRow("base", { position: 1 }),
+            writeRow("tools", { position: 2, headRef: "wardby/run-root-run", continuesBranch: true }),
+          ],
+        },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("leaves a single-repository run's task text unchanged", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).not.toContain("Extra repository");
+      expect(taskOf(text)).toBe(
+        `${created.store.run.task}\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+      );
+    });
+  });
+
   it("gives a job without extras no repositories key at all", async () => {
     const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
     await created.executor.start("run-1");

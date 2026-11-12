@@ -11,19 +11,29 @@ appliesTo: ">=0.10.0"
 
 `coding_repositories_unsupported` means the run's set holds extra repositories
 (a default set, or a `repositories` list) but this deployment's executor cannot
-read a file or resolve a ref in a repository, which dispatch needs to pin each
-extra to a commit. It is raised at dispatch and no run is started. Runs with
-only the default repository are not affected.
+check access to another repository, read a file in it, or resolve its ref.
+Dispatch needs all three to authorize each extra and pin it to a commit. It is
+raised at dispatch and no run is started. Runs with only the default repository
+are not affected.
 
 It points to an executor that does not implement multiple repositories, such as
 a custom or older one behind the executor seam.
 
+Callers see it like the other repository-set refusals:
+
+- `trigger_agent` returns a 400 error with the message
+  `coding_repositories_unsupported: this deployment cannot resolve extra repositories.`
+- A webhook gets a 400 `{ "error": "invalid_repositories" }` with
+  `"error_description": "coding_repositories_unsupported"`.
+- A lead's `delegate_to_<name>` call receives
+  `{ "error": "coding_repositories_unsupported", "message": … }`.
+
 ## What to do
 
-- Use an executor from Wardby 0.10.0 or later, or run the agent with only its
-  default repository (`repositories: []` on `trigger_agent`, and no links in the
-  default set).
-- Check the server version with the version your workers expect.
+- Run the control plane with an executor from Wardby 0.10.0 or later (the
+  built-in container executor supports extra repositories).
+- Or run the agent with only its default repository: `repositories: []` on
+  `trigger_agent`, and no links in the default set.
 
 See [A repository of the run has no resolved commit](coding-repository-unresolved.md)
 and [Several repositories in one coding run](../multi-repository-runs.md).

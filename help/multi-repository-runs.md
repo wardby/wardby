@@ -49,7 +49,9 @@ own folder, `/repos/<name>`:
   branch when the run is dispatched. See
   [`repository_ref_unreadable`](errors/repository-ref-unreadable.md).
 - The refs are resolved to commits at dispatch and recorded, so a moving branch
-  does not change a run already started.
+  does not change a run already started. The run's task text carries one line
+  per extra with its folder, repository, full commit and access, for example
+  `Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`
 - Read links follow the GitHub allowlist like every link: to read another
   account's repository, add that account to `WARDBY_GITHUB_ALLOWED_ACCOUNTS`.
   The agent's owner needs read access to a private repository.

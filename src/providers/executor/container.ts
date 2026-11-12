@@ -11,7 +11,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
-import { withBaseCommit } from "../../coding/base-commit.js";
+import { withBaseCommit, withExtraRepositories } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
@@ -3807,7 +3807,22 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
-    const withCommit = withBaseCommit(run.task, workspace.baseCommit);
+    // Each extra at the commit it was prepared at: the same values go into input.json's repositories
+    // and, in full, into the task text (the worker's own note shortens them).
+    const extras = run.repositories.map((r) => ({
+      name: r.name,
+      repository: r.repository,
+      access: r.access,
+      commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+    }));
+    const withBase = withBaseCommit(run.task, workspace.baseCommit);
+    const withCommit = withExtraRepositories(withBase, extras);
+    if (extras.length > 0 && withCommit === withBase) {
+      containerLog.warn(
+        { event: "coding.extra_commits_omitted", runId: run.runId },
+        "the coding task left no room for the extra repositories' commits",
+      );
+    }
     const description = await this.currentDescriptionText(run);
     // The ticket first, then the description: each is cut to what's left of the task's budget.
     // The target-branch merge note (conflicts to resolve) comes before the ticket and the description.
@@ -3819,7 +3834,7 @@ export class ContainerExecutor implements Executor {
       withLinkedIssue(withOriginal, await this.linkedIssueFor(run, description)),
       description,
     );
-    if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
+    if (withBase === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },
         "the coding task left no room for the base commit line",
@@ -3877,12 +3892,12 @@ export class ContainerExecutor implements Executor {
         // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
         ...(run.repositories.length > 0
           ? {
-              repositories: run.repositories.map((r) => ({
+              repositories: extras.map((r) => ({
                 name: r.name,
                 path: `/repos/${r.name}`,
                 access: r.access,
                 repository: r.repository,
-                commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+                commit: r.commit,
               })),
             }
           : {}),
