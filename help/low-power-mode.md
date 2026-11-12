@@ -1,9 +1,9 @@
 ---
 id: low-power-mode
 title: Low power mode on GKE
-summary: Low power mode: scale the coding proxy and native gateway to zero when idle to cut the cost of a lightly used GKE deployment, and what changes when they wake.
+summary: Low power mode: scale the coding proxy, native gateway and optional export renderer to zero when idle to cut the cost of a lightly used GKE deployment, and what changes when they wake.
 audience: operator
-tags: [gke, cost, low-power, scale-to-zero, kubernetes, autoscaling, idle, power_sleep, power_status, sleep now, power:manage, mcp, coding-agents]
+tags: [gke, cost, low-power, renderer, document-exports, scale-to-zero, kubernetes, autoscaling, idle, power_sleep, power_status, sleep now, power:manage, mcp, coding-agents]
 appliesTo: ">=0.6.0"
 ---
 
@@ -73,7 +73,12 @@ only when `WARDBY_LOW_POWER=1`.
 ## Sleep now
 
 To skip the idle window, for example right after a test, call `power_sleep`.
-Pass `target: "proxy"` or `target: "gateway"` to sleep one; omit it for both.
+Pass `target: "proxy"`, `target: "gateway"` or `target: "renderer"` to sleep one;
+omit it for the proxy and the gateway. The renderer is the optional PNG/PDF
+export renderer (`WARDBY_RENDERER=true`); it is a target only when
+`WARDBY_RENDERER_URL` is set, sleeps after an idle window with no export
+requested, and the first export after that waits up to 2 minutes for it to wake.
+Its blockers are queued or running export ids.
 
 - It scales the target to 0 at once, ignoring the idle window and the woke-at
   grace.

@@ -150,6 +150,16 @@ describe("power tools", () => {
     await client.close();
   });
 
+  it("power_sleep accepts the renderer as a target", async () => {
+    const power = fakePower();
+    const client = await connect(ADMIN, power);
+    const r = await client.callTool({ name: "power_sleep", arguments: { target: "renderer" } });
+    expect(r.isError).toBeFalsy();
+    expect(JSON.parse(text(r))).toEqual({ slept: ["renderer"], blocked: [] });
+    expect(power.sleepNow).toHaveBeenCalledWith(["renderer"]);
+    await client.close();
+  });
+
   it.each([[{ target: "control-plane" }], [{ target: "proxy", force: true }], [{ target: 1 }]])(
     "power_sleep rejects %j",
     async (args) => {

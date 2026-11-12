@@ -38,6 +38,8 @@ const scripts = [
     undo: 'kubectl -n "$NAMESPACE" delete role/wardby-power rolebinding/wardby-power --ignore-not-found',
     undoCall: "-n wardby-coding delete role/wardby-power rolebinding/wardby-power --ignore-not-found",
     kubectlPrefix: "-n wardby-coding",
+    // The Deployments the pre-apply block stamps; the renderer is GKE-only (an optional target, skipped when absent).
+    stamped: ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"],
     // Off mode drops the control plane's HPA before the apply, so it cannot rescale what the apply sets.
     offPreApplyCalls: ["-n wardby-coding delete hpa/wardby-control-plane --ignore-not-found"],
     apply: 'echo "$OVERLAY_MANIFEST" | kubectl apply -f -',
@@ -53,6 +55,7 @@ const scripts = [
     undoCall:
       "--context kind-wardby -n wardby-coding delete role/wardby-power rolebinding/wardby-power --ignore-not-found",
     kubectlPrefix: "--context kind-wardby -n wardby-coding",
+    stamped: ["wardby-coding-proxy", "wardby-native-gateway"],
     offPreApplyCalls: [],
     apply: 'kubectl kustomize "$OVERLAY" \\',
     prelude: 'KUBE_CONTEXT=kind-wardby\nMANIFEST_DIR="deploy/kind-coding"',
@@ -99,7 +102,7 @@ describe.each(scripts)("$name WARDBY_LOW_POWER", (s) => {
   });
 
   describe("before the apply", () => {
-    const deployments = ["wardby-coding-proxy", "wardby-native-gateway"];
+    const deployments = s.stamped;
     // `get ... -o name` prints the Deployment when it exists (exit 0, empty output when not).
     const existing = 'case "$*" in *" get deploy "*) echo "deployment.apps/x" ;; esac';
     const run = (mode, fake = existing) =>
@@ -123,7 +126,7 @@ describe.each(scripts)("$name WARDBY_LOW_POWER", (s) => {
         const result = run(mode);
         expect(result.status).toBe(0);
         const calls = result.calls.trim().split("\n");
-        expect(calls.slice(4)).toEqual(mode === 0 ? s.offPreApplyCalls : []);
+        expect(calls.slice(2 * deployments.length)).toEqual(mode === 0 ? s.offPreApplyCalls : []);
         deployments.forEach((name, i) => {
           expect(calls[2 * i]).toBe(`${s.kubectlPrefix} get deploy ${name} --ignore-not-found -o name`);
           const match = calls[2 * i + 1].match(

@@ -13,6 +13,8 @@ locals {
     "claude-tool-runner",
     "claude-tool-runner-node-python",
     "native-worker",
+    # Optional PNG/PDF export renderer: built from the renderer bake target, not in its default group.
+    "renderer",
   ])
 }
 

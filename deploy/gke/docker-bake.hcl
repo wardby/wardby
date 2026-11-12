@@ -79,3 +79,13 @@ target "native-worker" {
   dockerfile = "src/native-worker/Dockerfile"
   tags       = ["${REGISTRY}/native-worker:latest"]
 }
+
+# The optional PNG/PDF export renderer (docs/documents.md, "Exports"). Not in the default group:
+# `docker buildx bake -f deploy/gke/docker-bake.hcl renderer` builds it, and deploy/gke/up.sh does so
+# only when WARDBY_RENDERER=true.
+target "renderer" {
+  inherits   = ["_gke"]
+  dockerfile = "deploy/Dockerfile"
+  target     = "renderer"
+  tags       = ["${REGISTRY}/renderer:latest"]
+}

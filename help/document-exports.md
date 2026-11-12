@@ -14,7 +14,7 @@ appliesTo: ">=0.10.0"
 - `png`: one board as an image (needs `board`).
 - `pdf`: all boards of a design, or a Markdown document, as a PDF.
 
-PNG and PDF need the server's renderer. Without one the request is refused with [`export_renderer_unavailable`](errors/export-renderer-unavailable.md). A Markdown PDF leaves out images that are not embedded as `data:` URLs. A rendered export is kept for one hour, can be read only by the person who asked, and each document allows 30 requests an hour. Anonymous share-link readers can download HTML but must sign in to ask for PNG or PDF.
+PNG and PDF need the server's renderer (an optional service the operator turns on). Without one the request is refused with [`export_renderer_unavailable`](errors/export-renderer-unavailable.md). A Markdown PDF leaves out images that are not embedded as `data:` URLs. A rendered export is kept for one hour, can be read only by the person who asked, and each document allows 30 requests an hour. Anonymous share-link readers can download HTML but must sign in to ask for PNG or PDF.
 
 Over MCP use `export_document` (`documentId`, `format`, `board`, `versionNumber`); it waits up to 150 seconds. Over the page API: `GET /d/api/<id>/export` for HTML, `POST /d/api/<id>/exports` then `GET /d/api/exports/<exportId>` and `.../file` for PNG and PDF.
 

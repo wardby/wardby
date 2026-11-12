@@ -1,0 +1,112 @@
+# Optional PNG/PDF export renderer (docs/documents.md, "Exports"). Applied only when the
+# deployment turns it on (deploy/gke/up.sh: WARDBY_RENDERER=true). It reads nothing but the
+# boards the control plane sends it: no database, no secrets, no service-account token, no
+# egress. `wardby-renderer-image` is substituted at apply time.
+#
+# Chromium runs here with its own sandbox off (the runtime's default seccomp profile refuses the
+# user namespaces it needs), so the isolation is this spec: gVisor (the gvisor overlay), a non-root
+# user, a read-only root filesystem, every capability dropped, no privilege escalation, the runtime
+# default seccomp profile, no service-account token, no secret-backed env, and a NetworkPolicy that
+# admits only the control plane and lets the renderer reach nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-renderer
+  namespace: wardby-coding
+  labels: { app.kubernetes.io/name: wardby-renderer }
+spec:
+  # No replicas: a new Deployment starts at 1, and in low-power mode the control plane owns the
+  # count (src/core/power.ts), so a re-apply never wakes a sleeping renderer.
+  selector:
+    matchLabels: { app.kubernetes.io/name: wardby-renderer }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: wardby-renderer }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: renderer
+          image: wardby-renderer-image
+          ports: [{ name: http, containerPort: 8796 }]
+          env:
+            - { name: PORT, value: "8796" }
+            - { name: HOME, value: /tmp }
+            - { name: NODE_ENV, value: production }
+          # The renderer refuses connections beyond concurrency + queue + 4 (14 by default), so a
+          # probe can be refused or slow while it renders at capacity. A probe therefore waits up
+          # to 10 s and a pod is only unready or restarted after several misses in a row (liveness:
+          # 6 x 20 s); an unhealthy renderer (lost browser, stuck renders) exits on its own.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          # Memory 2Gi: up to 14 connections x 8 MiB buffered request bodies (112 MiB) plus their
+          # JSON-parse copies (about the same again, 224 MiB worst case), the Node process
+          # (about 150 MiB), and two Chromium renders at once (concurrency 2; up to about 450 MiB
+          # each for a tall board or a long paginated PDF). That is about 1.3 GiB at the worst case;
+          # 1Gi would let the kernel kill it mid-render. 500m CPU keeps Autopilot's memory:CPU
+          # ratio (at most 6.5 GiB per vCPU) from raising the request on its own.
+          resources:
+            requests: { cpu: 500m, memory: 2Gi, ephemeral-storage: 1Gi }
+            limits: { cpu: 500m, memory: 2Gi, ephemeral-storage: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: wardby-renderer, namespace: wardby-coding }
+spec:
+  selector: { app.kubernetes.io/name: wardby-renderer }
+  ports: [{ name: http, port: 8796, targetPort: http }]
+---
+# Only the control plane may reach the renderer, and the renderer may reach nothing
+# (default-deny-all already denies both; this names the one allowed path).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: wardby-renderer, namespace: wardby-coding }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: wardby-renderer }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: wardby-control-plane }
+      ports: [{ protocol: TCP, port: 8796 }]
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: wardby-control-plane-renderer-egress, namespace: wardby-coding }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: wardby-control-plane }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: wardby-renderer }
+      ports: [{ protocol: TCP, port: 8796 }]

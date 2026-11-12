@@ -58,6 +58,7 @@ import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
 import { loadGitHubAllowedAccounts } from "../config/github-allowed-accounts.js";
 import { loadRendererConfig } from "../config/renderer.js";
+import { RENDERER_WAKE_TIMEOUT_MS } from "../core/documents/exports.js";
 import { createRendererClient } from "../core/documents/renderer-client.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
@@ -382,11 +383,20 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // malformed URL stops startup; only whether one is set is logged, never the URL.
   const rendererConfig = loadRendererConfig();
   mcpLog.info({ configured: rendererConfig.url !== null }, "PNG/PDF export renderer");
+  const rendererPower = baseProviders.power;
   const providers: McpProviders = baseProviders.exports
     ? baseProviders
     : {
         ...baseProviders,
-        exports: { db: prisma, renderer: rendererConfig.url ? createRendererClient(rendererConfig.url) : null },
+        exports: {
+          db: prisma,
+          renderer: rendererConfig.url ? createRendererClient(rendererConfig.url) : null,
+          // Low-power mode keeps the renderer at zero until an export needs it.
+          wake:
+            rendererPower?.enabled && rendererConfig.url
+              ? (id) => rendererPower.ensureAwake("renderer", { timeoutMs: RENDERER_WAKE_TIMEOUT_MS, runId: id })
+              : undefined,
+        },
       };
   await providers.executor.launch?.();
   warmUpExecutor(providers.executor);

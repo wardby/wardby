@@ -693,7 +693,14 @@ control-plane Deployment, raises it to that value. The first coding run after a
 control-plane restart also runs the cluster preflight canary, because start-up
 preflight is deferred while the proxy sleeps (`kubernetes_preflight_deferred`).
 
-**Deploys.** Every `up.sh` run marks the proxy and gateway as just woken before
+**Export renderer.** With `WARDBY_RENDERER=true` (the optional PNG/PDF export
+renderer, see [its section](../deploy/gke/README.md#pngpdf-export-renderer-optional))
+the renderer `wardby-renderer` is a third target. It sleeps when no export was
+requested in the idle window, and the first export after that waits up to 2
+minutes for it to wake; if it cannot, that export fails as
+`export_renderer_unavailable`. `power_sleep` accepts `target: "renderer"`.
+
+**Deploys.** Every `up.sh` run marks the proxy, gateway and renderer as just woken before
 it applies the manifests, which bring them back up. That includes a run that
 turns low-power mode off: the control plane being replaced still runs in
 low-power mode until its rollout ends, and the mark stops it scaling them back

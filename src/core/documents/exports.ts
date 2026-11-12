@@ -46,6 +46,8 @@ export const EXPORTS_PER_DOCUMENT_HOUR = 30;
 export const EXPORT_RATE_BUCKET = "document-export";
 export const EXPORT_TTL_MS = 3_600_000;
 export const EXPORT_STALE_MS = 600_000;
+/** How long a scaled-to-zero renderer may take to wake before the export fails as export_renderer_unavailable. */
+export const RENDERER_WAKE_TIMEOUT_MS = 120_000;
 
 const EXPORT_CODES = new Set([
   "export_format_unsupported",

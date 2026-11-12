@@ -104,6 +104,36 @@ it. Nothing to configure; see
 gateway to zero when idle and runs fewer always-on pods; see
 [Low-power mode](../../docs/getting-started-gke.md#low-power-mode).
 
+## PNG/PDF export renderer (optional)
+
+Off by default. PNG and PDF exports of designs and Markdown documents (see
+[Exports](../../docs/documents.md#exports)) need a renderer: a small service that
+runs headless Chromium over the boards the control plane sends it. Without it
+those requests are refused as `export_renderer_unavailable`; HTML exports need
+nothing.
+
+Set `WARDBY_RENDERER=true` for `up.sh` (only `true`, `false` or unset are
+accepted). It builds the `renderer` image (not part of the default bake group),
+pushes it, applies `deploy/kind-coding/manifests/renderer/gvisor`, and sets
+`WARDBY_RENDERER_URL` on the control plane to
+`http://wardby-renderer.wardby-coding.svc.cluster.local:8796`. Re-running
+`up.sh` without it removes the renderer's Deployment, Service and
+NetworkPolicies.
+
+- **Isolation.** Chromium runs without its own sandbox (the runtime's default
+  seccomp profile refuses the user namespaces it needs), so the pod is the
+  boundary: gVisor, a non-root user, a read-only root filesystem, no
+  capabilities, no service-account token, no database or secrets, and a
+  NetworkPolicy that admits only the control plane on port 8796 and lets the
+  renderer reach nothing.
+- **Size.** Requests equal limits: 500m CPU, 2 GiB memory, 1 GiB ephemeral
+  storage. The namespace quota already leaves room for it.
+- **Low-power mode.** With `WARDBY_LOW_POWER=1` the renderer is a third
+  target: it sleeps when no export was requested in the idle window, and the
+  first export after that waits for it to wake (up to 2 minutes). `power_sleep`
+  accepts `target: "renderer"`; see
+  [Low-power mode](../../docs/getting-started-gke.md#low-power-mode).
+
 ## Run dependency cache
 
 Off by default. The coding-run dependency cache (see
