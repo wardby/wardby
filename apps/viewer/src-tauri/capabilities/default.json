@@ -16,6 +16,7 @@
     "allow-fetch-graph",
     "allow-fetch-run",
     "allow-fetch-infra",
+    "allow-fetch-documents",
     "allow-kube-contexts",
     "allow-set-kube-context",
     "allow-kube-connect",

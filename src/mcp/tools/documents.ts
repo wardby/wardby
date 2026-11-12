@@ -27,7 +27,7 @@ import {
 } from "../../core/documents/versions.js";
 import { listThreads, reply, setThreadStatus } from "../../core/documents/comments.js";
 import type { ThreadView } from "../../core/documents/comments.js";
-import { grantedIds } from "../../core/grants.js";
+import { listDocumentsFor } from "../../core/documents/list.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "../../core/untrusted-content.js";
 import { MAX_THREADS_PER_SEND, sendThreadsToAgent } from "../../core/documents/agent-loop.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -584,13 +584,10 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     inputSchema: { type: "object", properties: { ownedOnly: { type: "boolean" } } },
     handler: async (args: unknown, ctx) => {
       const input = listDocsArgs.parse(args ?? {});
-      const granted = input.ownedOnly ? [] : await grantedIds(ctx.db, "document", ctx.principal.id, "read");
-      const found = await ctx.db.document.findMany({
-        where: { OR: [{ ownerId: ctx.principal.id }, { id: { in: granted } }] },
-        orderBy: { updatedAt: "desc" },
-        take: MAX_LISTED_DOCUMENTS + 1,
+      const { rows, truncated } = await listDocumentsFor(ctx.db, ctx.principal.id, {
+        ownedOnly: input.ownedOnly,
+        limit: MAX_LISTED_DOCUMENTS,
       });
-      const rows = found.slice(0, MAX_LISTED_DOCUMENTS);
       return textResult({
         documents: rows.map((d) => ({
           documentId: d.id,
@@ -605,7 +602,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           UNTRUSTED_TOOL_OUTPUT_TAG,
           rows.map((d) => `${d.id}: ${JSON.stringify(d.title)}`).join("\n"),
         ),
-        ...(found.length > MAX_LISTED_DOCUMENTS ? { truncated: true } : {}),
+        ...(truncated ? { truncated: true } : {}),
         ...linkNote(ctx),
       });
     },

@@ -11,6 +11,7 @@ import {
   connect,
   disconnect,
   fetchGraph,
+  fetchDocuments,
   fetchInfra,
   fetchRun,
   isAppError,
@@ -49,6 +50,7 @@ describe("command wrappers", () => {
     await fetchRun("https://w.example", "run-1");
     await openUrl("https://github.com/o/r/pull/7");
     await fetchInfra("https://w.example");
+    await fetchDocuments("https://w.example", 500);
     await kubeContexts();
     await setKubeContext("https://w.example", "kind-dev");
     await setKubeContext("https://w.example", null);
@@ -66,6 +68,7 @@ describe("command wrappers", () => {
       ["fetch_run", { url: "https://w.example", id: "run-1" }],
       ["open_url", { url: "https://github.com/o/r/pull/7" }],
       ["fetch_infra", { url: "https://w.example" }],
+      ["fetch_documents", { url: "https://w.example", limit: 500 }],
       ["kube_contexts"],
       ["set_kube_context", { url: "https://w.example", context: "kind-dev" }],
       ["set_kube_context", { url: "https://w.example", context: null }],

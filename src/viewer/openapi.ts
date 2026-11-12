@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
 import { VIEWER_SCHEMAS } from "./api-schema.js";
 import { viewerJsonSchema } from "./api-schema.js";
-import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, SSE_HEARTBEAT_MS } from "./limits.js";
+import {
+  DEFAULT_DOCUMENTS_LIMIT,
+  DEFAULT_GRAPH_LIMIT,
+  MAX_DOCUMENTS_LIMIT,
+  MAX_GRAPH_LIMIT,
+  SSE_HEARTBEAT_MS,
+} from "./limits.js";
 
 export const OPENAPI_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../docs/viewer-api.openapi.yml");
 
@@ -87,6 +93,43 @@ export const VIEWER_ROUTES: readonly ViewerRoute[] = [
     description: "Where and how this wardby deployment runs its workloads.",
     responses: {
       "200": { description: "Infrastructure info.", content: { "application/json": { schema: ref("infra-info") } } },
+    },
+  },
+  {
+    path: "/admin/api/documents",
+    operationId: "getDocuments",
+    summary: "Documents and designs you can open",
+    description:
+      "The documents and designs the authenticated caller owns or was granted read access to, newest first. Metadata only (titles, ids, agent, repository, path, timestamps); never content or comments. The role-based access an admin has to every document is not applied here. `pagePath` is the page that opens one, relative to the server's origin.",
+    parameters: [
+      {
+        name: "agent",
+        in: "query",
+        required: false,
+        description: "Only documents linked to this agent id.",
+        schema: { type: "string" },
+      },
+      {
+        name: "repository",
+        in: "query",
+        required: false,
+        description: "Only documents linked to this repository (exact match).",
+        schema: { type: "string" },
+      },
+      {
+        name: "limit",
+        in: "query",
+        required: false,
+        description: `Maximum number of documents, 1 to ${MAX_DOCUMENTS_LIMIT}. Default ${DEFAULT_DOCUMENTS_LIMIT}.`,
+        schema: { type: "integer", minimum: 1, maximum: MAX_DOCUMENTS_LIMIT, default: DEFAULT_DOCUMENTS_LIMIT },
+      },
+    ],
+    responses: {
+      "200": {
+        description: "The documents.",
+        content: { "application/json": { schema: ref("document-list") } },
+      },
+      "400": errorBody("invalid_limit", "The limit parameter is invalid."),
     },
   },
   {
@@ -174,7 +217,7 @@ export function buildViewerOpenApi(version: string): Json {
       title: "wardby admin viewer API",
       version,
       description:
-        "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract.",
+        "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info, your documents and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract.",
     },
     servers: [{ url: "https://{host}", variables: { host: { default: "wardby.example.com" } } }],
     paths,

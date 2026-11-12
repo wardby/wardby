@@ -274,11 +274,36 @@ export const InfraInfoSchema = z.object({
 });
 export type InfraInfo = z.infer<typeof InfraInfoSchema>;
 
+/**
+ * The documents and designs the signed-in admin owns or was granted read access to (GET /admin/api/documents).
+ * Metadata only: never content or comments. `mine` is ownership by the caller.
+ */
+export const DocumentListSchema = z.object({
+  documents: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      kind: z.enum(["document", "design"]),
+      mine: z.boolean(),
+      agent: z.object({ id: z.string(), name: z.string() }).nullable(),
+      repository: z.string().nullable(),
+      path: z.string().nullable(),
+      updatedAt: z.string(),
+      latestVersion: z.number().int(),
+      /** The page that opens it: "/d/<id>", relative to the server's origin. */
+      pagePath: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+export type DocumentList = z.infer<typeof DocumentListSchema>;
+
 export const VIEWER_SCHEMAS = {
   "graph-snapshot": GraphSnapshotSchema,
   "run-detail": RunDetailSchema,
   "viewer-event": ViewerEventSchema,
   "infra-info": InfraInfoSchema,
+  "document-list": DocumentListSchema,
 } as const;
 
 /** A viewer schema's JSON Schema (draft-07 keywords, no `$schema`), as the published files spell it. */

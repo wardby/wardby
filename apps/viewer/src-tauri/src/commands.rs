@@ -927,6 +927,10 @@ fn graph_path(since: &str, limit: u32) -> Result<String, AppError> {
     Ok(format!("/admin/api/graph?since={enc}&limit={limit}"))
 }
 
+fn documents_path(limit: u32) -> String {
+    format!("/admin/api/documents?limit={limit}")
+}
+
 fn run_path(id: &str) -> Result<String, AppError> {
     let ok = !id.is_empty()
         && id.len() <= 128
@@ -978,6 +982,18 @@ pub async fn fetch_run(
     let url = normalize_server_url(&url)?;
     let path = run_path(&id)?;
     fetch(&app, &state, &url, &path).await
+}
+
+/// The documents and designs the signed-in admin owns or was granted read access to.
+#[tauri::command]
+pub async fn fetch_documents(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    limit: u32,
+) -> Result<Value, AppError> {
+    let url = normalize_server_url(&url)?;
+    fetch(&app, &state, &url, &documents_path(limit)).await
 }
 
 const INFRA_PATH: &str = "/admin/api/infra";
@@ -1605,6 +1621,7 @@ mod tests {
             "/admin/api/graph?since=2026-01-01T00%3A00%3A00%2B02%3A00&limit=50"
         );
         assert!(graph_path(" ", 1).is_err());
+        assert_eq!(documents_path(200), "/admin/api/documents?limit=200");
         assert_eq!(run_path("ckabc-1_x").unwrap(), "/admin/api/runs/ckabc-1_x");
         assert!(run_path("../x").is_err());
         assert!(run_path("").is_err());

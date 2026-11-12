@@ -7,7 +7,7 @@ import { formatWindowTotal, TRUNCATED_TITLE } from "../format/spend";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
 import { exactUsd, formatUsd } from "../format/money";
 
-export type Tab = "runs" | "infra";
+export type Tab = "runs" | "infra" | "documents";
 
 /** Cluster line and view controls shown on the Infrastructure tab. */
 export interface InfraBar {
@@ -20,6 +20,8 @@ export interface InfraBar {
   namespace: string | null;
   watching: boolean;
 }
+
+const TAB_LABEL: Record<Tab, string> = { runs: "Runs", infra: "Infrastructure", documents: "Documents" };
 
 const GROUP_LABEL: Record<StatusGroup, string> = {
   running: "running",
@@ -79,9 +81,9 @@ export function TopBar(props: Props) {
       <div className="topbar-row">
         <span className="brand">wardby</span>
         <div className="tabs" role="group" aria-label="View">
-          {(["runs", "infra"] as const).map((t) => (
+          {(["runs", "infra", "documents"] as const).map((t) => (
             <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
-              {t === "runs" ? "Runs" : "Infrastructure"}
+              {TAB_LABEL[t]}
             </button>
           ))}
         </div>
@@ -111,7 +113,7 @@ export function TopBar(props: Props) {
           {badge}
         </span>
       </div>
-      {tab === "infra" ? (
+      {tab === "documents" ? null : tab === "infra" ? (
         infra && (
           <div className="topbar-row infra-row">
             <div className="tabs" role="group" aria-label="Infrastructure view">

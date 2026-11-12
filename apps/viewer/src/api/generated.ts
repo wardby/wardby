@@ -319,3 +319,22 @@ export interface InfraInfo {
     } | null;
   } | null;
 }
+
+export interface DocumentList {
+  documents: {
+    id: string;
+    title: string;
+    kind: "document" | "design";
+    mine: boolean;
+    agent: {
+      id: string;
+      name: string;
+    } | null;
+    repository: string | null;
+    path: string | null;
+    updatedAt: string;
+    latestVersion: number;
+    pagePath: string;
+  }[];
+  truncated: boolean;
+}

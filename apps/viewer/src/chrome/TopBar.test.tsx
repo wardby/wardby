@@ -133,6 +133,16 @@ describe("TopBar tabs", () => {
     expect(onTabChange).toHaveBeenCalledWith("infra");
   });
 
+  it("offers a Documents tab that drops the runs controls", () => {
+    const onTabChange = vi.fn();
+    const { rerender } = render(<TopBar {...props} tab="runs" onTabChange={onTabChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Documents" }));
+    expect(onTabChange).toHaveBeenCalledWith("documents");
+    rerender(<TopBar {...props} tab="documents" onTabChange={onTabChange} />);
+    expect(screen.getByRole("button", { name: "Documents" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByLabelText("Search runs")).toBeNull();
+  });
+
   it("replaces the filter row with Map | Table, the cluster line and a context picker on Infrastructure", () => {
     const onModeChange = vi.fn();
     const onContextChange = vi.fn();

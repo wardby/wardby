@@ -1460,3 +1460,44 @@ button:disabled {
 .steps .step.failed {
   color: var(--bad);
 }
+
+/* Documents tab */
+.documents-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.documents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.documents-table th,
+.documents-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  overflow-wrap: anywhere;
+}
+
+.documents-table tbody tr {
+  cursor: pointer;
+}
+
+.documents-table tbody tr:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
