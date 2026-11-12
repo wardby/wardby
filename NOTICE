@@ -1,2 +1,46 @@
 Wardby
 Copyright 2026 Christopher Fields
+
+Third-party software in the document page bundle (dist/web-assets/)
+
+The browser bundle for document pages (built by scripts/build-web.mjs) includes
+the following packages, each under the MIT License reproduced below:
+
+- @tiptap/core, @tiptap/pm, @tiptap/starter-kit (and the @tiptap/extension-*
+  and @tiptap/extensions packages it includes), @tiptap/extension-table,
+  @tiptap/markdown 3.33.1
+  Copyright (c) 2025, Tiptap GmbH
+- prosemirror-commands, prosemirror-dropcursor, prosemirror-gapcursor,
+  prosemirror-history, prosemirror-keymap, prosemirror-model,
+  prosemirror-schema-list, prosemirror-state, prosemirror-transform,
+  prosemirror-view, orderedmap, w3c-keyname
+  Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+- prosemirror-tables
+  Copyright (C) 2015-2016 by Marijn Haverbeke <marijnh@gmail.com> and others
+- rope-sequence
+  Copyright (C) 2016 by Marijn Haverbeke <marijn@haverbeke.berlin>
+- marked
+  Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/)
+  Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
+- linkifyjs
+  Copyright (c) 2024 Nick Frasser
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

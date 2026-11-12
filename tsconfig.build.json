@@ -10,6 +10,8 @@
     "src/**/*.test-support.ts",
     "src/providers/jobs/contract-suite.ts",
     "src/providers/storage/blob-store-contract.ts",
-    "src/tools/**"
+    "src/tools/**",
+    // The browser app is bundled by scripts/build-web.mjs, not compiled by tsc.
+    "src/web/app/**"
   ]
 }
