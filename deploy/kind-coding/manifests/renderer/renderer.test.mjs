@@ -32,6 +32,8 @@ function checkDeployment(deployment, { gvisor }) {
   const pod = spec.template.spec;
   const container = pod.containers[0];
   expect(spec).not.toHaveProperty("replicas");
+  // No surge pod during a rollout: the namespace quota has room for one renderer.
+  expect(spec.strategy).toEqual({ type: "Recreate" });
   if (gvisor) expect(pod.runtimeClassName).toBe("gvisor");
   expect(pod.automountServiceAccountToken).toBe(false);
   expect(pod).not.toHaveProperty("serviceAccountName");

@@ -127,7 +127,9 @@ NetworkPolicies.
   NetworkPolicy that admits only the control plane on port 8796 and lets the
   renderer reach nothing.
 - **Size.** Requests equal limits: 500m CPU, 2 GiB memory, 1 GiB ephemeral
-  storage. The namespace quota already leaves room for it.
+  storage. The namespace quota already leaves room for it. A rollout replaces
+  the pod rather than surging a second one (`strategy: Recreate`), so an export
+  requested during that short gap fails and can be retried.
 - **Low-power mode.** With `WARDBY_LOW_POWER=1` the renderer is a third
   target: it sleeps when no export was requested in the idle window, and the
   first export after that waits for it to wake (up to 5 minutes). `power_sleep`

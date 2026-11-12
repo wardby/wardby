@@ -17,6 +17,11 @@ metadata:
 spec:
   # No replicas: a new Deployment starts at 1, and in low-power mode the control plane owns the
   # count (src/core/power.ts), so a re-apply never wakes a sleeping renderer.
+  # Recreate: the renderer holds no state, and a rollout must not need room for a second pod (the
+  # namespace quota leaves room for one beside coding runs). Exports in that short gap fail and
+  # can be retried.
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app.kubernetes.io/name: wardby-renderer }
   template:
