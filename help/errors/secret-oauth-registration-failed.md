@@ -17,7 +17,7 @@ Two related messages use the same code: the provider's reply was unusable (no `c
 
 ## What to do
 
-1. For `invalid_redirect_uri` on the default web flow, the provider may accept only loopback callbacks. Connect with `oauth.callback` set to `"loopback"` and finish the sign-in with the Wardby CLI.
+1. For `invalid_redirect_uri` on the default web flow, the provider may accept only loopback callbacks. Connect with `oauth.callback` set to `"loopback"` and finish the sign-in with the Wardby CLI; see [Connect an OAuth secret through the Wardby CLI](../oauth-loopback-connect.md).
 2. For `invalid_redirect_uri` on the loopback flow, the provider refused even a `127.0.0.1` callback. Register a client with the provider yourself and pass it as `oauth.clientId`.
 3. For other codes or a bare HTTP status, check with the provider that it allows dynamic client registration for your account, or pass `oauth.clientId`.
 4. The host's operator log has a `registration_failed` warning with the host, status, error code and the provider's (bounded) description.

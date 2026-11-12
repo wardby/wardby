@@ -132,6 +132,67 @@ Provider requirements:
   signed-in user's access is what every agent gets.
 - Wardby's requests to the provider send `User-Agent: wardby/<version>`.
 
+### Providers that accept only loopback callbacks
+
+From 0.9.12. Some providers accept dynamic client registration only for loopback
+redirect addresses (`127.0.0.1` or `localhost`), their own app, or a few known
+connectors, so the default flow's `https://<your-wardby-host>/oauth/callback`
+is refused. BrowserStack's hosted MCP server is an example. You need this flow
+when connecting fails with
+[`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md)
+and `invalid_redirect_uri`; on the default flow that message says the provider may
+accept only loopback callbacks.
+
+1. Call `create_secret { name, oauth: { resource, scope?, clientId?, callback: "loopback" } }`.
+   It works over HTTP and stdio. It returns `status: "pending"`, a `command`
+   (`npx @wardby/cli@latest secret connect -`), a `link` and an `expiresAt`. Do
+   not also pass `value`, `broker` or `confirmationCode`. For BrowserStack:
+
+   ```json
+   {
+     "name": "BROWSERSTACK",
+     "oauth": { "resource": "https://mcp.browserstack.com/mcp", "callback": "loopback" }
+   }
+   ```
+
+2. On your own computer, run the `command` in a terminal and paste the `link` when it
+   asks "Paste the connect link:". The CLI listens on a random port on
+   `127.0.0.1`, opens your browser to the provider (add `--no-browser` to have it
+   print the address instead), and catches the redirect. Sign in as the service
+   user. The CLI then prints `Confirmation code: XXXX-XXXX` and the exact
+   `create_secret` call to make.
+3. Call `create_secret { name, confirmationCode }` with the same name, as for the
+   default flow.
+
+What the CLI needs:
+
+- Node.js 24 or later (for `npx`), and a browser on the same machine, because the
+  provider sends the browser to `127.0.0.1` on that machine. With no browser
+  there, use `--no-browser` and open the printed address on a machine that can
+  reach the CLI's listener, or use another sign-in method.
+- Network access to your Wardby server at its canonical URL
+  (`MCP_CANONICAL_URI`; over stdio, the local address the stdio server opens).
+  The server must be reachable from that machine; the CLI refuses a link that
+  points at a plain `http` address unless it is `127.0.0.1`, `localhost` or `[::1]`.
+- Nothing else of Wardby's: the CLI needs no database or credentials.
+
+Security:
+
+- The `link` is a credential for 10 minutes. It names one owner, one secret name
+  and one resource. Do not share it, post it or commit it; the CLI takes it from
+  standard input so it stays out of shell history and the process list.
+- The link alone cannot finish the connection. Only the owner named in the link
+  can redeem the confirmation code, so someone who gets the code or the link
+  cannot connect a secret for you. A link can start a few sign-ins (at most 5
+  waiting at once); an unused one expires.
+- The CLI never prints the authorization code, state or link. The address it
+  prints with `--no-browser` contains the sign-in state; do not share it.
+- A sign-in started by the loopback flow cannot be finished through the web
+  callback page, and the reverse.
+- If the provider refuses even a `127.0.0.1` callback
+  (`invalid_redirect_uri` on this flow), register a client with the provider yourself
+  and pass it as `oauth.clientId`; it must allow `http://127.0.0.1:<any port>/callback`.
+
 ### Refresh, reconnect, disconnect
 
 - **Refresh is automatic.** Wardby refreshes the access token when the secret is

@@ -25,6 +25,10 @@ URI `https://<your-wardby-host>/oauth/callback`. Without it you get
 [`secret_oauth_client_id_required`](errors/secret-oauth-client-id-required.md). The account you sign in with
 sets what every agent using the secret can do.
 
+From 0.9.12, a provider that accepts only loopback redirect addresses (BrowserStack's registration is one) is
+connected with `oauth.callback: "loopback"` and the Wardby CLI instead of the sign-in link. See the help article
+`oauth-loopback-connect`.
+
 ## Refresh, reauth and reconnecting
 
 Wardby refreshes the token when the secret is used within 60 seconds of its expiry (or after it), not in the background, and retries once on a 401. A refresh that cannot reach the provider
