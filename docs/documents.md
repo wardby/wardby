@@ -110,7 +110,8 @@ agent you own, or one whose owner set `codingProfile.allowWebhookTaskOverride`
 and granted you `execute`: a send hands the agent task text, the same rule as
 `trigger_agent`. `path` is a repository-relative `.md` file of plain segments
 (letters, digits, `.`, `_`, `-`; at most 256 characters); `baseRef`, if given,
-must be a valid branch name.
+must be a valid branch name. An `agentId` without a repository follows the
+same rule.
 Then a person with `write` access sends open threads (up to 50) from the page or
 with `send_threads_to_agent`. Wardby starts one coding run (run trigger
 `comment`) with the document, the threads and the file path; when it ends, the

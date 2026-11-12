@@ -209,20 +209,26 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       let repository = input.repository;
       let path = input.path;
       let baseRef = input.baseRef;
-      if (repository !== undefined) {
-        if (input.agentId === undefined) throw new McpError(400, "document_repo_link_invalid");
-        // Linking a coding agent takes execute on it plus the coding-task override rule (owner, or the
-        // owner's allowWebhookTaskOverride): the same rule as trigger_agent, re-checked at every send.
+      if (repository !== undefined && input.agentId === undefined) {
+        throw new McpError(400, "document_repo_link_invalid");
+      }
+      if (input.agentId !== undefined) {
+        // Any agent link (with or without a repository) takes execute on the agent plus the coding-task
+        // override rule (owner, or the owner's allowWebhookTaskOverride): the same rule as trigger_agent,
+        // re-checked at every send. Without it, a stranger's agentId would make every write to the
+        // document redact against that agent's secret values: an oracle for them.
         const row = await ctx.db.agent.findUnique({
           where: { id: input.agentId },
           include: { codingProfile: { select: { allowWebhookTaskOverride: true } } },
         });
         const { agent } = await assertAgentAccess(ctx, row, input.agentId, "execute");
-        if (agent.kind !== "coding") throw new McpError(400, "document_repo_link_invalid");
         await mapped(async () => assertDocumentAgentOverride(ctx.principal.id, agent));
-        path = await mapped(async () => validDocumentPath(input.path!));
-        if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
-        if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
+        if (repository !== undefined) {
+          if (agent.kind !== "coding") throw new McpError(400, "document_repo_link_invalid");
+          path = await mapped(async () => validDocumentPath(input.path!));
+          if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
+          if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
+        }
       }
       if (repository === undefined && baseRef !== undefined) throw new McpError(400, "document_repo_link_invalid");
       const created = await mapped(() =>

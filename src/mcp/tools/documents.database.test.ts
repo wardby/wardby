@@ -193,6 +193,38 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     }
   });
 
+  it("an agentId without a repository still needs the agent's owner or its opt-in (no secret-value oracle)", async () => {
+    // other has no access to profiledAgentId at all
+    const stranger = await connect(other);
+    const out = await stranger("create_document", { title: "O", markdown: "guess", agentId: profiledAgentId });
+    expect(out.isError).toBe(true);
+    expect(out.text).not.toContain("document_");
+    expect(await db.document.count({ where: { ownerId: other.id } })).toBe(0);
+    // execute alone (no opt-in) is refused too
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: profiledAgentId,
+        granteeKind: "principal",
+        granteePrincipalId: other.id,
+        granteeKey: `principal:${other.id}`,
+        level: "execute",
+      },
+    });
+    try {
+      const refused = await stranger("create_document", { title: "O", markdown: "guess", agentId: profiledAgentId });
+      expect(refused.text).toContain("document_agent_unavailable");
+      expect(await db.document.count({ where: { ownerId: other.id } })).toBe(0);
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: profiledAgentId } });
+    }
+    // the owner may
+    const mine = await (
+      await connect(owner)
+    )("create_document", { title: "O", markdown: "x", agentId: profiledAgentId });
+    expect(mine.isError).toBe(false);
+  });
+
   it("refuses an unsafe path or base ref: document_repo_link_invalid", async () => {
     const call = await connect(owner);
     const base = { title: "P", markdown: "x", repository: "acme/docs", path: "docs/p.md", agentId: profiledAgentId };
