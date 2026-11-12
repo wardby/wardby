@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
+import { defaultRepositoryName } from "../../coding/repository-names.js";
 
 const db = createPrismaClient();
 const suffix = randomUUID();
@@ -84,6 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
           agentId,
           provider: "github",
           repository: "openai/example",
+          name: defaultRepositoryName("openai/example"),
           access: "write",
           triggers: [],
           authorizedVia: "admin",
@@ -115,7 +117,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       const gone = { viaRepositoryLink: true, repositoryLinkExists: false, repositoryLinkAuthorizedVia: null };
       const link = { agentId, provider: "github", repository: "openai/example" };
       const updateLink = (data: { access?: string; triggers?: string[] }) =>
-        db.agentRepository.update({ where: { agentId_provider_repository: link }, data });
+        db.agentRepository.updateMany({ where: link, data });
       // Downgraded to read: no longer on the list.
       await updateLink({ access: "read" });
       await expect(store.load(runId)).resolves.toMatchObject(gone);

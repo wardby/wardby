@@ -9,6 +9,7 @@ import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
 import { buildSecretsAccessor } from "../../core/secrets.js";
 import { principalGranteeKey } from "../../core/grants.js";
+import { defaultRepositoryName } from "../../coding/repository-names.js";
 
 const db = createPrismaClient();
 const agentIds: string[] = [];
@@ -66,6 +67,7 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
           agentId: agent.id,
           provider: "github",
           repository: "o/bot",
+          name: defaultRepositoryName("o/bot"),
           access: "write",
           authorizedVia: "admin",
           authorizedById: admin.id,
@@ -74,6 +76,7 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
           agentId: agent.id,
           provider: "github",
           repository: "o/own",
+          name: defaultRepositoryName("o/own"),
           access: "read",
           authorizedVia: "host_permission",
           authorizedById: a.id,

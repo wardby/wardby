@@ -109,7 +109,14 @@ describe.skipIf(!process.env.DATABASE_URL)("unread_files in both execution modes
       },
     });
     await db.agentRepository.create({
-      data: { agentId, provider: "local", repository, access: "write", authorizedVia: "local_root" },
+      data: {
+        agentId,
+        provider: "local",
+        repository,
+        name: `local:${repository}`,
+        access: "write",
+        authorizedVia: "local_root",
+      },
     });
 
     // The cursors are deterministic for a head: read the chain once to script the paging review.

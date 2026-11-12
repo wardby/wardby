@@ -288,6 +288,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
         agentId: reviewer,
         provider: "github",
         repository: repoC,
+        name: `github:${repoC}`,
         access: "write",
         triggers: ["pull_request"],
         checkName: "wardby review",

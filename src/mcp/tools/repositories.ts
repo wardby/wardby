@@ -274,8 +274,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               ...authorization,
             };
             return tx.agentRepository.upsert({
-              where: { agentId_provider_repository: { agentId: args.agentId, provider, repository } },
-              create: { agentId: args.agentId, provider, repository, ...fields },
+              where: { agentId_name: { agentId: args.agentId, name: `${provider}:${repository}` } },
+              create: { agentId: args.agentId, provider, repository, name: `${provider}:${repository}`, ...fields },
               update: fields,
             });
           },

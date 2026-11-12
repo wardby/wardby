@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolveCodingRepository, RepositoryChoiceRefusedError } from "./coding-repository.js";
 import { createPrismaClient } from "./db.js";
+import { defaultRepositoryName } from "../coding/repository-names.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("resolveCodingRepository (database)", () => {
   const db = createPrismaClient();
@@ -31,9 +32,31 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveCodingRepository (database)",
     });
     await db.agentRepository.createMany({
       data: [
-        { agentId, provider: "github", repository: listed, access: "write", triggers: [], baseRef: "develop" },
-        { agentId, provider: "github", repository: withTrigger, access: "write", triggers: ["mention"] },
-        { agentId, provider: "github", repository: readOnly, access: "read", triggers: [] },
+        {
+          agentId,
+          provider: "github",
+          repository: listed,
+          name: defaultRepositoryName(listed),
+          access: "write",
+          triggers: [],
+          baseRef: "develop",
+        },
+        {
+          agentId,
+          provider: "github",
+          repository: withTrigger,
+          name: defaultRepositoryName(withTrigger),
+          access: "write",
+          triggers: ["mention"],
+        },
+        {
+          agentId,
+          provider: "github",
+          repository: readOnly,
+          name: defaultRepositoryName(readOnly),
+          access: "read",
+          triggers: [],
+        },
       ],
     });
     for (const id of runIds) await db.run.create({ data: { id, agentId, status: "succeeded" } });

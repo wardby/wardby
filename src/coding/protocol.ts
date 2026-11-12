@@ -280,6 +280,14 @@ function isGitRef(value: string): boolean {
 /** Repository identity prefix for a git folder on the wardby host: `local:/abs/path`. */
 export const LOCAL_REPO_PREFIX = "local:";
 
+/** A coding link's folder under /repos/ (and its name in the run's input and output). */
+export const CODING_REPOSITORY_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** Names the run's default repository (/workspace) in a driver's pullRequests; never a link name. */
+export const RESERVED_REPOSITORY_NAME = "workspace";
+export function isCodingRepositoryName(value: string): boolean {
+  return CODING_REPOSITORY_NAME.test(value) && value !== RESERVED_REPOSITORY_NAME;
+}
+
 export function isLocalRepository(value: string): boolean {
   return value.startsWith(LOCAL_REPO_PREFIX);
 }

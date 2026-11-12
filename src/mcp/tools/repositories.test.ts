@@ -28,6 +28,7 @@ interface FakeRepositoryRow {
   agentId: string;
   provider: string;
   repository: string;
+  name: string;
   access: string;
   triggers: string[];
   checkName: string | null;
@@ -72,15 +73,13 @@ function fakeDb(
         create,
         update,
       }: {
-        where: { agentId_provider_repository: { agentId: string; provider: string; repository: string } };
+        where: { agentId_name: { agentId: string; name: string } };
         create: Omit<FakeRepositoryRow, "id" | "createdAt">;
         update: Partial<FakeRepositoryRow>;
       }) => {
         if (opts.failUpsertWith) throw opts.failUpsertWith;
-        const { agentId, provider, repository } = where.agentId_provider_repository;
-        const existing = rows.find(
-          (r) => r.agentId === agentId && r.provider === provider && r.repository === repository,
-        );
+        const { agentId, name } = where.agentId_name;
+        const existing = rows.find((r) => r.agentId === agentId && r.name === name);
         if (existing) {
           Object.assign(existing, update);
           return { ...existing };
@@ -746,6 +745,7 @@ describe("repository tools", () => {
       agentId: "a1",
       provider: "github",
       repository: "openai/example",
+      name: "github:openai/example",
       access: "write",
       triggers: [],
       checkName: null,
@@ -970,6 +970,7 @@ describe("link_repository check names (H5-2)", () => {
       agentId: "a9",
       provider: "github",
       repository: "o/r",
+      name: "github:o/r",
       access: "write",
       triggers: [],
       checkName: "wardby review",

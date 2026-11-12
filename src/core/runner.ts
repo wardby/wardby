@@ -1343,11 +1343,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           authorize: async (link) => {
             const current = await db.agentRepository.findUnique({
               where: {
-                agentId_provider_repository: {
-                  agentId: loaded.agentId,
-                  provider: link.provider,
-                  repository: link.repository,
-                },
+                agentId_name: { agentId: loaded.agentId, name: `${link.provider}:${link.repository}` },
               },
               include: { agent: { select: { ownerId: true } } },
             });
