@@ -3,7 +3,7 @@ id: comment-threads-and-agents
 title: Send comment threads to a coding agent
 summary: Link a document to a repository file and a coding agent, then send open comment threads to it; the agent edits the file, Wardby publishes the next version and replies on each thread.
 audience: operator
-tags: [documents, comments, send_threads_to_agent, coding agent, comment trigger, repository]
+tags: [documents, comments, send_threads_to_agent, coding agent, comment trigger, repository, live updates]
 appliesTo: ">=0.10.0"
 ---
 
@@ -31,6 +31,8 @@ When the run ends:
 
 1. Wardby reads the file at the run's head ref and publishes it as the next version, only if the document is still at the version that was sent. If someone published meanwhile, the edit is not applied and the agent's reply names the branch it is on.
 2. The agent replies on each thread, and resolves the ones it addressed. A failed run posts one fixed reply; the threads stay open.
+
+Open pages show the new version, the agent's replies and the resolved threads as they land, without a refresh (see [live updates](documents.md#live-updates)).
 
 ## Limits
 

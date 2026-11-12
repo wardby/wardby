@@ -17,9 +17,12 @@ PDF/PNG export, version compare or repository export yet.
   follow it across versions. If the text is deleted, the thread is marked
   outdated.
 - Replies, resolve and reopen, edit and delete your own comments, and
-  `@`-mentions between members (stored and highlighted; Wardby sends no
-  notification in this phase). Share-link guests get no list of people to
-  mention.
+  `@`-mentions (stored and highlighted; Wardby sends no notification in this
+  phase). Members can mention members and the guests who have commented on
+  the document (shown as "Name (guest)"); share-link guests get no list of
+  people to mention.
+- Live updates: new comments, replies, resolved threads and new versions show
+  up on every open page without a refresh.
 - Links to share a document with people who have no account.
 - Send open threads to a coding agent that edits a file in a repository.
 
@@ -78,7 +81,41 @@ links keep working. With `AUTH_PROVIDER=self-hosted`, the `WEB_OIDC_*`
 variables are ignored.
 
 If you run Wardby behind a proxy, it must forward `Origin` and the `Cookie`
-headers and serve the pages on the same origin as `MCP_CANONICAL_URI`.
+headers and serve the pages on the same origin as `MCP_CANONICAL_URI`. It must
+also pass the live-updates stream (next section) through unbuffered.
+
+## Live updates
+
+An open document page listens on `GET /d/api/<documentId>/events`, a
+Server-Sent Events stream (`text/event-stream`). When anyone comments,
+replies, edits or deletes a comment, resolves, reopens or sends a thread, when
+an agent replies, when a version is published (from the editor, MCP or an
+agent), or when a share link is revoked, every page showing that document
+refetches what changed through the page API. Events name only the document and
+the kind of change, never its content, so access checks stay on the page API.
+
+- Comments, threads and highlights update in place; an open comment box keeps
+  what you typed. A new version loads in place unless you have unsaved edits;
+  then the page asks you to reload.
+- The page shows "Offline — reconnecting" while it is not connected, and
+  catches up when it reconnects. A tab hidden for 5 minutes stops listening and
+  catches up when you return.
+- The stream uses the page's browser session: members and registered guests
+  get live updates; a visitor who has not yet continued as a guest does not.
+  Every 15 seconds the server re-checks the session and access, and ends the
+  stream when the session has expired, the share link is revoked, the user is
+  disabled or access is gone.
+- One browser session can hold at most 5 open streams (one per open tab); a
+  sixth is refused with `web_rate_limited` until a tab is closed, and that tab
+  falls back to refreshing threads only while an agent is working.
+
+Every Wardby replica forwards events from every other through PostgreSQL
+`LISTEN`/`NOTIFY` on the channel `wardby_documents`, using one extra
+connection per replica (the same kind the admin viewer uses). Proxies and load
+balancers in front of Wardby must not buffer `text/event-stream` responses
+(Wardby sends `X-Accel-Buffering: no` for nginx-compatible proxies) and need
+an idle or read timeout longer than the 15-second heartbeat (60 seconds or
+more is a safe choice).
 
 ## Names and privacy
 
@@ -94,7 +131,10 @@ labelled as the agent.
 ## Share links and guests
 
 `create_share_link` returns `https://<your-host>/s/<token>` once; only a hash
-is stored, so a lost link must be replaced. `permission` is `view` or `comment`;
+is stored, so a lost link must be replaced. Over stdio, links use the origin of
+`MCP_CANONICAL_URI` when it is set; without it the document and share tools
+return the path only (`path`, or `pagePath` where `path` is the repository
+file) with a note, so open it on the address that serves Wardby's pages. `permission` is `view` or `comment`;
 `expiresInDays` is 1-90 (default 14). Guests can read the current version and
 (with `comment`) start threads and reply, 30 an hour per guest; one link
 accepts 20 guest registrations an hour. They cannot edit, see older versions,
@@ -140,18 +180,20 @@ published.
 
 ## Limits
 
-| Limit                        | Value                 |
-| ---------------------------- | --------------------- |
-| Markdown per version         | 1 MiB (UTF-8 bytes)   |
-| Comment or reply             | 10,000 characters     |
-| Quoted anchor text           | 500 characters        |
-| Guest name                   | 1-40 characters       |
-| Share link lifetime          | 1-90 days, default 14 |
-| Threads per send             | 50                    |
-| Sends per document           | 30 an hour            |
-| Guest comments and replies   | 30 an hour per guest  |
-| Guest registrations per link | 20 an hour            |
-| Document sent to an agent    | 60,000 characters     |
+| Limit                        | Value                   |
+| ---------------------------- | ----------------------- |
+| Markdown per version         | 1 MiB (UTF-8 bytes)     |
+| Comment or reply             | 10,000 characters       |
+| Quoted anchor text           | 500 characters          |
+| Guest name                   | 1-40 characters         |
+| Share link lifetime          | 1-90 days, default 14   |
+| Threads per send             | 50                      |
+| Sends per document           | 30 an hour              |
+| Guest comments and replies   | 30 an hour per guest    |
+| Guest registrations per link | 20 an hour              |
+| Document sent to an agent    | 60,000 characters       |
+| Mentions checked per comment | 20 (members and guests) |
+| Live-update streams          | 5 per browser session   |
 
 ## Security headers
 
