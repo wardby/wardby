@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { JSDOM } from "jsdom";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "#prisma";
 import { RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
@@ -146,6 +147,14 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
     // Board links became fragment links; nothing links out.
     expect(proto.body).toContain("#board-menu");
     expect(proto.body).not.toContain("#board:");
+    // Ruling T9-1 on the downloaded file: no allow-scripts beside allow-same-origin, and the CSP's
+    // script-src is the switcher's hash alone (boards/export.test.ts checks the full policy).
+    expect(proto.body).toContain('sandbox="allow-same-origin allow-top-navigation-by-user-activation"');
+    expect(proto.body).not.toContain("allow-scripts");
+    const csp = new JSDOM(proto.body).window.document
+      .querySelector('meta[http-equiv="Content-Security-Policy"]')!
+      .getAttribute("content")!;
+    expect(csp).toMatch(/(?:^|; )script-src 'sha256-[A-Za-z0-9+/]+=*';/);
     await expect(
       exportFile(db, { documentId: designId, viewer: ownerV, format: "board-html", board: "nope" }),
     ).rejects.toThrow("export_not_found");
