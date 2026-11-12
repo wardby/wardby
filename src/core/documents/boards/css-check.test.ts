@@ -120,3 +120,28 @@ describe("checkCss image function arguments", () => {
     expect(checkCss("a{background:var(--bg, linear-gradient(red, blue))}")).toEqual([]);
   });
 });
+
+// A browser's URL parser strips only C0 controls and U+0020, so a Unicode space before "data:"
+// makes a relative URL that loads from the page's own origin. JS trim() would hide it.
+describe("checkCss Unicode spaces before a reference", () => {
+  const spaces: [string, string][] = [
+    ["U+00A0", " "],
+    ["U+2000", " "],
+    ["U+3000", "　"],
+    ["U+FEFF", "﻿"],
+  ];
+  it.each(spaces)("refuses %s before data: and # in a quoted and an unquoted url()", (_name, sp) => {
+    for (const ref of [`${sp}data:image/png,/../../web/login?returnTo=/x`, `${sp}#f`]) {
+      expect(checkCss(`a{background:url("${ref}")}`)).toContain("external_url");
+      expect(checkCss(`a{background:url(${ref})}`)).toContain("external_url");
+      expect(checkCss(`a{background-image:image-set("${ref}" 1x)}`)).toContain("external_url");
+      expect(checkCss(`background:url("${ref}")`, { declarations: true })).toContain("external_url");
+    }
+  });
+  it("still allows CSS whitespace around a data: or # reference", () => {
+    expect(checkCss('a{background:url(" data:image/png,x ")}')).toEqual([]);
+    expect(checkCss("a{background:url( data:image/png,x )}")).toEqual([]);
+    expect(checkCss('a{background:url("\\9 #f")}')).toEqual([]);
+    expect(checkCss('background:url(" #f")', { declarations: true })).toEqual([]);
+  });
+});

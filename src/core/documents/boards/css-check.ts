@@ -53,6 +53,13 @@ type Frame =
 /** CSS Syntax 3.3 input preprocessing: newlines normalised, NUL replaced. */
 const preprocess = (css: string) => css.replace(/\r\n|[\r\f]/g, "\n").replace(/\0/g, "�");
 
+/**
+ * Trims CSS whitespace only (space, tab, newline, CR, form feed). JS `trim()` also strips U+00A0,
+ * U+2000-U+200A, U+3000, U+FEFF and others, which a browser's URL parser keeps: `url("\u00a0data:…")`
+ * would pass ALLOWED_REF yet load as a same-origin relative URL. Such a value is refused instead.
+ */
+const cssTrim = (value: string): string => value.replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/g, "");
+
 const valueOf = (t: CSSToken): string => {
   const value = (t[4] as { value?: unknown } | null)?.value;
   return typeof value === "string" ? value : "";
@@ -100,13 +107,13 @@ export function checkCss(css: string, _options: CssCheckOptions = {}): CssProble
         if (valueOf(t).toLowerCase() === "import") out.add("import");
         break;
       case TokenType.URL:
-        if (!ALLOWED_REF.test(valueOf(t).trim())) out.add("external_url");
+        if (!ALLOWED_REF.test(cssTrim(valueOf(t)))) out.add("external_url");
         break;
       case TokenType.Ident:
         if (SCRIPT_LIKE_IDENT.has(valueOf(t).toLowerCase())) out.add("expression");
         break;
       case TokenType.String: {
-        const value = valueOf(t).trim();
+        const value = cssTrim(valueOf(t));
         if (top?.kind === "url") {
           if (top.seen || !ALLOWED_REF.test(value)) top.bad = true;
           top.seen = true;

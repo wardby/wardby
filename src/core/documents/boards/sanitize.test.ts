@@ -229,6 +229,23 @@ describe("sanitizeBoard CSS bypasses (fix round 1)", () => {
     refused(board("", '<div style="--a:&quot;https://e.test/x.png&quot;;background-image:src(var(--a))">y</div>'));
   });
 
+  it.each([
+    ["U+00A0", "\u00a0"],
+    ["U+2000", "\u2000"],
+    ["U+3000", "\u3000"],
+    ["U+FEFF", "\ufeff"],
+  ])("refuses a url() whose data: reference starts with %s, in a sheet and in a style attribute", (_name, sp) => {
+    const ref = `${sp}data:image/png,/../../web/login?returnTo=/x`;
+    for (const input of [
+      board(`<style>a{background-image:url("${ref}")}</style>`),
+      board("", `<div style="background-image:url(&quot;${ref}&quot;)">y</div>`),
+    ]) {
+      const out = sanitizeBoard(input);
+      expect(out.problems.length).toBeGreaterThan(0);
+      expect(out.html + out.baseCss + (out.editsCss ?? "")).not.toContain("/web/login");
+    }
+  });
+
   it("checks the style elements as they are joined, not only one by one", () => {
     // A comment opened in one element and closed in the next.
     refused(board('<style>a{}/*</style><style>"*/ b{background-image:url(https://e.test/x)} /*"</style>'));
