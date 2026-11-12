@@ -42,10 +42,12 @@ export async function createDocument(
 ): Promise<{ id: string; versionId: string }> {
   if ((input.kind ?? "document") !== "document") throw new Error("document_kind_unsupported");
   const markdown = await prepareMarkdown(db, cipher, input.agentId ?? null, input.markdown);
+  // The title is shown on pages, share pages and MCP lists: redacted like the body.
+  const title = await redactForDocumentAgent(db, cipher, input.agentId ?? null, input.title);
   return db.$transaction(async (tx) => {
     const doc = await tx.document.create({
       data: {
-        title: input.title,
+        title,
         ownerId: input.ownerId,
         agentId: input.agentId ?? null,
         repository: input.repository ?? null,

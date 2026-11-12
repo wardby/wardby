@@ -315,6 +315,25 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
   });
 
+  it("publishes the agent's file with its secret values and token-shaped values redacted", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Add the key");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    const sha = await finish(runId, "succeeded", "Done.");
+    const fakeToken = "ghs_FAKEfakeFAKEfakeFAKEfake0123456789";
+    files.set(`${sha}:${path}`, `hello world\n\nkey ${SECRET} and ${fakeToken} end`);
+    await onDocumentRunFinished(db, deps, runId);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
+    expect(doc.currentVersion!.markdown).not.toContain(SECRET);
+    expect(doc.currentVersion!.markdown).not.toContain(fakeToken);
+    expect(doc.currentVersion!.markdown).toBe("hello world\n\nkey [REDACTED] and [REDACTED] end");
+  });
+
   it("a thread the agent did not answer gets a fixed reply and stays open; malformed blocks are ignored", async () => {
     const docId = await linkedDoc();
     const t1 = await thread(docId, "hello", "Warmer");

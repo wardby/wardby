@@ -65,6 +65,18 @@ describe.skipIf(!process.env.DATABASE_URL)("document service (database)", () => 
     expect(v.summary).not.toContain(SECRET);
   });
 
+  it("redacts the agent's secret values in the title", async () => {
+    const { id } = await createDocument(db, cipher, {
+      ownerId: owner.id,
+      title: `Notes ${SECRET}`,
+      agentId: agent,
+      markdown: "x",
+    });
+    const { document } = await getDocument(db, id);
+    expect(document.title).not.toContain(SECRET);
+    expect(document.title).toBe("Notes [REDACTED]");
+  });
+
   it("computes access for principals and guests", async () => {
     const { id } = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x" });
     expect(await documentAccess(db, id, { kind: "principal", principalId: owner.id })).toBe("owner");

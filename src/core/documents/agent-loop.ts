@@ -35,6 +35,7 @@ import { assertDocumentAgentOverride, validDocumentBaseRef, validDocumentPath } 
 import { listThreads, postAgentReply } from "./comments.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { publishVersion } from "./service.js";
+import { redactSecrets } from "../../coding/redact.js";
 
 const log = logger.child({ module: "documents-agent-loop" });
 
@@ -379,7 +380,7 @@ export async function onDocumentRunFinished(
       return;
     }
 
-    const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result);
+    const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
     if (edit.kind === "conflict") {
       for (const t of threads) await reply(t, versionConflictReply(edit.branch));
       return;
@@ -442,6 +443,7 @@ async function publishRunEdit(
   runId: string,
   threads: ClaimedThread[],
   codingResult: unknown,
+  secretValues: readonly string[],
 ): Promise<RunEdit> {
   const documentId = threads[0].documentId;
   try {
@@ -456,13 +458,16 @@ async function publishRunEdit(
     if (!doc?.repository || !doc.path || !ref || !deps.executor.readCodingRepositoryFile) return { kind: "failed" };
     const sentVersion = threads[0].sentVersionNumber;
     if (sentVersion === null || threads.some((t) => t.sentVersionNumber !== sentVersion)) return { kind: "failed" };
-    const markdown = await deps.executor.readCodingRepositoryFile({
+    const read = await deps.executor.readCodingRepositoryFile({
       repository: doc.repository,
       baseRef: ref,
       path: doc.path,
       maxBytes: MAX_MARKDOWN_BYTES,
     });
-    if (markdown === null) return { kind: "failed" };
+    if (read === null) return { kind: "failed" };
+    // Agent output: the agent's secret values by exact value, then every token shape (an installation
+    // token or provider key the run saw), as its replies are. publishVersion's exact-value pass runs too.
+    const markdown = redactSecrets(read, secretValues);
     const branch = result?.headRef ?? ref;
     if (markdown === doc.currentVersion?.markdown) {
       return doc.currentVersion.number === sentVersion ? { kind: "unchanged" } : { kind: "conflict", branch };

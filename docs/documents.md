@@ -127,8 +127,11 @@ agent and remain allowed to give it task text (its owner, or the owner's
 images, task lists or raw HTML open comment-only in the page, because the
 editor would rewrite them.
 
-Secret values of the linked agent are replaced in document and comment text
-before they are stored, so a pasted secret does not become document content.
+Secret values of the linked agent are replaced in document titles, document
+and comment text before they are stored, so a pasted secret does not become
+document content. The file an agent run writes, and its replies, are also
+checked for token-shaped values (provider keys, Git host tokens) before they are
+published.
 
 ## Limits
 
