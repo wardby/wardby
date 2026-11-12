@@ -132,4 +132,25 @@ describe.skipIf(!process.env.DATABASE_URL)("document service (database)", () => 
     expect((await db.commentThread.findUniqueOrThrow({ where: { id: keep.id } })).status).toBe("open");
     expect((await db.commentThread.findUniqueOrThrow({ where: { id: drop.id } })).status).toBe("outdated");
   });
+
+  it("keeps a thread anchored on code-block text open after re-publish", async () => {
+    const md = "Intro\n\n```js\n# not a heading\nconst a_b = 1;\n```\n\nOutro";
+    const { id, versionId } = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: md });
+    const t = await db.commentThread.create({
+      data: {
+        documentId: id,
+        number: 1,
+        versionId,
+        anchor: { type: "text", quote: "# not a heading\nconst a_b = 1;", prefix: "", suffix: "" },
+      },
+    });
+    const r = await publishVersion(db, cipher, { documentId: id, markdown: md + "\n\nMore.", via: "editor" });
+    expect(r.reanchored).toEqual({ kept: 1, outdated: 0 });
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t.id } })).status).toBe("open");
+  });
+
+  it("stores the given via on createDocument", async () => {
+    const { id } = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x", via: "mcp" });
+    expect((await getDocument(db, id)).version.via).toBe("mcp");
+  });
 });

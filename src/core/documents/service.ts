@@ -39,6 +39,7 @@ export async function createDocument(
     repository?: string;
     path?: string;
     baseRef?: string;
+    via?: PublishVia;
   },
 ): Promise<{ id: string; versionId: string }> {
   if ((input.kind ?? "document") !== "document") throw new Error("document_kind_unsupported");
@@ -60,7 +61,7 @@ export async function createDocument(
         number: 1,
         markdown,
         contentHash: sha256(markdown),
-        via: "editor",
+        via: input.via ?? "editor",
         createdById: input.ownerId,
       },
     });

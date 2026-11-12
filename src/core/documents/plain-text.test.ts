@@ -16,6 +16,19 @@ describe("markdownToPlainText", () => {
   it("handles star emphasis and strikes", () => {
     expect(markdownToPlainText("*x* __y__ ~~z~~")).toBe("x y z");
   });
+  it("drops fence lines (with a language tag) and keeps code text", () => {
+    expect(markdownToPlainText("before\n\n```js\nconst a = 1;\n```\n\nafter")).toBe("before\nconst a = 1;\nafter");
+    expect(markdownToPlainText("~~~\nx\n~~~")).toBe("x");
+  });
+  it("keeps code lines verbatim (no heading, bullet or emphasis stripping)", () => {
+    expect(markdownToPlainText("```\n# comment\n- x\n*x*\n  a   b\n```")).toBe("# comment\n- x\n*x*\na b");
+  });
+  it("keeps snake_case and 2*x*3 intact", () => {
+    expect(markdownToPlainText("foo_bar_baz and 2*x*3")).toBe("foo_bar_baz and 2*x*3");
+  });
+  it("still strips normal star and underscore emphasis", () => {
+    expect(markdownToPlainText("a *emphasis* and _emphasis_ here")).toBe("a emphasis and emphasis here");
+  });
   it("returns empty for empty input", () => {
     expect(markdownToPlainText("")).toBe("");
   });
