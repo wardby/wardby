@@ -44,6 +44,7 @@ const EXACT_STATUS: Record<string, number> = {
   document_version_is_latest: 409,
   document_too_large: 413,
   board_too_large: 413,
+  document_format_mismatch: 400,
   document_too_large_for_agent: 413,
   document_agent_unavailable: 403,
   document_send_failed: 503,
