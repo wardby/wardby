@@ -48,6 +48,9 @@
   channel to a Jira project or an agent to follow cards from pickup to merge.
 - [Run hooks](run-hooks.md) (0.9.8+) ties your own sandbox tool to an agent's
   events, such as `run_completed`, to send results to Slack, email or any API.
+- [Documents](documents.md) (0.10.0+) covers Markdown documents with anchored
+  comments, share links for guests, browser sign-in and sending comment threads
+  to a coding agent.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

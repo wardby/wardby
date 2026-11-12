@@ -387,6 +387,9 @@ for the repository's own dependency-override policy.
 - [Run hooks](https://github.com/wardby/wardby/blob/main/docs/run-hooks.md) (0.9.8+): wardby calls your own
   sandbox tool when an agent's run finishes (or a PR opens, a review posts), to
   send results to Slack, email or any API.
+- [Documents](https://github.com/wardby/wardby/blob/main/docs/documents.md) (0.10.0+): Markdown documents with
+  anchored comments, share links for guests, and comment threads sent to a
+  coding agent that edits the file.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
   repository and allowed per agent, for Codex and Claude Code runs on the
   Kubernetes and Docker launchers.

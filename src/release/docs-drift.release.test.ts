@@ -81,6 +81,19 @@ function errorCodes(): Map<string, string> {
       add(match[1], file);
     }
   }
+  // Documents: the codes the documents core, the web surface and the MCP tools throw or answer
+  // (`throw new Error("code")` / `throw new McpError(status, "code")`, the web route status table).
+  for (const file of sourceFiles.filter((f) =>
+    /src[/\\](core[/\\]documents|web)[/\\][^/\\]+\.ts$|src[/\\]mcp[/\\]tools[/\\]documents\.ts$/.test(f),
+  )) {
+    const form =
+      /\b(?:Error|McpError)\((?:\d+,\s*)?"((?:document|comment|share|guest|web)_[a-z_]+)"|^\s+((?:document|comment|share|guest|web)_[a-z_]+):\s*\d{3},/gm;
+    for (const match of read(file).matchAll(form)) add(match[1] ?? match[2], relative(ROOT, file));
+  }
+  // The web page API's generic codes (src/web/context.ts, src/web/api.ts, src/web/routes.ts).
+  for (const code of ["invalid_request", "expected_json_object", "not_found", "internal_error"]) {
+    add(code, "src/web/context.ts");
+  }
   // repo_pr_read's `patch_cursor_${reason}` (PatchCursorError's reasons).
   for (const reason of ["malformed", "stale"]) add(`patch_cursor_${reason}`, "src/core/review-host-tools.ts");
   for (const code of CHILD_RUN_FAILURE_CODES) add(code, "CHILD_RUN_FAILURE_CODES");
