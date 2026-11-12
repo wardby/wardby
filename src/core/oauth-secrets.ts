@@ -515,8 +515,8 @@ export interface OAuthResolveOptions {
   clock?: () => number;
   /**
    * The caller's stop signal (`options.signal` counts too). An aborted caller stops waiting at once
-   * with the retryable error; the shared refresh is aborted, ending its transaction and releasing
-   * the row lock, only once no caller still waits for it.
+   * with the retryable error. Once no caller still waits, a shared refresh that has not yet sent its
+   * token request rolls back and releases the row lock; one already sent runs to the end and is stored.
    */
   signal?: AbortSignal;
   /** The single-flight table; defaults to this process's. Tests give separate tables to act as separate processes. */
@@ -526,7 +526,7 @@ export interface OAuthResolveOptions {
 /** One refresh in flight, shared by every caller in this process that wants the same secret refreshed. */
 interface RefreshFlight {
   promise: Promise<OAuthSecretPayload>;
-  /** Aborts the token request, so the transaction ends and the row lock is released. */
+  /** Stops the refresh before its token request is sent, so the transaction rolls back; never cuts a sent request. */
   controller: AbortController;
   /** Callers still waiting that can abort; a caller with no signal pins the flight for good. */
   abortable: number;
@@ -714,6 +714,9 @@ function isLockTimeout(err: unknown): boolean {
   return false;
 }
 
+/** Thrown inside the transaction when the flight stopped before its token request was sent. */
+class StoppedBeforeSend extends Error {}
+
 async function refreshLocked(
   db: Pick<PrismaClient, "$transaction">,
   cipher: SecretCipher,
@@ -754,7 +757,7 @@ async function refreshLocked(
         const timeoutMs = Math.min(REFRESH_TIMEOUT_MS, left - REFRESH_COMMIT_MARGIN_MS);
         if (timeoutMs < REFRESH_MIN_REQUEST_MS) throw refreshUnavailable();
         // Stopped while waiting for the lock: roll back now rather than spend the refresh token.
-        if (signal.aborted) throw refreshUnavailable();
+        if (signal.aborted) throw new StoppedBeforeSend();
         const client: OAuthClient = {
           clientId: meta.clientId,
           ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
@@ -766,9 +769,10 @@ async function refreshLocked(
             meta,
             client,
             payload.refreshToken,
-            // The flight's signal, never one caller's: an abort reaches the request only when no
-            // caller still waits. Once the provider answers, the tokens are stored whatever happens.
-            { ...opts.options, signal, timeoutMs },
+            // No stop signal once sent, the flight's or a caller's: the provider may spend a rotating
+            // refresh token as soon as it has the request, so the request runs to its timeout and
+            // whatever it returns is stored. Callers that stopped were already released.
+            { ...sendOptions(opts.options), timeoutMs },
             opts.fetchImpl,
             now,
           );
@@ -807,8 +811,8 @@ async function refreshLocked(
       log.warn({ secretId: row.id, reason: "rotated_unsaved" }, "OAuth secret refresh failed");
       throw err instanceof OAuthSecretFlowError ? err : refreshUnavailable();
     }
-    if (signal.aborted) {
-      // Every caller stopped: the transaction was rolled back and the lock released, nothing changed.
+    if (err instanceof StoppedBeforeSend) {
+      // Every caller stopped before the token request was sent: rolled back, lock released, nothing changed.
       log.info({ secretId: row.id, reason: "aborted" }, "OAuth secret refresh stopped");
       throw refreshUnavailable();
     }
@@ -831,6 +835,13 @@ async function refreshLocked(
   }
   if (outcome.kind === "refreshed") log.info({ secretId: row.id }, "OAuth secret refreshed");
   return outcome.payload;
+}
+
+/** The fetch policy for the token request, without any stop signal (see refreshLocked). */
+function sendOptions(options: SafeFetchOptions | undefined): SafeFetchOptions {
+  if (!options) return {};
+  const { signal: _signal, ...rest } = options;
+  return rest;
 }
 
 /**

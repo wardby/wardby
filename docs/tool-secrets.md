@@ -136,8 +136,10 @@ Provider requirements:
   on one Wardby server share a single refresh. A call that is stopped (its run
   stopped, or its MCP call timed out) stops waiting for the refresh at once with
   [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md);
-  a refresh no call still waits for is cancelled, leaving the secret unchanged,
-  and the log records the reason `aborted`.
+  a refresh no call still waits for is cancelled if it has not yet contacted the
+  provider, leaving the secret unchanged, and the log records the reason
+  `aborted`. A refresh already sent to the provider still completes and is
+  saved, even if every call waiting for it was stopped.
 - **When it cannot refresh.** If the provider refuses the grant or the client
   (`invalid_grant`, `invalid_client`), the token is past its expiry with no
   refresh token (`expired`), or the service refuses the token with a 401 before

@@ -1007,33 +1007,131 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect((error as Error).cause).toBeUndefined();
     };
 
-    it("an aborted refresh releases the row lock at once, so another process's caller gets it", async () => {
-      const { read } = await connected("abort-lock", 30);
+    /** Waits until `check` holds, polling every 50 ms, up to `ms`. */
+    async function until(check: () => boolean | Promise<boolean>, ms = 10_000) {
+      const deadline = Date.now() + ms;
+      while (!(await check())) {
+        if (Date.now() > deadline) throw new Error("condition not met in time");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    /** Holds the secret's row lock from another transaction until `release` is called. */
+    async function holdLock(id: string) {
+      let release!: () => void;
+      const released = new Promise<void>((r) => (release = r));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((r) => (locked = r));
+      const holder = db.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "id" = ${id} FOR UPDATE`;
+          locked();
+          await released;
+        },
+        { timeout: 15_000 },
+      );
+      await isLocked;
+      return {
+        release: async () => {
+          release();
+          await holder;
+        },
+      };
+    }
+
+    it("a refresh already sent completes and stores the rotated token even when every caller stops", async () => {
+      const { read } = await connected("abort-after-send", 30);
       const stale = await read();
-      const stop = new AbortController();
-      const holder = decryptEntry(db, cipher, stale, {
-        options: OPTS,
-        fetchImpl: abortableSlowToken(12_000),
-        signal: stop.signal,
-        flights: new Map(),
-      }).catch((e: unknown) => e);
-      // Let the holder take the lock and start its (slow) token request.
-      await new Promise((r) => setTimeout(r, 500));
-      const waiter = decryptEntry(db, cipher, stale, { options: OPTS, flights: new Map() });
-      await new Promise((r) => setTimeout(r, 200));
+      const flights = new Map();
+      let sent = false;
+      let sentSignal: AbortSignal | undefined;
+      // The provider answers (and rotates) 1.5 s after the request reaches it.
+      const fetchImpl: typeof safeFetch = async (url, init, options) => {
+        if (url.endsWith("/token")) {
+          sent = true;
+          sentSignal = options?.signal;
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        return safeFetch(url, init, options);
+      };
+      const stops = [new AbortController(), new AbortController()];
+      const stopped = stops.map((s) =>
+        decryptEntry(db, cipher, stale, {
+          options: { ...OPTS, signal: s.signal },
+          fetchImpl,
+          signal: s.signal,
+          flights,
+        }).catch((e: unknown) => e),
+      );
+      await until(() => sent);
+      // A sent request carries no stop signal, the flight's or a caller's.
+      expect(sentSignal).toBeUndefined();
       const abortedAt = Date.now();
-      stop.abort();
-      expectRetryable(await holder);
-      expect(Date.now() - abortedAt).toBeLessThan(500);
-      const entry = await waiter;
-      // Well inside the 4 s lock wait: the aborted transaction rolled back promptly.
-      expect(Date.now() - abortedAt).toBeLessThan(1500);
-      expect(entry.value).toBe("fake-access-2");
-      // The aborted request never reached the provider, so the stored refresh token was spent once.
+      for (const s of stops) s.abort();
+      for (const e of await Promise.all(stopped)) expectRetryable(e);
+      expect(Date.now() - abortedAt).toBeLessThan(200);
+      // The abandoned refresh finishes in the background and its result is stored.
+      await until(async () => (await read()).ciphertext !== stale.ciphertext);
+      const after = await read();
+      expect((await payloadOf(after.ciphertext)).refreshToken).toBe("fake-refresh-2");
+      expect(metaOf(after.oauth).status).toBe("connected");
       expect(fake.tokenRequests).toBe(1);
-      expect((await payloadOf((await read()).ciphertext)).refreshToken).toBe("fake-refresh-2");
-      expect(logText()).toContain("aborted");
+      await until(() => flights.size === 0);
+      expect(logText()).not.toContain("aborted");
+      expect(logText()).not.toContain("rotated_unsaved");
       expect(logText()).not.toContain("fake-");
+    }, 20_000);
+
+    it("a stop before the token request is sent rolls back with no request, logged aborted", async () => {
+      const { read } = await connected("abort-before-send", 30);
+      const stale = await read();
+      const lock = await holdLock(stale.id);
+      const stop = new AbortController();
+      let error: unknown;
+      try {
+        const pending = decryptEntry(db, cipher, stale, {
+          options: OPTS,
+          signal: stop.signal,
+          flights: new Map(),
+        }).catch((e: unknown) => e);
+        // The refresh is waiting for the lock: it has not sent anything yet.
+        await new Promise((r) => setTimeout(r, 300));
+        stop.abort();
+        error = await pending;
+      } finally {
+        await lock.release();
+      }
+      expectRetryable(error);
+      await until(() => logText().includes("aborted"));
+      expect(fake.tokenRequests).toBe(0);
+      const after = await read();
+      expect(after.ciphertext).toBe(stale.ciphertext);
+      expect(metaOf(after.oauth).status).toBe("connected");
+      expect(logText()).not.toContain("fake-");
+    }, 20_000);
+
+    it("a lock wait that runs out during a stop is logged lock_timeout, not aborted", async () => {
+      const { read } = await connected("abort-lock-timeout", 30);
+      const stale = await read();
+      const lock = await holdLock(stale.id);
+      try {
+        const stop = new AbortController();
+        const pending = decryptEntry(db, cipher, stale, {
+          options: OPTS,
+          signal: stop.signal,
+          flights: new Map(),
+        }).catch((e: unknown) => e);
+        await new Promise((r) => setTimeout(r, 300));
+        stop.abort();
+        expectRetryable(await pending);
+        // The abandoned flight's lock wait runs out (4 s) while the lock is still held.
+        await until(() => logText().includes("lock_timeout"), 10_000);
+        expect(logText()).not.toContain("aborted");
+        expect(fake.tokenRequests).toBe(0);
+      } finally {
+        await lock.release();
+      }
+      expect((await read()).ciphertext).toBe(stale.ciphertext);
     }, 20_000);
 
     it("a caller whose signal is already aborted opens no transaction and sends no request", async () => {
@@ -1131,18 +1229,26 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       const stale = await read();
       const counted = countingDb();
       const flights = new Map();
+      // Hold the lock so the stop lands before the token request is sent (a sent one completes).
+      const lock = await holdLock(stale.id);
       const stops = [new AbortController(), new AbortController()];
-      const stopped = stops.map((s) =>
-        decryptEntry(counted.db, cipher, stale, {
-          options: OPTS,
-          fetchImpl: abortableSlowToken(12_000),
-          signal: s.signal,
-          flights,
-        }).catch((e: unknown) => e),
-      );
-      await new Promise((r) => setTimeout(r, 300));
-      for (const s of stops) s.abort();
-      for (const e of await Promise.all(stopped)) expectRetryable(e);
+      let stopped: unknown[];
+      try {
+        const pending = stops.map((s) =>
+          decryptEntry(counted.db, cipher, stale, {
+            options: OPTS,
+            fetchImpl: abortableSlowToken(12_000),
+            signal: s.signal,
+            flights,
+          }).catch((e: unknown) => e),
+        );
+        await new Promise((r) => setTimeout(r, 300));
+        for (const s of stops) s.abort();
+        stopped = await Promise.all(pending);
+      } finally {
+        await lock.release();
+      }
+      for (const e of stopped) expectRetryable(e);
       // The entry is gone at once: a new caller does not join the stopped refresh.
       expect(flights.size).toBe(0);
       const started = Date.now();
@@ -1151,6 +1257,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(entry.value).toBe("fake-access-2");
       expect(counted.transaction).toHaveBeenCalledTimes(2);
       expect(fake.tokenRequests).toBe(1);
+      await until(() => logText().includes("aborted"));
     }, 20_000);
 
     it("a failed shared refresh is not kept: the next call starts a new one", async () => {
@@ -1337,7 +1444,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(metaOf((await read()).oauth).status).toBe("connected");
     });
 
-    it("a run stopped while its MCP secrets load ends the refresh at once and says the call was stopped", async () => {
+    it("a run stopped while its MCP secrets load stops waiting at once and says the call was stopped", async () => {
       const name = "stop-at-load";
       const { ownerId, ownAgent } = await sharedServer("stop-load", name);
       const current = await row(ownerId, name);
@@ -1347,20 +1454,17 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
         expiresAt: new Date(Date.now() + 30_000).toISOString(),
       };
       await db.secret.update({ where: { id: current.id }, data: { oauth } });
-      // The token endpoint answers only after 12 s, unless the request is aborted first.
-      const fetchImpl: typeof safeFetch = async (url, _init, options) => {
+      // The token endpoint fails 2 s after the request reaches it. A sent request is not cut by
+      // the stop: it runs to its end in the background.
+      let settled = false;
+      const fetchImpl: typeof safeFetch = async (url) => {
         if (!url.endsWith("/token")) throw new Error("unexpected request");
-        return new Promise((_resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("too late")), 12_000);
-          options?.signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              reject(new Error("fetch_cancelled_or_timeout"));
-            },
-            { once: true },
-          );
-        });
+        return new Promise((_resolve, reject) =>
+          setTimeout(() => {
+            settled = true;
+            reject(new Error("fetch_cancelled_or_timeout"));
+          }, 2000),
+        );
       };
       const pin = (await loadMcpToolPins(db, ownAgent)).find((p) => p.toolName === "echo");
       if (!pin) throw new Error("no pin");
@@ -1383,6 +1487,11 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(JSON.parse(out)).toEqual({ error: "mcp_call_timeout", message: "The call was stopped." });
       expect(out).not.toContain("fake-");
       // Nothing changed: the transaction rolled back.
+      expect((await row(ownerId, name)).ciphertext).toBe(current.ciphertext);
+      expect(metaOf((await row(ownerId, name)).oauth).status).toBe("connected");
+      // The background request then fails and rolls back too, leaving the secret as it was.
+      await until(() => settled);
+      await new Promise((r) => setTimeout(r, 200));
       expect((await row(ownerId, name)).ciphertext).toBe(current.ciphertext);
       expect(metaOf((await row(ownerId, name)).oauth).status).toBe("connected");
     }, 20_000);
