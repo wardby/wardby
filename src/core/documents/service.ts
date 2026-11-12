@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { Prisma } from "#prisma";
 import type { Document, DocumentVersion, PrismaClient } from "#prisma";
-import { loadAgentSecretValues } from "../secret-guard.js";
-import { redactExactSecretValues } from "../secret-spans.js";
+import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { locateAnchor, parseTextAnchor } from "./anchors.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { markdownToPlainText } from "./plain-text.js";
+import { redactForDocumentAgent } from "./redact.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
 export type DocumentServiceDb = PrismaClient;
@@ -20,9 +20,7 @@ async function prepareMarkdown(
   markdown: string,
 ): Promise<string> {
   if (Buffer.byteLength(markdown, "utf8") > MAX_MARKDOWN_BYTES) throw new Error("document_too_large");
-  if (!agentId) return markdown;
-  const values = (await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values);
-  return redactExactSecretValues(markdown, values);
+  return redactForDocumentAgent(db, cipher, agentId, markdown);
 }
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -87,14 +85,7 @@ export async function publishVersion(
   const markdown = await prepareMarkdown(db, cipher, doc.agentId, input.markdown);
   const plain = markdownToPlainText(markdown);
   const summary =
-    input.summary === undefined
-      ? null
-      : doc.agentId
-        ? redactExactSecretValues(
-            input.summary,
-            (await loadAgentSecretValues(db, cipher, doc.agentId)).flatMap((e) => e.values),
-          )
-        : input.summary;
+    input.summary === undefined ? null : await redactForDocumentAgent(db, cipher, doc.agentId, input.summary);
   return withSerializableRetry(() =>
     db.$transaction(
       async (tx) => {
