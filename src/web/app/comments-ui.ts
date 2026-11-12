@@ -153,9 +153,10 @@ export class CommentsUI {
     this.apply(payload);
   }
 
-  startPolling(): void {
+  /** Polls while an agent is working on a thread, unless `isLive()` says live updates already cover it. */
+  startPolling(isLive: () => boolean = () => false): void {
     setInterval(() => {
-      if (document.hidden || !this.threads.some((t) => this.working(t))) return;
+      if (document.hidden || isLive() || !this.threads.some((t) => this.working(t))) return;
       this.reload().catch(() => undefined);
     }, POLL_MS);
   }

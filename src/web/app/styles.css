@@ -141,6 +141,10 @@ a {
 .save.bad {
   color: var(--bad);
 }
+.live-note {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
 .banner {
   padding: 0.45rem 0.9rem;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));

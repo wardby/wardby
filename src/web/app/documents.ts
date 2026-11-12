@@ -2,7 +2,8 @@
  * Entry point of the document page (/d/<id> and /s/<token>): reads the
  * bootstrap the server wrote, loads the document, mounts the Tiptap editor
  * (editable for members with write) and the comment dialog, and saves edits
- * with a debounced PUT carrying the version they were based on.
+ * with a debounced PUT carrying the version they were based on. Live
+ * updates (live.ts) refetch threads and newer versions as they happen.
  */
 import "./styles.css";
 import {
@@ -16,7 +17,8 @@ import {
 } from "./api.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
-import { createEditor } from "./editor.js";
+import { createEditor, setHighlights } from "./editor.js";
+import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 
 const SAVE_DELAY_MS = 1500;
@@ -64,10 +66,17 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const title = h("b", { class: "title" }, payload.document.title);
   const version = h("span", { class: "badge" }, `v${baseNumber}`);
   const saveState = h("span", { class: "save", aria: { live: "polite" } });
+  const liveNote = h("span", { class: "live-note", hidden: true, role: "status" });
   const who = h("span", { class: "who-am-i" });
   const account = h("span", { class: "account" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
   const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
+  const changedBanner = h(
+    "div",
+    { class: "banner", hidden: true, role: "note" },
+    "This document changed. Reload to see the latest version. ",
+    h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
+  );
   const editorEl = h("div", { class: "editor" });
   const margin = h("div", { class: "margin" });
   const page = h("div", { class: "page" }, editorEl, margin);
@@ -97,10 +106,12 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
           version,
         ),
         saveState,
+        liveNote,
         who,
         account,
       ),
       banner,
+      changedBanner,
       lossyNotice,
       toolbar,
       h("div", { class: "main" }, stage, side),
@@ -113,11 +124,12 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
   const lossless = isLosslessRoundTrip(payload.version.markdown, editor.getMarkdown());
   const editable = canWrite && lossless;
-  if (!lossless) {
+  const lockLossy = () => {
     lossyNotice.hidden = false;
     toolbar.hidden = true;
     editor.setEditable(false, false);
-  }
+  };
+  if (!lossless) lockLossy();
 
   const tb = (label: string, aria: string, run: () => boolean) =>
     h(
@@ -184,6 +196,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     }
   };
 
+  let startLive: () => void = () => undefined;
   const comments = new CommentsUI(
     {
       api,
@@ -198,6 +211,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       onViewer: (v) => {
         viewer = v;
         renderViewer();
+        startLive();
       },
     },
     viewer,
@@ -205,7 +219,9 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   renderViewer();
   comments.apply(payload);
   void comments.loadMentions();
-  comments.startPolling();
+  // The agent-run poll is a fallback for when live updates are not connected.
+  let liveUp = false;
+  comments.startPolling(() => liveUp);
   comments.openFromHash();
   addEventListener("hashchange", () => comments.openFromHash());
 
@@ -214,6 +230,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   let saving = false;
   let dirty = false;
   let conflict = false;
+  let pendingRefresh = false;
 
   const showSave = (text: string, reload = false) => {
     clear(saveState);
@@ -249,6 +266,10 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     } finally {
       saving = false;
     }
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      void refresh();
+    }
     if (dirty && !conflict) schedule();
   };
 
@@ -256,6 +277,95 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     clearTimeout(timer);
     timer = setTimeout(() => void save(), SAVE_DELAY_MS);
   };
+
+  // ---- live updates ----
+  /** Shows a newer version in place, keeping the scroll position and (where it still fits) the selection. */
+  const loadVersion = (next: DocumentPayload) => {
+    const scroll = stage.scrollTop;
+    const { from, to } = editor.state.selection;
+    editor
+      .chain()
+      .setMeta("addToHistory", false)
+      .setContent(next.version.markdown, { emitUpdate: false, contentType: "markdown" })
+      .run();
+    const size = editor.state.doc.content.size;
+    try {
+      editor.commands.setTextSelection({ from: Math.min(from, size), to: Math.min(to, size) });
+    } catch {
+      /* the old selection does not map onto the new document */
+    }
+    stage.scrollTop = scroll;
+    baseNumber = next.version.number;
+    version.textContent = `v${baseNumber}`;
+    if (!isLosslessRoundTrip(next.version.markdown, editor.getMarkdown())) lockLossy();
+    // Re-anchor every thread against the new text.
+    setHighlights(editor, { ranges: [] });
+    comments.apply(next);
+  };
+
+  /** Refetches the document and threads; a newer version loads in place unless there are unsaved edits. */
+  const refresh = coalesce(async () => {
+    let next: DocumentPayload;
+    try {
+      next = await api.load();
+    } catch {
+      return; // the next event, reconnect or save tries again
+    }
+    const act = versionAction({ shown: baseNumber, latest: next.version.number, dirty: dirty || conflict, saving });
+    if (act === "defer") {
+      pendingRefresh = true;
+      return;
+    }
+    if (act === "load") return loadVersion(next);
+    if (act === "banner") changedBanner.hidden = false;
+    comments.apply(next);
+  });
+
+  let serverHears = true;
+  const showLive = (state: "connecting" | "live" | "offline" | "stopped") => {
+    liveUp = state === "live" && serverHears;
+    liveNote.hidden = state === "connecting" || (state === "live" && serverHears);
+    liveNote.textContent =
+      state === "stopped" ? "Live updates stopped. Reload to see the latest." : "Offline — reconnecting";
+  };
+  let liveState: "connecting" | "live" | "offline" | "stopped" = "connecting";
+  // Only a signed-in member or guest has a session to stream with: a visitor on a share link starts
+  // listening once they continue as a guest.
+  let liveStarted = false;
+  startLive = () => {
+    if (liveStarted || viewer.kind === "anonymous") return;
+    liveStarted = true;
+    const live = new LiveConnection(
+      `/d/api/${encodeURIComponent(boot.documentId)}/events`,
+      boot.shareToken ? { "x-wardby-share": boot.shareToken } : {},
+      {
+        onMessage: (message) => {
+          const act = liveAction(message);
+          if (act === "status") {
+            const up = statusConnected(message.data);
+            if (up !== null) serverHears = up;
+            showLive(liveState);
+          } else if (act) void refresh();
+        },
+        onReconnect: () => void refresh(),
+        onState: (state) => {
+          liveState = state;
+          showLive(state);
+        },
+      },
+    );
+    live.start();
+    const stopper = new HiddenStopper({
+      stop: () => live.stop(),
+      resume: () => {
+        live.start();
+        void refresh();
+      },
+    });
+    document.addEventListener("visibilitychange", () => stopper.visible(!document.hidden));
+    if (document.hidden) stopper.visible(false);
+  };
+  startLive();
 
   if (editable) {
     showSave("Saved");
