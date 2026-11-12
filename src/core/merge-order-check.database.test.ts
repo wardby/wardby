@@ -16,6 +16,7 @@ import {
   sweepMergeOrderChecks,
   syncMergeOrderChecks,
   syncMergeOrderChecksAfterRun,
+  syncMergeOrderChecksForPullRequest,
 } from "./merge-order-check.js";
 import { runTreeRoot } from "./related-pull-requests.js";
 import type { RepoAccessGate } from "./repo-access.js";
@@ -445,5 +446,74 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     await expect(
       syncMergeOrderChecksAfterRun({ db, hosts: deps.hosts }, { id: id("lead"), parentRunId: null }),
     ).resolves.toBeUndefined();
+  });
+
+  describe("a coding run's extra repository (#537)", () => {
+    const repoE = `mocheck/e-${s8}`;
+    const repoF = `mocheck/f-${s8}`;
+    const full = (outcome: string, repository: string, number: number) => ({
+      schemaVersion: 1,
+      outcome,
+      repository,
+      baseRef: "main",
+      headRef: `wardby/run-${id("xc")}`,
+      commitSha: "a".repeat(40),
+      pullRequestUrl: `https://github.com/${repository}/pull/${number}`,
+      pullRequestNumber: number,
+      summary: "Did the work.",
+      tests: [],
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
+
+    beforeAll(async () => {
+      // A finished lead delegated one coding run: its default repository E#50 is step 1, and its
+      // writable extra `tools` (F) opened F#3 as step 2.
+      await run(id("xlead"), "succeeded");
+      await run(id("xc"), "succeeded", id("xlead"));
+      await db.codingRun.create({
+        data: {
+          runId: id("xc"),
+          task: "t",
+          repository: repoE,
+          baseRef: "main",
+          headRef: `wardby/run-${id("xc")}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 900,
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+          mergeOrder: 1,
+          result: full("pull_request_opened", repoE, 50),
+        },
+      });
+      await db.codingRunRepository.create({
+        data: {
+          runId: id("xc"),
+          position: 1,
+          name: "tools",
+          access: "write",
+          provider: "github",
+          repository: repoF,
+          baseRef: "main",
+          headRef: `wardby/run-${id("xc")}`,
+          pullRequestNumber: 3,
+          mergeOrder: 2,
+          result: full("pull_request_opened", repoF, 3),
+        },
+      });
+      prs.set(`${repoE}#50`, { state: "open", headSha: SHA, markerRunId: id("xc") });
+      prs.set(`${repoF}#3`, { state: "open", headSha: SHA, markerRunId: id("xc") });
+    });
+
+    it("runTreeRoot accepts the extra's repository", async () => {
+      await expect(runTreeRoot(db, id("xc"), repoF)).resolves.toMatchObject({ id: id("xlead"), isOpener: false });
+      await expect(runTreeRoot(db, id("xc"), repoA)).resolves.toBeNull();
+    });
+
+    it("an event on the extra's pull request finds its set and posts the check on both pull requests", async () => {
+      await syncMergeOrderChecksForPullRequest({ db, hosts: deps.hosts }, { repository: repoF, number: 3 });
+      expect(verdicts()).toEqual([`${repoE} completed/success`, `${repoF} in_progress`]);
+      expect(summaryFor(repoF)).toContain(`[${repoE}#50](https://github.com/${repoE}/pull/50)`);
+    });
   });
 });

@@ -127,7 +127,8 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
  * whatever its status: the marker's coding run (a continuation resolves to
  * its root coding run first), then up its parents. Null when the marker
  * names no coding run, or one recorded for a different repository than
- * `repository` (compared case-insensitively; omit it to skip the check).
+ * `repository`: neither its default repository nor one of its writable extra
+ * repositories (#537), compared case-insensitively; omit it to skip the check.
  * `isOpener` is true when that root is the opening coding run itself (the
  * pull request was not delegated). The single place this walk and its
  * repository guard live (requestLeadRunId, the merge order check).
@@ -144,7 +145,14 @@ export async function runTreeRoot(
       SELECT COALESCE(cr."rootCodingRunId", cr."runId") AS "id"
       FROM "CodingRun" cr
       WHERE cr."runId" = ${markerRunId}
-        AND (${repo}::text IS NULL OR lower(cr."repository") = lower(${repo}::text))
+        AND (
+          ${repo}::text IS NULL
+          OR lower(cr."repository") = lower(${repo}::text)
+          OR EXISTS (
+            SELECT 1 FROM "CodingRunRepository" crr
+            WHERE crr."runId" = cr."runId" AND crr."access" = 'write' AND lower(crr."repository") = lower(${repo}::text)
+          )
+        )
     ), up AS (
       SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r JOIN opener o ON r."id" = o."id"
       UNION
@@ -190,6 +198,30 @@ async function extraRepositoryRows(
         ]
       : [];
   });
+}
+
+/**
+ * Whether coding run `runId`'s change (its root coding run and every continuation of it) recorded a
+ * pull request in a writable extra repository (#537): such a change spans several pull requests,
+ * so a run of it that ends refreshes their Related sections and merge order checks even when no
+ * lead delegated it. False for a run that is not a coding run.
+ */
+export async function changeHasExtraPullRequest(
+  db: Pick<PrismaClient, "codingRun" | "codingRunRepository">,
+  runId: string,
+): Promise<boolean> {
+  const run = await db.codingRun.findUnique({ where: { runId }, select: { rootCodingRunId: true } });
+  if (!run) return false;
+  const rootRunId = run.rootCodingRunId ?? runId;
+  const row = await db.codingRunRepository.findFirst({
+    where: {
+      access: "write",
+      pullRequestNumber: { not: null },
+      codingRun: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }] },
+    },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 /**
@@ -434,14 +466,11 @@ export async function updateRelatedPullRequests(
   };
   if (!Object.values(hosts ?? {}).some(canEditRelatedSection)) return;
   try {
-    // A run that delegated nothing has no request set of its own, unless it opened pull requests in
-    // several repositories itself (#537).
+    // A run that delegated nothing has no request set of its own, unless it is a coding run whose
+    // change (its root and the root's continuations) opened pull requests in extra repositories (#537).
     if (
       !(await db.run.findFirst({ where: { parentRunId: run.id }, select: { id: true } })) &&
-      !(await db.codingRunRepository.findFirst({
-        where: { runId: run.id, pullRequestNumber: { not: null } },
-        select: { id: true },
-      }))
+      !(await changeHasExtraPullRequest(db, run.id))
     ) {
       return;
     }

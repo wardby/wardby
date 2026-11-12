@@ -458,11 +458,19 @@ export async function checkContinuation(
   runId: string,
   repository: string,
   dispatchingOwnerId?: string | null,
+  /**
+   * The pull request the caller holds (a mention's or a fix round's): its provider, and its number,
+   * which the matched repository's pull request must be, so an extra whose pull request was
+   * replaced matches its own row rather than the oldest row for that repository. The provider
+   * defaults to the repository id's.
+   */
+  pullRequest?: { provider?: string; number?: number },
 ): Promise<ContinuationCheck> {
   const resolved = await resolveRunPullRequest(reader, {
     markerRunId: runId,
-    provider: codeProviderOf(repository),
+    provider: pullRequest?.provider ?? codeProviderOf(repository),
     repository,
+    ...(pullRequest?.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
     ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
   });
   if (!resolved.ok) return resolved;

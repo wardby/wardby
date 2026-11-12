@@ -6,7 +6,7 @@
 import type { PrismaClient } from "#prisma";
 import { pullRequestOutcome } from "./host-status.js";
 
-export type BudgetStoppedHeadDb = Pick<PrismaClient, "codingRun">;
+export type BudgetStoppedHeadDb = Pick<PrismaClient, "codingRun" | "codingRunRepository">;
 
 /** The run that pushed last: its status and the commit it pushed (result.commitSha). */
 export interface LastPusher {
@@ -22,13 +22,26 @@ const commitShaOf = (result: unknown): string | undefined => {
 
 /**
  * The newest continuation of `root` (by createdAt) whose result names pull request `prNumber`,
- * else the root itself.
+ * else the root itself. For a writable extra's pull request (`extra`, the row name, #537), the
+ * result read is each run's row of that name instead of the run's own (default repository's), so
+ * a number another repository of the set shares never matches.
  */
 export async function lastPusher(
   db: BudgetStoppedHeadDb,
   root: { runId: string; result: unknown; run: { status?: string } | null },
   prNumber: number,
+  extra?: string,
 ): Promise<LastPusher> {
+  if (extra !== undefined) {
+    const rows = await db.codingRunRepository.findMany({
+      where: { name: extra, codingRun: { OR: [{ runId: root.runId }, { rootCodingRunId: root.runId }] } },
+      select: { runId: true, result: true, codingRun: { select: { run: { select: { status: true } } } } },
+      orderBy: { createdAt: "desc" },
+    });
+    const pushed = rows.find((r) => pullRequestOutcome(r.result)?.pullRequestNumber === prNumber);
+    if (!pushed) return { status: root.run?.status, commitSha: undefined };
+    return { status: pushed.codingRun.run?.status, commitSha: commitShaOf(pushed.result) };
+  }
   const continuations = await db.codingRun.findMany({
     where: { rootCodingRunId: root.runId },
     select: { result: true, run: { select: { status: true } } },
@@ -36,6 +49,21 @@ export async function lastPusher(
   });
   const last = continuations.find((c) => pullRequestOutcome(c.result)?.pullRequestNumber === prNumber) ?? root;
   return { status: last.run?.status, commitSha: commitShaOf(last.result) };
+}
+
+/**
+ * Whether the last run that pushed to the pull request (the root, or a later continuation of it)
+ * stopped at its budget: its pushed changes are unfinished work, so the draft stays a draft. A
+ * continuation that finished the work makes it eligible again. `extra` names the root's writable
+ * row when the pull request is an extra repository's (#537); omitted, it is the default's.
+ */
+export async function lastPushStoppedAtBudget(
+  db: BudgetStoppedHeadDb,
+  root: { runId: string; result: unknown; run: { status?: string } | null },
+  prNumber: number,
+  extra?: string,
+): Promise<boolean> {
+  return (await lastPusher(db, root, prNumber, extra)).status === "budget_exhausted";
 }
 
 const ROOT_SELECT = {

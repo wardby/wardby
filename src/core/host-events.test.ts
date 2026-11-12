@@ -48,6 +48,11 @@ vi.mock("./dispatch.js", () => ({
   })),
 }));
 import { checkContinuation, dispatchRun } from "./dispatch.js";
+vi.mock("./run-pull-request.js", async (orig) => ({
+  ...(await orig<typeof import("./run-pull-request.js")>()),
+  rootFollowUpInFlight: vi.fn(async () => false),
+}));
+import { rootFollowUpInFlight } from "./run-pull-request.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const REPO = "chfields/knock-knock-jokes";
@@ -508,7 +513,10 @@ describe("routeHostEvent mention task text", () => {
     for (const f of result.followUps) await f();
     expect(result.runIds).toEqual([]);
     expect(dispatchRun).not.toHaveBeenCalled();
-    expect(checkContinuation).toHaveBeenLastCalledWith(d.db, "run_elsewhere", REPO);
+    expect(checkContinuation).toHaveBeenLastCalledWith(d.db, "run_elsewhere", REPO, undefined, {
+      provider: "github",
+      number: 7,
+    });
     expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
       number: 7,
       body: expect.stringContaining("Its description names wardby run `run_elsewhere`"),
@@ -546,6 +554,99 @@ describe("routeHostEvent mention task text", () => {
       REPO,
       expect.objectContaining({ replyToReviewCommentId: "88" }),
     );
+  });
+
+  describe("a follow-up on a pull request of a root run's set (#537)", () => {
+    const TOOLS = "your-org/tools";
+    const extraCheck = {
+      ok: true as const,
+      root: {
+        runId: "run_root",
+        baseRef: "main",
+        headRef: "wardby/run-run_root",
+        pullRequestNumber: 3,
+        repo: { kind: "extra" as const, name: "tools", repository: TOOLS, pullRequestNumber: 3 },
+      },
+    };
+    const onTools = { ...base, repository: TOOLS, number: 3, priorRunId: "run_cont" };
+
+    it("dispatches the responder for a mention on an extra's pull request, matched by provider and number", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      vi.mocked(rootFollowUpInFlight).mockClear();
+      vi.mocked(checkContinuation).mockResolvedValueOnce(extraCheck);
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      const result = await routeHostEvent(onTools, d);
+      for (const f of result.followUps) await f();
+      expect(result.runIds).toEqual(["run-a3"]);
+      expect(checkContinuation).toHaveBeenLastCalledWith(d.db, "run_cont", TOOLS, undefined, {
+        provider: "github",
+        number: 3,
+      });
+      expect(rootFollowUpInFlight).toHaveBeenCalledWith(d.db, "run_root");
+      expect(d.hosts.github.comment).not.toHaveBeenCalledWith(
+        TOOLS,
+        expect.objectContaining({ body: expect.stringContaining("I can't continue this pull request") }),
+      );
+    });
+
+    it("declines, with one comment and no run, while a follow-up of the root run is in flight", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      vi.mocked(checkContinuation).mockResolvedValueOnce(extraCheck);
+      vi.mocked(rootFollowUpInFlight).mockResolvedValueOnce(true);
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      const result = await routeHostEvent(onTools, d);
+      for (const f of result.followUps) await f();
+      expect(result.runIds).toEqual([]);
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).toHaveBeenCalledTimes(1);
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(TOOLS, {
+        number: 3,
+        body: mentionDeclinedBody("follow_up_running"),
+      });
+      expect(mentionDeclinedBody("follow_up_running")).toBe(
+        "ℹ️ A follow-up for this change is already running. Mention me again after it finishes; I will pick up the whole change, including its other pull requests.",
+      );
+    });
+
+    it("says nothing and starts nothing with mention explanations off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      vi.mocked(checkContinuation).mockResolvedValueOnce(extraCheck);
+      vi.mocked(rootFollowUpInFlight).mockResolvedValueOnce(true);
+      const d = { ...deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]), mentionExplanations: false };
+      const result = await routeHostEvent(onTools, d);
+      for (const f of result.followUps) await f();
+      expect(result).toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.comment).not.toHaveBeenCalled();
+    });
+
+    it("re-checks the root in the dispatch transaction, and declines when a follow-up started in between", async () => {
+      vi.mocked(rootFollowUpInFlight).mockClear().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      vi.mocked(checkContinuation).mockResolvedValueOnce(extraCheck);
+      // The real dispatch runs beforePersist inside its transaction and starts nothing when it declines.
+      vi.mocked(dispatchRun).mockImplementationOnce(async (opts) => {
+        expect(await opts.beforePersist!(txStub as never, {} as never)).toBe(false);
+        return null;
+      });
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      const result = await routeHostEvent(onTools, d);
+      for (const f of result.followUps) await f();
+      expect(result.runIds).toEqual([]);
+      expect(vi.mocked(rootFollowUpInFlight).mock.calls[1]).toEqual([txStub, "run_root"]);
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(TOOLS, {
+        number: 3,
+        body: mentionDeclinedBody("follow_up_running"),
+      });
+    });
+
+    it("applies no follow-up rule to a mention without a marker", async () => {
+      vi.mocked(rootFollowUpInFlight).mockClear();
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      const result = await routeHostEvent(base, d);
+      expect(result.runIds).toEqual(["run-a3"]);
+      expect(rootFollowUpInFlight).not.toHaveBeenCalled();
+      expect(vi.mocked(dispatchRun).mock.calls.at(-1)![0].beforePersist).toBeUndefined();
+    });
   });
 
   it("N-1: an outsider's issue text reaches the agent only as wrapped untrusted context", async () => {
@@ -915,6 +1016,7 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
         "no_reviewer",
         "agent_not_authorized",
         "pull_request_not_reviewable",
+        "follow_up_running",
       ] as const) {
         expect(mentionDeclinedBody(reason)).not.toContain("@");
       }

@@ -22,7 +22,8 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
 } from "./attribution.js";
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
-import { checkContinuation, dispatchRun } from "./dispatch.js";
+import { checkContinuation, dispatchRun, type DispatchTx } from "./dispatch.js";
+import { rootFollowUpInFlight } from "./run-pull-request.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { githubIssueKey, handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
@@ -531,15 +532,20 @@ export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibl
 }
 
 /**
- * Whether the run the PR's marker names is one this deployment can continue on
- * this PR: known here, in this repository, and the one that opened this PR.
- * The marker is trusted only on a PR the App authored, but every deployment
+ * The root coding run a follow-up on this PR continues, when the run the PR's
+ * marker names is one this deployment can continue on this PR: known here, and
+ * this PR is its root's default repository's or one of its writable extras'
+ * (#537), matched on provider, repository and number. Null otherwise. The
+ * marker is trusted only on a PR the App authored, but every deployment
  * sharing the App authors such PRs, and the id is only a hint until checked.
  */
-async function priorRunContinues(deps: RouteHostEventDeps, event: MentionEvent): Promise<boolean> {
-  if (!event.priorRunId) return false;
-  const check = await checkContinuation(deps.db, event.priorRunId, event.repository);
-  return check.ok && check.root.pullRequestNumber === event.number;
+async function priorRunRoot(deps: RouteHostEventDeps, event: MentionEvent): Promise<string | null> {
+  if (!event.priorRunId) return null;
+  const check = await checkContinuation(deps.db, event.priorRunId, event.repository, undefined, {
+    provider: event.provider,
+    number: event.number,
+  });
+  return check.ok && check.root.pullRequestNumber === event.number ? check.root.runId : null;
 }
 
 /** The reply to a mention whose author can see the repository but cannot push to it. */
@@ -576,7 +582,7 @@ export function unknownPriorRunBody(priorRunId: string): string {
 
 /** Why a mention from someone allowed to use wardby started nothing; posted so they are not left guessing. */
 export type MentionDeclineReason =
-  "no_responder" | "no_reviewer" | "agent_not_authorized" | "pull_request_not_reviewable";
+  "no_responder" | "no_reviewer" | "agent_not_authorized" | "pull_request_not_reviewable" | "follow_up_running";
 
 /**
  * Never names the App's handle: this comment is posted by the App, and a
@@ -601,6 +607,8 @@ export function mentionDeclinedBody(reason: MentionDeclineReason): string {
       );
     case "pull_request_not_reviewable":
       return "ℹ️ I didn't start a review: this pull request is closed or comes from a fork, and wardby reviews only open pull requests from branches of this repository.";
+    case "follow_up_running":
+      return "ℹ️ A follow-up for this change is already running. Mention me again after it finishes; I will pick up the whole change, including its other pull requests.";
   }
 }
 
@@ -1786,7 +1794,8 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           followUps: [react],
         };
       }
-      if (event.priorRunId && !(await priorRunContinues(deps, event))) {
+      const priorRoot = event.priorRunId ? await priorRunRoot(deps, event) : null;
+      if (event.priorRunId && !priorRoot) {
         // The PR's marker names a run this deployment cannot continue (most
         // often one another deployment sharing the App opened). A run would
         // only fail, or open a second PR, so say why instead of starting one.
@@ -1807,6 +1816,11 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         };
         return { runIds: [], followUps: [react, reply] };
       }
+      // One follow-up in flight per root run (#537 §4), a single-repository one included: a second
+      // would work on the same branches at once. Checked here, and again in the dispatch
+      // transaction (beforePersist below), so two mentions arriving together start one run.
+      if (priorRoot && (await rootFollowUpInFlight(deps.db, priorRoot))) return decline("follow_up_running");
+      let followUpRunning = false;
       // Seeded from the PR's validated marker run: the request it belongs to. Stored state only.
       // An issue mention is seeded from the issue's recorded pull requests instead.
       const siblings = event.isPullRequest
@@ -1842,13 +1856,21 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
                 RESPONSE_PATH_SNAPSHOT_BUDGET,
               ),
             },
+        ...(priorRoot
+          ? {
+              beforePersist: async (tx: DispatchTx) => {
+                followUpRunning = await rootFollowUpInFlight(tx, priorRoot);
+                return !followUpRunning;
+              },
+            }
+          : {}),
         // Where to report, written with the run: even if this instance dies
         // before the follow-up below, the run's outcome still gets a comment.
         afterPersist: async (tx, run) => {
           await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
         },
       });
-      if (!dispatched) return none;
+      if (!dispatched) return followUpRunning ? decline("follow_up_running") : none;
       log.info(
         { repository: event.repository, number: event.number, runId: dispatched.run.id },
         "mention run dispatched",

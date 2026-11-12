@@ -3477,3 +3477,91 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     });
   });
 });
+
+describe("a coding sub-run's pull requests across its repositories (#537)", () => {
+  const REPO = "your-org/your-fork";
+  const TOOLS = "your-org/tools";
+  const codingProfile: FakeCodingProfile = {
+    provider: "codex",
+    repository: REPO,
+    baseRef: "main",
+    defaultTask: null,
+    allowWebhookTaskOverride: true,
+    timeoutSec: 900,
+    allowedEgress: [],
+    protectedPaths: [],
+    toolchain: "node-python",
+    toolchainVersion: "3.12",
+    workerImageRef: null,
+  };
+  const outcome = (outcome: string, repository: string, number: number) => ({
+    schemaVersion: 1,
+    outcome,
+    repository,
+    baseRef: "main",
+    headRef: "wardby/run-x",
+    commitSha: "a".repeat(40),
+    pullRequestUrl: `https://github.com/${repository}/pull/${number}`,
+    pullRequestNumber: number,
+    summary: "Did the work.",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
+
+  it("the lead's delegation result lists the default repository's pull request, then each extra's", async () => {
+    const lead: FakeAgent = {
+      id: "lead",
+      name: "lead",
+      systemPrompt: "You delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const builder: FakeAgent = {
+      id: "builder",
+      name: "builder",
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb([lead, builder], [{ parentAgentId: "lead", childAgentId: "builder", boundName: "build" }]);
+    const parentRun = await db.run.create({ data: { agentId: "lead" } });
+    // The finished child: its default repository updated PR 7; its writable extras opened TOOLS#3
+    // and had no changes in `docs`; a read repository has no result.
+    const executor = {
+      ...fakeCodingExecutor(db, { status: "succeeded", finalText: "Done.", costUsd: 0 }),
+      async start(runId: string) {
+        const child = await (db as any).codingRun.findUnique({ where: { runId } });
+        child.result = outcome("pull_request_updated", REPO, 7);
+        (db as any).codingRunRepositories.push(
+          { runId, position: 0, name: "base", access: "read", result: null },
+          { runId, position: 1, name: "tools", access: "write", result: outcome("pull_request_opened", TOOLS, 3) },
+          { runId, position: 2, name: "docs", access: "write", result: { outcome: "no_changes" } },
+        );
+        await (db as any).run.update({
+          where: { id: runId },
+          data: { status: "succeeded", finalText: "Done.", costUsd: 0, finishedAt: new Date() },
+        });
+      },
+    };
+    const llm = scriptedLlm([
+      toolCall("delegate_to_build", JSON.stringify({ task: "change both" })),
+      finalAnswer("done"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+    const seen = toolResultSeen(llm, 1);
+    expect(seen.pullRequest).toEqual({
+      outcome: "updated",
+      repository: REPO,
+      number: 7,
+      url: `https://github.com/${REPO}/pull/7`,
+    });
+    expect(seen.pullRequests).toEqual([
+      { outcome: "updated", repository: REPO, number: 7, url: `https://github.com/${REPO}/pull/7` },
+      { outcome: "opened", repository: TOOLS, number: 3, url: `https://github.com/${TOOLS}/pull/3` },
+    ]);
+  });
+});

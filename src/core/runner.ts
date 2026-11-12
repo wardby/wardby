@@ -737,6 +737,8 @@ export function codingChildResult(
   codingResult?: unknown,
   /** The child's recorded budget refusal (loadBudgetEvent), if any. */
   budgetEvent?: { event: BudgetEventView; agentName: string } | null,
+  /** The results stored on the child's writable extra repositories' rows (#537), in set order. */
+  extraResults: readonly unknown[] = [],
 ): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
@@ -762,25 +764,51 @@ export function codingChildResult(
     ...(refusal ? { refusal } : {}),
     ...(errorCode ? { errorCode } : {}),
     ...(budget ? { budget } : {}),
-    ...pullRequestOf(codingResult),
+    ...pullRequestsOf(codingResult, extraResults),
   });
 }
 
 /**
- * The pull request the coding sub-run opened or pushed to, from wardby's own
- * stored result (never the sub-agent's text), so the parent can cite it.
+ * The pull requests the coding sub-run opened or pushed to, from wardby's own
+ * stored results (never the sub-agent's text), so the parent can cite them:
+ * `pullRequest` is the first (the default repository's when it has one), and
+ * `pullRequests`, present only when there are several, lists the default
+ * repository's and then each extra repository's (#537).
  */
-function pullRequestOf(codingResult: unknown): { pullRequest?: Record<string, unknown> } {
-  const pr = pullRequestOutcome(codingResult);
-  if (!pr) return {};
-  return {
-    pullRequest: {
-      outcome: pr.outcome === "pull_request_opened" ? "opened" : "updated",
-      repository: pr.repository,
-      number: pr.pullRequestNumber,
-      ...(pr.pullRequestUrl ? { url: pr.pullRequestUrl } : {}),
-    },
-  };
+function pullRequestsOf(
+  codingResult: unknown,
+  extraResults: readonly unknown[],
+): { pullRequest?: Record<string, unknown>; pullRequests?: Record<string, unknown>[] } {
+  const prs = [codingResult, ...extraResults].flatMap((result) => {
+    const pr = pullRequestOutcome(result);
+    return pr
+      ? [
+          {
+            outcome: pr.outcome === "pull_request_opened" ? "opened" : "updated",
+            repository: pr.repository,
+            number: pr.pullRequestNumber,
+            ...(pr.pullRequestUrl ? { url: pr.pullRequestUrl } : {}),
+          },
+        ]
+      : [];
+  });
+  if (prs.length === 0) return {};
+  return { pullRequest: prs[0], ...(prs.length > 1 ? { pullRequests: prs } : {}) };
+}
+
+/** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
+async function extraRepositoryResults(db: Pick<RunnerDb, "codingRunRepository">, runId: string): Promise<unknown[]> {
+  try {
+    const rows = await db.codingRunRepository.findMany({
+      where: { runId, access: "write" },
+      select: { result: true },
+      orderBy: { position: "asc" },
+    });
+    return rows.map((r) => r.result);
+  } catch (err) {
+    runnerLog.warn({ err, runId }, "could not read the coding sub-run's extra repository results");
+    return [];
+  }
 }
 
 /**
@@ -1310,7 +1338,12 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
           return null;
         });
-      return codingChildResult(waited.run, stored?.result, await loadBudgetEvent(db, childRunId));
+      return codingChildResult(
+        waited.run,
+        stored?.result,
+        await loadBudgetEvent(db, childRunId),
+        await extraRepositoryResults(db, childRunId),
+      );
     }
     return nativeChildResult(waited.run, wait.mergeOrderNote);
   };
@@ -2437,7 +2470,14 @@ export async function durableDelegate(
       const stored = await db.codingRun
         .findUnique({ where: { runId: childRunId }, select: { result: true } })
         .catch(() => null);
-      return finish(codingChildResult(child, stored?.result, await loadBudgetEvent(db, childRunId)));
+      return finish(
+        codingChildResult(
+          child,
+          stored?.result,
+          await loadBudgetEvent(db, childRunId),
+          await extraRepositoryResults(db, childRunId),
+        ),
+      );
     }
     if (now() - startedAt >= boundMs) {
       await executor.stop(childRunId, "sub-agent wait timed out").catch((err: unknown) => {

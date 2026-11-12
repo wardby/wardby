@@ -343,6 +343,39 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await checkContinuation(db, runId, "acme/elsewhere")).toEqual({ ok: false, reason: "other_repository" });
   });
 
+  it("matches an extra's replacement pull request by its own number, not the oldest row of that repository", async () => {
+    const { agentId } = await codingAgent();
+    const { runId, tools } = await rootWithTools(agentId, "opened");
+    // A follow-up replaced tools#3 (closed) with tools#4: recorded on the continuation's own row.
+    const continuation = await dispatchRun({
+      db,
+      executor: fakeExecutor().executor,
+      agentId,
+      codingTask: "replace the tools pull request",
+      continuesCodingRunId: runId,
+    });
+    const contId = continuation!.run.id;
+    await db.codingRunRepository.update({
+      where: { runId_name: { runId: contId, name: "tools" } },
+      data: { pullRequestNumber: 4 },
+    });
+    const check = (number?: number) =>
+      checkContinuation(db, contId, tools, owner, number === undefined ? undefined : { provider: "github", number });
+    expect(await check(4)).toMatchObject({
+      ok: true,
+      root: { runId, pullRequestNumber: 4, repo: { kind: "extra", name: "tools", pullRequestNumber: 4 } },
+    });
+    expect(await check(3)).toMatchObject({ ok: true, root: { pullRequestNumber: 3 } });
+    // Without the number, the oldest row of the repository answers: the caller would refuse #4 as another PR.
+    expect(await check()).toMatchObject({ ok: true, root: { pullRequestNumber: 3 } });
+    expect(await check(5)).toEqual({ ok: false, reason: "no_pull_request" });
+    // The provider is part of the match.
+    expect(await checkContinuation(db, contId, tools, owner, { provider: "bitbucket", number: 4 })).toEqual({
+      ok: false,
+      reason: "other_repository",
+    });
+  });
+
   it("dispatches a continuation of a root whose default repository opened no pull request but an extra did", async () => {
     const { agentId } = await codingAgent();
     const { runId } = await rootWithTools(agentId, "no_changes");
