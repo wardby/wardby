@@ -103,6 +103,13 @@ import {
   updateToolGuarded,
   type AuthorizeTool,
 } from "./core/tool-admin.js";
+import {
+  grantToolConnection,
+  makeToolPublic,
+  revokeToolConnection,
+  SystemToolError,
+} from "./core/system-tools/admin.js";
+import { isToolConnectionName, parseChannelScope, TOOL_CONNECTIONS } from "./core/system-tools/connections.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { toolTimeoutProblem } from "./sandbox/tool-timeout.js";
 import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
@@ -553,8 +560,9 @@ async function toolUpdate(args: string[]): Promise<void> {
   const prepared = await prepareToolUpdate(changes);
   if (!prepared.ok) fail(`invalid --params schema: ${prepared.errorMessage}`);
 
+  let consentCleared: { attachments: number; hooks: number } | undefined;
   try {
-    await updateToolGuarded(prisma, resolved.tool.id, prepared.data, operatorAuthorize(ref));
+    ({ consentCleared } = await updateToolGuarded(prisma, resolved.tool.id, prepared.data, operatorAuthorize(ref)));
   } catch (err) {
     if (err instanceof ToolAttachedError) {
       fail(
@@ -564,6 +572,71 @@ async function toolUpdate(args: string[]): Promise<void> {
     throw err;
   }
   console.log(`updated tool ${resolved.tool.id}.`);
+  if (consentCleared && consentCleared.attachments + consentCleared.hooks > 0) {
+    console.log(
+      `cleared capability grants on ${consentCleared.attachments} attachment(s) and ${consentCleared.hooks} run hook(s) owned by others; their owners grant them again with attach_tool / update_run_hook.`,
+    );
+  }
+}
+
+/** `wardby tool make-public <tool-name|tool-id>` -- MCP make_tool_public's rules, as the operator. */
+async function toolMakePublic(args: string[]): Promise<void> {
+  const [ref] = args;
+  if (!ref) fail("tool make-public requires <tool-name|tool-id>.");
+  const resolved = await resolveToolRef(prisma, ref);
+  if (!resolved.ok) fail(resolved.error);
+  try {
+    await makeToolPublic(prisma, resolved.tool.id, null);
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      fail(err.agents.length > 0 ? `${err.message} Agents: ${formatAttachedAgents(err.agents)}.` : err.message);
+    }
+    throw err;
+  }
+  console.log(`tool ${resolved.tool.id} is now public.`);
+}
+
+/**
+ * `wardby tool grant-connection <tool> slack --channels <C1,C2|linked|*>` and
+ * `wardby tool revoke-connection <tool> slack` -- MCP grant_tool_connection /
+ * revoke_tool_connection, as the operator.
+ */
+async function toolConnection(args: string[], revoke: boolean): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { channels: { type: "string" } },
+  });
+  const verb = revoke ? "revoke-connection" : "grant-connection";
+  const [ref, connection] = positionals;
+  if (!ref || !connection) fail(`tool ${verb} requires <tool-name|tool-id> <${TOOL_CONNECTIONS.join("|")}>.`);
+  if (!isToolConnectionName(connection)) fail(`connection must be one of: ${TOOL_CONNECTIONS.join(", ")}.`);
+  const resolved = await resolveToolRef(prisma, ref);
+  if (!resolved.ok) fail(resolved.error);
+  try {
+    if (revoke) {
+      const removed = await revokeToolConnection(prisma, resolved.tool.id, connection);
+      console.log(
+        removed
+          ? `revoked ${connection} from tool ${resolved.tool.id}.`
+          : `tool ${resolved.tool.id} had no ${connection} grant.`,
+      );
+      return;
+    }
+    if (!values.channels) fail("tool grant-connection requires --channels <C1,C2|linked|*>.");
+    const scope = parseChannelScope(
+      values.channels
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean),
+    );
+    if (!scope.ok) fail(scope.error);
+    await grantToolConnection(prisma, resolved.tool.id, connection, scope.channels, null);
+    console.log(`granted ${connection} to tool ${resolved.tool.id}: ${scope.channels.join(", ")}.`);
+  } catch (err) {
+    if (err instanceof SystemToolError) fail(err.message);
+    throw err;
+  }
 }
 
 /** `wardby tool delete <tool-name|tool-id> [--detach]` -- MCP delete_tool's rules, public tools included. */
@@ -1172,6 +1245,12 @@ async function main(): Promise<void> {
       await toolUpdate(rest.slice(1));
     } else if (command === "tool" && rest[0] === "delete") {
       await toolDelete(rest.slice(1));
+    } else if (command === "tool" && rest[0] === "make-public") {
+      await toolMakePublic(rest.slice(1));
+    } else if (command === "tool" && rest[0] === "grant-connection") {
+      await toolConnection(rest.slice(1), false);
+    } else if (command === "tool" && rest[0] === "revoke-connection") {
+      await toolConnection(rest.slice(1), true);
     } else if (command === "tool" && rest[0] === "list") {
       await toolList(rest.slice(1));
     } else if (command === "run") {

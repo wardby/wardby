@@ -21,6 +21,9 @@ export const CLI_USAGE = `usage:
   wardby tool detach <tool-name|tool-id> <agent-name>
   wardby tool update <tool-name|tool-id> [--description <d>] [--params <file>] [--code <file>]
   wardby tool delete <tool-name|tool-id> [--detach]
+  wardby tool make-public <tool-name|tool-id>   (a system tool: no owner, changed only by admins or this CLI)
+  wardby tool grant-connection <tool-name|tool-id> slack --channels <C1,C2|linked|*>
+  wardby tool revoke-connection <tool-name|tool-id> slack
   wardby tool list [--agent <name>]
   wardby run <name>
   wardby runs [--agent <name>] [--limit N] [--status <s>]
