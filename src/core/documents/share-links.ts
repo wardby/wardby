@@ -70,25 +70,37 @@ export async function resolveShareToken(
   return { link: rest, document };
 }
 
+/** Result of {@link validateSessionLink}: no link involved, a live link, or a dead one. */
+export type SessionLinkState =
+  | { kind: "none" }
+  | { kind: "link"; link: DocumentShareLink; document: Document; documentId: string; permission: string }
+  | { kind: "dead" };
+
 /**
- * Revalidates the share link behind a guest web session on every request:
- * the live link and document, or null when the link is revoked, expired or
- * gone, the guest is gone, or the session carries neither a guest nor a link.
+ * Revalidates, on every request, the share link behind a web session (R9a).
+ * Applies to any session carrying a shareLinkId: guest sessions and signed-in
+ * members who entered via /s/<token>.
+ * - `none`: the session has no shareLinkId; this helper is not concerned.
+ * - `dead`: the link is revoked, expired or gone, its document is gone, or a
+ *   guestId is present and that guest is missing or belongs to another link.
+ * - `link`: the live link, its document, document id and permission.
  */
 export async function validateSessionLink(
   db: ShareDb,
-  session: { guestId?: string; shareLinkId?: string },
-): Promise<{ link: DocumentShareLink; document: Document } | null> {
-  if (!session.guestId || !session.shareLinkId) return null;
-  const guest = await db.documentGuest.findUnique({ where: { id: session.guestId } });
-  if (!guest || guest.shareLinkId !== session.shareLinkId) return null;
+  session: { guestId?: string | null; shareLinkId?: string | null },
+): Promise<SessionLinkState> {
+  if (!session.shareLinkId) return { kind: "none" };
+  if (session.guestId) {
+    const guest = await db.documentGuest.findUnique({ where: { id: session.guestId } });
+    if (!guest || guest.shareLinkId !== session.shareLinkId) return { kind: "dead" };
+  }
   const link = await db.documentShareLink.findUnique({
     where: { id: session.shareLinkId },
     include: { document: true },
   });
-  if (!link || !isLive(link)) return null;
+  if (!link || !link.document || !isLive(link)) return { kind: "dead" };
   const { document, ...rest } = link;
-  return { link: rest, document };
+  return { kind: "link", link: rest, document, documentId: document.id, permission: link.permission };
 }
 
 /** Display names of the document's members (owner and principal grantees), for the guest-name rule. */

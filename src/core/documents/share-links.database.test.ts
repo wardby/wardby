@@ -131,11 +131,13 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
     const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: "Sess Guest" });
     const guestSession = await createWebSession(db, { guestId, shareLinkId: link.id });
     const ownerSession = await createWebSession(db, { principalId: owner.id });
-    expect((await validateSessionLink(db, { guestId, shareLinkId: link.id }))?.document.id).toBe(docId);
-    expect(await validateSessionLink(db, { guestId: "other", shareLinkId: link.id })).toBeNull();
-    expect(await validateSessionLink(db, {})).toBeNull();
+    const ok = await validateSessionLink(db, { guestId, shareLinkId: link.id });
+    expect(ok.kind === "link" && ok.documentId).toBe(docId);
+    expect(await validateSessionLink(db, { guestId: "other", shareLinkId: link.id })).toEqual({ kind: "dead" });
+    expect(await validateSessionLink(db, {})).toEqual({ kind: "none" });
+    expect(await validateSessionLink(db, { principalId: owner.id } as never)).toEqual({ kind: "none" });
     await revokeShareLink(db, { shareLinkId: link.id, viewer: view(owner) });
-    expect(await validateSessionLink(db, { guestId, shareLinkId: link.id })).toBeNull();
+    expect(await validateSessionLink(db, { guestId, shareLinkId: link.id })).toEqual({ kind: "dead" });
     expect(await db.webSession.count({ where: { guestId } })).toBe(0);
     expect(await db.webSession.count({ where: { principalId: owner.id } })).toBe(1);
     expect(guestSession.token).not.toBe(ownerSession.token);
@@ -147,6 +149,21 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
     const link = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "view" });
     const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: "Exp Guest" });
     await db.documentShareLink.update({ where: { id: link.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-    expect(await validateSessionLink(db, { guestId, shareLinkId: link.id })).toBeNull();
+    expect(await validateSessionLink(db, { guestId, shareLinkId: link.id })).toEqual({ kind: "dead" });
+  });
+
+  it("revalidates a signed-in member's link session (principalId + shareLinkId)", async () => {
+    const link = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "comment" });
+    const live = await validateSessionLink(db, { shareLinkId: link.id });
+    expect(live.kind === "link" && live.permission).toBe("comment");
+    const memberSession = await createWebSession(db, { principalId: owner.id, shareLinkId: link.id });
+    await db.documentShareLink.update({ where: { id: link.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect(await validateSessionLink(db, { shareLinkId: link.id })).toEqual({ kind: "dead" });
+    const link2 = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "view" });
+    const s2 = await createWebSession(db, { principalId: owner.id, shareLinkId: link2.id });
+    await revokeShareLink(db, { shareLinkId: link2.id, viewer: view(owner) });
+    expect(await validateSessionLink(db, { shareLinkId: link2.id })).toEqual({ kind: "dead" });
+    expect(await db.webSession.count({ where: { shareLinkId: link2.id } })).toBe(0);
+    expect(memberSession.token).not.toBe(s2.token);
   });
 });
