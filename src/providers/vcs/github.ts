@@ -14,6 +14,7 @@ import {
 import { isSafeGitAuthToken } from "./remote.js";
 import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import {
+  COMMIT_SHA,
   DEPENDENCY_CACHE_PATH,
   normalizeGitHubRepository,
   normalizeGitRef,
@@ -63,7 +64,6 @@ const CONTINUATION_CHECK_RUN_NAME = "wardby/continuation";
 const SAFE_PULL_REQUEST_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$/;
 /** Mirrors the runId shape validated elsewhere (coding/protocol.ts, git.ts) — validated independently here too. */
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 export interface GitHubAppConfig {
   appId: string;
@@ -1034,7 +1034,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   async createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void> {
     const repository = normalizeGitHubRepository(input.repository);
-    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_COMMIT_SHA.test(input.headSha)) {
+    if (!SAFE_RUN_ID.test(input.runId) || !COMMIT_SHA.test(input.headSha)) {
       throw new Error("github_check_run_input_invalid");
     }
     await this.withChecksToken(repository, async (token) => {
@@ -1060,7 +1060,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
     const repository = normalizeGitHubRepository(input.repository);
-    if (!SAFE_RUN_ID.test(input.runId) || (input.headSha !== undefined && !SAFE_COMMIT_SHA.test(input.headSha))) {
+    if (!SAFE_RUN_ID.test(input.runId) || (input.headSha !== undefined && !COMMIT_SHA.test(input.headSha))) {
       throw new Error("github_check_run_input_invalid");
     }
     const ref = input.headSha ?? (input.headRef === undefined ? undefined : normalizeGitRef(input.headRef));
@@ -1265,7 +1265,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   /** See GitHubRepositoryAccess.proposeDescriptionComment. */
   async proposeDescriptionComment(input: UpdateDescriptionInput): Promise<boolean> {
     try {
-      if (!input.headSha || !/^[0-9a-f]{40}$/.test(input.headSha)) return false;
+      if (!input.headSha || !COMMIT_SHA.test(input.headSha)) return false;
       const target = this.descriptionTarget(input);
       return await this.withRepositoryToken(target.repository, async (token) => {
         const state = await this.descriptionState(token, input, target);
@@ -1287,7 +1287,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       !SAFE_RUN_ID.test(input.runId) ||
       !SAFE_RUN_ID.test(input.rootRunId) ||
       !SAFE_RUN_ID.test(input.baseline.agentTextRunId) ||
-      (input.headSha !== undefined && !/^[0-9a-f]{40}$/.test(input.headSha)) ||
+      (input.headSha !== undefined && !COMMIT_SHA.test(input.headSha)) ||
       // Only wardby's own pull request: its branch is the root run's.
       headRef !== `wardby/run-${input.rootRunId}`
     ) {

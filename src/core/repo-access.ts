@@ -56,7 +56,7 @@ export type RepoAccessDecision =
   { ok: true; level?: HostPermission } | { ok: false; reason: RepoAccessDenial; level?: HostPermission };
 
 /** What a use of the repository needs. */
-export type RepoAccessKind = "coding" | "write" | "read" | "mention";
+export type RepoAccessKind = "coding" | "coding_read" | "write" | "read" | "mention";
 
 /**
  * Coding runs and write links push, comment, and publish checks; a mention
@@ -64,7 +64,7 @@ export type RepoAccessKind = "coding" | "write" | "read" | "mention";
  * triage is not enough for it either.
  */
 export function requiredLevel(kind: RepoAccessKind): HostPermission {
-  return kind === "read" ? "read" : "write";
+  return kind === "read" || kind === "coding_read" ? "read" : "write";
 }
 
 export function atLeast(level: HostPermission, required: HostPermission): boolean {

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  CodingReadRefSchema,
   CODING_TASK_TRAILER_RESERVE_BYTES,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
@@ -760,5 +761,16 @@ describe("truncateText", () => {
     const cut = truncateText("é".repeat(100), 40);
     expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(40);
     expect(cut.endsWith(SUMMARY_TRUNCATED_MARKER)).toBe(true);
+  });
+});
+
+describe("CodingReadRefSchema", () => {
+  it("accepts a branch, a tag and a full SHA (lower-cased)", () => {
+    expect(CodingReadRefSchema.parse("main")).toBe("main");
+    expect(CodingReadRefSchema.parse("v1.2.3")).toBe("v1.2.3");
+    expect(CodingReadRefSchema.parse("A".repeat(40))).toBe("a".repeat(40));
+  });
+  it.each(["", "-x", "a..b", "a b", "refs/heads/"])("refuses %j", (ref) => {
+    expect(CodingReadRefSchema.safeParse(ref).success).toBe(false);
   });
 });

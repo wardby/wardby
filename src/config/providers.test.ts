@@ -10,6 +10,7 @@ import {
   loadGitHubUserAuthConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
+  loadCodingRunRepositoryLimit,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
   loadJiraConfig,
@@ -651,5 +652,20 @@ describe("loadLocalRepoRoots (via providers config)", () => {
   it("is empty when LOCAL_REPO_ROOTS is unset", async () => {
     const { loadLocalRepoRoots } = await import("./providers.js");
     expect(loadLocalRepoRoots({})).toEqual({ roots: [], missing: [] });
+  });
+});
+
+describe("loadCodingRunRepositoryLimit", () => {
+  it("loads CODING_MAX_RUN_REPOSITORIES with default 5", () => {
+    expect(loadCodingRunRepositoryLimit({})).toBe(5);
+    expect(loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "8" })).toBe(8);
+    expect(() => loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "0" })).toThrow(
+      "CODING_MAX_RUN_REPOSITORIES must be a positive integer.",
+    );
+    // The launch caps allow 16 extras: 1 default + 16.
+    expect(loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "17" })).toBe(17);
+    expect(() => loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "18" })).toThrow(
+      "CODING_MAX_RUN_REPOSITORIES must be at most 17 (the default repository plus 16 extras).",
+    );
   });
 });

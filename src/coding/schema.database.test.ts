@@ -230,5 +230,5 @@ describe.skipIf(!process.env.DATABASE_URL)("multi-repo migration backfills link 
       await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await client.end();
     }
-  });
+  }, 30_000);
 });

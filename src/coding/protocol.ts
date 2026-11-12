@@ -337,6 +337,18 @@ const repositorySchema = z
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
 
+export const COMMIT_SHA = /^[0-9a-f]{40}$/;
+/** Extras one run's input and JobSpec can carry; CODING_MAX_RUN_REPOSITORIES (default plus extras) is capped at this + 1. */
+export const MAX_RUN_REPOSITORIES_IN_INPUT = 16;
+/** A read link's ref: a branch, a tag, or a full commit SHA (stored lower-case). */
+export const CodingReadRefSchema = z
+  .string()
+  .refine(
+    (value) => COMMIT_SHA.test(value.toLowerCase()) || isGitRef(value),
+    "must be a branch, a tag or a 40-hex commit SHA",
+  )
+  .transform((value) => (COMMIT_SHA.test(value.toLowerCase()) ? value.toLowerCase() : normalizeGitRef(value)));
+
 export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
 /**
