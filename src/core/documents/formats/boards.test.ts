@@ -18,6 +18,31 @@ const prepared = (files: Record<string, string>, secrets: string[]) => {
   return out.files;
 };
 
+/** A fake value holding every character a serialiser escapes: & < > " \\ and U+00A0. */
+const SPECIAL = 'Pa"ss&w<rd>\\99\u00a0zz';
+/** SPECIAL as HTML text or an attribute value: the raw text never holds the value. */
+const SPECIAL_HTML = "Pa&quot;ss&amp;w&lt;rd&gt;\\99&nbsp;zz";
+
+/** Every string a reader of `text` gets once it is decoded: as HTML (text and attributes) and as JSON. */
+function decodedStrings(text: string): string[] {
+  const out = [text];
+  try {
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") out.push(v);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(JSON.parse(text));
+  } catch {
+    // Not JSON.
+  }
+  const dom = new JSDOM(text, { virtualConsole: new VirtualConsole() });
+  const doc = dom.window.document;
+  out.push(doc.documentElement.textContent ?? "");
+  for (const el of Array.from(doc.querySelectorAll("*"))) for (const a of Array.from(el.attributes)) out.push(a.value);
+  dom.window.close();
+  return out;
+}
+
 describe("format adapters", () => {
   it("picks the adapter by kind", () => {
     expect(formatFor("document")).toBe(markdownFormat);
@@ -48,6 +73,62 @@ describe("format adapters", () => {
     // Stable: preparing the stored files again changes nothing.
     const again = prepared(prepared(files, [secret]), [secret]);
     expect(again["boards/home.html"]).toBe(home);
+  });
+
+  it("redacts values that reach the stored files only in escaped form, checked decoded", () => {
+    const files = coffee();
+    expect(files["boards/home.html"]).not.toContain(SPECIAL);
+    files["boards/home.html"] = files["boards/home.html"]
+      .replace(/<title>[^<]*<\/title>/, `<title>t ${SPECIAL_HTML}</title>`)
+      .replace("</body>", `<p>t ${SPECIAL_HTML}</p><p title="${SPECIAL_HTML}" class="k">a</p></body>`);
+    const manifest = JSON.parse(files["manifest.json"]);
+    manifest.title = `X ${SPECIAL}`;
+    manifest.boards[0].name = `N ${SPECIAL}`;
+    // JSON.stringify leaves U+00A0 as it is; write it escaped so no raw form of it is left either.
+    files["manifest.json"] = JSON.stringify(manifest).replace(/\u00a0/g, "\\u00a0");
+    files["brand.md"] = `# Brand\n\nKey ${SPECIAL_HTML}\n`;
+    for (const text of Object.values(files)) expect(text).not.toContain(SPECIAL);
+
+    const stored = prepared(files, [SPECIAL]);
+    for (const [path, text] of Object.entries(stored)) {
+      for (const s of decodedStrings(text)) expect(s, path).not.toContain(SPECIAL);
+    }
+    const doc = new JSDOM(stored["boards/home.html"], { virtualConsole: new VirtualConsole() }).window.document;
+    expect(doc.title).toBe("t [REDACTED]");
+    expect(doc.querySelector("p.k")?.getAttribute("title")).toBe("[REDACTED]");
+    expect(doc.body.textContent).toContain("t [REDACTED]");
+    expect(JSON.parse(stored["manifest.json"]).title).toBe("X [REDACTED]");
+    expect(JSON.parse(stored["manifest.json"]).boards[0].name).toBe("N [REDACTED]");
+    expect(stored["brand.md"]).toBe("# Brand\n\nKey [REDACTED]\n");
+    // Stable: preparing the stored files again changes nothing.
+    expect(prepared(stored, [SPECIAL])).toEqual(stored);
+  });
+
+  it("redacts a value written with numeric entities in board text and attributes", () => {
+    const secret = "FAKE-NUMERIC-VALUE-41";
+    const files = coffee();
+    const encoded = "FAKE&#45;NUMERIC&#x2D;VALUE-&#52;1";
+    files["boards/menu.html"] = files["boards/menu.html"].replace(
+      "</body>",
+      `<p>${encoded}</p><a href="#${encoded}" class="q">x</a></body>`,
+    );
+    const menu = prepared(files, [secret])["boards/menu.html"];
+    for (const s of decodedStrings(menu)) expect(s).not.toContain(secret);
+    expect(menu).toContain("[REDACTED]");
+  });
+
+  it("refuses a board that redaction would push past the size limit", () => {
+    // Written as an entity, the 6-character value is 10 characters in the input, 6 once sanitised
+    // and 10 again as the marker: only the post-pass grows the board, past 512 KB here.
+    const unit = "FAKEV&#76; ";
+    const limit = 512 * 1024;
+    const n = Math.floor((limit - "<p></p>".length) / unit.length);
+    const board = `<p>${unit.repeat(n)}</p>`;
+    expect(Buffer.byteLength(board, "utf8")).toBeLessThanOrEqual(limit);
+    const manifest = JSON.stringify({ title: "Big", boards: [{ id: "home", name: "Home", file: "boards/home.html" }] });
+    const files = { "manifest.json": manifest, "boards/home.html": board };
+    expect(() => prepared(files, [])).not.toThrow();
+    expect(() => prepared(files, ["FAKEVL"])).toThrow("board_too_large");
   });
 
   it("refuses a design whose board id only becomes a secret value once normalised", () => {

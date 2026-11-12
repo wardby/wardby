@@ -7,7 +7,7 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { cutUntrustedText } from "../untrusted-content.js";
 import { documentAccess, requireDocumentAccess } from "./access.js";
 import type { Viewer } from "./access.js";
-import { MAX_COMMENT_CHARS } from "./limits.js";
+import { DOCUMENT_WRITE_ATTEMPTS, MAX_COMMENT_CHARS } from "./limits.js";
 import { parseGuestMentions, parseMentionRefs } from "./mentions.js";
 import { notifyDocumentChange } from "./events.js";
 import { displayNameFor } from "./names.js";
@@ -118,20 +118,22 @@ export async function createThread(
   const secrets = await documentSecretValues(db, cipher, doc.agentId);
   const anchor = fmt.redactAnchor(parsed, secrets);
   const body = redactExactSecretValues(input.body, secrets);
-  const created = await withSerializableRetry(() =>
-    db.$transaction(
-      async (tx) => {
-        await preferIndexScans(tx);
-        const last = await tx.commentThread.aggregate({ where: { documentId: doc.id }, _max: { number: true } });
-        const number = (last._max.number ?? 0) + 1;
-        const thread = await tx.commentThread.create({
-          data: { documentId: doc.id, number, versionId: doc.currentVersionId!, anchor },
-        });
-        await tx.comment.create({ data: { threadId: thread.id, body, ...authorFields(input.viewer) } });
-        return { threadId: thread.id, number };
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    ),
+  const created = await withSerializableRetry(
+    () =>
+      db.$transaction(
+        async (tx) => {
+          await preferIndexScans(tx);
+          const last = await tx.commentThread.aggregate({ where: { documentId: doc.id }, _max: { number: true } });
+          const number = (last._max.number ?? 0) + 1;
+          const thread = await tx.commentThread.create({
+            data: { documentId: doc.id, number, versionId: doc.currentVersionId!, anchor },
+          });
+          await tx.comment.create({ data: { threadId: thread.id, body, ...authorFields(input.viewer) } });
+          return { threadId: thread.id, number };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    { attempts: DOCUMENT_WRITE_ATTEMPTS },
   );
   await notifyDocumentChange(db, doc.id, "thread");
   return { ...created, mentionsWithoutAccess: await mentionsWithoutAccess(db, doc.id, input.body) };

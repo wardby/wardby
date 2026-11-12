@@ -11,26 +11,51 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const MIME: Record<string, string> = { ".json": "application/json", ".html": "text/html", ".md": "text/markdown" };
 const mimeFor = (path: string) => MIME[path.slice(path.lastIndexOf("."))] ?? "text/plain";
 
+const entriesOf = (files: Record<string, string>) =>
+  Object.entries(files).map(([path, text]) => ({ path, text, hash: sha256(text) }));
+
 /**
- * Writes a design version's files; text already stored for this document (same hash) is reused.
- * Two statements whatever the file count, so the publish transaction (Serializable) stays short.
+ * Writes the text of `files` to the document's content store, skipping text already there (same
+ * hash). Idempotent and safe outside a transaction: a publish writes it before its Serializable
+ * transaction, so that transaction only adds file rows. Text left unreferenced (a publish that then
+ * lost a version conflict) is harmless and goes with the document (cascade).
  */
+export async function storeDocumentContent(
+  db: Pick<Prisma.TransactionClient, "documentContent">,
+  documentId: string,
+  files: Record<string, string>,
+): Promise<void> {
+  const unique = new Map(entriesOf(files).map((e) => [e.hash, e.text]));
+  if (unique.size === 0) return;
+  await db.documentContent.createMany({
+    data: [...unique].map(([hash, text]) => ({ documentId, hash, text, size: Buffer.byteLength(text, "utf8") })),
+    skipDuplicates: true,
+  });
+}
+
+/** A version's file rows over text storeDocumentContent already wrote: one statement. */
+export async function storeVersionFileRows(
+  tx: Pick<Prisma.TransactionClient, "documentFile">,
+  documentId: string,
+  versionId: string,
+  files: Record<string, string>,
+): Promise<void> {
+  const entries = entriesOf(files);
+  if (entries.length === 0) return;
+  await tx.documentFile.createMany({
+    data: entries.map((e) => ({ versionId, path: e.path, documentId, hash: e.hash, mime: mimeFor(e.path) })),
+  });
+}
+
+/** Writes a design version's files and their text (text already stored for this document is reused). */
 export async function storeVersionFiles(
   tx: Prisma.TransactionClient,
   documentId: string,
   versionId: string,
   files: Record<string, string>,
 ): Promise<void> {
-  const entries = Object.entries(files).map(([path, text]) => ({ path, text, hash: sha256(text) }));
-  if (entries.length === 0) return;
-  const unique = new Map(entries.map((e) => [e.hash, e.text]));
-  await tx.documentContent.createMany({
-    data: [...unique].map(([hash, text]) => ({ documentId, hash, text, size: Buffer.byteLength(text, "utf8") })),
-    skipDuplicates: true,
-  });
-  await tx.documentFile.createMany({
-    data: entries.map((e) => ({ versionId, path: e.path, documentId, hash: e.hash, mime: mimeFor(e.path) })),
-  });
+  await storeDocumentContent(tx, documentId, files);
+  await storeVersionFileRows(tx, documentId, versionId, files);
 }
 
 /** A design version's files, or only `paths` of them when given. */

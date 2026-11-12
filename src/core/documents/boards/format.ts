@@ -80,6 +80,9 @@ export function parseManifest(text: string): Manifest {
 
 const bytes = (s: string) => Buffer.byteLength(s, "utf8");
 
+/** The normalised manifest.json text. */
+export const serializeManifest = (manifest: Manifest): string => `${JSON.stringify(manifest, null, 2)}\n`;
+
 /**
  * Checks a design's files against board format v1 and returns them normalised: the manifest
  * re-serialised, each board sanitised (sanitize.ts), brand.md kept if present. Pure: no I/O and
@@ -103,7 +106,7 @@ export function normalizeDesign(files: Record<string, string>): {
   const unlisted = Object.keys(files).filter((p) => !listed.has(p)).length;
   if (unlisted) problems.push(`${plural(unlisted, "file is", "files are")} not listed in manifest.json`);
 
-  const out: Record<string, string> = { [MANIFEST_PATH]: `${JSON.stringify(manifest, null, 2)}\n` };
+  const out: Record<string, string> = { [MANIFEST_PATH]: serializeManifest(manifest) };
   const warnings: VersionWarning[] = [];
   if (Object.hasOwn(files, BRAND_PATH)) {
     if (bytes(files[BRAND_PATH]) > BRAND_MAX_BYTES) problems.push("brand.md is over 64 KB");

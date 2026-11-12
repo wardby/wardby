@@ -5,7 +5,8 @@ import { redactExactSecretValues } from "../secret-spans.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
-import { loadContent, storeVersionFiles } from "./files.js";
+import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
+import { loadContent, storeDocumentContent, storeVersionFileRows, storeVersionFiles } from "./files.js";
 import { formatFor, type DocumentKind, type PreparedContent } from "./formats/index.js";
 import { documentSecretValues } from "./redact.js";
 import type { VersionWarning } from "./warnings.js";
@@ -37,17 +38,6 @@ function versionColumns(format: VersionContent["format"], prepared: PreparedCont
     contentHash: contentHash(prepared.content),
     warnings: prepared.warnings.length ? (prepared.warnings as unknown as Prisma.InputJsonValue) : undefined,
   };
-}
-
-async function storeFiles(
-  tx: Prisma.TransactionClient,
-  documentId: string,
-  versionId: string,
-  prepared: PreparedContent,
-): Promise<void> {
-  if (prepared.content.format === "boards-v1") {
-    await storeVersionFiles(tx, documentId, versionId, prepared.content.files);
-  }
 }
 
 export async function createDocument(
@@ -93,7 +83,9 @@ export async function createDocument(
         createdById: input.ownerId,
       },
     });
-    await storeFiles(tx, doc.id, version.id, prepared);
+    if (prepared.content.format === "boards-v1") {
+      await storeVersionFiles(tx, doc.id, version.id, prepared.content.files);
+    }
     await tx.document.update({ where: { id: doc.id }, data: { currentVersionId: version.id } });
     return { id: doc.id, versionId: version.id, warnings: prepared.warnings };
   });
@@ -144,54 +136,60 @@ export async function publishVersion(
   });
   const outdatedBefore = new Set(fmt.outdated(prepared.content, openBefore));
   for (const t of openBefore) checked.set(t.id, outdatedBefore.has(t.id));
-  const published = await withSerializableRetry(() =>
-    db.$transaction(
-      async (tx) => {
-        await preferIndexScans(tx);
-        const last = await tx.documentVersion.aggregate({
-          where: { documentId: input.documentId },
-          _max: { number: true },
-        });
-        if (input.expectedNumber !== undefined && (last._max.number ?? 0) !== input.expectedNumber) {
-          throw new Error("document_version_conflict");
-        }
-        const number = (last._max.number ?? 0) + 1;
-        const version = await tx.documentVersion.create({
-          data: {
-            documentId: input.documentId,
+  // A design's text goes in before the transaction too (idempotent per document), so the transaction
+  // only writes the version, its file rows and thread statuses.
+  const files = prepared.content.format === "boards-v1" ? prepared.content.files : null;
+  if (files) await storeDocumentContent(db, input.documentId, files);
+  const published = await withSerializableRetry(
+    () =>
+      db.$transaction(
+        async (tx) => {
+          await preferIndexScans(tx);
+          const last = await tx.documentVersion.aggregate({
+            where: { documentId: input.documentId },
+            _max: { number: true },
+          });
+          if (input.expectedNumber !== undefined && (last._max.number ?? 0) !== input.expectedNumber) {
+            throw new Error("document_version_conflict");
+          }
+          const number = (last._max.number ?? 0) + 1;
+          const version = await tx.documentVersion.create({
+            data: {
+              documentId: input.documentId,
+              number,
+              ...versionColumns(fmt.format, prepared),
+              via: input.via,
+              createdById: input.createdById ?? null,
+              runId: input.runId ?? null,
+              summary,
+            },
+          });
+          if (files) await storeVersionFileRows(tx, input.documentId, version.id, files);
+          await tx.document.update({
+            where: { id: input.documentId },
+            data: { currentVersionId: version.id },
+          });
+          const threads = await tx.commentThread.findMany({
+            where: { documentId: input.documentId, status: "open" },
+            select: { id: true, anchor: true },
+          });
+          const unchecked = threads.filter((t) => !checked.has(t.id));
+          const outdatedNew = new Set(unchecked.length ? fmt.outdated(prepared.content, unchecked) : []);
+          const outdatedIds = threads.filter((t) => checked.get(t.id) ?? outdatedNew.has(t.id)).map((t) => t.id);
+          const kept = threads.length - outdatedIds.length;
+          if (outdatedIds.length > 0) {
+            await tx.commentThread.updateMany({ where: { id: { in: outdatedIds } }, data: { status: "outdated" } });
+          }
+          return {
+            versionId: version.id,
             number,
-            ...versionColumns(fmt.format, prepared),
-            via: input.via,
-            createdById: input.createdById ?? null,
-            runId: input.runId ?? null,
-            summary,
-          },
-        });
-        await storeFiles(tx, input.documentId, version.id, prepared);
-        await tx.document.update({
-          where: { id: input.documentId },
-          data: { currentVersionId: version.id },
-        });
-        const threads = await tx.commentThread.findMany({
-          where: { documentId: input.documentId, status: "open" },
-          select: { id: true, anchor: true },
-        });
-        const unchecked = threads.filter((t) => !checked.has(t.id));
-        const outdatedNew = new Set(unchecked.length ? fmt.outdated(prepared.content, unchecked) : []);
-        const outdatedIds = threads.filter((t) => checked.get(t.id) ?? outdatedNew.has(t.id)).map((t) => t.id);
-        const kept = threads.length - outdatedIds.length;
-        if (outdatedIds.length > 0) {
-          await tx.commentThread.updateMany({ where: { id: { in: outdatedIds } }, data: { status: "outdated" } });
-        }
-        return {
-          versionId: version.id,
-          number,
-          reanchored: { kept, outdated: outdatedIds.length },
-          warnings: prepared.warnings,
-        };
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    ),
+            reanchored: { kept, outdated: outdatedIds.length },
+            warnings: prepared.warnings,
+          };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    { attempts: DOCUMENT_WRITE_ATTEMPTS },
   );
   // After the commit: the editor, MCP and the agent loop all publish here.
   await notifyDocumentChange(db, input.documentId, "version");

@@ -33,6 +33,8 @@ export const markdownFormat: DocumentFormat = {
     const a = parseTextAnchor(anchor);
     const r = (s: string) => redactExactSecretValues(s, secretValues);
     // The marker can be longer than the value: cut back to the limits, keeping the side next to the quote.
+    // A quote or context changed here may no longer match the document text exactly, so the thread can
+    // go outdated on the next publish. That fails safe: the thread is kept, only its anchor is lost.
     return parseTextAnchor({
       type: "text",
       quote: r(a.quote).slice(0, MAX_QUOTE_CHARS),

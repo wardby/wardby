@@ -6,13 +6,14 @@
 declare module "jsdom" {
   export interface DomAttr {
     readonly name: string;
-    readonly value: string;
+    value: string;
   }
   export interface DomNode {
     readonly nodeType: number;
     textContent: string | null;
     readonly isConnected: boolean;
     readonly parentElement: DomElement | null;
+    readonly childNodes: ArrayLike<DomNode> & Iterable<DomNode>;
     contains(other: DomNode | null): boolean;
     insertBefore<T extends DomNode>(node: T, child: DomNode | null): T;
   }
@@ -32,6 +33,8 @@ declare module "jsdom" {
     getAttribute(name: string): string | null;
     hasAttribute(name: string): boolean;
     closest(selectors: string): DomElement | null;
+    /** A template element's contents (a document fragment). Other elements differ: meta's is a string. */
+    readonly content?: unknown;
     matches(selectors: string): boolean;
     remove(): void;
   }

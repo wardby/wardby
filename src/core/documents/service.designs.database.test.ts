@@ -15,6 +15,29 @@ const SECRET = "FAKE-DESIGN-SECRET-7f3a91";
 /** The same fake value with one character written as an HTML entity: the raw text never contains it. */
 const ENCODED_DASH = SECRET.replace("-", "&#45;");
 const ENCODED_HEX = SECRET.replace("A", "&#x41;");
+/** A second fake value holding every character a serialiser escapes: & < > " \\ and U+00A0. */
+const SPECIAL = 'Pa"ss&w<rd>\\99\u00a0zz';
+/** SPECIAL as HTML text or an attribute value: the raw text never holds the value. */
+const SPECIAL_HTML = "Pa&quot;ss&amp;w&lt;rd&gt;\\99&nbsp;zz";
+/** Every string a reader of `text` gets once it is decoded: as HTML (text and attributes) and as JSON. */
+function decodedStrings(text: string): string[] {
+  const out = [text];
+  try {
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") out.push(v);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(JSON.parse(text));
+  } catch {
+    // Not JSON.
+  }
+  const dom = new JSDOM(text, { virtualConsole: new VirtualConsole() });
+  const doc = dom.window.document;
+  out.push(doc.documentElement.textContent ?? "");
+  for (const el of Array.from(doc.querySelectorAll("*"))) for (const a of Array.from(el.attributes)) out.push(a.value);
+  dom.window.close();
+  return out;
+}
 const read = (p: string) => readFileSync(new URL(`./boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
 const coffee = (): Record<string, string> => ({
   "manifest.json": read("manifest.json"),
@@ -41,6 +64,8 @@ describe.skipIf(!process.env.DATABASE_URL)("design service (database)", () => {
     });
     await createSecret(`DESIGN_KEY_${s.slice(0, 8)}`, SECRET, owner.id, cipher, db);
     await attachSecret(agent, `DESIGN_KEY_${s.slice(0, 8)}`, owner.id, db);
+    await createSecret(`DESIGN_SPECIAL_${s.slice(0, 8)}`, SPECIAL, owner.id, cipher, db);
+    await attachSecret(agent, `DESIGN_SPECIAL_${s.slice(0, 8)}`, owner.id, db);
   });
   afterAll(async () => {
     await db.document.deleteMany({ where: { ownerId: owner.id } });
@@ -74,15 +99,22 @@ describe.skipIf(!process.env.DATABASE_URL)("design service (database)", () => {
     expect(await db.documentFile.count({ where: { documentId: id } })).toBe(10);
   });
 
-  it("redacts the agent's secret values in board files, including entity-encoded ones", async () => {
+  it("redacts the agent's secret values in board files, including entity-encoded and escaped ones", async () => {
     const files = coffee();
     files["boards/home.html"] = files["boards/home.html"].replace(
       "</body>",
-      `<p>key ${SECRET}</p><p>dash ${ENCODED_DASH}</p><p title="${ENCODED_HEX}">hex</p></body>`,
+      `<p>key ${SECRET}</p><p>dash ${ENCODED_DASH}</p><p title="${ENCODED_HEX}">hex</p>` +
+        `<p>t ${SPECIAL_HTML}</p><p title="${SPECIAL_HTML}" class="sp">a</p></body>`,
     );
     const manifest = JSON.parse(files["manifest.json"]);
     manifest.title = `Coffee ${SECRET.replace("-", "\\u002d")}`;
-    files["manifest.json"] = JSON.stringify(manifest).replace("\\\\u002d", "\\u002d");
+    manifest.boards[0].name = `X ${SPECIAL}`;
+    files["manifest.json"] = JSON.stringify(manifest)
+      .replace("\\\\u002d", "\\u002d")
+      .replace(/\u00a0/g, "\\u00a0");
+    files["brand.md"] = `# Brand\n\nKey ${SPECIAL_HTML}\n`;
+    // The special value is never in the input as written: only its escaped forms are.
+    for (const text of Object.values(files)) expect(text).not.toContain(SPECIAL);
     const { id } = await createDocument(db, cipher, {
       kind: "design",
       ownerId: owner.id,
@@ -95,17 +127,20 @@ describe.skipIf(!process.env.DATABASE_URL)("design service (database)", () => {
     expect(document.title).not.toContain(SECRET);
     const stored = filesOf(content);
     const home = stored["boards/home.html"];
-    expect(home).not.toContain(SECRET);
-    expect(home).toContain("[REDACTED]");
     expect(home).toContain("dash [REDACTED]");
-    expect(stored["manifest.json"]).not.toContain(SECRET);
-    // Nothing anywhere in the stored rows holds the value in clear, decoded or not.
+    const dom = new JSDOM(home, { virtualConsole: new VirtualConsole() });
+    expect(dom.window.document.querySelector("p.sp")?.getAttribute("title")).toBe("[REDACTED]");
+    dom.window.close();
+    expect(JSON.parse(stored["manifest.json"]).boards[0].name).toBe("X [REDACTED]");
+    expect(stored["brand.md"]).toBe("# Brand\n\nKey [REDACTED]\n");
+    // Nothing anywhere in the stored rows holds a value in clear, raw or decoded (text, attributes, JSON).
     const rows = await db.documentContent.findMany({ where: { documentId: id }, select: { text: true } });
+    expect(rows.length).toBe(6);
     for (const r of rows) {
-      const decoded = new JSDOM(r.text, { virtualConsole: new VirtualConsole() }).window.document.documentElement
-        .innerHTML;
-      expect(r.text).not.toContain(SECRET);
-      expect(decoded).not.toContain(SECRET);
+      for (const text of decodedStrings(r.text)) {
+        expect(text).not.toContain(SECRET);
+        expect(text).not.toContain(SPECIAL);
+      }
     }
   });
 
