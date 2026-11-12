@@ -969,6 +969,7 @@ async function scheduler(args: string[]): Promise<void> {
     db: prisma,
     secrets: nativeProviders.secrets,
     datastore: nativeProviders.datastore,
+    chat,
   });
   const selfDefects = { db: prisma, issueTrackers };
   const runStepSweeper = new RunStepSweeper(prisma);

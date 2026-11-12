@@ -13,6 +13,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "#prisma";
+import type { ChatProviderRegistry } from "../../providers/chat/types.js";
 import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { scopeDatastore } from "../../providers/datastore/scoped.js";
 import type { Datastore } from "../../providers/datastore/types.js";
@@ -28,6 +29,7 @@ import { backoffMs, MAX_ATTEMPTS } from "../notification-dispatcher.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "../secrets.js";
+import { buildSlackConnection } from "../system-tools/connections.js";
 import { buildHookEvent, hookFinalText, type HookEventRow } from "./params.js";
 
 const log = logger.child({ module: "run-hooks" });
@@ -45,6 +47,8 @@ export interface RunHookRuntime {
   datastore: Datastore;
   /** Overrides the sandbox's outbound network call — tests only. */
   fetchImpl?: typeof safeFetch;
+  /** The server's chat providers: a public tool granted Slack posts through `chat.slack` (#529). */
+  chat?: ChatProviderRegistry;
 }
 
 export interface HookRow {
@@ -57,7 +61,11 @@ export interface HookRow {
   capabilitiesGrantedById: string | null;
 }
 export interface HookToolRow {
+  id: string;
   name: string;
+  /** Null for a public tool: only a public tool may use a connection grant. */
+  ownerId: string | null;
+  connectionGrants: { connection: string; channels: string[] }[];
   code: string;
   paramsZod: string;
   timeoutMs: number | null;
@@ -67,6 +75,17 @@ export interface HookAgentRow {
   name: string;
   ownerId: string | null;
 }
+
+/** The tool fields a hook delivery needs (shared with test_run_hook). */
+export const HOOK_TOOL_SELECT = {
+  id: true,
+  name: true,
+  code: true,
+  paramsZod: true,
+  timeoutMs: true,
+  ownerId: true,
+  connectionGrants: { select: { connection: true, channels: true } },
+} as const;
 
 export type HookCallResult = { ok: true } | { ok: false; permanent: boolean; error: string };
 
@@ -117,6 +136,20 @@ export async function callRunHook(
       return { ok: false, permanent: true, error: mask(`hook_params_rejected: ${validated.errorMessage}`) };
     }
     const consented = agent.ownerId !== null && hook.capabilitiesGrantedById === agent.ownerId;
+    // The server's Slack connection: an admin's grant on a public tool, not
+    // the agent owner's consent (the token is the server's, not the agent's).
+    const slackGrant =
+      tool.ownerId === null ? tool.connectionGrants.find((grant) => grant.connection === "slack") : undefined;
+    const slack =
+      slackGrant && rt.chat?.slack
+        ? buildSlackConnection({
+            chat: rt.chat.slack,
+            scope: slackGrant.channels,
+            db: rt.db,
+            mask: (text) => redactExactSecretValues(text, values),
+            ids: { toolId: tool.id, hookId: hook.id },
+          })
+        : undefined;
     const result = await runInSandbox({
       code: tool.code,
       params: validated.value,
@@ -132,6 +165,7 @@ export async function callRunHook(
       ),
       timeoutMs: effectiveToolTimeoutMs(tool.timeoutMs ?? undefined, loadToolMaxTimeoutMs()),
       ...(rt.fetchImpl ? { fetchImpl: rt.fetchImpl } : {}),
+      ...(slack ? { slack } : {}),
     });
     if (result.ok) return { ok: true };
     return { ok: false, permanent: false, error: mask(`${result.errorKind}: ${result.errorMessage}`) };
@@ -164,7 +198,7 @@ export async function dispatchHooksOnce(
       event: true,
       hook: {
         include: {
-          tool: { select: { name: true, code: true, paramsZod: true, timeoutMs: true } },
+          tool: { select: HOOK_TOOL_SELECT },
           agent: { select: { id: true, name: true, ownerId: true } },
         },
       },
