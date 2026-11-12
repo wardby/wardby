@@ -61,13 +61,25 @@ and `resolve_thread` act as you.
 
 `send_threads_to_agent` sends open threads on a repository-linked document to
 its coding agent. It needs write access to the document and the `runs:trigger`
-scope as well as `documents:write`, and answers `{ runId, status }`. The run
-(trigger `comment`) gets the threads as untrusted context and edits only the
-linked file. When it succeeds, the file at the run's pushed commit is published
+scope as well as `documents:write`, and answers `{ runId, status }`. The
+document in Wardby is the source of truth: the run (trigger `comment`) gets the
+current version's Markdown and the threads as untrusted context, writes that
+Markdown to the linked file, then applies the requested changes, editing only
+that file. When it succeeds, the file at the run's pushed commit is published
 as the next version, and the agent's reply on each thread appears as
-"Agent · via <your name>"; threads it reports as addressed are resolved. Any
-other ending posts "The agent run failed; the document was not changed." on
-each thread. Errors: `document_not_agent_linked` (no coding agent, repository
-or path, or the repository is not on the agent's list), `comment_thread_closed`
-(a thread is not open), `comment_send_rate_limited` (30 sends per document per
-hour).
+"Agent · via <your name>"; threads it reports as addressed are resolved. If
+someone published a newer version after the send, the agent's edit is not
+published: each thread gets a reply naming the branch it is on, and stays
+open. If the edit cannot be read or published, the replies say so and no
+thread is resolved. Any other ending posts "The agent run failed; the document
+was not changed." on each thread. Each run's ending is answered once.
+
+Errors: `document_not_agent_linked` (no coding agent, repository or path, or
+the repository is not on the agent's list), `document_agent_unavailable` (the
+document's owner no longer has execute access to the agent),
+`document_too_large_for_agent` (the current version is over 60,000 characters,
+or does not fit in a coding task with the agent's instructions),
+`comment_thread_closed` (a thread is not open), `comment_thread_already_sent` (a
+thread's earlier run has not finished yet), `comment_send_rate_limited` (30
+sends per document per hour), `document_send_failed` (the run could not be
+started; try again).

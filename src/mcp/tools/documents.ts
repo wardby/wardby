@@ -17,18 +17,38 @@ import { canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireAgentAccess } from "../auth/access.js";
 import type { McpRequestContext } from "../context.js";
 
+/** Codes whose status no suffix rule gives. */
+const EXACT_STATUS: Record<string, number> = {
+  comment_thread_closed: 409,
+  comment_thread_already_sent: 409,
+  document_version_conflict: 409,
+  document_too_large_for_agent: 413,
+  document_agent_unavailable: 403,
+  document_send_failed: 503,
+};
+
+/** The HTTP status for a documents error code; undefined when it is not one. */
+export function documentErrorStatus(code: string): number | undefined {
+  if (!/^(document|share|comment)_[a-z_]+$/.test(code)) return undefined;
+  // The same statuses as the web routes (src/web/context.ts STATUS) for these codes.
+  const exact = EXACT_STATUS[code];
+  if (exact !== undefined) return exact;
+  if (code.endsWith("_not_found")) return 404;
+  if (/_(access_denied|forbidden)$/.test(code)) return 403;
+  if (/_(invalid|too_large|too_long|unsupported|not_agent_linked)$/.test(code)) return 400;
+  if (code.endsWith("_rate_limited")) return 429;
+  return undefined;
+}
+
 /** Maps the documents module's error codes to MCP errors; anything else passes through. */
 async function mapped<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    const code = error instanceof Error ? error.message : "";
-    if (error instanceof McpError || !/^(document|share|comment)_[a-z_]+$/.test(code)) throw error;
-    if (code.endsWith("_not_found")) throw new McpError(404, code);
-    if (/_(access_denied|forbidden)$/.test(code)) throw new McpError(403, code);
-    if (/_(invalid|too_large|too_long|unsupported|closed|not_agent_linked)$/.test(code)) throw new McpError(400, code);
-    if (code.endsWith("_rate_limited")) throw new McpError(429, code);
-    throw error;
+    if (error instanceof McpError || !(error instanceof Error)) throw error;
+    const status = documentErrorStatus(error.message);
+    if (status === undefined) throw error;
+    throw new McpError(status, error.message);
   }
 }
 

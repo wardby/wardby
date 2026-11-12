@@ -40,6 +40,11 @@
  * reviews that waited for a delegating run that ended without its finalizer
  * (lost, including leads this pass just marked lost), and drops deferred
  * reviews that are too old (host-events.ts startDeferredReviews).
+ *
+ * Given document deps, each pass also answers comment threads sent to runs
+ * that ended without an answer: lost (including runs this pass marked lost),
+ * failed to start, or whose completion hook never ran
+ * (documents/agent-loop.ts sweepUnansweredDocumentRuns; claimed once per run).
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
@@ -58,6 +63,7 @@ import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 import { sweepMergeOrderChecks } from "./merge-order-check.js";
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
+import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 /** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
@@ -173,6 +179,8 @@ export async function reconcileOnce(
   issueTrackers?: IssueTrackerRegistry,
   /** What starting a deferred review needs; absent = no deferred-review sweep. */
   deferredReviews?: ReviewStartDeps,
+  /** What answering document comment runs needs; absent = no document sweep. */
+  documentRuns?: DocumentSweepDeps,
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - heartbeatTimeoutMs);
   const stale = {
@@ -315,6 +323,9 @@ export async function reconcileOnce(
   // Re-post `wardby merge order` checks whose pr_closed or new-head event was missed; after the
   // deferred-review start, so no review waits on it. Throttled and bounded per pass, never throws.
   await sweepMergeOrderChecks({ db, hosts: reviewHosts }, now);
+  // Answer comment threads sent to runs that ended without an answer (lost, including runs this pass
+  // just marked lost; failed to start; a missed completion hook). Claimed once per run; bounded, never throws.
+  if (documentRuns) await sweepUnansweredDocumentRuns(documentRuns, now);
   return lost;
 }
 
@@ -329,6 +340,8 @@ export interface ReconcilerOptions {
   issueTrackers?: IssueTrackerRegistry;
   /** Host-event deps for starting deferred reviews (waitForCi) whose CI never finished; absent = no sweep. */
   deferredReviews?: ReviewStartDeps;
+  /** Deps for answering comment threads sent to runs that ended unanswered; absent = no sweep. */
+  documentRuns?: DocumentSweepDeps;
 }
 
 export interface ReconcilerHandle {
@@ -349,6 +362,7 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
       options.reviewHosts,
       options.issueTrackers,
       options.deferredReviews,
+      options.documentRuns,
     ).catch((err) => {
       reconcilerLog.error({ err }, "reconcile pass failed");
     });

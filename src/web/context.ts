@@ -145,6 +145,7 @@ const STATUS = {
   web_login_state_invalid: 400,
   web_session_required: 401,
   document_access_denied: 403,
+  document_agent_unavailable: 403,
   comment_edit_forbidden: 403,
   web_csrf_failed: 403,
   web_origin_rejected: 403,
@@ -154,13 +155,16 @@ const STATUS = {
   share_link_invalid: 404,
   document_version_conflict: 409,
   comment_thread_closed: 409,
+  comment_thread_already_sent: 409,
   document_too_large: 413,
+  document_too_large_for_agent: 413,
   expected_json_object: 415,
   document_send_not_available: 501,
   web_login_not_configured: 503,
   web_rate_limited: 429,
   comment_send_rate_limited: 429,
   web_assets_missing: 503,
+  document_send_failed: 503,
 } satisfies Record<string, number>;
 
 /** The code and status for an error. Unknown errors are logged by name only (their text may carry user content). */

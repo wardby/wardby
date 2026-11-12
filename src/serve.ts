@@ -94,6 +94,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     executor: providers.executor,
     reviewHosts,
     issueTrackers: providers.issueTrackers,
+    // Comment threads sent to runs that ended unanswered (lost, failed to start, missed hook).
+    documentRuns: { db: prisma, cipher: providers.secrets, executor: providers.executor },
     ...(reviewHosts
       ? {
           deferredReviews: {

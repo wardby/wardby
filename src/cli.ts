@@ -962,6 +962,8 @@ async function scheduler(args: string[]): Promise<void> {
     reviewHosts,
     issueTrackers,
     deferredReviews: { db: prisma, executor, hosts: reviewHosts, repoAccess, issueTrackers },
+    // Comment threads sent to runs that ended unanswered (lost, failed to start, missed hook).
+    documentRuns: { db: prisma, cipher: secrets, executor },
   });
   const notifications = await startNotifications({ db: prisma, chat });
   // Run hooks deliver with or without a chat provider (every replica; a lease elects one sender).

@@ -250,5 +250,11 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     const run = await db.run.findUniqueOrThrow({ where: { id: sent.json.runId } });
     expect(run).toMatchObject({ trigger: "comment", triggeredById: owner.id, agentId: profiledAgentId });
     expect((await db.commentThread.findUniqueOrThrow({ where: { id: lt.threadId } })).sentRunId).toBe(run.id);
+
+    // Sent again while its run is still going: refused, and the thread keeps its first run.
+    const again = await sender("send_threads_to_agent", { documentId: linked.documentId, threadIds: [lt.threadId] });
+    expect(again.isError).toBe(true);
+    expect(again.text).toContain("comment_thread_already_sent");
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: lt.threadId } })).sentRunId).toBe(run.id);
   });
 });

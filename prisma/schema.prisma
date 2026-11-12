@@ -2300,24 +2300,28 @@ model DocumentVersion {
 }
 
 model CommentThread {
-  id           String    @id @default(cuid())
-  documentId   String
-  document     Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  id                String    @id @default(cuid())
+  documentId        String
+  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   /// per-document display number (#1, #2...)
-  number       Int
+  number            Int
   /// version it was created on
-  versionId    String
+  versionId         String
   /// see src/core/documents/anchors.ts TextAnchor
-  anchor       Json
+  anchor            Json
   /// open | resolved | outdated
-  status       String    @default("open")
-  sentAt       DateTime?
-  sentById     String?
-  sentRunId    String?
-  resolvedById String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  comments     Comment[]
+  status            String    @default("open")
+  sentAt            DateTime?
+  sentById          String?
+  sentRunId         String?
+  /// the document version number the thread was sent with; the agent's edit is published only while it is still the latest
+  sentVersionNumber Int?
+  /// the sent run whose ending was answered on this thread (claimed once per run)
+  answeredRunId     String?
+  resolvedById      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  comments          Comment[]
 
   @@unique([documentId, number])
   @@index([documentId, status])

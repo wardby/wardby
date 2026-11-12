@@ -5,7 +5,7 @@
  * the agent's replies (redacted) and resolves only the threads it flagged.
  * The executor and the repository read are fakes. Skipped without DATABASE_URL.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Principal } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
@@ -14,15 +14,21 @@ import { createPrismaClient } from "../db.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { UNTRUSTED_CONTEXT_TAG } from "../untrusted-content.js";
 import type { Viewer } from "./access.js";
+import { markRunFailedFromExecutorError } from "../dispatch.js";
 import {
   AGENT_RUN_FAILED_REPLY,
+  DOCUMENT_SWEEP_GRACE_MS,
+  EDIT_NOT_APPLIED_NOTE,
+  MAX_SEND_MARKDOWN_CHARS,
   MAX_SENDS_PER_DOCUMENT_HOUR,
   onDocumentRunFinished,
   parseThreadReplies,
   sendThreadsToAgent,
+  sweepUnansweredDocumentRuns,
+  versionConflictReply,
 } from "./agent-loop.js";
 import { createThread, listThreads, setThreadStatus } from "./comments.js";
-import { createDocument } from "./service.js";
+import { createDocument, publishVersion } from "./service.js";
 
 const SECRET = "s3cret-agentloop-789";
 const anchor = (quote: string) => ({ type: "text", quote, prefix: "", suffix: "" });
@@ -125,8 +131,14 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     createThread(db, cipher, { documentId, viewer, anchor: anchor(quote), body });
 
   /** Marks the run finished as the coding executor would. */
-  async function finish(runId: string, status: "succeeded" | "failed", summary: string, push = true) {
-    const sha = "a".repeat(40);
+  async function finish(
+    runId: string,
+    status: "succeeded" | "failed" | "lost",
+    summary: string,
+    push = true,
+    finishedAt = new Date(),
+  ) {
+    const sha = createHash("sha1").update(runId).digest("hex");
     const result = {
       schemaVersion: 1,
       outcome: push ? "branch_pushed" : "no_changes",
@@ -142,8 +154,8 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       data: {
         status,
         finalText: status === "succeeded" ? summary : null,
-        error: status === "failed" ? "coding_failure_job" : null,
-        finishedAt: new Date(),
+        error: status === "succeeded" ? null : "coding_failure_job",
+        finishedAt,
         ...(status === "succeeded" ? { codingRun: { update: { result } } } : {}),
       },
     });
@@ -161,6 +173,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     });
     const run = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
     expect(run.trigger).toBe("comment");
+    expect(run.codingRun!.request).toContain("CURRENT DOCUMENT (version 1):\nhello world\n\nsecond para");
     expect(run.triggeredById).toBe(writer.id);
     expect(run.agentId).toBe(codingAgentId);
     const task = run.codingRun!.request!;
@@ -169,6 +182,12 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(instructions).toContain(path);
     expect(instructions).toContain("wardby-thread-replies");
     expect(instructions).not.toContain("Make this warmer");
+    expect(instructions).toContain(`First write that exact content to ${JSON.stringify(path)}`);
+    expect(instructions).toContain(`Edit only ${JSON.stringify(path)}`);
+    expect(instructions).not.toContain("second para");
+    // The document's Markdown is in the untrusted context, ahead of the threads and labelled with its version.
+    expect(context.indexOf("CURRENT DOCUMENT (version 1):\nhello world\n\nsecond para")).toBe(1);
+    expect(context.indexOf("COMMENT THREADS:")).toBeGreaterThan(context.indexOf("second para"));
     expect(context).toContain("Make this warmer");
     expect(context).toContain("Shorter please");
     // The only real closing tag is the wrapper's own.
@@ -179,6 +198,8 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       expect(r.sentRunId).toBe(runId);
       expect(r.sentById).toBe(writer.id);
       expect(r.sentAt).not.toBeNull();
+      expect(r.sentVersionNumber).toBe(1);
+      expect(r.answeredRunId).toBeNull();
     }
   });
 
@@ -342,6 +363,183 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     });
     await onDocumentRunFinished(db, deps, runId);
     expect(await db.comment.count({ where: { runId } })).toBe(0);
+  });
+
+  const repliesBlock = (entries: { thread: number; reply: string; resolved?: boolean }[]) =>
+    `Edited.\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(entries)}\n\`\`\``;
+
+  it("a newer version after the send: publishes nothing, posts the fixed reply, threads stay open", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    // A person edits the document while the run works.
+    await publishVersion(db, cipher, {
+      documentId: docId,
+      markdown: "hello there world\n\nsecond para",
+      via: "editor",
+    });
+    const sha = await finish(runId, "succeeded", repliesBlock([{ thread: t1.number, reply: "Done.", resolved: true }]));
+    files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+
+    await onDocumentRunFinished(db, deps, runId);
+
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({ number: 2, markdown: "hello there world\n\nsecond para" });
+    expect(await db.documentVersion.count({ where: { documentId: docId, runId } })).toBe(0);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(versionConflictReply(`wardby/run-${runId}`));
+    expect(versionConflictReply("b")).toBe(
+      "The document changed after this was sent, so the agent's edit was not applied. It is on branch b.",
+    );
+  });
+
+  it("an edit that cannot be read is not applied: the replies say so and no thread is resolved", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    // No file at the pushed commit: the read answers null.
+    await finish(runId, "succeeded", repliesBlock([{ thread: t1.number, reply: "Warmed it.", resolved: true }]));
+    await onDocumentRunFinished(db, deps, runId);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(`Warmed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+    expect(EDIT_NOT_APPLIED_NOTE).toBe("(The edit could not be applied.)");
+    expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
+  });
+
+  it("refuses a document over 60,000 characters: document_too_large_for_agent, nothing sent", async () => {
+    const docId = await linkedDoc(`hello ${"x".repeat(MAX_SEND_MARKDOWN_CHARS)}`);
+    const t1 = await thread(docId, "hello", "Warmer");
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+    ).rejects.toThrow("document_too_large_for_agent");
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).sentRunId).toBeNull();
+    // At the limit it is sent, the whole Markdown in the task.
+    const atLimit = await linkedDoc(`hello ${"y".repeat(MAX_SEND_MARKDOWN_CHARS - 6)}`);
+    const t2 = await thread(atLimit, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: atLimit,
+      viewer: asWriter(),
+      threadIds: [t2.threadId],
+    });
+    const run = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+    expect(run.codingRun!.request).toContain("y".repeat(MAX_SEND_MARKDOWN_CHARS - 6));
+  });
+
+  it("answers a run once when the completion hook and the sweep both see it end", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const t2 = await thread(docId, "second", "Shorter");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId, t2.threadId],
+    });
+    const now = new Date();
+    await finish(runId, "failed", "", true, new Date(now.getTime() - DOCUMENT_SWEEP_GRACE_MS - 1000));
+    await Promise.all([
+      onDocumentRunFinished(db, deps, runId),
+      sweepUnansweredDocumentRuns({ db, cipher, executor }, now),
+      onDocumentRunFinished(db, deps, runId),
+    ]);
+    await sweepUnansweredDocumentRuns({ db, cipher, executor }, now);
+    expect(await db.comment.count({ where: { runId } })).toBe(2);
+    const rows = await db.commentThread.findMany({ where: { sentRunId: runId } });
+    expect(rows.map((r) => r.answeredRunId)).toEqual([runId, runId]);
+  });
+
+  it("the sweep answers a lost run and a run that failed to start, after the grace period", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const t2 = await thread(docId, "second", "Shorter");
+    const lost = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    const failed = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t2.threadId],
+    });
+    await finish(lost.runId, "lost", "");
+    await markRunFailedFromExecutorError(db, failed.runId, new Error("launch failed"));
+
+    // Within the grace period the hook has the first go: the sweep leaves them.
+    await sweepUnansweredDocumentRuns({ db, cipher, executor }, new Date());
+    expect(await db.comment.count({ where: { runId: { in: [lost.runId, failed.runId] } } })).toBe(0);
+
+    const later = new Date(Date.now() + DOCUMENT_SWEEP_GRACE_MS + 1000);
+    for (let i = 0; i < 5; i += 1) await sweepUnansweredDocumentRuns({ db, cipher, executor }, later);
+    for (const runId of [lost.runId, failed.runId]) {
+      const replies = await db.comment.findMany({ where: { runId } });
+      expect(replies.map((c) => c.body)).toEqual([AGENT_RUN_FAILED_REPLY]);
+    }
+  });
+
+  it("refuses re-sending a thread while its run is going; allows it once the run ended (answering it first)", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const first = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+    ).rejects.toThrow("comment_thread_already_sent");
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).sentRunId).toBe(first.runId);
+
+    // Ended but not answered yet (no hook ran): the send answers the first run, then sends again.
+    await finish(first.runId, "failed", "");
+    const second = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    expect(second.runId).not.toBe(first.runId);
+    expect((await db.comment.findMany({ where: { runId: first.runId } })).map((c) => c.body)).toEqual([
+      AGENT_RUN_FAILED_REPLY,
+    ]);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+    expect(row).toMatchObject({ sentRunId: second.runId, answeredRunId: null });
+  });
+
+  it("refuses when the document's owner no longer has execute on the agent: document_agent_unavailable", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    await db.agent.update({ where: { id: codingAgentId }, data: { ownerId: commenter.id } });
+    try {
+      await expect(
+        sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+      ).rejects.toThrow("document_agent_unavailable");
+      // A grant gives it back.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: codingAgentId,
+          granteeKind: "principal",
+          granteePrincipalId: owner.id,
+          granteeKey: `principal:${owner.id}`,
+          level: "execute",
+        },
+      });
+      await expect(
+        sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+      ).resolves.toMatchObject({ runId: expect.any(String) });
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: codingAgentId } });
+      await db.agent.update({ where: { id: codingAgentId }, data: { ownerId: owner.id } });
+    }
   });
 });
 
