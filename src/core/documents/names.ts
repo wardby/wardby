@@ -1,3 +1,5 @@
+import { MAX_DISPLAY_NAME_CHARS } from "./profiles.js";
+
 const FORBIDDEN = /\b(agent|via)\b/i;
 
 /** NFKC-folds, trims and collapses whitespace, so look-alike forms compare equal. */
@@ -26,7 +28,7 @@ export function displayNameFor(p: {
   githubLogin?: string | null;
   subject: string;
 }): string {
-  if (p.profileName?.trim()) return p.profileName.trim().slice(0, 80);
+  if (p.profileName?.trim()) return p.profileName.trim().slice(0, MAX_DISPLAY_NAME_CHARS);
   if (p.githubLogin) return `@${p.githubLogin}`;
   const tail = p.subject.split(/[|:]/).pop() ?? p.subject;
   return `user·${tail.slice(0, 4)}`;

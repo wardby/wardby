@@ -30,7 +30,7 @@ PDF/PNG export, version compare or repository export yet.
 | `create_document`                                            | `documents:write` | Create a document; optionally link it to a repository file and coding agent |
 | `publish_version`                                            | `documents:write` | Publish the next version (needs `write`)                                    |
 | `get_document`                                               | `documents:read`  | Read the current or a numbered version                                      |
-| `list_documents`                                             | `documents:read`  | Documents you own or were granted                                           |
+| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)       |
 | `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                    |
 | `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                            |
 | `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                             |
@@ -50,6 +50,9 @@ A caller without access is told `document_not_found`, so ids do not leak.
 The scopes `documents:read` and `documents:write` are advertised with the
 other Wardby scopes; no Wardby role is needed. Define both at your identity
 provider (see [getting-started-identity-provider.md](getting-started-identity-provider.md)).
+Sharing a document uses the general grant tools, so it needs their scopes:
+`grant_access` and `revoke_access` need `agents:write`, and `list_access` needs
+`agents:read`.
 
 ## Browser sign-in
 
@@ -71,7 +74,8 @@ both sign-ins are the same Wardby person. The issuer is the existing
 `AUTH_ISSUER`. A sign-in must finish within 10 minutes in the browser that
 started it. A browser session ends after 12 hours idle or 7 days. Without
 `WEB_OIDC_CLIENT_ID`, member pages answer `web_login_not_configured`; share
-links keep working.
+links keep working. With `AUTH_PROVIDER=self-hosted`, the `WEB_OIDC_*`
+variables are ignored.
 
 If you run Wardby behind a proxy, it must forward `Origin` and the `Cookie`
 headers and serve the pages on the same origin as `MCP_CANONICAL_URI`.
@@ -81,8 +85,9 @@ headers and serve the pages on the same origin as `MCP_CANONICAL_URI`.
 Members appear under the display name the identity provider gives
 (the `name` or `preferred_username` claim), then their linked GitHub login, then a short tail of
 their subject. Guests pick a name (1-40 characters, not containing "agent" or
-"via", not a name already used on that document, compared case-insensitively
-after Unicode normalisation). Names are always HTML-escaped when shown. A
+"via", not the name of the document's owner or a member granted access to it,
+compared case-insensitively after Unicode normalisation; two guests may share a
+name, and each is shown with "(guest)"). Names are always HTML-escaped when shown. A
 guest's optional email is stored but never shown on the page. Agent replies are
 labelled as the agent.
 
@@ -175,5 +180,7 @@ Each error code has an article under `help/errors/`: `document_not_found`,
 `web_login_failed`, `web_login_state_invalid`, `web_login_not_configured`,
 `web_csrf_failed`, `web_origin_rejected`, `web_session_required`,
 `web_rate_limited` and `web_assets_missing` (the bundle was not built: run
-`npm run build`). In the MCP tools, the help articles are found with
+`npm run build`). For what an error response from the page API looks like
+(including the `id` of a 500 to look up in the log), see
+`help/errors/web-request-errors.md`. In the MCP tools, the help articles are found with
 `search_help`.

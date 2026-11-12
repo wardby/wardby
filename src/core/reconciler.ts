@@ -44,7 +44,9 @@
  * Given document deps, each pass also answers comment threads sent to runs
  * that ended without an answer: lost (including runs this pass marked lost),
  * failed to start, or whose completion hook never ran
- * (documents/agent-loop.ts sweepUnansweredDocumentRuns; claimed once per run).
+ * (documents/agent-loop.ts sweepUnansweredDocumentRuns; claimed once per run),
+ * and deletes expired document-page sessions and rate-limit windows
+ * (documents/sweep.ts).
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
@@ -64,6 +66,7 @@ import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 import { sweepMergeOrderChecks } from "./merge-order-check.js";
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
+import { sweepExpiredDocumentRows } from "./documents/sweep.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 /** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
@@ -325,7 +328,11 @@ export async function reconcileOnce(
   await sweepMergeOrderChecks({ db, hosts: reviewHosts }, now);
   // Answer comment threads sent to runs that ended without an answer (lost, including runs this pass
   // just marked lost; failed to start; a missed completion hook). Claimed once per run; bounded, never throws.
-  if (documentRuns) await sweepUnansweredDocumentRuns(documentRuns, now);
+  if (documentRuns) {
+    await sweepUnansweredDocumentRuns(documentRuns, now);
+    // Expired document-page sessions and rate-limit windows; never throws.
+    await sweepExpiredDocumentRows(documentRuns.db, now);
+  }
   return lost;
 }
 

@@ -15,8 +15,8 @@
  *   app, which sends it as `x-wardby-share`; access is then the higher of the
  *   member's own grant and the live link's permission, on that link's
  *   document only. Opening a link never changes the session.
- * - Guests are rate-limited (rate-limits.ts): registrations per link and per
- *   client address, comments per guest.
+ * - Guests are rate-limited (rate-limits.ts): registrations per link,
+ *   comments per guest. Nothing is limited per client address (R12).
  * - Responses carry fixed error codes only (R10); unknown errors are logged
  *   by name, never by message.
  *

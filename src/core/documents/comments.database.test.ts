@@ -9,6 +9,7 @@ import {
   deleteComment,
   editComment,
   listThreads,
+  MAX_MENTIONS_CHECKED,
   mentionCandidates,
   reply,
   setThreadStatus,
@@ -127,6 +128,12 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
     expect((await db.comment.findFirstOrThrow({ where: { threadId: t.threadId } })).body).toBe(body);
     const r = await reply(db, cipher, { threadId: t.threadId, viewer: asOwner(), body: `@[${outsider.id}]` });
     expect(r.mentionsWithoutAccess).toEqual([outsider.id]);
+  });
+
+  it("checks at most MAX_MENTIONS_CHECKED distinct mentions per comment", async () => {
+    const many = Array.from({ length: MAX_MENTIONS_CHECKED + 30 }, (_, i) => `@[nobody-${i}-${s.slice(0, 8)}]`);
+    const t = await createThread(db, cipher, { documentId: docId, viewer: asOwner(), anchor, body: many.join(" ") });
+    expect(t.mentionsWithoutAccess).toHaveLength(MAX_MENTIONS_CHECKED);
   });
 
   it("edits and deletes only own comments; guests by guestId", async () => {

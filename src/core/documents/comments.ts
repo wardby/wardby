@@ -64,10 +64,17 @@ export async function principalNames(db: CommentDb, ids: string[]): Promise<Map<
   return out;
 }
 
-/** Deduped mentioned ids that cannot see the document. The body is not changed. */
+/** Mentions per comment checked for access; any beyond are stored but not checked or reported. */
+export const MAX_MENTIONS_CHECKED = 20;
+
+/**
+ * Deduped mentioned ids that cannot see the document, among the first
+ * MAX_MENTIONS_CHECKED (a long body could otherwise cost hundreds of access
+ * queries per comment). The body is not changed.
+ */
 async function mentionsWithoutAccess(db: CommentDb, documentId: string, body: string): Promise<string[]> {
   const missing: string[] = [];
-  for (const id of new Set(parseMentions(body))) {
+  for (const id of [...new Set(parseMentions(body))].slice(0, MAX_MENTIONS_CHECKED)) {
     const access = await documentAccess(db, documentId, { kind: "principal", principalId: id });
     if (access === "none") missing.push(id);
   }

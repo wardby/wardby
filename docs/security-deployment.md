@@ -72,7 +72,8 @@ The CLI rejects any flag a command does not take, for example
 `auth user grant` changes only an existing user and never creates one. Both
 `--role` and `--revoke-role` can be repeated. `--name` (at most 80
 characters) sets the display name shown on documents and comments; without
-one, the subject is shown.
+one, the user's linked GitHub login is shown, or else `user·` followed by the
+first four characters of the subject's last segment.
 
 ## Roles and privileged operations
 

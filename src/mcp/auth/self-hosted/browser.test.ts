@@ -186,4 +186,67 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     expect((await visit("/logout", { csrf: logoutCsrf })).status).toBe(303);
     await expect(provider.sessions.get(session)).rejects.toThrow();
   }, 30_000);
+
+  it("keeps /login's return path only when it is a safe /d/ or /s/ path", async () => {
+    const probe = createServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
+    const port = (probe.address() as import("node:net").AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const origin = `http://127.0.0.1:${port}`;
+    const provider = new SelfHostedAuthProvider(
+      { canonicalUri: origin + "/mcp", signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) },
+      db,
+    );
+    const identity = new IdentityService(db, "b2".repeat(32));
+    const subject = "browser-return-" + randomUUID();
+    subjects.push(subject);
+    const user = await identity.createUser(subject);
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: origin + "/mcp" } });
+    const own = await startHttpServer({
+      mcp,
+      config: { canonicalUri: origin + "/mcp", httpBind: { host: "127.0.0.1", port }, authProviderKind: "self-hosted" },
+      auth: { authProvider: provider, db, providers },
+      selfHosted: provider,
+    });
+    try {
+      const signIn = async (back: string) => {
+        const jar = new Map<string, string>();
+        const take = (res: Response) => {
+          for (const value of res.headers.getSetCookie()) {
+            const [key, token] = value.split(";", 1)[0].split("=");
+            jar.set(key, token);
+          }
+          return res;
+        };
+        const cookie = () => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+        const page = take(
+          await fetch(`${origin}/login?return=${encodeURIComponent(back)}`, { headers: { cookie: cookie() } }),
+        );
+        const html = await page.text();
+        const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1];
+        const posted = take(
+          await fetch(`${origin}/login`, {
+            method: "POST",
+            redirect: "manual",
+            headers: { cookie: cookie(), origin, "content-type": "application/x-www-form-urlencoded" },
+            // The form field is sent as given, whatever the page kept.
+            body: new URLSearchParams({ login_key: user.loginKey, csrf, interaction: "", return: back }),
+          }),
+        );
+        return { html, location: posted.headers.get("location") };
+      };
+      const safe = await signIn("/d/doc123");
+      expect(safe.html).toContain('name="return" value="/d/doc123"');
+      expect(safe.location).toBe("/d/doc123");
+      // Four sign-ins in all: the login limiter allows five per window.
+      for (const back of ["https://evil.example/d/x", "//evil.example/d/x", "/d/../logout"]) {
+        const out = await signIn(back);
+        expect(out.html, back).not.toContain('name="return"');
+        expect(out.location, back).toBe("/logout");
+      }
+    } finally {
+      await own.close();
+    }
+  }, 30_000);
 });

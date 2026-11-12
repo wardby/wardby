@@ -211,7 +211,7 @@ export class CommentsUI {
         if (this.pop.menuOpen && !target.closest(".menu, [data-act=menu]")) this.setMenu(false);
         return;
       }
-      if (target.closest(".mbadge, .tp-row, [data-comment-id], #bubble")) return;
+      if (target.closest(".mbadge, .tp-row, [data-comment-id]")) return;
       this.closePop();
     });
 

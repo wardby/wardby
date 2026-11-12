@@ -6,8 +6,9 @@
  * Counting reuses the self-hosted login's Postgres limiter (`AuthRateLimit`).
  * Its keys are hashed; the web surface has no self-hosted credential key in
  * delegating mode, so keys are a domain-separated SHA-256 of
- * bucket, identity and window. Identities are a share link id, a guest id or
- * the client address — never a token.
+ * bucket, identity and window. Identities are a share link id or a guest id —
+ * never a token, and never a client address (behind a load balancer it would
+ * throttle every guest at once).
  */
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
