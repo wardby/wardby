@@ -5,12 +5,30 @@ import type { AddressInfo } from "node:net";
 import { chromium } from "playwright-core";
 import { PDFDocument } from "pdf-lib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { launchChrome, MAX_RENDER_HEIGHT, type ChromeRenderer } from "./chrome.js";
+import { createCloseWaiter, launchChrome, MAX_RENDER_HEIGHT, type ChromeRenderer } from "./chrome.js";
 
 const home = readFileSync(
   new URL("../core/documents/boards/fixtures/coffee/boards/home.html", import.meta.url),
   "utf8",
 );
+
+describe("close waiter", () => {
+  it("counts a context close that does not settle in time, and uncounts it if it settles later", async () => {
+    const closes = createCloseWaiter(50);
+    await closes.wait(Promise.resolve());
+    await closes.wait(Promise.reject(new Error("gone")));
+    expect(closes.stuck()).toBe(0);
+    const started = Date.now();
+    await closes.wait(new Promise(() => undefined));
+    expect(Date.now() - started).toBeLessThan(1_000);
+    let settle: () => void = () => undefined;
+    await closes.wait(new Promise<void>((r) => (settle = r)));
+    expect(closes.stuck()).toBe(2);
+    settle();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closes.stuck()).toBe(1);
+  });
+});
 
 describe.skipIf(!existsSync(chromium.executablePath()))("renderer chrome", () => {
   let chrome: ChromeRenderer;
@@ -95,6 +113,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))("renderer chrome", () =>
     let lost = 0;
     other.onDisconnected(() => (lost += 1));
     expect(other.isConnected()).toBe(true);
+    expect(other.stuckContexts()).toBe(0);
     await other.close();
     expect(other.isConnected()).toBe(false);
     expect(lost).toBe(1);

@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { z } from "zod";
 import { logger, type Logger } from "../core/logger.js";
-import type { ChromeRenderer } from "./chrome.js";
+import { CLOSE_WAIT_MS, type ChromeRenderer } from "./chrome.js";
 
 /**
  * The request body cap. It holds the largest request the control plane sends with room for JSON
@@ -23,6 +23,11 @@ export const MAX_PAGINATED_HTML_BYTES = 3 * 1024 * 1024;
 export const MAX_PDF_BOARDS = 50;
 /** A whole render (all boards of a PDF) must finish within this, or it is aborted. */
 export const DEFAULT_RENDER_DEADLINE_MS = 90_000;
+/**
+ * After the deadline, how long an abandoned render keeps its slot while Chromium closes its
+ * context: the close wait plus a little grace. A render still unsettled by then counts as stuck.
+ */
+export const DEFAULT_ABANDON_WAIT_MS = CLOSE_WAIT_MS + 1_000;
 const MAX_DRAIN_BYTES = 32 * 1024 * 1024;
 
 const htmlUpTo = (max: number) => z.string().refine((s) => Buffer.byteLength(s, "utf8") <= max);
@@ -37,8 +42,9 @@ const pdfBody = z.union([
   }),
 ]);
 
-/** What the server needs from Chromium; `isConnected` absent = always connected (tests). */
-export type RendererChrome = Pick<ChromeRenderer, "png" | "pdf"> & Partial<Pick<ChromeRenderer, "isConnected">>;
+/** What the server needs from Chromium; absent `isConnected`/`stuckContexts` = healthy (tests). */
+export type RendererChrome = Pick<ChromeRenderer, "png" | "pdf"> &
+  Partial<Pick<ChromeRenderer, "isConnected" | "stuckContexts">>;
 
 type Route = "healthz" | "png" | "pdf" | "other";
 type Fail = "invalid_request" | "payload_too_large" | "busy" | "render_failed" | "not_found" | "unavailable";
@@ -136,8 +142,17 @@ export function superviseChrome(
   });
 }
 
-/** Runs `work` with an abort signal; past `ms` the signal fires and the result is render_failed. */
-async function withDeadline<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+/**
+ * Runs `work` with an abort signal; past `ms` the signal fires and the result is render_failed.
+ * `held` settles when the render itself does, or `ms + abandonMs` after the start if it never does
+ * (then `true`: the render is stuck). The caller keeps its slot until `held` settles, so an
+ * abandoned render still counts against the concurrency budget while Chromium closes it.
+ */
+function withDeadline<T>(
+  ms: number,
+  abandonMs: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): { result: Promise<T>; held: Promise<boolean> } {
   const ctl = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_resolve, reject) => {
@@ -146,14 +161,24 @@ async function withDeadline<T>(ms: number, work: (signal: AbortSignal) => Promis
       reject(new HttpFail("render_failed"));
     }, ms);
   });
+  expired.catch(() => undefined);
   const running = work(ctl.signal);
-  // A render that settles after the deadline is ignored (its rejection too).
-  running.catch(() => undefined);
-  try {
-    return await Promise.race([running, expired]);
-  } finally {
+  const done = running.then(
+    () => false,
+    () => false,
+  );
+  let bound: NodeJS.Timeout | undefined;
+  const held = Promise.race([
+    done,
+    new Promise<boolean>((resolve) => {
+      bound = setTimeout(() => resolve(true), ms + abandonMs);
+    }),
+  ]).finally(() => {
     clearTimeout(timer);
-  }
+    clearTimeout(bound);
+  });
+  // A render that settles after the deadline is ignored (its rejection too).
+  return { result: Promise.race([running, expired]), held };
 }
 
 export function createRendererServer(
@@ -163,6 +188,12 @@ export function createRendererServer(
     concurrency?: number;
     queue?: number;
     renderDeadlineMs?: number;
+    /** See DEFAULT_ABANDON_WAIT_MS. */
+    abandonWaitMs?: number;
+    /** Stuck renders (ours and Chromium's unclosed contexts) at which the renderer turns unhealthy. */
+    maxStuckRenders?: number;
+    /** Called once when the renderer turns unhealthy (main.ts exits so the pod restarts). */
+    onUnhealthy?: () => void;
     log?: Logger;
   } = {},
 ): Server {
@@ -170,9 +201,24 @@ export function createRendererServer(
   const concurrency = opts.concurrency ?? 2;
   const queue = opts.queue ?? 8;
   const deadlineMs = opts.renderDeadlineMs ?? DEFAULT_RENDER_DEADLINE_MS;
+  const abandonMs = opts.abandonWaitMs ?? DEFAULT_ABANDON_WAIT_MS;
+  const maxStuck = opts.maxStuckRenders ?? concurrency;
   const slots = semaphore(concurrency, queue);
   const log = opts.log ?? logger.child({ module: "renderer" });
-  const connected = () => chrome.isConnected?.() ?? true;
+  // Renders that never settled within deadline + abandon wait (their slots were given back).
+  let stuckRenders = 0;
+  let unhealthy = false;
+  const connected = () => !unhealthy && (chrome.isConnected?.() ?? true);
+  /**
+   * A wedged-but-connected Chromium (a page hanging layout or print) leaves contexts that never
+   * close; past `maxStuck` of them the renderer refuses work and asks to be restarted.
+   */
+  function checkStuck(): void {
+    if (unhealthy || stuckRenders + (chrome.stuckContexts?.() ?? 0) < maxStuck) return;
+    unhealthy = true;
+    log.error("renderer has too many stuck renders; marking unhealthy");
+    opts.onUnhealthy?.();
+  }
 
   async function handle(req: IncomingMessage, route: Route): Promise<{ type: string; bytes: Buffer }> {
     if (route === "healthz" && req.method === "GET") {
@@ -184,20 +230,25 @@ export function createRendererServer(
     const input = route === "png" ? { png: parse(pngBody, raw) } : { pdf: parse(pdfBody, raw) };
     if (!connected()) throw new HttpFail("unavailable");
     await slots.acquire();
+    const render = withDeadline(deadlineMs, abandonMs, async (signal) => {
+      if (input.png) {
+        return { type: "image/png", bytes: await chrome.png(input.png.html, input.png.width, { signal }) };
+      }
+      const paginate = input.pdf.paginate === true;
+      return { type: "application/pdf", bytes: await chrome.pdf(input.pdf.boards, { paginate, signal }) };
+    });
+    // The slot is freed when the render settles, not when the reply goes out.
+    void render.held.then((stuck) => {
+      slots.release();
+      if (stuck) stuckRenders += 1;
+      checkStuck();
+    });
     try {
-      return await withDeadline(deadlineMs, async (signal) => {
-        if (input.png) {
-          return { type: "image/png", bytes: await chrome.png(input.png.html, input.png.width, { signal }) };
-        }
-        const paginate = input.pdf.paginate === true;
-        return { type: "application/pdf", bytes: await chrome.pdf(input.pdf.boards, { paginate, signal }) };
-      });
+      return await render.result;
     } catch (err) {
       if (err instanceof HttpFail) throw err;
       // The error is dropped: a Chromium message can quote the page it failed on.
       throw new HttpFail("render_failed");
-    } finally {
-      slots.release();
     }
   }
 

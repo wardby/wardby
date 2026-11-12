@@ -211,7 +211,7 @@ describe("renderer server", () => {
     }
   });
 
-  it("aborts a render that never finishes, answers render_failed and frees the slot", async () => {
+  it("aborts a render that never finishes, answers render_failed and frees the slot once it settles", async () => {
     let calls = 0;
     let aborted = false;
     const url = await start(
@@ -219,22 +219,85 @@ describe("renderer server", () => {
         png: async (_html, _width, o) => {
           calls += 1;
           if (calls === 1) {
-            o?.signal?.addEventListener("abort", () => (aborted = true));
-            return new Promise<Buffer>(() => undefined);
+            // Like chrome.ts: on abort the render settles only after its context close wait.
+            return new Promise<Buffer>((_resolve, reject) =>
+              o?.signal?.addEventListener("abort", () => {
+                aborted = true;
+                setTimeout(() => reject(new Error("render aborted")), 300);
+              }),
+            );
           }
           return PNG;
         },
       }),
-      { concurrency: 1, queue: 0, renderDeadlineMs: 150 },
+      { concurrency: 1, queue: 0, renderDeadlineMs: 150, abandonWaitMs: 5_000 },
     );
     const started = Date.now();
     const hung = await post(`${url}/v1/png`, { html: "x", width: 1280 });
     expect(hung.status).toBe(500);
     expect(await hung.json()).toEqual({ error: "render_failed" });
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(1_000);
     expect(aborted).toBe(true);
+    // The abandoned render still holds the only slot while it closes.
+    expect((await post(`${url}/v1/png`, { html: "x", width: 1280 })).status).toBe(429);
+    await new Promise((r) => setTimeout(r, 400));
     const next = await post(`${url}/v1/png`, { html: "x", width: 1280 });
     expect(next.status).toBe(200);
+    expect((await fetch(`${url}/healthz`)).status).toBe(200);
+  });
+
+  it("holds the slot of a render that never settles until the bound, then turns unhealthy and exits", async () => {
+    const lines: string[] = [];
+    const log = pino({ level: "trace" }, { write: (line: string) => void lines.push(line) });
+    let unhealthy = 0;
+    // A wedged Chromium: the render ignores the abort and its context close never settles.
+    const url = await start(fakeChrome({ png: () => new Promise<Buffer>(() => undefined) }), {
+      concurrency: 2,
+      queue: 0,
+      renderDeadlineMs: 100,
+      abandonWaitMs: 300,
+      log,
+      onUnhealthy: () => (unhealthy += 1),
+    });
+    const started = Date.now();
+    const first = await Promise.all([
+      post(`${url}/v1/png`, { html: "x", width: 1280 }),
+      post(`${url}/v1/png`, { html: "x", width: 1280 }),
+    ]);
+    expect(first.map((r) => r.status)).toEqual([500, 500]);
+    // Both slots are still held: the renders have not settled and the bound has not passed.
+    expect((await post(`${url}/v1/png`, { html: "x", width: 1280 })).status).toBe(429);
+    expect((await fetch(`${url}/healthz`)).status).toBe(200);
+    expect(unhealthy).toBe(0);
+    await new Promise((r) => setTimeout(r, Math.max(0, 100 + 300 + 150 - (Date.now() - started))));
+    // Past the bound: two stuck renders = concurrency, so the renderer refuses work and asks to exit.
+    const health = await fetch(`${url}/healthz`);
+    expect(health.status).toBe(503);
+    expect(await health.json()).toEqual({ error: "unavailable" });
+    expect((await post(`${url}/v1/png`, { html: "x", width: 1280 })).status).toBe(503);
+    expect(unhealthy).toBe(1);
+    const msgs = lines.map((l) => (JSON.parse(l) as { msg: string }).msg);
+    expect(msgs.filter((m) => m !== "render request")).toEqual([
+      "renderer has too many stuck renders; marking unhealthy",
+    ]);
+  });
+
+  it("turns unhealthy when Chromium reports unclosed contexts", async () => {
+    let stuck = 0;
+    let unhealthy = 0;
+    const url = await start(fakeChrome({ stuckContexts: () => stuck }), {
+      concurrency: 2,
+      onUnhealthy: () => (unhealthy += 1),
+    });
+    stuck = 1;
+    expect((await post(`${url}/v1/png`, { html: "x", width: 1280 })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await fetch(`${url}/healthz`)).status).toBe(200);
+    stuck = 2;
+    expect((await post(`${url}/v1/png`, { html: "x", width: 1280 })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await fetch(`${url}/healthz`)).status).toBe(503);
+    expect(unhealthy).toBe(1);
   });
 
   it("answers 503 on /healthz and renders once the browser is gone", async () => {

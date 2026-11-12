@@ -18,10 +18,11 @@ function port(raw: string | undefined): number {
 async function main(): Promise<void> {
   const listenPort = port(process.env.PORT);
   const chrome = await launchChrome();
-  const server = createRendererServer(chrome);
   let stopping = false;
-  // A crashed browser makes every render fail: exit so the pod restarts (not on our own close).
-  superviseChrome(chrome, { log, exit: (code) => !stopping && process.exit(code) });
+  // A crashed or wedged browser makes renders fail: exit so the pod restarts (not on our own close).
+  const exit = (code: number) => !stopping && process.exit(code);
+  const server = createRendererServer(chrome, { onUnhealthy: () => exit(1) });
+  superviseChrome(chrome, { log, exit });
   server.listen(listenPort, "0.0.0.0", () => log.info({ port: listenPort }, "renderer listening"));
   const stop = (signal: string) => {
     if (stopping) return;

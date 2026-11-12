@@ -113,6 +113,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright HOME=/tmp
 # amd64 and arm64; playwright-core lib/coreBundle.js, `deps["debian12-x64"].chromium`): re-check
 # it on every playwright-core bump. Fonts are a deliberate set: fontconfig, Liberation (metric
 # compatible with Arial/Times/Courier), Noto Color Emoji and WenQuanYi Zen Hei for CJK text.
+# The browser install also drops Playwright's ffmpeg, used only for recordVideo, which the
+# renderer never uses; it is removed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 \
@@ -122,6 +124,7 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && npx --no-install playwright-core install --only-shell chromium \
+    && rm -rf /ms-playwright/ffmpeg-* \
     && chmod -R a+rX /ms-playwright
 USER node
 EXPOSE 8796

@@ -14,8 +14,37 @@ const PAGE_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; " +
   "frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 const RENDER_TIMEOUT_MS = 30_000;
-const CLOSE_WAIT_MS = 5_000;
+/** How long a render waits for its context to close before giving up on it (counted as stuck). */
+export const CLOSE_WAIT_MS = 5_000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref());
+
+/**
+ * Waits up to `waitMs` for each context close. A close that has not settled by then is counted as
+ * stuck (a wedged Chromium can leave it pending for good); the count drops if it settles later.
+ */
+export function createCloseWaiter(waitMs: number) {
+  let stuck = 0;
+  return {
+    async wait(closing: Promise<unknown>): Promise<void> {
+      let closed = false;
+      let late = false;
+      const settled = closing.then(
+        () => undefined,
+        () => undefined,
+      );
+      void settled.then(() => {
+        closed = true;
+        if (late) stuck -= 1;
+      });
+      await Promise.race([settled, sleep(waitMs)]);
+      if (!closed) {
+        late = true;
+        stuck += 1;
+      }
+    },
+    stuck: () => stuck,
+  };
+}
 
 export interface RenderOptions {
   /** Aborting closes the render's browser context, so the pending Chromium call rejects. */
@@ -38,6 +67,8 @@ export interface ChromeRenderer {
   isConnected(): boolean;
   /** Called once when Chromium goes away. */
   onDisconnected(cb: () => void): void;
+  /** Render contexts whose close did not settle within CLOSE_WAIT_MS (and has not since). */
+  stuckContexts(): number;
   close(): Promise<void>;
 }
 
@@ -64,6 +95,7 @@ export async function launchChrome(opts: { executablePath?: string } = {}): Prom
       "--mute-audio",
     ],
   });
+  const closes = createCloseWaiter(CLOSE_WAIT_MS);
 
   /**
    * One board in a fresh context. `measure` = lay out as screen media and report the content
@@ -131,7 +163,7 @@ export async function launchChrome(opts: { executablePath?: string } = {}): Prom
       return await Promise.race([work, aborted]);
     } finally {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
-      await Promise.race([context.close().catch(() => undefined), sleep(CLOSE_WAIT_MS)]);
+      await closes.wait(context.close());
     }
   }
 
@@ -160,6 +192,7 @@ export async function launchChrome(opts: { executablePath?: string } = {}): Prom
       if (!browser.isConnected()) cb();
       else browser.once("disconnected", cb);
     },
+    stuckContexts: () => closes.stuck(),
     close: () => browser.close(),
   };
 }
