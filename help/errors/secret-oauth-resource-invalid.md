@@ -25,3 +25,4 @@ Pass the service's URL as `https://<host>/<path>` with:
 Then call `create_secret { name, oauth: { resource } }` again.
 
 See the [secrets guide](../../docs/tool-secrets.md#oauth-secrets).
+Related: [`secret_oauth_input_too_long`](secret-oauth-input-too-long.md).

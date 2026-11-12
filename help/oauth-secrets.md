@@ -36,6 +36,14 @@ uses fail with [`secret_reauth_required`](errors/secret-reauth-required.md). To 
 steps under the **same name**; attachments and MCP servers keep working. `list_secrets` shows `status`
 (`connected` or `reauth_required`) and never a token.
 
+Uses of one secret that need a refresh at the same time on one Wardby server share a single refresh. A call that
+is stopped (its run stopped, or its MCP call timed out) stops waiting at once with
+`secret_oauth_refresh_unavailable`. A refresh no call still waits for is cancelled if it has not yet contacted
+the provider, leaving the secret unchanged (the server log records the reason `aborted`); a refresh already sent
+completes and is saved. If the provider issued new tokens but Wardby could not store them, the log records
+`rotated_unsaved`, and the secret may need connecting again. The `reauthReason` is `invalid_grant`,
+`invalid_client`, `expired` or `rejected` (the service refused the token with a 401 and there is no refresh token).
+
 ## Delete and revocation
 
 `delete_secret` disconnects the secret. Wardby first revokes the tokens at the provider when it has a
@@ -52,7 +60,7 @@ still used by an MCP server or host provider is not deleted until you update or 
   [`secret_oauth_discovery_failed`](errors/secret-oauth-discovery-failed.md).
 - If the provider cannot be reached while you connect, you get
   [`secret_oauth_provider_unavailable`](errors/secret-oauth-provider-unavailable.md); try again.
-- A resource that is not an https URL with a host name fails with `secret_oauth_resource_invalid`, and an over-long name, scope or client id with `secret_oauth_input_too_long` (0.9.12 and later; see the secrets guide).
+- A resource that is not an https URL with a host name fails with `secret_oauth_resource_invalid`, and an over-long name, scope or client id with `secret_oauth_input_too_long` (0.9.12 and later; see the secrets guide). Send `confirmationCode` on its own with the name; combining it with `value`, `broker` or `oauth` is refused.
 - If tokens cannot be encrypted or decrypted you get
   [`secret_oauth_encryption_failed`](errors/secret-oauth-encryption-failed.md); check the secret key.
 
@@ -62,7 +70,9 @@ Everyone an MCP server or agent is shared with uses the same service identity, w
 share it as carefully as the signed-in user's access. If the owner's OAuth secret needs reconnecting, or its
 credentials otherwise cannot be used, a user the server is shared with sees only "The MCP server's credentials
 can't be used; ask its owner to check it." They never see the secret name or `secret_reauth_required`; only the
-owner sees the specific error and can reconnect.
+owner sees the specific error and can reconnect. If the refresh only failed for now (the provider could not be
+reached, or another request held the secret too long), they see "The MCP server's credentials could not be
+refreshed just now; try again shortly." instead (0.9.12 and later); retry later.
 
 ## Example: BrowserStack's MCP server
 

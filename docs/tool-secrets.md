@@ -120,6 +120,8 @@ Provider requirements:
   [`secret_oauth_resource_invalid`](../help/errors/secret-oauth-resource-invalid.md). A secret name, scope or
   client id over its length limit fails with
   [`secret_oauth_input_too_long`](../help/errors/secret-oauth-input-too-long.md).
+- If the provider sends the browser back with an `iss` (issuer) that differs from the provider's own issuer,
+  the sign-in is refused ("The sign-in came back from a different issuer."); start again from step 1.
 - Send `confirmationCode` on its own with the name; combining it with `value`, `broker` or `oauth` is refused.
 - `oauth.scope` asks for specific scopes. Omit it to use what the provider
   grants by default; pick the narrowest scope that does the job, since the

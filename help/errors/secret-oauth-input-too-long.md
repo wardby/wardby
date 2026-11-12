@@ -20,3 +20,4 @@ Shorten the input and call `create_secret` again. The limits are 1024 bytes for 
 `oauth.scope`, and 512 bytes for `oauth.clientId`.
 
 See the [secrets guide](../../docs/tool-secrets.md#oauth-secrets).
+Related: [`secret_oauth_resource_invalid`](secret-oauth-resource-invalid.md).
