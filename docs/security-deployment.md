@@ -613,6 +613,29 @@ bound connection pools and concurrent invocations, and review a cancellable
 database adapter or isolated worker if strict immediate termination is required.
 Do not claim these per-invocation caps establish a whole-process memory ceiling.
 
+### Public (system) tools and server connections
+
+A public tool has no owner: everyone can see and attach it, never read its
+code. Only the operator (`wardby tool create|update|delete`) and admins over
+MCP (`make_tool_public`, `update_tool`, `delete_tool`; `agents:admin` with the
+admin role) can create or change one. Updating a public tool clears the
+capability grants (secrets, hosts) of every attachment and run hook on an
+agent with an owner, in the same transaction, so changed code never runs with
+an owner's secrets that owner didn't re-approve.
+
+An admin can grant a public tool a server connection (`grant_tool_connection`,
+`wardby tool grant-connection`). Slack is the only one: a run hook on the tool
+can call `slack.post`, which posts with the server's own bot token
+(`WARDBY_SLACK_BOT_TOKEN`). The token never enters the sandbox. The grant
+limits the channels (a list, `linked`, or `*`); the text is masked by exact
+value against the hook agent's secrets before it is posted; at most 20 posts
+per delivery; each post is logged with the tool, hook, channel and outcome,
+never the text. Agents' own tool calls never get the connection.
+
+**Upgrading:** 0.9.12 adds the `ToolConnectionGrant` table and the nullable
+`Tool.publishedById` / `Tool.publishedAt` columns; apply the migration with
+`prisma migrate deploy`.
+
 ### Tool time limits
 
 A tool call has 10 seconds unless the tool sets its own `timeoutMs`
