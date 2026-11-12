@@ -75,6 +75,9 @@ function triggerFor(row: RunRow, sites: IssueSites): RunTriggerInfo {
       return { kind: "subagent" };
     case "manual":
       return { kind: "manual" };
+    case "comment":
+      // Viewer shows a dedicated "comment" trigger in a later documents task; until then it reads as a host event.
+      return { kind: "host_event" };
     case "host_event":
       if (row.issueStatus) {
         return {

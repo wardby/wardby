@@ -63,6 +63,7 @@ model Agent {
   mcpServers           AgentMcpServer[]
   notificationChannels NotificationChannel[]
   runHooks             RunHook[]
+  documents            Document[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
   defectProjectKey String?
@@ -345,6 +346,7 @@ enum RunTrigger {
   webhook
   subagent
   host_event
+  comment
 }
 
 model Run {
@@ -1194,6 +1196,10 @@ model Principal {
   authUser     AuthUser?
   budgetGroups BudgetGroup[]
   mcpServers   McpServer[]
+
+  ownedDocuments Document[]        @relation("DocumentOwner")
+  webSessions    WebSession[]
+  profile        PrincipalProfile?
 
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
@@ -2245,4 +2251,155 @@ model HostProviderTrustedAccount {
   hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
 
   @@id([provider, accountId])
+}
+
+model Document {
+  id               String              @id @default(cuid())
+  /// "document" in phase 1; "design" later
+  kind             String              @default("document")
+  title            String
+  ownerId          String
+  owner            Principal           @relation("DocumentOwner", fields: [ownerId], references: [id])
+  agentId          String?
+  agent            Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  /// e.g. "owner/repo" or "local:/abs/path"; with path, enables send-to-agent
+  repository       String?
+  /// repo-relative Markdown path
+  path             String?
+  baseRef          String?
+  currentVersionId String?             @unique
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  versions         DocumentVersion[]   @relation("DocumentVersions")
+  currentVersion   DocumentVersion?    @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  threads          CommentThread[]
+  shareLinks       DocumentShareLink[]
+
+  @@index([ownerId])
+  @@index([agentId])
+}
+
+model DocumentVersion {
+  id          String    @id @default(cuid())
+  documentId  String
+  document    Document  @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  number      Int
+  /// <= 1 MiB (checked in code)
+  markdown    String
+  /// sha256 hex of markdown
+  contentHash String
+  /// "editor" | "agent" | "mcp" | "import"
+  via         String
+  createdById String?
+  runId       String?
+  summary     String?
+  createdAt   DateTime  @default(now())
+  currentOf   Document? @relation("CurrentVersion")
+
+  @@unique([documentId, number])
+}
+
+model CommentThread {
+  id           String    @id @default(cuid())
+  documentId   String
+  document     Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// per-document display number (#1, #2...)
+  number       Int
+  /// version it was created on
+  versionId    String
+  /// see src/core/documents/anchors.ts TextAnchor
+  anchor       Json
+  /// open | resolved | outdated
+  status       String    @default("open")
+  sentAt       DateTime?
+  sentById     String?
+  sentRunId    String?
+  resolvedById String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  comments     Comment[]
+
+  @@unique([documentId, number])
+  @@index([documentId, status])
+  @@index([sentRunId])
+}
+
+model Comment {
+  id        String         @id @default(cuid())
+  threadId  String
+  thread    CommentThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  /// principal
+  authorId  String?
+  guestId   String?
+  guest     DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  /// agent reply
+  runId     String?
+  /// principal who sent the thread to the agent
+  viaId     String?
+  /// Markdown subset; mentions as @[principalId]
+  body      String
+  editedAt  DateTime?
+  deletedAt DateTime?
+  createdAt DateTime       @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model DocumentShareLink {
+  id          String          @id @default(cuid())
+  documentId  String
+  document    Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// sha256 hex; the token is never stored
+  tokenHash   String          @unique
+  /// "view" | "comment"
+  permission  String
+  expiresAt   DateTime
+  createdById String
+  revokedAt   DateTime?
+  createdAt   DateTime        @default(now())
+  guests      DocumentGuest[]
+
+  @@index([documentId])
+}
+
+model DocumentGuest {
+  id          String            @id @default(cuid())
+  shareLinkId String
+  shareLink   DocumentShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  name        String
+  email       String?
+  createdAt   DateTime          @default(now())
+  lastUsedAt  DateTime          @default(now())
+  comments    Comment[]
+  sessions    WebSession[]
+
+  @@index([shareLinkId])
+}
+
+model WebSession {
+  id          String         @id @default(cuid())
+  tokenHash   String         @unique
+  csrfHash    String
+  principalId String?
+  principal   Principal?     @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  guestId     String?
+  guest       DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  /// set when the session came through a share link
+  shareLinkId String?
+  expiresAt   DateTime
+  lastSeenAt  DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+
+  @@index([principalId])
+  @@index([expiresAt])
+}
+
+model PrincipalProfile {
+  principalId String    @id
+  principal   Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  displayName String?
+  email       String?
+  /// "oidc" | "self-hosted" | "operator"
+  source      String
+  updatedAt   DateTime  @updatedAt
 }
