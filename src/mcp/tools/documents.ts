@@ -6,6 +6,7 @@ import type { Viewer } from "../../core/documents/access.js";
 import { textResult } from "./text-result.js";
 import { requireDocumentAccess } from "../../core/documents/access.js";
 import { createDocument, publishVersion } from "../../core/documents/service.js";
+import { markdownOf } from "../../core/documents/content.js";
 import {
   DEFAULT_VERSIONS_PAGE,
   getVersion,
@@ -354,7 +355,14 @@ function registerContentTools(mcp: WardbyMcpServer): void {
             ? await ctx.db.documentVersion.findUnique({ where: { id: doc.currentVersionId } })
             : null;
         if (!version) throw new Error("document_not_found");
-        return { doc, version };
+        // Markdown only here: a design version has none (document_format_mismatch), never "null".
+        return {
+          doc,
+          version: {
+            number: version.number,
+            markdown: markdownOf({ format: version.format, markdown: version.markdown ?? null }),
+          },
+        };
       });
       return textResult({
         documentText: wrapUntrusted(UNTRUSTED_TOOL_OUTPUT_TAG, `Title: ${out.doc.title}\n\n${out.version.markdown}`),

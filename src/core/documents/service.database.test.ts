@@ -41,13 +41,13 @@ describe.skipIf(!process.env.DATABASE_URL)("document service (database)", () => 
     expect((await getDocument(db, id)).version.markdown).toBe("hello 2");
   });
 
-  it("refuses oversize markdown and non-document kinds", async () => {
+  it("refuses oversize markdown and Markdown for a design", async () => {
     await expect(
       createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x".repeat(MAX_MARKDOWN_BYTES + 1) }),
     ).rejects.toThrow("document_too_large");
     await expect(
       createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "T", markdown: "x" }),
-    ).rejects.toThrow("document_kind_unsupported");
+    ).rejects.toThrow("document_format_mismatch");
   });
 
   it("redacts the owner agent's secret values in versions", async () => {

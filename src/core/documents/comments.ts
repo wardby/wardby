@@ -7,16 +7,20 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { cutUntrustedText } from "../untrusted-content.js";
 import { documentAccess, requireDocumentAccess } from "./access.js";
 import type { Viewer } from "./access.js";
-import { parseTextAnchor } from "./anchors.js";
-import type { TextAnchor } from "./anchors.js";
 import { MAX_COMMENT_CHARS } from "./limits.js";
 import { parseGuestMentions, parseMentionRefs } from "./mentions.js";
 import { notifyDocumentChange } from "./events.js";
 import { displayNameFor } from "./names.js";
 import { profileNames } from "./profiles.js";
-import { redactForDocumentAgent } from "./redact.js";
+import { MANIFEST_PATH } from "./boards/format.js";
+import { loadVersionFiles } from "./files.js";
+import { formatFor, type Anchor } from "./formats/index.js";
+import { documentSecretValues, redactForDocumentAgent } from "./redact.js";
+import { redactExactSecretValues } from "../secret-spans.js";
+import { logger } from "../logger.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
+const log = logger.child({ module: "documents-comments" });
 export type CommentDb = PrismaClient;
 
 export type ThreadFilter = "open" | "resolved" | "sent" | "mine" | "all";
@@ -34,7 +38,7 @@ export interface ThreadView {
   id: string;
   number: number;
   status: string;
-  anchor: TextAnchor;
+  anchor: Anchor;
   sentAt: Date | null;
   comments: CommentView[];
 }
@@ -98,10 +102,22 @@ export async function createThread(
   input: { documentId: string; viewer: Viewer; anchor: unknown; body: string },
 ): Promise<{ threadId: string; number: number; mentionsWithoutAccess: string[] }> {
   const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
-  const anchor = parseTextAnchor(input.anchor);
+  const fmt = formatFor(doc.kind);
+  const parsed = fmt.parseAnchor(input.anchor);
   checkBody(input.body);
   if (!doc.currentVersionId) throw new Error("document_not_found");
-  const body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
+  if (fmt.kind === "design") {
+    // A pin goes on a board of the current version: one the manifest does not list is refused. The
+    // manifest alone says which boards there are.
+    const manifest = await loadVersionFiles(db, doc.currentVersionId, [MANIFEST_PATH]);
+    if (!Object.hasOwn(manifest, MANIFEST_PATH) || !fmt.anchorFits({ format: "boards-v1", files: manifest }, parsed)) {
+      throw new Error("comment_anchor_invalid");
+    }
+  }
+  // The anchor's text (quote, context, element words and path) is caller-written and stored: redacted like the body.
+  const secrets = await documentSecretValues(db, cipher, doc.agentId);
+  const anchor = fmt.redactAnchor(parsed, secrets);
+  const body = redactExactSecretValues(input.body, secrets);
   const created = await withSerializableRetry(() =>
     db.$transaction(
       async (tx) => {
@@ -200,7 +216,7 @@ export async function listThreads(
   db: CommentDb,
   input: { documentId: string; viewer: Viewer; filter: ThreadFilter },
 ): Promise<ThreadView[]> {
-  await requireDocumentAccess(db, input.documentId, input.viewer, "read");
+  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "read");
   const threads = await db.commentThread.findMany({
     where: {
       documentId: input.documentId,
@@ -231,25 +247,38 @@ export async function listThreads(
     c.runId === null &&
     (input.viewer.kind === "principal" ? c.authorId === input.viewer.principalId : c.guestId === input.viewer.guestId);
 
-  const views: ThreadView[] = threads.map((t) => ({
-    id: t.id,
-    number: t.number,
-    status: t.status,
-    anchor: parseTextAnchor(t.anchor),
-    sentAt: t.sentAt,
-    comments: t.comments.map((c): CommentView => {
-      let author: CommentView["author"];
-      if (c.runId) {
-        author = { kind: "agent", name: "Agent" };
-        if (c.viaId) author.viaName = names.get(c.viaId) ?? FORMER_MEMBER;
-      } else if (c.guestId) {
-        author = { kind: "guest", name: `${guestName.get(c.guestId) ?? "Guest"} (guest)` };
-      } else {
-        author = { kind: "member", name: (c.authorId && names.get(c.authorId)) || FORMER_MEMBER };
-      }
-      return { id: c.id, author, body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mine: isMine(c) };
-    }),
-  }));
+  const fmt = formatFor(doc.kind);
+  const views: ThreadView[] = threads.flatMap((t) => {
+    let anchor: Anchor;
+    try {
+      anchor = fmt.parseAnchor(t.anchor);
+    } catch {
+      // Stored anchors were parsed on write; one that no longer parses is left out, never shown raw.
+      log.warn({ threadId: t.id, code: "comment_anchor_invalid" }, "skipped a comment thread with an invalid anchor");
+      return [];
+    }
+    return [
+      {
+        id: t.id,
+        number: t.number,
+        status: t.status,
+        anchor,
+        sentAt: t.sentAt,
+        comments: t.comments.map((c): CommentView => {
+          let author: CommentView["author"];
+          if (c.runId) {
+            author = { kind: "agent", name: "Agent" };
+            if (c.viaId) author.viaName = names.get(c.viaId) ?? FORMER_MEMBER;
+          } else if (c.guestId) {
+            author = { kind: "guest", name: `${guestName.get(c.guestId) ?? "Guest"} (guest)` };
+          } else {
+            author = { kind: "member", name: (c.authorId && names.get(c.authorId)) || FORMER_MEMBER };
+          }
+          return { id: c.id, author, body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mine: isMine(c) };
+        }),
+      },
+    ];
+  });
   return input.filter === "mine" ? views.filter((t) => t.comments.some((c) => c.mine)) : views;
 }
 

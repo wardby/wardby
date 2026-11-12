@@ -44,6 +44,7 @@ import { notifyDocumentChange } from "./events.js";
 import { publishVersion } from "./service.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { markdownOf } from "./content.js";
+import { formatFor, type DocumentFormat } from "./formats/index.js";
 
 const log = logger.child({ module: "documents-agent-loop" });
 
@@ -135,13 +136,13 @@ function instructions(doc: { path: string; baseRef: string | null }, versionNumb
 }
 
 /** The sent threads as plain text, for the untrusted context. */
-function threadsText(threads: Awaited<ReturnType<typeof listThreads>>): string {
+function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: DocumentFormat): string {
   return threads
     .map((t) => {
       const lines = t.comments.map(
         (c) => `- ${c.author.name}${c.author.viaName ? ` via ${c.author.viaName}` : ""} (${c.author.kind}): ${c.body}`,
       );
-      return [`Thread #${t.number} on the text ${JSON.stringify(t.anchor.quote)}:`, ...lines].join("\n");
+      return [`Thread #${t.number} on ${fmt.anchorLabel(t.anchor)}:`, ...lines].join("\n");
     })
     .join("\n\n");
 }
@@ -152,7 +153,7 @@ function threadsText(threads: Awaited<ReturnType<typeof listThreads>>): string {
  * task). A document that leaves too little room is refused.
  */
 function buildTask(
-  doc: { path: string; baseRef: string | null },
+  doc: { path: string; baseRef: string | null; kind: string },
   version: { number: number; markdown: string },
   threads: Awaited<ReturnType<typeof listThreads>>,
   agentInstructions: string,
@@ -166,7 +167,7 @@ function buildTask(
   const used = byteLength(composeTaskOverride(task, documentPart)) + byteLength(agentInstructions.trim());
   const room = MAX_CODING_TASK_BYTES - TASK_RESERVE_BYTES - used;
   if (room < MIN_THREADS_BYTES) throw new Error("document_too_large_for_agent");
-  const text = threadsText(threads);
+  const text = threadsText(threads, formatFor(doc.kind));
   const byChars = text.length > MAX_UNTRUSTED_BODY_CHARS ? text.slice(0, MAX_UNTRUSTED_BODY_CHARS) : text;
   const fitted = truncateText(byChars, room, byteLength, THREADS_CUT_MARKER);
   const threadsPart =
@@ -257,7 +258,12 @@ export async function sendThreadsToAgent(
     idSet.has(t.id),
   );
   if (threads.length !== ids.length) throw new Error("comment_thread_closed");
-  const task = buildTask({ path, baseRef }, { number: version.number, markdown }, threads, agent.systemPrompt);
+  const task = buildTask(
+    { path, baseRef, kind: doc.kind },
+    { number: version.number, markdown },
+    threads,
+    agent.systemPrompt,
+  );
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
@@ -483,7 +489,8 @@ async function publishRunEdit(
     // written back to the repository. publishVersion's exact-value pass runs too.
     const markdown = redactExactSecretValues(redactTokenShapedValues(read), secretValues);
     const branch = result?.headRef ?? ref;
-    if (markdown === doc.currentVersion?.markdown) {
+    // A design version has no Markdown: markdownOf refuses it (document_format_mismatch, reported as failed).
+    if (doc.currentVersion && markdown === markdownOf(doc.currentVersion)) {
       return doc.currentVersion.number === sentVersion ? { kind: "unchanged" } : { kind: "conflict", branch };
     }
     const numbers = threads.map((t) => `#${t.number}`);

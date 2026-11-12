@@ -1,53 +1,81 @@
-import { createHash } from "node:crypto";
 import { Prisma } from "#prisma";
 import type { Document, DocumentVersion, PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
-import { locateAnchor, parseTextAnchor } from "./anchors.js";
+import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
-import { MAX_MARKDOWN_BYTES } from "./limits.js";
-import { markdownToPlainText } from "./plain-text.js";
-import { redactForDocumentAgent } from "./redact.js";
+import { loadContent, storeVersionFiles } from "./files.js";
+import { formatFor, type DocumentKind, type PreparedContent } from "./formats/index.js";
+import { documentSecretValues } from "./redact.js";
+import type { VersionWarning } from "./warnings.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
 export type DocumentServiceDb = PrismaClient;
 
 export type PublishVia = "editor" | "agent" | "mcp" | "import";
 
-async function prepareMarkdown(
-  db: DocumentServiceDb,
-  cipher: Cipher,
-  agentId: string | null,
-  markdown: string,
-): Promise<string> {
-  if (Buffer.byteLength(markdown, "utf8") > MAX_MARKDOWN_BYTES) throw new Error("document_too_large");
-  return redactForDocumentAgent(db, cipher, agentId, markdown);
+/** Exactly one of markdown/files, matching the kind: a document takes Markdown, a design takes files. */
+function contentInput(
+  kind: DocumentKind,
+  input: { markdown?: string; files?: Record<string, string> },
+): VersionContent {
+  if (kind === "document" && input.markdown !== undefined && input.files === undefined) {
+    return { format: "markdown", markdown: input.markdown };
+  }
+  if (kind === "design" && input.files !== undefined && input.markdown === undefined) {
+    return { format: "boards-v1", files: input.files };
+  }
+  throw new Error("document_format_mismatch");
 }
 
-const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+/** The DocumentVersion columns that hold prepared content (design files go to storeVersionFiles). */
+function versionColumns(format: VersionContent["format"], prepared: PreparedContent) {
+  return {
+    format,
+    markdown: prepared.content.format === "markdown" ? prepared.content.markdown : null,
+    contentHash: contentHash(prepared.content),
+    warnings: prepared.warnings.length ? (prepared.warnings as unknown as Prisma.InputJsonValue) : undefined,
+  };
+}
+
+async function storeFiles(
+  tx: Prisma.TransactionClient,
+  documentId: string,
+  versionId: string,
+  prepared: PreparedContent,
+): Promise<void> {
+  if (prepared.content.format === "boards-v1") {
+    await storeVersionFiles(tx, documentId, versionId, prepared.content.files);
+  }
+}
 
 export async function createDocument(
   db: DocumentServiceDb,
   cipher: Cipher,
   input: {
-    kind?: string;
+    kind?: DocumentKind;
     ownerId: string;
     title: string;
-    markdown: string;
+    markdown?: string;
+    files?: Record<string, string>;
     agentId?: string;
     repository?: string;
     path?: string;
     baseRef?: string;
     via?: PublishVia;
   },
-): Promise<{ id: string; versionId: string }> {
-  if ((input.kind ?? "document") !== "document") throw new Error("document_kind_unsupported");
-  const markdown = await prepareMarkdown(db, cipher, input.agentId ?? null, input.markdown);
+): Promise<{ id: string; versionId: string; warnings: VersionWarning[] }> {
+  const fmt = formatFor(input.kind ?? "document");
+  const content = contentInput(fmt.kind, input);
+  const secrets = await documentSecretValues(db, cipher, input.agentId ?? null);
+  const prepared = fmt.prepare(content, secrets);
   // The title is shown on pages, share pages and MCP lists: redacted like the body.
-  const title = await redactForDocumentAgent(db, cipher, input.agentId ?? null, input.title);
+  const title = redactExactSecretValues(input.title, secrets);
   return db.$transaction(async (tx) => {
     const doc = await tx.document.create({
       data: {
+        kind: fmt.kind,
         title,
         ownerId: input.ownerId,
         agentId: input.agentId ?? null,
@@ -60,14 +88,14 @@ export async function createDocument(
       data: {
         documentId: doc.id,
         number: 1,
-        markdown,
-        contentHash: sha256(markdown),
+        ...versionColumns(fmt.format, prepared),
         via: input.via ?? "editor",
         createdById: input.ownerId,
       },
     });
+    await storeFiles(tx, doc.id, version.id, prepared);
     await tx.document.update({ where: { id: doc.id }, data: { currentVersionId: version.id } });
-    return { id: doc.id, versionId: version.id };
+    return { id: doc.id, versionId: version.id, warnings: prepared.warnings };
   });
 }
 
@@ -76,7 +104,8 @@ export async function publishVersion(
   cipher: Cipher,
   input: {
     documentId: string;
-    markdown: string;
+    markdown?: string;
+    files?: Record<string, string>;
     via: PublishVia;
     createdById?: string;
     runId?: string;
@@ -86,16 +115,35 @@ export async function publishVersion(
     /** Only restoreVersion sets this: a summary reading "Restored v<N>" marks a restore, so no one else may write it. */
     allowRestoredSummary?: boolean;
   },
-): Promise<{ versionId: string; number: number; reanchored: { kept: number; outdated: number } }> {
+): Promise<{
+  versionId: string;
+  number: number;
+  reanchored: { kept: number; outdated: number };
+  warnings: VersionWarning[];
+}> {
   if (input.summary !== undefined && !input.allowRestoredSummary && /^\s*Restored v\d+/i.test(input.summary)) {
     throw new Error("document_summary_invalid");
   }
-  const doc = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
+  const doc = await db.document.findUnique({
+    where: { id: input.documentId },
+    select: { agentId: true, kind: true },
+  });
   if (!doc) throw new Error("document_not_found");
-  const markdown = await prepareMarkdown(db, cipher, doc.agentId, input.markdown);
-  const plain = markdownToPlainText(markdown);
-  const summary =
-    input.summary === undefined ? null : await redactForDocumentAgent(db, cipher, doc.agentId, input.summary);
+  const fmt = formatFor(doc.kind);
+  const content = contentInput(fmt.kind, input);
+  const secrets = await documentSecretValues(db, cipher, doc.agentId);
+  const prepared = fmt.prepare(content, secrets);
+  const summary = input.summary === undefined ? null : redactExactSecretValues(input.summary, secrets);
+  // Re-anchoring parses the new content (jsdom for a design): done here, before the Serializable
+  // transaction, so the transaction stays short. Anchors never change after a thread is created, so
+  // the verdicts hold; a thread opened meanwhile is checked inside the transaction.
+  const checked = new Map<string, boolean>();
+  const openBefore = await db.commentThread.findMany({
+    where: { documentId: input.documentId, status: "open" },
+    select: { id: true, anchor: true },
+  });
+  const outdatedBefore = new Set(fmt.outdated(prepared.content, openBefore));
+  for (const t of openBefore) checked.set(t.id, outdatedBefore.has(t.id));
   const published = await withSerializableRetry(() =>
     db.$transaction(
       async (tx) => {
@@ -112,14 +160,14 @@ export async function publishVersion(
           data: {
             documentId: input.documentId,
             number,
-            markdown,
-            contentHash: sha256(markdown),
+            ...versionColumns(fmt.format, prepared),
             via: input.via,
             createdById: input.createdById ?? null,
             runId: input.runId ?? null,
             summary,
           },
         });
+        await storeFiles(tx, input.documentId, version.id, prepared);
         await tx.document.update({
           where: { id: input.documentId },
           data: { currentVersionId: version.id },
@@ -128,22 +176,19 @@ export async function publishVersion(
           where: { documentId: input.documentId, status: "open" },
           select: { id: true, anchor: true },
         });
-        let kept = 0;
-        const outdatedIds: string[] = [];
-        for (const t of threads) {
-          let found: boolean;
-          try {
-            found = locateAnchor(plain, parseTextAnchor(t.anchor)) !== null;
-          } catch {
-            found = false;
-          }
-          if (found) kept += 1;
-          else outdatedIds.push(t.id);
-        }
+        const unchecked = threads.filter((t) => !checked.has(t.id));
+        const outdatedNew = new Set(unchecked.length ? fmt.outdated(prepared.content, unchecked) : []);
+        const outdatedIds = threads.filter((t) => checked.get(t.id) ?? outdatedNew.has(t.id)).map((t) => t.id);
+        const kept = threads.length - outdatedIds.length;
         if (outdatedIds.length > 0) {
           await tx.commentThread.updateMany({ where: { id: { in: outdatedIds } }, data: { status: "outdated" } });
         }
-        return { versionId: version.id, number, reanchored: { kept, outdated: outdatedIds.length } };
+        return {
+          versionId: version.id,
+          number,
+          reanchored: { kept, outdated: outdatedIds.length },
+          warnings: prepared.warnings,
+        };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     ),
@@ -156,9 +201,9 @@ export async function publishVersion(
 export async function getDocument(
   db: DocumentServiceDb,
   documentId: string,
-): Promise<{ document: Document; version: DocumentVersion }> {
+): Promise<{ document: Document; version: DocumentVersion; content: VersionContent }> {
   const document = await db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
   if (!document || !document.currentVersion) throw new Error("document_not_found");
   const { currentVersion, ...rest } = document;
-  return { document: rest, version: currentVersion };
+  return { document: rest, version: currentVersion, content: await loadContent(db, currentVersion) };
 }

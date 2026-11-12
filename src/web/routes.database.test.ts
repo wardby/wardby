@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest, createServer } from "node:http";
 import { connect, type AddressInfo } from "node:net";
@@ -434,6 +435,30 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       const missing = await call(`/d/api/${own}/versions/9`, { jar });
       expect(missing.status).toBe(404);
       expect(await missing.json()).toEqual({ error: "document_version_not_found" });
+
+      // A design version comes back as its files, never as a null Markdown.
+      const coffee = (p: string) =>
+        readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+      const design = await createDocument(db, cipher, {
+        kind: "design",
+        ownerId: owner.id,
+        title: "Design",
+        files: {
+          "manifest.json": coffee("manifest.json"),
+          ...Object.fromEntries(
+            ["home", "menu", "about", "visit"].map((b) => [`boards/${b}.html`, coffee(`boards/${b}.html`)]),
+          ),
+        },
+      });
+      const dv = (await (await call(`/d/api/${design.id}/versions/1`, { jar })).json()) as {
+        version: Record<string, unknown>;
+      };
+      expect(dv.version).toMatchObject({ number: 1, format: "boards-v1" });
+      expect(dv.version).not.toHaveProperty("markdown");
+      expect(Object.keys(dv.version.files as object)).toContain("boards/menu.html");
+      const dd = (await (await call(`/d/api/${design.id}`, { jar })).json()) as { version: Record<string, unknown> };
+      expect(dd.version).toMatchObject({ number: 1, format: "boards-v1" });
+      expect(dd.version).not.toHaveProperty("markdown");
 
       const restore = (init: CallInit) => call(`/d/api/${own}/versions/1/restore`, { method: "POST", ...init });
       expect((await restore({ jar, body: { baseNumber: 2 } })).status).toBe(403); // no CSRF

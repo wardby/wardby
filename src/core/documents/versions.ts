@@ -1,14 +1,16 @@
 /**
  * A document's version history: the list the page's Edits tray and
- * list_document_versions show, one version's Markdown, and restore.
+ * list_document_versions show, one version's content (Markdown, or a design's
+ * files), and restore.
  *
  * Output: list items carry no content — numbers, how and when, a display
  * name, the run id and the summary (redacted at write by publishVersion) and
- * the numbers of the comment threads the run answered. A version's Markdown
+ * the numbers of the comment threads the run answered. A version's content
  * was redacted against the document agent's secret values when it was
- * published (service.ts), so reading it back opens no new secret path.
+ * published (service.ts, the format adapters), so reading it back opens no
+ * new secret path.
  *
- * Restore publishes the chosen version's Markdown as a NEW version through
+ * Restore publishes the chosen version's content as a NEW version through
  * publishVersion (redaction, size limit, re-anchoring, events and the
  * version-conflict check), with the summary "Restored v<N>". Nothing is
  * rewritten in place.
@@ -19,7 +21,8 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import { principalNames } from "./comments.js";
 import { publishVersion, type PublishVia } from "./service.js";
-import { markdownOf } from "./content.js";
+import type { VersionContent } from "./content.js";
+import { loadContent } from "./files.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
 
@@ -124,22 +127,35 @@ export async function listVersions(
   };
 }
 
-/** One version's Markdown. */
+/** One version's content; `markdown` too for a Markdown version. */
 export async function getVersion(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; number: number },
-): Promise<{ number: number; markdown: string; createdAt: Date }> {
+): Promise<{
+  number: number;
+  format: VersionContent["format"];
+  content: VersionContent;
+  markdown?: string;
+  createdAt: Date;
+}> {
   await requireDocumentAccess(db, input.documentId, input.viewer, "read");
   const v = await db.documentVersion.findUnique({
     where: { documentId_number: { documentId: input.documentId, number: input.number } },
-    select: { number: true, format: true, markdown: true, createdAt: true },
+    select: { id: true, number: true, format: true, markdown: true, createdAt: true },
   });
   if (!v) throw new Error("document_version_not_found");
-  return { number: v.number, markdown: markdownOf(v), createdAt: v.createdAt };
+  const content = await loadContent(db, v);
+  return {
+    number: v.number,
+    format: content.format,
+    content,
+    ...(content.format === "markdown" ? { markdown: content.markdown } : {}),
+    createdAt: v.createdAt,
+  };
 }
 
 /**
- * Publishes version `number`'s Markdown as the next version (needs write; a
+ * Publishes version `number`'s content (Markdown, or a design's files) as the next version (needs write; a
  * member). `baseNumber` (the latest version the caller saw) is required:
  * document_version_conflict unless it is still the latest. Restoring the
  * version that is already the latest is refused (document_version_is_latest).
@@ -153,7 +169,7 @@ export async function restoreVersion(
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
   const v = await db.documentVersion.findUnique({
     where: { documentId_number: { documentId: input.documentId, number: input.number } },
-    select: { format: true, markdown: true },
+    select: { id: true, format: true, markdown: true },
   });
   if (!v) throw new Error("document_version_not_found");
   const latest = await db.documentVersion.aggregate({
@@ -162,9 +178,10 @@ export async function restoreVersion(
   });
   if ((latest._max.number ?? 0) !== input.baseNumber) throw new Error("document_version_conflict");
   if (input.number === input.baseNumber) throw new Error("document_version_is_latest");
+  const content = await loadContent(db, v);
   const out = await publishVersion(db, cipher, {
     documentId: input.documentId,
-    markdown: markdownOf(v),
+    ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
     via: input.via,
     createdById: input.viewer.principalId,
     summary: restoredSummary(input.number),

@@ -71,7 +71,7 @@ export async function getDocumentJson(
   anonymous: boolean,
 ): Promise<void> {
   await requireDocumentAccess(deps.db, documentId, viewer, "read");
-  const { document, version } = await getDocument(deps.db, documentId);
+  const { document, version, content } = await getDocument(deps.db, documentId);
   const me = await describeViewer(deps, documentId, viewer, anonymous);
   const threads = await listThreads(deps.db, { documentId, viewer, filter: "all" });
   // Names for @[guest:id] mentions, only for this document's own guests.
@@ -90,7 +90,12 @@ export async function getDocumentJson(
       ...(member ? { repository: document.repository, path: document.path } : {}),
       canSend: atLeast("document", me.access, "write") && !!document.repository && !!document.path,
     },
-    version: { number: version.number, markdown: version.markdown, createdAt: version.createdAt },
+    version: {
+      number: version.number,
+      format: content.format,
+      ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
+      createdAt: version.createdAt,
+    },
     me,
     threads,
     mentionedGuests,
@@ -263,7 +268,7 @@ export async function listVersionsJson(
   sendWebJson(res, 200, list);
 }
 
-/** One version's Markdown (redacted when it was published). */
+/** One version's Markdown, or a design version's files (redacted when it was published). */
 export async function getVersionJson(
   res: ServerResponse,
   deps: WebDeps,
@@ -272,7 +277,8 @@ export async function getVersionJson(
   number: number,
 ): Promise<void> {
   const v = await getVersion(deps.db, { documentId, viewer, number });
-  sendWebJson(res, 200, { version: v });
+  const content = v.content.format === "markdown" ? { markdown: v.content.markdown } : { files: v.content.files };
+  sendWebJson(res, 200, { version: { number: v.number, format: v.format, ...content, createdAt: v.createdAt } });
 }
 
 /** Publishes version <n>'s Markdown as a new version; baseNumber must still be the latest. */
