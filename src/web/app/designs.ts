@@ -311,7 +311,14 @@ function mount(
     if (measuring) setTimeout(() => afterMeasuring(run), 200);
     else run();
   };
+  /**
+   * The board whose ⋯ menu is open. The list is rebuilt on every change, save and fidelity pass, so
+   * the open menu is kept here and shown again by renderBoards (hidden while a pass runs, as the
+   * list is disabled then); otherwise a save landing just after the click would close it.
+   */
+  let openMenu: string | null = null;
   const closeMenus = () => {
+    openMenu = null;
     for (const m of Array.from(boardsList.querySelectorAll<HTMLElement>(".bmenu"))) m.hidden = true;
   };
   const renderBoards = () => {
@@ -319,6 +326,7 @@ function mount(
     boardsList.setAttribute("aria-busy", String(measuring));
     addBoardBtn.disabled = measuring;
     const list = boards.manifest().boards;
+    if (openMenu !== null && !list.some((b) => b.id === openMenu)) openMenu = null;
     list.forEach((b, i) => {
       const on = b.id === boards.currentBoard();
       const pick = h(
@@ -331,7 +339,7 @@ function mount(
       });
       const li = h("li", { class: on ? "on" : "", data: { board: b.id } }, pick);
       if (canWrite) {
-        const menu = h("div", { class: "bmenu", role: "menu", hidden: true });
+        const menu = h("div", { class: "bmenu", role: "menu", hidden: measuring || openMenu !== b.id });
         const item = (label: string, run: () => void, disabled = false) =>
           h(
             "button",
@@ -341,6 +349,7 @@ function mount(
               disabled,
               onClick: () => {
                 menu.hidden = true;
+                openMenu = null;
                 run();
               },
             },
@@ -385,6 +394,7 @@ function mount(
           const show = menu.hidden;
           closeMenus();
           menu.hidden = !show;
+          if (show) openMenu = b.id;
         });
         li.append(more, menu);
       }

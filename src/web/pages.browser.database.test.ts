@@ -378,6 +378,41 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 90_000);
 
+  it("keeps an open board menu open when the boards list is rebuilt by a new version", async () => {
+    const { documentId, cookie, principalIds } = await server.design({
+      title: "Coffee",
+      files: files(),
+      access: "write",
+    });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const about = page.locator(".boards li", { hasText: "About" });
+    await about.locator(".more").click();
+    await expect.poll(() => about.getByRole("menuitem", { name: "Rename…" }).isVisible()).toBe(true);
+    // Another writer publishes v2: the page loads it in place and rebuilds the boards list.
+    const next = files();
+    next["boards/menu.html"] = next["boards/menu.html"].replace("</main>", "<p>Theirs</p></main>");
+    await publishVersion(server.db, TEST_CIPHER, {
+      documentId,
+      files: next,
+      via: "editor",
+      createdById: principalIds.second,
+      expectedNumber: 1,
+    });
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    await expect.poll(() => about.getByRole("menuitem", { name: "Rename…" }).isVisible()).toBe(true);
+    expect(await page.locator(".boards .bmenu:not([hidden])").count()).toBe(1);
+    // A press outside the list still closes it, and stays closed across the next rebuild.
+    await page.locator(".topbar .crumbs").click();
+    await expect.poll(() => page.locator(".boards .bmenu:not([hidden])").count()).toBe(0);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 60_000);
+
   it("shows the conflict notice when someone else saved first, and keeps the edit", async () => {
     const { documentId, cookie, principalIds } = await server.design({
       title: "Coffee",
