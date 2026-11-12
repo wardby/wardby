@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { JSDOM, type DomDocument } from "jsdom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sanitizeBoard, sanitizeFragment } from "./sanitize.js";
 
 const fixture = (p: string) => readFileSync(new URL(`./fixtures/${p}`, import.meta.url), "utf8");
@@ -173,5 +173,74 @@ describe("sanitizeBoard containers and the body", () => {
     );
     expect(ok.problems).toEqual([]);
     expect(ok.html).toContain('fill="url(#g)"');
+  });
+});
+
+// Fix round 1 regressions: each case reports a problem and carries nothing from https://e.test.
+describe("sanitizeBoard CSS bypasses (fix round 1)", () => {
+  const board = (head: string, body = "x") =>
+    `<!doctype html><html><head><title>t</title>${head}</head><body>${body}</body></html>`;
+  const refused = (input: string) => {
+    const out = sanitizeBoard(input);
+    expect(out.problems.length).toBeGreaterThan(0);
+    expect(out.html).not.toContain("e.test");
+    expect(out.baseCss + (out.editsCss ?? "")).not.toContain("e.test");
+    return out;
+  };
+
+  it.each([
+    ["double", '"'],
+    ["single", "'"],
+  ])("refuses a %s-quoted string cut by a newline that hides a url()", (_name, q) => {
+    refused(board(`<style>a{content:${q}\n} b{background-image:url(https://e.test/x)} c{content:${q}}</style>`));
+  });
+
+  it("refuses image-set(var()) and src(var()) in a sheet and in a style attribute", () => {
+    refused(board('<style>body{--a:"https://e.test/x.png"} div{background-image:image-set(var(--a) 1x)}</style>'));
+    refused(board('<style>body{--a:"https://e.test/x.png"} div{background-image:src(var(--a))}</style>'));
+    refused(
+      board("", '<div style="--a:&quot;https://e.test/x.png&quot;;background-image:image-set(var(--a) 1x)">y</div>'),
+    );
+    refused(board("", '<div style="--a:&quot;https://e.test/x.png&quot;;background-image:src(var(--a))">y</div>'));
+  });
+
+  it("checks the style elements as they are joined, not only one by one", () => {
+    // A comment opened in one element and closed in the next.
+    refused(board('<style>a{}/*</style><style>"*/ b{background-image:url(https://e.test/x)} /*"</style>'));
+    // Edits blocks are joined with no separator: "<" + "/style>" would close the element.
+    const out = refused(
+      board(
+        "<style data-wardby-edits>a{color:red}<</style><style data-wardby-edits>/style><img src=https://e.test/x></style>",
+      ),
+    );
+    expect(out.problems).toContain("style text that closes the element in a style sheet");
+  });
+});
+
+describe("sanitizeBoard writes nothing to the console (fix round 1, secrets)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("does not print an @import URL or an unparsable sheet that jsdom rejects", () => {
+    const spies = (["error", "warn", "log", "info", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const head = (css: string) =>
+      `<!doctype html><html><head><title>t</title><style>${css}</style></head><body>x</body></html>`;
+    const outs = [
+      sanitizeBoard(head('@import "https://[zz/?k=FAKE-SECRET-1";')),
+      sanitizeBoard(head('@import "//[x/?k=FAKE-SECRET-3";')),
+      sanitizeBoard(head("a{color:red} }}} @media {{{ FAKE-SECRET-2 (((")),
+      sanitizeBoard(
+        `<!doctype html><html><head><title>t</title></head><body><svg><style>@import "https://[zz/?k=FAKE-SECRET-4";</style></svg></body></html>`,
+      ),
+    ];
+    sanitizeFragment('<div><style>@import "https://[zz/?k=FAKE-SECRET-5";</style></div>', { images: "drop" });
+    const written = [...spies, stderr, stdout].flatMap((s) => s.mock.calls);
+    stderr.mockRestore();
+    stdout.mockRestore();
+    expect(written).toEqual([]);
+    for (const o of outs) expect(JSON.stringify(o.problems)).not.toContain("FAKE-SECRET");
   });
 });

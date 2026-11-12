@@ -42,8 +42,19 @@ declare module "jsdom" {
     readonly document: DomDocument;
     close(): void;
   }
+  /**
+   * Receives the page's console calls and jsdom's own errors. A new one forwards nothing; the
+   * default one (no option given) prints jsdom errors, which can quote the input, to stderr.
+   */
+  export class VirtualConsole {
+    constructor();
+    on(event: string, listener: (...args: unknown[]) => void): this;
+  }
+  export interface ConstructorOptions {
+    virtualConsole?: VirtualConsole;
+  }
   export class JSDOM {
-    constructor(html?: string);
+    constructor(html?: string, options?: ConstructorOptions);
     readonly window: DomWindow;
     serialize(): string;
   }

@@ -6,6 +6,7 @@
  */
 import { z } from "zod";
 import type { VersionWarning } from "../warnings.js";
+import { BoardFormatError } from "./errors.js";
 import { BOARD_ID } from "./ids.js";
 import { sanitizeBoard } from "./sanitize.js";
 
@@ -30,13 +31,7 @@ export interface Manifest {
   boards: BoardEntry[];
 }
 
-/** The design does not follow board format v1. `problems` are our own fixed text plus board ids. */
-export class BoardFormatError extends Error {
-  constructor(readonly problems: string[]) {
-    super("board_format_invalid");
-    this.name = "BoardFormatError";
-  }
-}
+export { BoardFormatError };
 
 const manifestSchema = z.object({
   title: z.string().trim().min(1).max(200),

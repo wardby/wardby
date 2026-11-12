@@ -9,9 +9,10 @@
  * fixed text: never a URL, path, tag or attribute the caller wrote.
  */
 import createDOMPurify from "dompurify";
-import { JSDOM, type DomElement, type DomNode, type DomParent } from "jsdom";
+import { JSDOM, VirtualConsole, type DomElement, type DomNode, type DomParent } from "jsdom";
 import { escapeHtml } from "../../html-escape.js";
 import { checkCss, type CssProblem } from "./css-check.js";
+import { BoardFormatError } from "./errors.js";
 
 export interface RemovedCounts {
   scripts: number;
@@ -33,7 +34,11 @@ export interface SanitizedBoard {
 
 export interface SanitizedFragment {
   html: string;
-  /** `images`: external references dropped in "drop" mode (always 0 in "refuse" mode). */
+  /**
+   * `images`: in "drop" mode, the number of attributes removed for an external reference (an
+   * img src, a style attribute or SVG attribute with an external url(), the src of a removed
+   * iframe ...), not a count of elements. Always 0 in "refuse" mode.
+   */
   removed: RemovedCounts & { images: number };
   problems: string[];
 }
@@ -133,7 +138,7 @@ const NAMED_KINDS = new Set([
   "portal",
 ]);
 
-/** The DOMPurify members used here, typed without the DOM lib (see jsdom.d.ts). */
+/** The DOMPurify members used here, typed without the DOM lib (see src/types/jsdom.d.ts). */
 interface PurifyConfig {
   USE_PROFILES: { html: boolean; svg: boolean; svgFilters: boolean };
   FORBID_TAGS: string[];
@@ -153,7 +158,17 @@ interface Purifier {
   readonly removed: ReadonlyArray<{ element?: DomNode }>;
 }
 
-const { window } = new JSDOM("");
+/**
+ * Every jsdom instance here gets a silent virtual console. jsdom's default console prints its own
+ * errors to stderr, and those quote the input (an @import URL it could not parse, for one); board
+ * text must never reach a log.
+ */
+const parse = (html: string) => new JSDOM(html, { virtualConsole: new VirtualConsole() });
+
+/** Thrown when a defence-in-depth check finds what the sanitiser should already have removed. */
+const finalCheckFailed = () => new BoardFormatError(["the board failed the final safety check"]);
+
+const { window } = parse("");
 const purify = (createDOMPurify as unknown as (root: unknown) => Purifier)(window);
 
 interface State {
@@ -179,6 +194,7 @@ function cssProblemText(p: CssProblem, where: "a style sheet" | "a style attribu
   if (p === "import") return `@import in ${where}`;
   if (p === "expression") return `script-like CSS in ${where}`;
   if (p === "style_close") return `style text that closes the element in ${where}`;
+  if (p === "malformed") return `a broken CSS string or url() in ${where}`;
   return `external url() in ${where}`;
 }
 
@@ -233,13 +249,13 @@ purify.addHook("uponSanitizeAttribute", onAttribute);
 /** Element and attribute checks that never trust DOMPurify alone (defence in depth). */
 function assertClean(root: DomParent): void {
   if (root.querySelector("script, base, link, iframe, frame, object, embed, form, noscript, template, math")) {
-    throw new Error("board_format_invalid");
+    throw finalCheckFailed();
   }
   for (const el of Array.from(root.querySelectorAll("*"))) {
-    if (el.localName.toLowerCase() === "foreignobject") throw new Error("board_format_invalid");
+    if (el.localName.toLowerCase() === "foreignobject") throw finalCheckFailed();
     for (const a of Array.from(el.attributes)) {
-      if (a.name.toLowerCase().startsWith("on")) throw new Error("board_format_invalid");
-      if (SCRIPT_URL.test(a.value.replace(URL_WHITESPACE, ""))) throw new Error("board_format_invalid");
+      if (a.name.toLowerCase().startsWith("on")) throw finalCheckFailed();
+      if (SCRIPT_URL.test(a.value.replace(URL_WHITESPACE, ""))) throw finalCheckFailed();
     }
   }
 }
@@ -261,7 +277,7 @@ function cleanContainer(container: DomElement, s: State): string {
     if (!REMOVE_SUBTREE.includes(el.localName)) continue;
     if (!el.isConnected || !container.contains(el)) continue;
     // A frame or embed pointing elsewhere is an external reference as well as a removed element.
-    for (const attr of ["src", "data", "href", "poster"]) {
+    for (const attr of REFERENCE_ATTRS) {
       const v = el.getAttribute(attr)?.trim();
       if (v && !isLocalRef(v) && !SCRIPT_URL.test(v.replace(URL_WHITESPACE, ""))) {
         externalReference(s, `external reference in ${kindOf(el)} ${attr}`);
@@ -283,10 +299,10 @@ function cleanContainer(container: DomElement, s: State): string {
   } finally {
     state = undefined;
   }
-  const check = new JSDOM(`<!doctype html><body>${clean}`);
+  const check = parse(`<!doctype html><body>${clean}`);
   try {
     assertClean(check.window.document);
-    if (check.window.document.querySelector("style")) throw new Error("board_format_invalid");
+    if (check.window.document.querySelector("style")) throw finalCheckFailed();
   } finally {
     check.window.close();
   }
@@ -305,7 +321,7 @@ const newState = (images: "drop" | "refuse"): State => ({
  */
 export function sanitizeFragment(html: string, opts: FragmentOptions): SanitizedFragment {
   const s = newState(opts.images);
-  const dom = new JSDOM("<!doctype html><html><head></head><body></body></html>");
+  const dom = parse("<!doctype html><html><head></head><body></body></html>");
   try {
     const body = dom.window.document.body;
     body.innerHTML = html;
@@ -318,7 +334,7 @@ export function sanitizeFragment(html: string, opts: FragmentOptions): Sanitized
 
 export function sanitizeBoard(input: string): SanitizedBoard {
   const s = newState("refuse");
-  const dom = new JSDOM(input);
+  const dom = parse(input);
   try {
     const doc = dom.window.document;
 
@@ -342,6 +358,7 @@ export function sanitizeBoard(input: string): SanitizedBoard {
     // (noscript, template, iframe, ...); any other style element is removed and counted.
     let base = "";
     let edits: string | null = null;
+    let sheetProblems = false;
     for (const style of Array.from(doc.querySelectorAll("style"))) {
       const hoist = style.namespaceURI === HTML_NS && !style.parentElement?.closest(NO_HOIST_ANCESTORS);
       const css = style.textContent ?? "";
@@ -353,9 +370,28 @@ export function sanitizeBoard(input: string): SanitizedBoard {
       }
       const problems = checkCss(css);
       for (const p of problems) s.problems.add(cssProblemText(p, "a style sheet"));
-      if (problems.includes("style_close")) continue;
+      if (problems.length) {
+        sheetProblems = true;
+        continue;
+      }
       if (isEdits) edits = (edits ?? "") + css;
       else base += (base ? "\n" : "") + css;
+    }
+
+    // Each element was checked alone above; the browser reads the joined text as one sheet, so
+    // check base and edits again exactly as they are emitted (a comment opened in one element
+    // and closed in the next would otherwise hide a url()).
+    const joinedProblems = (sheet: string) => {
+      const problems = checkCss(sheet);
+      for (const p of problems) s.problems.add(cssProblemText(p, "a style sheet"));
+      return problems.length > 0;
+    };
+    if (joinedProblems(base)) sheetProblems = true;
+    if (edits !== null && joinedProblems(edits)) sheetProblems = true;
+    if (sheetProblems) {
+      // The board is refused; none of its CSS is carried in the result either.
+      base = "";
+      if (edits !== null) edits = "";
     }
 
     // The head is rebuilt; anything in it other than the title and plain meta tags is counted.
@@ -389,12 +425,12 @@ export function sanitizeBoard(input: string): SanitizedBoard {
       (edits !== null ? `<style data-wardby-edits>${edits}</style>\n` : "") +
       `</head>\n<body${bodyAttrs}>${clean}</body>\n</html>\n`;
 
-    const check = new JSDOM(html);
+    const check = parse(html);
     try {
       const d = check.window.document;
       assertClean(d);
       if (d.querySelectorAll("style").length !== (edits === null ? 1 : 2) || d.body.querySelector("style")) {
-        throw new Error("board_format_invalid");
+        throw finalCheckFailed();
       }
     } finally {
       check.window.close();

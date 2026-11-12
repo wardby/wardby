@@ -61,3 +61,62 @@ describe("checkCss on large input", () => {
     expect(Date.now() - t).toBeLessThan(2000);
   });
 });
+
+// Fix round 1, Critical 1: a string ends at an unescaped newline (CSS Syntax "bad string"), so
+// what follows it is CSS again for the browser even where PostCSS reads it as string text.
+describe("checkCss strings cut by a newline", () => {
+  it.each([
+    ["double quotes", 'a{content:"\n} b{background-image:url(https://e.test/x)} c{content:"}'],
+    ["single quotes", "a{content:'\n} b{background-image:url(https://e.test/x)} c{content:'}"],
+    ["a CRLF newline", 'a{content:"\r\n} b{background-image:url(https://e.test/x)} c{content:"}'],
+    ["a form feed", 'a{content:"\f} b{background-image:url(https://e.test/x)} c{content:"}'],
+  ])("finds the url() after a string cut by %s", (_name, css) => {
+    expect(checkCss(css)).toEqual(expect.arrayContaining(["malformed", "external_url"]));
+    expect(checkCss(css, { declarations: true })).toEqual(expect.arrayContaining(["malformed", "external_url"]));
+  });
+  it("refuses a bad string, an unclosed comment and a broken url() even with nothing after them", () => {
+    expect(checkCss('a{content:"x\n"}')).toContain("malformed");
+    expect(checkCss("a{color:red}/*")).toContain("malformed");
+    expect(checkCss("a{background:url(x y)}")).toEqual(expect.arrayContaining(["malformed", "external_url"]));
+  });
+  it("keeps an escaped newline inside a string", () => {
+    expect(checkCss('a{content:"one\\\ntwo"}')).toEqual([]);
+  });
+});
+
+// Fix round 1, Critical 2: an image function argument that is not a data: string, a checked
+// url() or a gradient could stand for a URL (var() is substituted after any check).
+describe("checkCss image function arguments", () => {
+  it.each(["image-set", "-webkit-image-set", "image", "src", "cross-fade"])(
+    "refuses var(), env() and attr() in %s()",
+    (fn) => {
+      expect(checkCss(`body{--a:"https://e.test/x.png"} div{background-image:${fn}(var(--a) 1x)}`)).toEqual([
+        "external_url",
+      ]);
+      expect(checkCss(`--a:"https://e.test/x.png";background-image:${fn}(var(--a))`, { declarations: true })).toEqual([
+        "external_url",
+      ]);
+      expect(checkCss(`a{background-image:${fn}(env(--a))}`)).toEqual(["external_url"]);
+      expect(checkCss(`a{background-image:${fn}(attr(data-x))}`)).toEqual(["external_url"]);
+    },
+  );
+  it("refuses a nested url() that fails the check, and a bare block", () => {
+    expect(checkCss("a{background-image:image-set(url(https://e.test/x) 1x)}")).toEqual(["external_url"]);
+    expect(checkCss('a{background-image:image-set(url("https://e.test/x") 1x)}')).toEqual(["external_url"]);
+    expect(checkCss("a{background-image:image-set(( 'https://e.test/x' ) 1x)}")).toEqual(["external_url"]);
+  });
+  it('refuses url("…") with more than one string or with a function inside', () => {
+    expect(checkCss('a{background:url("data:image/png,x" "https://e.test")}')).toEqual(["external_url"]);
+    expect(checkCss("a{background:url(var(--a))}")).toContain("external_url"); // a bad url token
+    expect(checkCss('a{background:url(var(--a) "data:image/png,x")}')).toContain("external_url");
+  });
+  it("allows data: strings, data: url(), gradients and type() in image functions", () => {
+    expect(
+      checkCss(
+        "a{background-image:image-set('data:image/png;base64,AAAA' 1x, url(data:image/png;base64,AAAA) 2x," +
+          ' linear-gradient(var(--a), red) 3x, "data:image/webp;base64,AA" type("image/webp"))}',
+      ),
+    ).toEqual([]);
+    expect(checkCss("a{background:var(--bg, linear-gradient(red, blue))}")).toEqual([]);
+  });
+});
