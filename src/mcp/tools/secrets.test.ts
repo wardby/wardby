@@ -238,6 +238,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -265,6 +266,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -285,6 +287,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -308,6 +311,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -337,6 +341,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
     for (const extra of [{}, { operator: true }]) {
@@ -369,6 +374,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
     const result = await client.callTool({ name: "detach_secret", arguments: { agentId: "a1", name: "TOKEN" } });
@@ -389,6 +395,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -428,6 +435,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
     const row = await db.secret.create({
@@ -480,6 +488,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
     const created = await client.callTool({
@@ -511,6 +520,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
     await client.callTool({ name: "create_secret", arguments: { name: "REVIEW_TOKEN", value: "ghp-abc" } });
@@ -552,6 +562,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: true,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp, { elicitation: { url: {} } });
 
@@ -595,6 +606,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: true,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp, { elicitation: { url: {} } });
     client.setRequestHandler("elicitation/create", async () => ({ action: "decline" }));
@@ -617,6 +629,7 @@ describe("secrets tools", () => {
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -662,6 +675,7 @@ describe("secrets tools", () => {
       registerSecretsTools(mcp, {
         buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
         protocolElicitation: false,
+        oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
       });
       return { mcp, client: await connectClient(mcp) };
     }

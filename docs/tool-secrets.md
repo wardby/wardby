@@ -116,6 +116,10 @@ Provider requirements:
   URI `https://<your-wardby-host>/oauth/callback` and pass its id as
   `oauth.clientId`; without it the call fails with
   [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md).
+  From 0.9.12, a provider that refuses the registration fails with
+  [`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md),
+  which names the provider's error code and the HTTP status (its description goes
+  only to the operator log).
 - `oauth.resource` must be an `https` URL with a host name (not an IP address); otherwise the call fails with
   [`secret_oauth_resource_invalid`](../help/errors/secret-oauth-resource-invalid.md). A secret name, scope or
   client id over its length limit fails with
@@ -127,6 +131,72 @@ Provider requirements:
   grants by default; pick the narrowest scope that does the job, since the
   signed-in user's access is what every agent gets.
 - Wardby's requests to the provider send `User-Agent: wardby/<version>`.
+
+### Providers that accept only loopback callbacks
+
+From 0.9.12. Some providers accept dynamic client registration only for loopback
+redirect addresses (`127.0.0.1` or `localhost`), their own app, or a few known
+connectors, so the default flow's `https://<your-wardby-host>/oauth/callback`
+is refused. BrowserStack's hosted MCP server is an example. You need this flow
+when connecting fails with
+[`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md)
+and `invalid_redirect_uri`; on the default flow that message says the provider may
+accept only loopback callbacks.
+
+1. Call `create_secret { name, oauth: { resource, scope?, clientId?, callback: "loopback" } }`.
+   It works over HTTP and stdio. It returns `status: "pending"`, a `command`
+   (`npx @wardby/cli@latest secret connect -`), a `link` and an `expiresAt`. Do
+   not also pass `value`, `broker` or `confirmationCode`. For BrowserStack:
+
+   ```json
+   {
+     "name": "BROWSERSTACK",
+     "oauth": { "resource": "https://mcp.browserstack.com/mcp", "callback": "loopback" }
+   }
+   ```
+
+2. On your own computer, run the `command` in a terminal and paste the `link` when it
+   asks "Paste the connect link:". The CLI listens on a random port on
+   `127.0.0.1`, opens your browser to the provider (add `--no-browser` to have it
+   print the address instead), and catches the redirect. Sign in as the service
+   user. The CLI then prints `Confirmation code: XXXX-XXXX` and the exact
+   `create_secret` call to make.
+3. Call `create_secret { name, confirmationCode }` with the same name, as for the
+   default flow.
+
+What the CLI needs:
+
+- Node.js 24 or later (for `npx`), and a browser on the same machine, because the
+  provider sends the browser to `127.0.0.1` on that machine. With no browser
+  there, use `--no-browser` and open the printed address on the same machine, or
+  forward the port (for example `ssh -L <port>:127.0.0.1:<port> <host>`; the CLI's
+  listener binds `127.0.0.1` only), or use another sign-in method.
+- Network access to your Wardby server at its canonical URL
+  (`MCP_CANONICAL_URI`; over stdio, the local address the stdio server opens).
+  The server must be reachable from that machine; the CLI refuses a link that
+  points at a plain `http` address unless it is `127.0.0.1`, `localhost` or `[::1]`.
+- Nothing else of Wardby's: the CLI needs no database or credentials.
+
+If a reverse proxy, load balancer or WAF sits in front of Wardby, it must pass
+`POST /oauth/loopback/start` and `POST /oauth/loopback/complete` to Wardby, the same
+as `/oauth/callback`.
+
+Security:
+
+- The `link` is a credential for 10 minutes. It names one owner, one secret name
+  and one resource. Do not share it, post it or commit it; the CLI takes it from
+  standard input so it stays out of shell history and the process list.
+- The link alone cannot finish the connection. Only the owner named in the link
+  can redeem the confirmation code, so someone who gets the code or the link
+  cannot connect a secret for you. A link can start a few sign-ins (at most 5
+  waiting at once for your account); an unused sign-in expires after 10 minutes.
+- The CLI never prints the authorization code, state or link. The address it
+  prints with `--no-browser` contains the sign-in state; do not share it.
+- A sign-in started by the loopback flow cannot be finished through the web
+  callback page, and the reverse.
+- If the provider refuses even a `127.0.0.1` callback
+  (`invalid_redirect_uri` on this flow), register a client with the provider yourself
+  and pass it as `oauth.clientId`; it must allow `http://127.0.0.1:<any port>/callback`.
 
 ### Refresh, reconnect, disconnect
 
@@ -405,6 +475,7 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 | [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md)                           | An OAuth secret's value or broker cannot be changed by hand.               |
 | [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md)                     | The name belongs to a secret that is not an OAuth secret.                  |
 | [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md)     | The provider needs a `clientId` you registered.                            |
+| [`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md)   | The provider refused to register Wardby (from 0.9.12).                     |
 | [`secret_oauth_encryption_failed`](../help/errors/secret-oauth-encryption-failed.md)       | The OAuth secret could not be encrypted or decrypted.                      |
 | [`secret_oauth_provider_unavailable`](../help/errors/secret-oauth-provider-unavailable.md) | The provider could not be reached while connecting.                        |
 | [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)   | The provider could not be reached to refresh the token.                    |

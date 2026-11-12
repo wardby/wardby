@@ -69,6 +69,7 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
     registerSecretsTools(mcp, {
       buildElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
       protocolElicitation,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

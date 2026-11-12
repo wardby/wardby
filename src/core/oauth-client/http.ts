@@ -9,11 +9,24 @@ export type OAuthErrorCode =
   | "provider_unavailable"
   | "bad_response";
 
+/**
+ * Validated facts about a refused client registration. Only a code matching `^[a-z_]{1,64}$`, an
+ * HTTP status and a name from a fixed list can appear here, never provider text.
+ */
+export interface OAuthRegistrationDetail {
+  status?: number;
+  /** The RFC 7591 `error` code, when it is a short snake_case token. */
+  providerError?: string;
+  /** The registration reply's unsupported `token_endpoint_auth_method`: a known name, else "unsupported". */
+  authMethod?: string;
+}
+
 /** Messages are fixed sentences: a provider response body is never interpolated into one. */
 export class OAuthProtocolError extends Error {
   constructor(
     readonly code: OAuthErrorCode,
     message: string,
+    readonly registration?: OAuthRegistrationDetail,
   ) {
     super(message);
     this.name = "OAuthProtocolError";
