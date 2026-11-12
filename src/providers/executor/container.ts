@@ -123,10 +123,13 @@ import type {
   ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
+import { countWorkspaceEntries } from "../vcs/git.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
@@ -314,7 +317,74 @@ export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: L
 /** A fix round's description state: the baseline to update against, or that it could not be loaded. */
 type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | null;
 
+/** One of a coding run's extra repositories (a CodingRunRepository row, #537), with its link as it is now. */
+export interface RunRepositorySnapshot {
+  id: string;
+  position: number;
+  name: string;
+  access: "read" | "write";
+  provider: string;
+  repository: string;
+  requestedRef: string | null;
+  resolvedSha: string | null;
+  baseRef: string | null;
+  headRef: string | null;
+  linkId: string | null;
+  /** The row's link still exists with the same access and no triggers (a coding-set link). */
+  linkExists: boolean;
+  linkAuthorizedVia: string | null;
+  /** A writable row whose branch already exists from the root or an earlier continuation (pullRequestNumber or resultBranch set on a same-name row). */
+  continuesBranch: boolean;
+  pullRequestNumber: number | null;
+  mergeOrder: number | null;
+  result: unknown;
+}
+
+/** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
+export interface RunWorkspaces {
+  main: PreparedWorkspace;
+  writable: Map<string, PreparedWorkspace>;
+  readOnly: PreparedReadOnlyCopy[];
+}
+
+function isRunWorkspaces(value: PreparedWorkspace | RunWorkspaces | null | undefined): value is RunWorkspaces {
+  return Boolean(value && "main" in value && "writable" in value);
+}
+
+/** How many extra repositories are prepared at once. */
+const EXTRA_PREPARE_CONCURRENCY = 3;
+
+/**
+ * Maps `items` through `work`, at most `limit` at a time, in input order. On a failure no new item
+ * starts, the ones already running are waited for (so nothing is still being written when the caller
+ * cleans up), and then the first failure is thrown.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length);
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const lane = async (): Promise<void> => {
+    while (!failure && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await work(items[index]);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  if (failure) throw failure.error;
+  return results;
+}
+
 export interface ContainerRunSnapshot {
+  /** The run's extra repositories in position order (CodingRunRepository); [] for a single-repository run. */
+  repositories: RunRepositorySnapshot[];
   /** Run.runStepsLevel, fixed at dispatch; absent on older snapshots = summary. */
   runStepsLevel?: RunStepsLevel | null;
   runId: string;
@@ -557,7 +627,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           select: { authorizedVia: true },
         })
       : null;
+    const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
     return {
+      repositories,
       runId: row.id,
       runStepsLevel: row.runStepsLevel,
       agentId: row.agentId,
@@ -615,6 +687,59 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       pricingVersion: row.pricingVersion,
       pricingSnapshot: row.pricingSnapshot,
     };
+  }
+
+  /**
+   * The run's extra repositories (#537), each with whether its link is still a coding-set link of
+   * the agent (same id, same access, no triggers) and, for a continuation, whether a writable row's
+   * branch already exists from the root or an earlier continuation of the same tree.
+   */
+  private async loadRepositories(
+    runId: string,
+    agentId: string,
+    rootId: string | null,
+  ): Promise<RunRepositorySnapshot[]> {
+    const rows = await this.db.codingRunRepository.findMany({ where: { runId }, orderBy: { position: "asc" } });
+    if (rows.length === 0) return [];
+    const linkIds = rows.flatMap((r) => (r.linkId ? [r.linkId] : []));
+    const links =
+      linkIds.length > 0
+        ? await this.db.agentRepository.findMany({
+            where: { id: { in: linkIds }, agentId },
+            select: { id: true, access: true, triggers: true, authorizedVia: true },
+          })
+        : [];
+    const branchRows = rootId
+      ? await this.db.codingRunRepository.findMany({
+          where: {
+            codingRun: { OR: [{ runId: rootId }, { rootCodingRunId: rootId }] },
+            OR: [{ pullRequestNumber: { not: null } }, { resultBranch: { not: null } }],
+          },
+          select: { name: true },
+        })
+      : [];
+    return rows.map((r) => {
+      const link = links.find((l) => l.id === r.linkId && l.access === r.access && l.triggers.length === 0);
+      return {
+        id: r.id,
+        position: r.position,
+        name: r.name,
+        access: r.access === "write" ? "write" : "read",
+        provider: r.provider,
+        repository: r.repository,
+        requestedRef: r.requestedRef,
+        resolvedSha: r.resolvedSha,
+        baseRef: r.baseRef,
+        headRef: r.headRef,
+        linkId: r.linkId,
+        linkExists: Boolean(link),
+        linkAuthorizedVia: link?.authorizedVia ?? null,
+        continuesBranch: r.access === "write" && branchRows.some((b) => b.name === r.name),
+        pullRequestNumber: r.pullRequestNumber,
+        mergeOrder: r.mergeOrder,
+        result: r.result,
+      };
+    });
   }
 
   async relatedPullRequests(runId: string): Promise<RelatedPullRequestEntry[]> {
@@ -1125,6 +1250,11 @@ export interface ContainerExecutorOptions {
   pollMaxMs?: number;
   /** How often to beat the heartbeat during a long launch; defaults to a third of the reconciler's timeout. */
   heartbeatIntervalMs?: number;
+  /**
+   * The entry cap over every prepared repository of a run with several (throws
+   * vcs_workspace_entry_limit). Test hook; defaults to countWorkspaceEntries.
+   */
+  countEntries?: (paths: string[]) => Promise<void>;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
@@ -1189,6 +1319,9 @@ type LoadedRegistryReport = {
 };
 
 class PreflightError extends Error {}
+
+/** An extra repository row with no resolved commit (or a writable one without its refs): refused before any clone. */
+export const CODING_REPOSITORY_UNRESOLVED_ERROR = "coding_repository_unresolved";
 
 /** A refusal by repository authorization; its message is the failure category's prefix (repo_access_*). */
 class RepoAccessError extends PreflightError {}
@@ -1340,6 +1473,8 @@ export class ContainerExecutor implements Executor {
     if (!run) throw new Error("coding_run_not_found");
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
     let workspace: PreparedWorkspace | null = null;
+    // Every workspace held once the default one is ready (the extras are added as each is prepared).
+    let workspaces: RunWorkspaces | null = null;
     let sessionId = run.proxySessionId;
     let handle = run.jobHandle;
     let claimId: string | null = null;
@@ -1364,19 +1499,38 @@ export class ContainerExecutor implements Executor {
       // host error is retried once before it is stopped.
       // A slow clone (large repository, cold host) outlives HEARTBEAT_TIMEOUT_MS just as a launch can.
       const toPrepare = run;
+      // A launched run's job already has its read-only copies; only its writable extras are recovered.
+      const pending = run.repositories.filter((extra) => !(handle && extra.access === "read"));
       workspace = await this.whileHeartbeating(runId, async () => {
+        // Every repository is authorized, and every extra row checked, before anything is cloned.
         await this.authorizeRepository(toPrepare, { inFlight: Boolean(handle) });
+        await this.authorizeExtras(toPrepare, { inFlight: Boolean(handle) });
+        for (const extra of pending) this.extraPreflight(toPrepare, extra);
         try {
           const found = await this.options.vcs.recoverWorkspace(prepared);
           if (!found && handle) throw new Error("coding_workspace_lost");
           const ready = found ?? (await this.options.vcs.prepareWorkspace(prepared));
-          this.emit({ stage: "prepared", runId });
+          if (pending.length === 0) this.emit({ stage: "prepared", runId });
           return ready;
         } catch (error) {
           if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
           throw error;
         }
       });
+      if (pending.length > 0) {
+        const held: RunWorkspaces = { main: workspace, writable: new Map(), readOnly: [] };
+        workspaces = held;
+        const [extrasRun, launched] = [run, Boolean(handle)];
+        await this.whileHeartbeating(runId, async () => {
+          try {
+            await this.prepareExtras(extrasRun, pending, held, launched);
+          } catch (error) {
+            if (!spendEnabled && !launched) throw new PreflightError(safeError(error), { cause: error });
+            throw error;
+          }
+        });
+        this.emit({ stage: "prepared", runId });
+      }
       await this.options.vcs.notifyContinuationStarted?.(workspace, { agentName: run.agentName });
 
       if (!handle) {
@@ -1441,7 +1595,7 @@ export class ContainerExecutor implements Executor {
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
-          await this.finishTerminal(run, handle, status.state, workspace, sessionId);
+          await this.finishTerminal(run, handle, status.state, workspaces ?? workspace, sessionId);
           return;
         }
         if (status.state === "running" && !observedRunning) {
@@ -1476,7 +1630,7 @@ export class ContainerExecutor implements Executor {
           ...(planned ? { planned } : {}),
         });
         if (requeued !== "spend_recorded") {
-          if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+          if (workspace) await this.cleanupWorkspaces(run, workspaces ?? workspace);
           if (requeued === "requeued") {
             // The next attempt writes its own input; this one names a session that is gone.
             await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1514,7 +1668,7 @@ export class ContainerExecutor implements Executor {
       const unreadyService = outOfBudget ? null : serviceUnreadyName(error);
       const protectedPath = outOfBudget ? null : protectedPathFromError(error);
       if (workspace) {
-        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.cleanupWorkspaces(run, workspaces ?? workspace);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
           ...(outOfBudget ? { budgetSentence: await this.budgetSentence(run) } : {}),
@@ -1588,6 +1742,125 @@ export class ContainerExecutor implements Executor {
       retryTransient: opts.inFlight,
     });
     if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
+  }
+
+  /**
+   * Every extra repository through the same gate, read rows included: the GitHub allowlist is a
+   * hard limit for every row, whatever its stamp, and it may have narrowed since the root run, so a
+   * continuation is checked again too. A row whose link is gone (or changed access, or gained a
+   * trigger) is not authorized. Throws RepoAccessError for the first denied row.
+   */
+  private async authorizeExtras(run: ContainerRunSnapshot, opts: { inFlight: boolean; only?: string }): Promise<void> {
+    for (const extra of run.repositories) {
+      // `only` scopes the check to one row by name: one row's denial must not fail every publish.
+      if (opts.only !== undefined && extra.name !== opts.only) continue;
+      if (!extra.linkExists) throw new RepoAccessError("repo_access_not_authorized");
+      const decision = await this.options.repoAccess.authorizeUse({
+        ownerId: run.ownerId,
+        provider: extra.provider,
+        repository: extra.repository,
+        required: requiredLevel(extra.access === "read" ? "coding_read" : "coding"),
+        authorizedVia: extra.linkAuthorizedVia,
+        retryTransient: opts.inFlight,
+      });
+      if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
+    }
+  }
+
+  /**
+   * What one extra repository is prepared from. A read row is one commit's files (no branch, no
+   * protected paths, nothing collected). A write row is a workspace in its own slot on the run's
+   * branch, with the run's protected paths and collection exclusions; in a continuation it continues
+   * the branch only when an earlier run of the tree already made it, and otherwise creates the
+   * root's branch name off its base. Throws PreflightError("coding_repository_unresolved") for a row
+   * dispatch never resolved.
+   */
+  private extraPreflight(
+    run: ContainerRunSnapshot,
+    extra: RunRepositorySnapshot,
+  ): { kind: "read"; input: ReadOnlyCopyInput } | { kind: "write"; input: VcsPrepareInput } {
+    if (!extra.resolvedSha) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    if (extra.access === "read") {
+      return {
+        kind: "read",
+        input: { runId: run.runId, name: extra.name, repository: extra.repository, commit: extra.resolvedSha },
+      };
+    }
+    if (!extra.baseRef || !extra.headRef) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    // The run's own protected paths and exclusions, validated the way the default repository's are.
+    const main = this.preflight(run, { launched: true });
+    const root = run.rootCodingRunId;
+    return {
+      kind: "write",
+      input: {
+        runId: run.runId,
+        repository: extra.repository,
+        baseRef: extra.baseRef,
+        headRef: run.headRef,
+        protectedPaths: main.protectedPaths,
+        collectExclude: main.collectExclude,
+        slot: { name: extra.name },
+        continuation: extra.continuesBranch && root ? { rootRunId: root } : undefined,
+        ...(root && !extra.continuesBranch ? { branchRunId: root } : {}),
+      },
+    };
+  }
+
+  /**
+   * The extras beside the prepared default workspace, EXTRA_PREPARE_CONCURRENCY at a time, each added
+   * to `held` as soon as it is ready so a failure part way still cleans up what was made. A launched
+   * run's writable extras must still be there (coding_workspace_lost otherwise), as its default one
+   * must. Then the entry cap over every repository together, for a run being prepared fresh.
+   */
+  private async prepareExtras(
+    run: ContainerRunSnapshot,
+    pending: readonly RunRepositorySnapshot[],
+    held: RunWorkspaces,
+    launched: boolean,
+  ): Promise<void> {
+    const vcs = this.options.vcs;
+    await mapWithConcurrency(pending, EXTRA_PREPARE_CONCURRENCY, async (extra) => {
+      const plan = this.extraPreflight(run, extra);
+      if (plan.kind === "read") {
+        if (!vcs.prepareReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+        held.readOnly.push(await vcs.prepareReadOnlyCopy(plan.input));
+        return;
+      }
+      const found = await vcs.recoverWorkspace(plan.input);
+      if (!found && launched) throw new Error("coding_workspace_lost");
+      held.writable.set(extra.name, found ?? (await vcs.prepareWorkspace(plan.input)));
+    });
+    if (launched) return;
+    await (this.options.countEntries ?? countWorkspaceEntries)([
+      held.main.workspacePath,
+      ...[...held.writable.values()].map((w) => w.workspacePath),
+      ...held.readOnly.map((c) => c.workspacePath),
+    ]);
+  }
+
+  /**
+   * Removes a run's workspaces. Held ones are removed one by one (each removal is idempotent, so
+   * order does not matter), then the default workspace, recovered from the run when not held.
+   * Removing the default workspace removes the whole run directory, extras and read-only copies
+   * included, so a run whose extras are not held here (a recovered or terminal run) needs nothing
+   * more. Never throws. Returns the default workspace, when there was one.
+   */
+  private async cleanupWorkspaces(
+    run: ContainerRunSnapshot,
+    held: PreparedWorkspace | RunWorkspaces | null | undefined,
+  ): Promise<PreparedWorkspace | null> {
+    const vcs = this.options.vcs;
+    if (isRunWorkspaces(held)) {
+      for (const extra of held.writable.values()) await vcs.cleanup(extra).catch(() => undefined);
+      for (const copy of held.readOnly) await vcs.cleanupReadOnlyCopy?.(copy).catch(() => undefined);
+    }
+    let main = isRunWorkspaces(held) ? held.main : (held ?? null);
+    if (!main) {
+      const input = this.preflightForCleanup(run);
+      main = input ? await vcs.recoverWorkspace(input).catch(() => null) : null;
+    }
+    if (main) await vcs.cleanup(main).catch(() => undefined);
+    return main;
   }
 
   /**
@@ -1739,9 +2012,10 @@ export class ContainerExecutor implements Executor {
     run: ContainerRunSnapshot,
     handle: JobHandle,
     jobState: "succeeded" | "failed" | "stopped" | "lost",
-    existingWorkspace?: PreparedWorkspace | null,
+    heldWorkspaces?: PreparedWorkspace | RunWorkspaces | null,
     existingSessionId?: string | null,
   ): Promise<void> {
+    const existingWorkspace = isRunWorkspaces(heldWorkspaces) ? heldWorkspaces.main : heldWorkspaces;
     const sessionId = existingSessionId ?? run.proxySessionId;
     if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
     // For notifyContinuationFinished in the `finally` below -- defaults to
@@ -1892,10 +2166,7 @@ export class ContainerExecutor implements Executor {
     } finally {
       if (run.sessionResume) await this.recordTranscript(run, handle);
       await this.options.jobs.remove(handle).catch(() => undefined);
-      const input = this.preflightForCleanup(run);
-      const workspace =
-        existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      const workspace = await this.cleanupWorkspaces(run, heldWorkspaces);
       // A run another process launched has no workspace here; its pull request still gets the final status.
       const target = workspace ?? this.continuationTargetOf(run);
       if (target) {
@@ -3185,6 +3456,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
   ["coding_services_unsupported", "preflight"],
+  // An extra repository dispatch never resolved to a commit: refused before anything is cloned.
+  [CODING_REPOSITORY_UNRESOLVED_ERROR, "preflight"],
   // Claude Code's tool runner failed to start or never became ready: the same category on both launchers.
   ["docker_tool_runner_", "job"],
   ["kubernetes_tool_runner_", "job"],

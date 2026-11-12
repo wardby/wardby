@@ -21,6 +21,7 @@ import type {
 import {
   GitCommandError,
   GitVcsProvider,
+  countWorkspaceEntries,
   NodeGitCommandRunner,
   protectedPathMatcher,
   redactGitOutput,
@@ -1778,5 +1779,25 @@ describe("GitHubRemote publish with branchRunId", () => {
     await provider.finalizeChanges(prepared);
     expect(github.pullRequestCalls).toHaveLength(1);
     expect(github.pullRequestCalls[0]).toMatchObject({ runId: "root-1", headRef: "wardby/run-root-1" });
+  });
+});
+
+describe("countWorkspaceEntries", () => {
+  it("counts every entry of several trees together, never following a symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-count-entries-"));
+    try {
+      const [one, two] = [join(root, "one"), join(root, "two")];
+      await mkdir(join(one, "dir"), { recursive: true });
+      await writeFile(join(one, "dir", "a.txt"), "a");
+      await mkdir(two);
+      await writeFile(join(two, "b.txt"), "b");
+      await symlink(root, join(two, "loop"));
+      // one: dir, dir/a.txt; two: b.txt, loop (not followed) = 4.
+      await expect(countWorkspaceEntries([one, two], 4)).resolves.toBeUndefined();
+      await expect(countWorkspaceEntries([one, two], 3)).rejects.toThrow("vcs_workspace_entry_limit");
+      await expect(countWorkspaceEntries([one], 3)).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

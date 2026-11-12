@@ -135,6 +135,165 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("loads a run's repository rows in order, with whether each link is still there and which branches exist", async () => {
+    const rootId = `container-repos-root-${randomUUID()}`;
+    const runId = `container-repos-${randomUUID()}`;
+    const codingRun = (id: string, rootCodingRunId: string | null) => ({
+      runId: id,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${rootCodingRunId ?? id}`,
+      provider: "codex",
+      model: "gpt-5.6-luna",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+    });
+    try {
+      const base = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/base",
+          name: "base",
+          access: "read",
+          ref: "main",
+          triggers: [],
+          authorizedVia: "admin",
+        },
+      });
+      const tools = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/tools",
+          name: "tools",
+          access: "write",
+          triggers: [],
+          authorizedVia: "host_permission",
+        },
+      });
+      const docs = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/docs",
+          name: "docs",
+          access: "write",
+          triggers: [],
+          authorizedVia: "admin",
+        },
+      });
+      await db.run.create({ data: { id: rootId, agentId, executionManaged: true } });
+      await db.codingRun.create({ data: codingRun(rootId, null) });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({ data: codingRun(runId, rootId) });
+      const sha = "a".repeat(40);
+      const row = (
+        id: string,
+        position: number,
+        link: { id: string; name: string; repository: string },
+        access: string,
+      ) => ({
+        runId: id,
+        position,
+        name: link.name,
+        access,
+        provider: "github",
+        repository: link.repository,
+        requestedRef: "main",
+        resolvedSha: sha,
+        linkId: link.id,
+        ...(access === "write" ? { baseRef: "main", headRef: `wardby/run-${rootId}` } : {}),
+      });
+      // The root opened a pull request for tools only.
+      await db.codingRunRepository.createMany({
+        data: [
+          row(rootId, 1, base, "read"),
+          { ...row(rootId, 2, tools, "write"), pullRequestNumber: 7 },
+          row(rootId, 3, docs, "write"),
+        ],
+      });
+      await db.codingRunRepository.createMany({
+        data: [row(runId, 3, docs, "write"), row(runId, 1, base, "read"), row(runId, 2, tools, "write")],
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      const loaded = await store.load(runId);
+      expect(loaded?.repositories).toEqual([
+        expect.objectContaining({
+          position: 1,
+          name: "base",
+          access: "read",
+          repository: "openai/base",
+          resolvedSha: sha,
+          baseRef: null,
+          headRef: null,
+          linkId: base.id,
+          linkExists: true,
+          linkAuthorizedVia: "admin",
+          continuesBranch: false,
+        }),
+        expect.objectContaining({
+          position: 2,
+          name: "tools",
+          access: "write",
+          baseRef: "main",
+          headRef: `wardby/run-${rootId}`,
+          linkExists: true,
+          linkAuthorizedVia: "host_permission",
+          continuesBranch: true,
+          pullRequestNumber: null,
+        }),
+        expect.objectContaining({ position: 3, name: "docs", continuesBranch: false, linkExists: true }),
+      ]);
+      // A root run has no earlier branches: nothing continues.
+      expect((await store.load(rootId))?.repositories.map((r) => r.continuesBranch)).toEqual([false, false, false]);
+      // A link whose access changed, or that gained a trigger, or that is gone, no longer authorizes its row.
+      await db.agentRepository.update({ where: { id: tools.id }, data: { access: "read" } });
+      await db.agentRepository.update({ where: { id: docs.id }, data: { triggers: ["mention"] } });
+      await db.agentRepository.delete({ where: { id: base.id } });
+      const gone = await store.load(runId);
+      expect(gone?.repositories.map((r) => [r.name, r.linkExists, r.linkAuthorizedVia])).toEqual([
+        ["base", false, null],
+        ["tools", false, null],
+        ["docs", false, null],
+      ]);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [runId, rootId] } } });
+      await db.run.deleteMany({ where: { id: { in: [runId, rootId] } } });
+      await db.agentRepository.deleteMany({ where: { agentId } });
+    }
+  });
+
+  it("loads no repositories for a single-repository run", async () => {
+    const runId = `container-single-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+      await expect(new PrismaContainerExecutionStore(db).load(runId)).resolves.toMatchObject({ repositories: [] });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+    }
+  });
+
   it("persists a sanitized failure category and opaque diagnostic ID separately from the terminal state", async () => {
     const failedRunId = `container-failed-${randomUUID()}`;
     try {

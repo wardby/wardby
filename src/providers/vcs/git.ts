@@ -12,6 +12,7 @@ import {
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
@@ -55,6 +56,38 @@ export const DEFAULT_MAX_CHANGED_FILES = 1_000;
 export const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
+
+/**
+ * Walks every entry under `directory` (depth first, symlinks never followed),
+ * calling `onEntry` for each; it returns whether to descend into the entry.
+ * Shared by the workspace inspection and the run-wide entry count.
+ */
+async function walkEntries(
+  directory: string,
+  onEntry: (entry: Dirent, fullPath: string, directory: string) => Promise<boolean> | boolean,
+): Promise<void> {
+  const handle = await opendir(directory);
+  for await (const entry of handle) {
+    const fullPath = resolve(directory, entry.name);
+    if (await onEntry(entry, fullPath, directory)) await walkEntries(fullPath, onEntry);
+  }
+}
+
+/**
+ * The entry cap over several prepared repositories together (a run with
+ * several): each one passed its own inspection, but the run's workspaces as a
+ * whole may hold no more than `max` entries. Throws vcs_workspace_entry_limit.
+ */
+export async function countWorkspaceEntries(paths: readonly string[], max = MAX_WORKSPACE_ENTRIES): Promise<void> {
+  let entries = 0;
+  for (const path of paths) {
+    await walkEntries(path, (entry) => {
+      entries += 1;
+      if (entries > max) throw new Error("vcs_workspace_entry_limit");
+      return entry.isDirectory();
+    });
+  }
+}
 const SAFE_GIT_USERNAME = /^[A-Za-z0-9._-]{1,64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
@@ -1158,31 +1191,26 @@ export class GitVcsProvider implements VcsProvider {
     const rootStat = await lstat(workspacePath);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     let entries = 0;
-    const visit = async (directory: string): Promise<void> => {
-      const handle = await opendir(directory);
-      for await (const entry of handle) {
-        entries += 1;
-        if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
-        if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
-        const fullPath = resolve(directory, entry.name);
-        const stat = await lstat(fullPath);
-        if (stat.isSymbolicLink()) {
-          const target = await readlink(fullPath);
-          const resolvedTarget = resolve(directory, target);
-          if (
-            isAbsolute(target) ||
-            (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))
-          ) {
-            throw new Error("vcs_symlink_escape");
-          }
-        } else if (stat.isDirectory()) {
-          await visit(fullPath);
-        } else if (!stat.isFile()) {
-          throw new Error("vcs_special_file");
+    await walkEntries(workspacePath, async (entry, fullPath, directory) => {
+      entries += 1;
+      if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
+      if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
+      const stat = await lstat(fullPath);
+      if (stat.isSymbolicLink()) {
+        const target = await readlink(fullPath);
+        const resolvedTarget = resolve(directory, target);
+        if (
+          isAbsolute(target) ||
+          (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))
+        ) {
+          throw new Error("vcs_symlink_escape");
         }
+        return false;
       }
-    };
-    await visit(workspacePath);
+      if (stat.isDirectory()) return true;
+      if (!stat.isFile()) throw new Error("vcs_special_file");
+      return false;
+    });
   }
 
   private async assertRemote(workspace: PreparedWorkspace): Promise<void> {
