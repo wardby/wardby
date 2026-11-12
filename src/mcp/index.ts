@@ -164,7 +164,7 @@ export function registerAllTools(
     /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
     refreshModelCatalog?: () => Promise<void>;
     /** Where create_secret's loopback sign-in links point, and which host accepts them; absent = not offered. */
-    oauthLoopback?: SecretsToolsOptions["oauthLoopback"];
+    oauthLoopback: SecretsToolsOptions["oauthLoopback"];
   },
 ): void {
   registerAgentTools(mcp);
@@ -201,7 +201,7 @@ export function registerAllTools(
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
     protocolElicitation: opts.secretElicitationProtocol,
-    ...(opts.oauthLoopback ? { oauthLoopback: opts.oauthLoopback } : {}),
+    oauthLoopback: opts.oauthLoopback,
   });
   registerWebhookTools(mcp);
 }

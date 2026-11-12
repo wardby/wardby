@@ -34,7 +34,13 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 
 /** A Wardby double: the two loopback routes, with the L2 contract. */
 async function wardby(
-  opts: { startStatus?: number; completeStatus?: number; completeBody?: unknown; startBody?: unknown } = {},
+  opts: {
+    startStatus?: number;
+    completeStatus?: number;
+    completeBody?: unknown;
+    startBody?: unknown;
+    startError?: unknown;
+  } = {},
 ) {
   const seen: Seen = { start: [], complete: [] };
   const server = createServer((req, res) => void handle(req, res));
@@ -54,7 +60,7 @@ async function wardby(
                 expiresAt: new Date(Date.now() + 600_000).toISOString(),
                 name: "browserstack",
               })
-            : { error: "link_invalid" },
+            : (opts.startError ?? { error: "link_invalid" }),
         ),
       );
     } else if (req.url === "/oauth/loopback/complete") {
@@ -94,6 +100,9 @@ function run(link: string, extra: Partial<Parameters<typeof secretConnectCommand
 function expectNoSecrets(text: string) {
   for (const secret of [TOKEN, PROVIDER_CODE, STATE]) expect(text).not.toContain(secret);
 }
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
 describe("wardby secret connect", () => {
   it("runs the full flow and prints the confirmation code and the next step", async () => {
@@ -332,12 +341,84 @@ describe("wardby secret connect", () => {
       [403, CONNECT_MESSAGES.linkRejected],
       [401, CONNECT_MESSAGES.linkRejected],
       [429, CONNECT_MESSAGES.tooMany],
-      [502, CONNECT_MESSAGES.startFailed],
     ] as const) {
       const w = await wardby({ startStatus: status });
       const { code, text } = await run(w.link);
       expect(code).toBe(1);
       expect(text).toBe(message);
+    }
+  });
+
+  it("shows the server's refusal code and cleaned message for other start failures", async () => {
+    const w = await wardby({
+      startStatus: 502,
+      startError: {
+        error: "secret_oauth_registration_failed",
+        message: "invalid_redirect_uri (HTTP 400): the provider refused the callback",
+      },
+    });
+    const { code, text } = await run(w.link);
+    expect(code).toBe(1);
+    expect(text).toBe(
+      "Wardby refused to start the sign-in (secret_oauth_registration_failed): invalid_redirect_uri (HTTP 400): the provider refused the callback",
+    );
+    expectNoSecrets(text);
+  });
+
+  it("cleans a hostile refusal message and ignores a malformed code", async () => {
+    const hostile = await wardby({
+      startStatus: 502,
+      startError: { error: "bad_thing", message: `x\u001b[31mred\u009b\u0007${"y".repeat(400)}` },
+    });
+    const a = await run(hostile.link);
+    expect(a.text).not.toMatch(CONTROL_RE);
+    expect(a.text).toBe(`Wardby refused to start the sign-in (bad_thing): x[31mred${"y".repeat(300 - 8)}`);
+    const badCode = await wardby({ startStatus: 502, startError: { error: "Bad\u001b[2J", message: "m" } });
+    expect((await run(badCode.link)).text).toBe(CONNECT_MESSAGES.startFailed);
+    const none = await wardby({ startStatus: 500, startError: "oops" });
+    expect((await run(none.link)).text).toBe(CONNECT_MESSAGES.startFailed);
+  });
+
+  it("maps an expired link at completion to linkRejected", async () => {
+    const w = await wardby({ completeStatus: 403, completeBody: { error: "link_invalid" } });
+    const { code, text } = await run(w.link, { openBrowser: browser(`code=${PROVIDER_CODE}&state=${STATE}`) });
+    expect(code).toBe(1);
+    expect(text).toContain(CONNECT_MESSAGES.linkRejected);
+  });
+
+  it("stops waiting at the sign-in's expiresAt when that is sooner than the wait", async () => {
+    const w = await wardby({
+      startBody: {
+        authorizeUrl: `https://provider.example/authorize?state=${STATE}&redirect_uri=x`,
+        expiresAt: new Date(Date.now() + 80).toISOString(),
+        name: "n",
+      },
+    });
+    const t0 = Date.now();
+    const { code, text } = await run(w.link, { waitMs: 60_000, openBrowser: async () => true });
+    expect(code).toBe(1);
+    expect(text).toContain(CONNECT_MESSAGES.timedOut);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("does not echo a secret name with control characters", async () => {
+    for (const name of ["a\u009bb", "a\u001bb", "a\u007fb"]) {
+      const w = await wardby({
+        startBody: {
+          authorizeUrl: `https://provider.example/authorize?state=${STATE}&redirect_uri=PLACEHOLDER`,
+          expiresAt: "x",
+          name,
+        },
+      });
+      const fix = browser(`code=${PROVIDER_CODE}&state=${STATE}`);
+      const { text } = await run(w.link, {
+        openBrowser: async () =>
+          fix(
+            `https://provider.example/a?redirect_uri=${encodeURIComponent(String(w.seen.start[0].body?.redirectUri))}`,
+          ),
+      });
+      expect(text).toContain('create_secret({ name: "<secret name>"');
+      expect(text).not.toMatch(/[\u0080-\u009f\u007f]/);
     }
   });
 

@@ -168,8 +168,9 @@ What the CLI needs:
 
 - Node.js 24 or later (for `npx`), and a browser on the same machine, because the
   provider sends the browser to `127.0.0.1` on that machine. With no browser
-  there, use `--no-browser` and open the printed address on a machine that can
-  reach the CLI's listener, or use another sign-in method.
+  there, use `--no-browser` and open the printed address on the same machine, or
+  forward the port (for example `ssh -L <port>:127.0.0.1:<port> <host>`; the CLI's
+  listener binds `127.0.0.1` only), or use another sign-in method.
 - Network access to your Wardby server at its canonical URL
   (`MCP_CANONICAL_URI`; over stdio, the local address the stdio server opens).
   The server must be reachable from that machine; the CLI refuses a link that
@@ -184,7 +185,7 @@ Security:
 - The link alone cannot finish the connection. Only the owner named in the link
   can redeem the confirmation code, so someone who gets the code or the link
   cannot connect a secret for you. A link can start a few sign-ins (at most 5
-  waiting at once); an unused one expires.
+  waiting at once for your account); an unused sign-in expires after 10 minutes.
 - The CLI never prints the authorization code, state or link. The address it
   prints with `--no-browser` contains the sign-in state; do not share it.
 - A sign-in started by the loopback flow cannot be finished through the web

@@ -120,7 +120,11 @@ async function wardbyMcp(p: Principal) {
     mcpReq: { requestState: () => undefined },
   };
   mcp.setFixedContext(ctx);
-  registerSecretsTools(mcp, { buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`, protocolElicitation: false });
+  registerSecretsTools(mcp, {
+    buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`,
+    protocolElicitation: false,
+    oauthLoopback: { origin: async () => ORIGIN, audience: "http" },
+  });
   registerMcpServerTools(mcp);
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

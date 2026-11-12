@@ -48,8 +48,10 @@ export const CONNECT_MESSAGES = {
   insecureOrigin: "Refusing to use a link that points to a non-https address.",
   unreachable: "Could not reach the Wardby server.",
   linkRejected: "The connect link is invalid or has expired. Ask for a new one with create_secret.",
-  tooMany: "Too many sign-ins are waiting for this secret. Wait a few minutes and try again.",
+  tooMany:
+    "Too many sign-ins are waiting for your account (sign-ins expire after 10 minutes). Wait a few minutes and try again.",
   startFailed: "Wardby could not start the sign-in. Check the secret settings and try again.",
+  startRefused: "Wardby refused to start the sign-in",
   badAuthorizeUrl: "Wardby returned an unusable sign-in address.",
   listenFailed: "Could not listen on this machine for the provider's redirect.",
   denied: "The sign-in was cancelled or refused at the provider.",
@@ -161,12 +163,13 @@ function listenForCallback(waitMs: number) {
     done = true;
     settle({ code: q.get("code"), state: q.get("state"), iss: q.get("iss"), error: q.get("error") });
   });
-  const timer = setTimeout(() => {
+  const onTimeout = () => {
     if (!done) {
       done = true;
       settle("timeout");
     }
-  }, waitMs);
+  };
+  let timer = setTimeout(onTimeout, waitMs);
   const ready = new Promise<number>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
@@ -179,7 +182,13 @@ function listenForCallback(waitMs: number) {
   const expect = (state: string) => {
     expectedState = state;
   };
-  return { ready, result, close, expect };
+  /** Shortens the wait (never extends it). */
+  const limit = (ms: number) => {
+    if (ms >= waitMs) return;
+    clearTimeout(timer);
+    timer = setTimeout(onTimeout, ms);
+  };
+  return { ready, result, close, expect, limit };
 }
 
 async function postJson(
@@ -213,9 +222,26 @@ async function postJson(
   return { status: res.status, json };
 }
 
-function startFailure(status: number): string {
+// C0 and C1 control characters (and DEL): terminal escapes live here.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_ONE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Removes C0 and C1 control characters (terminal escapes included) and caps the length. */
+function cleanServerText(text: string, max: number): string {
+  return text.replace(CONTROL_CHARS, "").slice(0, max);
+}
+
+/** The server's fixed `{ error, message }` for a refusal, shown after cleaning; never any other field. */
+function startFailure(status: number, json: Record<string, unknown> | undefined): string {
   if (status === 401 || status === 403) return CONNECT_MESSAGES.linkRejected;
   if (status === 429) return CONNECT_MESSAGES.tooMany;
+  const code = json?.error;
+  if (typeof code === "string" && /^[a-z_]{1,64}$/.test(code)) {
+    const message = typeof json?.message === "string" ? cleanServerText(json.message, 300) : "";
+    return `${CONNECT_MESSAGES.startRefused} (${code})${message ? `: ${message}` : "."}`;
+  }
   return CONNECT_MESSAGES.startFailed;
 }
 
@@ -266,7 +292,7 @@ export async function secretConnectCommand(argv: string[], deps: ConnectDeps = {
       redirectUri: `http://127.0.0.1:${port}/callback`,
     });
     const authorizeUrl = start.json?.authorizeUrl;
-    if (start.status !== 200) throw new ConnectError(startFailure(start.status));
+    if (start.status !== 200) throw new ConnectError(startFailure(start.status, start.json));
     if (typeof authorizeUrl !== "string" || !URL.canParse(authorizeUrl)) {
       throw new ConnectError(CONNECT_MESSAGES.badAuthorizeUrl);
     }
@@ -275,6 +301,9 @@ export async function secretConnectCommand(argv: string[], deps: ConnectDeps = {
     const state = new URL(authorizeUrl).searchParams.get("state");
     if (!state) throw new ConnectError(CONNECT_MESSAGES.badAuthorizeUrl);
     listener.expect(state);
+    // Wait no longer than the link is valid: the earlier of the configured wait and its expiry.
+    const expiresAtMs = typeof start.json?.expiresAt === "string" ? Date.parse(start.json.expiresAt) : NaN;
+    if (Number.isFinite(expiresAtMs)) listener.limit(Math.max(0, expiresAtMs - Date.now()));
     // The normalised address percent-encodes control characters, so it cannot inject terminal escapes.
     const safeUrl = new URL(authorizeUrl).href;
     const name = typeof start.json?.name === "string" ? start.json.name : undefined;
@@ -317,11 +346,14 @@ export async function secretConnectCommand(argv: string[], deps: ConnectDeps = {
       typeof confirmation !== "string" ||
       !/^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/.test(confirmation)
     ) {
-      throw new ConnectError(CONNECT_MESSAGES.completeFailed);
+      // 403: the link (and so the sign-in) expired while the browser step was open.
+      throw new ConnectError(complete.status === 403 ? CONNECT_MESSAGES.linkRejected : CONNECT_MESSAGES.completeFailed);
     }
     out(`Confirmation code: ${confirmation}`);
     out("Finish in your MCP client:");
-    out(`  create_secret({ name: ${JSON.stringify(name ?? "<secret name>")}, confirmationCode: "${confirmation}" })`);
+    // A name with any control character (C0 or C1) is not echoed: JSON.stringify leaves C1 in place.
+    const shownName = name !== undefined && !CONTROL_CHARS_ONE.test(name) ? name : "<secret name>";
+    out(`  create_secret({ name: ${JSON.stringify(shownName)}, confirmationCode: "${confirmation}" })`);
     return 0;
   } catch (err) {
     out(err instanceof ConnectError ? err.message : CONNECT_MESSAGES.startFailed);

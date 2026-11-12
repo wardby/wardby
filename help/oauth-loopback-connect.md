@@ -35,7 +35,8 @@ stdio.
 
 ## Safety
 
-- The link is a credential for 10 minutes for one owner and one secret name. Do not share it. The CLI reads it
+- The link is a credential for 10 minutes for one owner and one secret name. At most 5 sign-ins can be waiting for
+  your account at once; each expires after 10 minutes. Do not share it. The CLI reads it
   from standard input, so it stays out of shell history.
 - Only the owner named in the link can redeem the confirmation code.
 - If the provider refuses even a loopback callback, register a client yourself and pass `oauth.clientId`; it
@@ -43,8 +44,20 @@ stdio.
 
 ## If the CLI fails
 
-It prints a fixed message: the link is invalid or expired (ask for a new one with `create_secret`), the server
-could not be reached, too many sign-ins are waiting (wait a few minutes), the sign-in was cancelled at the
-provider, or it timed out after 10 minutes. Each of these is fixed by running `create_secret` again for a new
-link. Full guide:
-[`docs/tool-secrets.md`](../docs/tool-secrets.md#providers-that-accept-only-loopback-callbacks).
+The CLI prints one line, and the fix depends on it:
+
+- Could not reach the Wardby server: check the address in the link and your network, then run the command again
+  with the same link if it has not expired.
+- The link is invalid or has expired (also shown when the link expires while you sign in): get a new link with
+  `create_secret`.
+- Too many sign-ins are waiting for your account (at most 5 at once; each expires after 10 minutes): wait a few
+  minutes, then run the command again.
+- Wardby refused to start the sign-in, followed by a code such as `secret_oauth_registration_failed` and the
+  server's message: act on that message. See the matching article under `errors/`; for `invalid_redirect_uri`
+  on this flow, register a client and pass `oauth.clientId` (see Safety).
+- Could not listen on this machine: free local ports or a firewall rule is blocking `127.0.0.1`; run it again.
+- The sign-in was cancelled or refused at the provider, the provider returned an error, the redirect was
+  incomplete, it timed out (after 10 minutes at most, or when the link expires), or Wardby could not finish the
+  sign-in: get a new link with `create_secret` and start again.
+
+Full guide: [`docs/tool-secrets.md`](../docs/tool-secrets.md#providers-that-accept-only-loopback-callbacks).

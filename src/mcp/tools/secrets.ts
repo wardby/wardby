@@ -82,9 +82,6 @@ const OAUTH_NEEDS_HTTP =
   "Connecting an OAuth secret needs wardby's HTTP transport (the sign-in callback is served at MCP_CANONICAL_URI); " +
   "use an MCP client connected over HTTP.";
 
-const OAUTH_LOOPBACK_UNAVAILABLE =
-  'secret_oauth_loopback_unavailable: this wardby server does not hand out loopback sign-in links; use oauth.callback "web"';
-
 const OAUTH_LOOPBACK_MESSAGE =
   "Run this command in a terminal on the computer where you use your browser, and paste the link when it asks: " +
   "it opens the sign-in, then prints a confirmation code. " +
@@ -201,9 +198,9 @@ export interface SecretsToolsOptions {
   protocolElicitation: boolean;
   /**
    * Loopback sign-in links (`oauth.callback: "loopback"`): the origin the link names (HTTP: the
-   * canonical origin; stdio: the loopback link host) and the host that will accept it. Absent: refused.
+   * canonical origin; stdio: the loopback link host) and the host that will accept it.
    */
-  oauthLoopback?: {
+  oauthLoopback: {
     origin: () => Promise<string>;
     audience: OAuthLoopbackLinkAudience;
     now?: () => Date;
@@ -270,7 +267,6 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         const oauth = parseOAuthArg(args.oauth);
         if (oauth.callback === "loopback") {
           const loopback = opts.oauthLoopback;
-          if (!loopback) throw new McpError(400, OAUTH_LOOPBACK_UNAVAILABLE);
           // No discovery yet (that runs when the CLI starts the sign-in); only the checks that need no provider.
           let resource: string;
           try {

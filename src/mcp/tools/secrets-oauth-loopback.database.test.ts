@@ -60,7 +60,7 @@ async function principal(): Promise<Principal> {
   return p;
 }
 
-async function connect(p: Principal, opts: { audience?: OAuthLoopbackLinkAudience | "none"; operator?: boolean } = {}) {
+async function connect(p: Principal, opts: { audience?: OAuthLoopbackLinkAudience; operator?: boolean } = {}) {
   const audience = opts.audience ?? "http";
   const requests: string[] = [];
   const recordingFetch: typeof safeFetch = async (url, init, options) => {
@@ -89,15 +89,11 @@ async function connect(p: Principal, opts: { audience?: OAuthLoopbackLinkAudienc
   registerSecretsTools(mcp, {
     buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`,
     protocolElicitation: false,
-    ...(audience === "none"
-      ? {}
-      : {
-          oauthLoopback: {
-            origin: async () => (audience === "stdio" ? STDIO_ORIGIN : ORIGIN),
-            audience,
-            now: () => NOW,
-          },
-        }),
+    oauthLoopback: {
+      origin: async () => (audience === "stdio" ? STDIO_ORIGIN : ORIGIN),
+      audience,
+      now: () => NOW,
+    },
   });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -268,15 +264,6 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth.callback lo
       oauth: { resource: fake.mcpUrl, callback: "device" },
     });
     expect(badCallback.isError).toBe(true);
-    await close();
-  });
-
-  it("refuses loopback when the server offers no loopback links", async () => {
-    const p = await principal();
-    const { call, close } = await connect(p, { audience: "none" });
-    const r = await call("create_secret", { name: "bs", oauth: { resource: fake.mcpUrl, callback: "loopback" } });
-    expect(r.isError).toBe(true);
-    expect(r.text).toContain("secret_oauth_loopback_unavailable");
     await close();
   });
 });
