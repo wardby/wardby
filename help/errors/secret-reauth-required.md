@@ -11,7 +11,7 @@ appliesTo: ">=0.9.11"
 
 ## What happened
 
-The secret's OAuth connection is no longer usable. Wardby marks it `reauth_required` (visible in `list_secrets`, with a `reauthReason`) when the provider refuses the refresh token (`invalid_grant`) or the client (`invalid_client`), or the access token expired and there is no refresh token (`expired`). Typical causes are a revoked grant, a changed password, or a removed client registration. Uses of the secret, including MCP server calls, fail with `secret_reauth_required: secret "<name>" needs connecting again (create_secret with oauth)`.
+The secret's OAuth connection is no longer usable. Wardby marks it `reauth_required` (visible in `list_secrets`, with a `reauthReason`) when the provider refuses the refresh token (`invalid_grant`) or the client (`invalid_client`), or the access token expired and there is no refresh token (`expired`). From 0.9.12 it is also marked `rejected` when the service refused the access token before its expiry and there is no refresh token to get a new one, but only when the request carried that one OAuth secret and the 401 said the token is invalid (`WWW-Authenticate: Bearer` with `error="invalid_token"`). Any other 401 leaves the secret connected, and the call gets the 401 back. Typical causes are a revoked grant, a changed password, or a removed client registration. Uses of the secret, including MCP server calls, fail with `secret_reauth_required: secret "<name>" needs connecting again (create_secret with oauth)`.
 
 ## What to do
 

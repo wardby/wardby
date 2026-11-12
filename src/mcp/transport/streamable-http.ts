@@ -20,6 +20,13 @@ import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "../tools/run-transcript-download.js";
 import type { BlobStore } from "../../providers/storage/types.js";
+import { bearerToken, OAUTH_LOOPBACK_COMPLETE_PATH, OAUTH_LOOPBACK_START_PATH } from "../tools/oauth-loopback-link.js";
+import {
+  handleOAuthLoopbackComplete,
+  handleOAuthLoopbackStart,
+  OAUTH_LOOPBACK_BODY_LIMIT,
+  type OAuthLoopbackRouteDeps,
+} from "../tools/oauth-loopback-routes.js";
 import { logger } from "../../core/logger.js";
 import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
 import { handleWebRequest, type WebDeps } from "../../web/routes.js";
@@ -52,6 +59,11 @@ export interface StartHttpServerOptions {
   hostEvents?: { github?: GitHubIngressDeps; jira?: JiraIngressDeps };
   /** The OAuth link browser callback (link_host_account and later purposes); absent = 404. */
   oauthCallback?: OAuthCallbackDeps;
+  /**
+   * The OAuth secret loopback routes `wardby secret connect` calls (/oauth/loopback/start and
+   * /complete); absent = they answer 404. The audience is always "http" here.
+   */
+  oauthLoopback?: Omit<OAuthLoopbackRouteDeps, "verify" | "audience">;
   /** The admin viewer API (/admin/api/*); absent = those paths answer 404. */
   viewer?: ViewerApi;
   /** The blob store run transcripts are served from (get_run_transcript links); absent = they answer 503. */
@@ -157,7 +169,9 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
           ? HTTP_LIMITS.documentJson
           : url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") || url.pathname.startsWith("/hosts/")
             ? HTTP_LIMITS.json
-            : HTTP_LIMITS.auth;
+            : url.pathname === OAUTH_LOOPBACK_START_PATH || url.pathname === OAUTH_LOOPBACK_COMPLETE_PATH
+              ? OAUTH_LOOPBACK_BODY_LIMIT
+              : HTTP_LIMITS.auth;
         const raw = await readBody(req, limit, controller.signal);
         rawBody = raw;
         body = parseBody(raw, req.headers["content-type"]);
@@ -201,6 +215,22 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         audience: "http",
         db: opts.auth.db,
         blobs: opts.blobs,
+      });
+      return;
+    }
+    if (url.pathname === OAUTH_LOOPBACK_START_PATH || url.pathname === OAUTH_LOOPBACK_COMPLETE_PATH) {
+      // The loopback link is the credential, as `Authorization: Bearer` only (never the query, never
+      // logged: open-request tracking keeps the path only); the canonical-Host check has run.
+      if (!opts.oauthLoopback) {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const handle =
+        url.pathname === OAUTH_LOOPBACK_START_PATH ? handleOAuthLoopbackStart : handleOAuthLoopbackComplete;
+      await handle({ method: req.method, token: bearerToken(req.headers.authorization), body }, res, {
+        ...opts.oauthLoopback,
+        verify: (token) => opts.mcp.verifyRequestState(token),
+        audience: "http",
       });
       return;
     }
@@ -255,7 +285,11 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         sendJson(res, 404, { error: "not_found" });
         return;
       }
-      await handleOAuthCallback(url, res, opts.oauthCallback, { target: "GitHub", tool: "link_host_account" });
+      await handleOAuthCallback(url, res, opts.oauthCallback, {
+        target: "GitHub",
+        tool: "link_host_account",
+        purposePrefix: "host-identity:",
+      });
       return;
     }
     if (url.pathname === OAUTH_CALLBACK_PATH && req.method === "GET") {

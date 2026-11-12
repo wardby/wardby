@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../../test-support/fake-oauth-server.test-support.js";
 import { discoverOAuth, type OAuthMetadata } from "./discovery.js";
 import { OAuthProtocolError } from "./http.js";
 import { buildAuthorizeUrl, exchangeCode, refreshTokens, registerClient, revokeToken } from "./tokens.js";
+
+const warned = vi.hoisted(() => vi.fn());
+vi.mock("../logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    vi.spyOn(log, "warn").mockImplementation(warned);
+    return log;
+  });
+  return real;
+});
 
 const opts = { privateHostAllowlist: ["127.0.0.1"] };
 const REDIRECT = "http://127.0.0.1:9999/callback";
@@ -90,6 +102,66 @@ describe("registerClient", () => {
     expect((err as Error).message).not.toContain("SECRET-TEXT");
     const bad = await stub(201, { nope: true });
     await expect(registerClient(meta(bad.url), REDIRECT, opts)).rejects.toMatchObject({ code: "registration_failed" });
+  });
+
+  it("names the RFC 7591 error code and status, keeps the description out of the error, bounds it in the log", async () => {
+    const long = `${"x".repeat(400)}`;
+    const refused = await stub(400, {
+      error: "invalid_redirect_uri",
+      error_description: `bad\u0007 uri SECRET-TEXT ${long}`,
+    });
+    warned.mockClear();
+    const err = (await registerClient(meta(refused.url), REDIRECT, opts).catch(
+      (e: unknown) => e,
+    )) as OAuthProtocolError;
+    expect(err).toMatchObject({
+      code: "registration_failed",
+      registration: { status: 400, providerError: "invalid_redirect_uri" },
+    });
+    expect(JSON.stringify(err.registration)).not.toContain("SECRET-TEXT");
+    expect(err.message).not.toContain("SECRET-TEXT");
+    const [fields] = warned.mock.calls[0] as [Record<string, unknown>];
+    expect(fields).toMatchObject({
+      host: "127.0.0.1",
+      status: 400,
+      error: "invalid_redirect_uri",
+      reason: "registration_failed",
+    });
+    const description = fields.description as string;
+    expect(description).toContain("SECRET-TEXT");
+    expect(description.length).toBe(300);
+    expect(description).not.toContain("\u0007");
+  });
+
+  it("drops an error code that is not a short snake_case token", async () => {
+    const s = await stub(400, { error: "Bad <script>", error_description: "d" });
+    const err = (await registerClient(meta(s.url), REDIRECT, opts).catch((e: unknown) => e)) as OAuthProtocolError;
+    expect(err.registration).toEqual({ status: 400 });
+  });
+
+  it("carries only the status for a 403 HTML body", async () => {
+    const s = await stub(403, "<html>Forbidden SECRET-TEXT</html>");
+    const err = (await registerClient(meta(s.url), REDIRECT, opts).catch((e: unknown) => e)) as OAuthProtocolError;
+    expect(err.registration).toEqual({ status: 403 });
+    expect(JSON.stringify(err)).not.toContain("SECRET-TEXT");
+  });
+
+  it("reports a reply without client_id with its status", async () => {
+    const s = await stub(201, { token_endpoint_auth_method: "none" });
+    const err = (await registerClient(meta(s.url), REDIRECT, opts).catch((e: unknown) => e)) as OAuthProtocolError;
+    expect(err).toMatchObject({ code: "registration_failed", registration: { status: 201 } });
+  });
+
+  it("names a known unsupported auth method, else 'unsupported', and ignores unknown fields", async () => {
+    const jwt = await stub(201, { client_id: "c", token_endpoint_auth_method: "private_key_jwt" });
+    await expect(registerClient(meta(jwt.url), REDIRECT, opts)).rejects.toMatchObject({
+      registration: { authMethod: "private_key_jwt" },
+    });
+    const odd = await stub(201, { client_id: "c", token_endpoint_auth_method: "SECRET-TEXT" });
+    const err = (await registerClient(meta(odd.url), REDIRECT, opts).catch((e: unknown) => e)) as OAuthProtocolError;
+    expect(err.registration).toEqual({ status: 201, authMethod: "unsupported" });
+    const extra = await stub(201, { client_id: "c", something_new: { a: 1 } });
+    expect(await registerClient(meta(extra.url), REDIRECT, opts)).toEqual({ clientId: "c" });
   });
 
   it("gives provider_unavailable on 5xx, 429 or a network error at the registration endpoint", async () => {
@@ -322,6 +394,24 @@ describe("refreshTokens", () => {
     await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({
       code: "invalid_client",
     });
+  });
+
+  it("maps invalid_target (a resource the server does not know) to a fixed bad_response without the provider text", async () => {
+    fake = await startFakeOAuthServer();
+    const m = await discoverOAuth(fake.mcpUrl, opts);
+    const err = await refreshTokens(
+      { ...m, resource: `${fake.url}/not-this-resource` },
+      { clientId: "x" },
+      "fake-refresh-CCCC",
+      opts,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OAuthProtocolError);
+    expect((err as OAuthProtocolError).code).toBe("bad_response");
+    expect((err as Error).message).toBe("The OAuth provider refused the token request.");
+    expect((err as Error).cause).toBeUndefined();
+    expect(JSON.stringify(err, Object.getOwnPropertyNames(err))).not.toMatch(/unknown resource|invalid_target|CCCC/);
+    // The server rejected it before looking at the refresh token.
+    expect(fake.tokenRequests).toBe(0);
   });
 
   it("treats an unrecognised 4xx as bad_response", async () => {

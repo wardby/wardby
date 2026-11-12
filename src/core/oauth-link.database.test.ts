@@ -439,4 +439,206 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     expect(ok.kind).toBe("confirm");
     expect(calls[0]).toMatchObject({ iss: "https://idp.invalid" });
   });
+
+  it("fails closed on a present-but-empty iss (it is forwarded, not dropped)", async () => {
+    const p = await principal();
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "iss-empty" },
+      redirectUri: REDIRECT,
+    });
+    const state = new URL(started.authorizeUrl).searchParams.get("state");
+    calls.length = 0;
+    const done = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "idp-code",
+      iss: "",
+      redirectUri: REDIRECT,
+    });
+    expect(done.kind).toBe("confirm");
+    expect(calls[0]).toHaveProperty("iss", "");
+  });
+
+  it("uses the request's own redirect URI when the adapter names one in its context", async () => {
+    const p = await principal();
+    const LOOPBACK = "http://127.0.0.1:53111/callback";
+    const perRequest: OAuthLinkAdapter<{ label: string; redirectUri?: string }, { login: string }> = {
+      ...testAdapter,
+      redirectUri: (context) => {
+        const c = context as { redirectUri?: unknown } | null;
+        return typeof c?.redirectUri === "string" ? c.redirectUri : undefined;
+      },
+    };
+    const perRequestAdapters = new Map([["test", perRequest]]);
+    for (const [label, stored, expected] of [
+      ["loopback", LOOPBACK, LOOPBACK],
+      ["none", undefined, REDIRECT],
+    ] as const) {
+      const started = await startOAuthLink({
+        db,
+        adapter: perRequest,
+        principalId: p.id,
+        context: { label, ...(stored ? { redirectUri: stored } : {}) },
+        redirectUri: stored ?? REDIRECT,
+      });
+      const params = new URL(started.authorizeUrl).searchParams;
+      expect(params.get("redirect_uri")).toBe(expected);
+      calls.length = 0;
+      const done = await completeOAuthCallback({
+        db,
+        adapters: perRequestAdapters,
+        cipher,
+        state: params.get("state"),
+        code: "idp-code",
+        redirectUri: () => REDIRECT,
+      });
+      expect(done.kind).toBe("confirm");
+      expect(calls[0].redirectUri).toBe(expected);
+    }
+  });
+
+  /** The newest request a principal started (optionally of one purpose or context), to check a refusal consumed nothing. */
+  async function rowFor(principalId: string, where: { purpose?: string; context?: object } = {}) {
+    return db.oAuthLinkRequest.findFirst({
+      where: {
+        principalId,
+        ...(where.purpose !== undefined ? { purpose: where.purpose } : {}),
+        ...(where.context !== undefined ? { context: { equals: where.context } } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  it("refuses a request of a purpose with no adapter without consuming its state", async () => {
+    const p = await principal();
+    const started = await startOAuthLink({
+      db,
+      adapter: { ...testAdapter, purpose: "other" },
+      principalId: p.id,
+      context: { label: "x" },
+      redirectUri: REDIRECT,
+    });
+    const state = new URL(started.authorizeUrl).searchParams.get("state");
+    const done = await completeOAuthCallback({ db, adapters, cipher, state, code: "c", redirectUri: REDIRECT });
+    expect(done).toEqual({ kind: "invalid" });
+    expect((await rowFor(p.id, { purpose: "other" }))?.callbackAt).toBeNull();
+    // The adapter it belongs to can still complete it.
+    const other = await completeOAuthCallback({
+      db,
+      adapters: new Map([["other", { ...testAdapter, purpose: "other" }]]),
+      cipher,
+      state,
+      code: "c",
+      redirectUri: REDIRECT,
+    });
+    expect(other.kind).toBe("confirm");
+  });
+
+  it("refuses a request `accept` rejects without consuming its state, and passes it the request's owner, purpose and context", async () => {
+    const p = await principal();
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "mine" },
+      redirectUri: REDIRECT,
+    });
+    const state = new URL(started.authorizeUrl).searchParams.get("state");
+    const seen: unknown[] = [];
+    const refused = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "c",
+      redirectUri: REDIRECT,
+      accept: (request) => {
+        seen.push(request);
+        return false;
+      },
+    });
+    expect(refused).toEqual({ kind: "invalid" });
+    expect(seen).toEqual([{ principalId: p.id, purpose: "test", context: { label: "mine" } }]);
+    expect(calls).toHaveLength(0);
+    expect((await rowFor(p.id))?.callbackAt).toBeNull();
+    const accepted = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "c",
+      redirectUri: REDIRECT,
+      accept: (request) => request.principalId === p.id,
+    });
+    expect(accepted.kind).toBe("confirm");
+  });
+
+  it("completes a request only on the callback kind its adapter names (web by default), without consuming it on the other", async () => {
+    const p = await principal();
+    const marked: OAuthLinkAdapter<{ label: string; loopback?: boolean }, { login: string }> = {
+      ...testAdapter,
+      callbackKind: (context) => ((context as { loopback?: boolean }).loopback ? "loopback" : "web"),
+    };
+    const markedAdapters = new Map([["test", marked]]);
+    async function begin(loopback: boolean) {
+      const started = await startOAuthLink({
+        db,
+        adapter: marked,
+        principalId: p.id,
+        context: { label: "k", ...(loopback ? { loopback: true } : {}) },
+        redirectUri: REDIRECT,
+      });
+      return new URL(started.authorizeUrl).searchParams.get("state");
+    }
+    const run = (state: string | null, callbackKind?: "web" | "loopback") =>
+      completeOAuthCallback({
+        db,
+        adapters: markedAdapters,
+        cipher,
+        state,
+        code: "c",
+        redirectUri: REDIRECT,
+        ...(callbackKind ? { callbackKind } : {}),
+      });
+
+    const loopbackState = await begin(true);
+    expect(await run(loopbackState)).toEqual({ kind: "invalid" });
+    expect(await run(loopbackState, "web")).toEqual({ kind: "invalid" });
+    expect((await rowFor(p.id, { context: { label: "k", loopback: true } }))?.callbackAt).toBeNull();
+    expect((await run(loopbackState, "loopback")).kind).toBe("confirm");
+
+    const webState = await begin(false);
+    expect(await run(webState, "loopback")).toEqual({ kind: "invalid" });
+    expect((await rowFor(p.id, { context: { label: "k" } }))?.callbackAt).toBeNull();
+    expect((await run(webState)).kind).toBe("confirm");
+
+    // An adapter without the hook is web only.
+    const plain = await link(p.id, { label: "plain" });
+    expect(plain.outcome.kind).toBe("confirm");
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "plain2" },
+      redirectUri: REDIRECT,
+    });
+    const plainState = new URL(started.authorizeUrl).searchParams.get("state");
+    expect(
+      await completeOAuthCallback({
+        db,
+        adapters,
+        cipher,
+        state: plainState,
+        code: "c",
+        redirectUri: REDIRECT,
+        callbackKind: "loopback",
+      }),
+    ).toEqual({ kind: "invalid" });
+    expect(calls.filter((c) => c.context && (c.context as { label: string }).label === "plain2")).toHaveLength(0);
+  });
 });

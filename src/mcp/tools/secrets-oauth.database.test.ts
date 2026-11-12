@@ -53,7 +53,11 @@ async function connect(p: Principal, canonicalUri = CANONICAL) {
     mcpReq: { requestState: () => undefined },
   };
   mcp.setFixedContext(ctx);
-  registerSecretsTools(mcp, { buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`, protocolElicitation: false });
+  registerSecretsTools(mcp, {
+    buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`,
+    protocolElicitation: false,
+    oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
+  });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
@@ -149,6 +153,32 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     await close();
   });
 
+  it("delete_secret revokes the refresh and access tokens at the provider, then deletes and audits", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    const started = await call("create_secret", { name: "revoke-me", oauth: { resource: fake.mcpUrl } });
+    const html = await visitCallback((JSON.parse(started.text) as { url: string }).url);
+    const code = /([A-Z2-7]{4}-[A-Z2-7]{4})/.exec(html)?.[1] ?? "";
+    expect((await call("create_secret", { name: "revoke-me", confirmationCode: code })).isError).toBe(false);
+    const row = await db.secret.findUniqueOrThrow({ where: { ownerId_name: { ownerId: p.id, name: "revoke-me" } } });
+    const tokens = JSON.parse(await cipher.decrypt(row.ciphertext)) as { accessToken: string; refreshToken: string };
+    expect(fake.revoked.size).toBe(0);
+
+    const deleted = await call("delete_secret", { id: row.id });
+    expect(deleted.isError).toBe(false);
+    expect(JSON.parse(deleted.text)).toEqual({ deleted: row.id });
+    expect(fake.revoked.has(tokens.refreshToken)).toBe(true);
+    expect(fake.revoked.has(tokens.accessToken)).toBe(true);
+    expect(await db.secret.findUnique({ where: { id: row.id } })).toBeNull();
+    const audit = await db.secretBrokerChange.findMany({ where: { secretId: row.id }, orderBy: { createdAt: "asc" } });
+    expect(audit.at(-1)).toMatchObject({ after: null, via: "mcp", actorId: p.id });
+    for (const leak of [tokens.accessToken, tokens.refreshToken]) {
+      expect(deleted.text).not.toContain(leak);
+      expect(JSON.stringify(audit)).not.toContain(leak);
+    }
+    await close();
+  });
+
   it("refuses oauth over stdio (no canonical URI)", async () => {
     const p = await principal();
     const { call, close } = await connect(p, "stdio");
@@ -217,6 +247,45 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     expect(r.isError).toBe(true);
     expect(r.text).toContain("secret_oauth_managed");
     expect(r.text).not.toContain("x?t=");
+    await close();
+  });
+
+  it("refuses confirmationCode together with value, broker or oauth", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    for (const extra of [
+      { value: "x" },
+      { broker: { hosts: ["a.example"], placement: { kind: "query", name: "k" } } },
+      { oauth: { resource: fake.mcpUrl } },
+    ]) {
+      const r = await call("create_secret", { name: "bs", confirmationCode: "AAAA-AAAA", ...extra });
+      expect(r.isError).toBe(true);
+      expect(r.text).toContain("Pass confirmationCode on its own");
+    }
+    await close();
+  });
+
+  it("answers bad OAuth input with 400 and OAuth wording", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    const http = await call("create_secret", { name: "bs", oauth: { resource: "ftp://x.example/mcp" } });
+    expect(http.isError).toBe(true);
+    expect(http.text).toContain(
+      "secret_oauth_resource_invalid: the OAuth resource must be an https URL with a host name",
+    );
+    const ip = await call("create_secret", { name: "bs", oauth: { resource: "https://10.1.2.3/mcp" } });
+    expect(ip.isError).toBe(true);
+    expect(ip.text).toContain("secret_oauth_resource_invalid");
+    expect(ip.text).not.toContain("MCP server URL");
+    const longName = await call("create_secret", { name: "n".repeat(2000), oauth: { resource: fake.mcpUrl } });
+    expect(longName.isError).toBe(true);
+    expect(longName.text).toContain("secret_oauth_input_too_long");
+    expect(longName.text).not.toContain("bridge_input_limit");
+    const longClient = await call("create_secret", {
+      name: "bs",
+      oauth: { resource: fake.mcpUrl, clientId: "c".repeat(600) },
+    });
+    expect(longClient.text).toContain("secret_oauth_input_too_long");
     await close();
   });
 });

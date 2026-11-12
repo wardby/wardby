@@ -47,13 +47,23 @@ export interface SecretEntry {
   /** Set for an OAuth secret: every value that must be redacted (access, refresh, client secret). */
   oauth?: { redact: string[] };
 }
+/** Per call: the caller's stop signal, so an OAuth refresh it no longer waits for ends promptly. */
+export interface SecretCallOptions {
+  signal?: AbortSignal;
+  /**
+   * `refresh` only: the 401 is this secret's own (the request carried no other OAuth secret, and the
+   * resource answered RFC 6750 `invalid_token`). Only then is a secret with no refresh token marked
+   * reauth_required (`rejected`); otherwise it is left as it is.
+   */
+  attributable?: boolean;
+}
 export interface SecretsAccessor {
   /** Readable secrets only: a brokered secret throws `secret_brokered`. */
   get(name: string): Promise<string | undefined>;
   /** Host-internal: value and broker config, brokered or not. Never exposed to tool code. */
-  resolve?(name: string): Promise<SecretEntry | undefined>;
+  resolve?(name: string, call?: SecretCallOptions): Promise<SecretEntry | undefined>;
   /** OAuth only: refresh now unless another caller already replaced `usedValue`; resolves the fresh entry. */
-  refresh?(name: string, usedValue: string): Promise<SecretEntry | undefined>;
+  refresh?(name: string, usedValue: string, call?: SecretCallOptions): Promise<SecretEntry | undefined>;
   /**
    * For redaction lists only: the entry as stored, never refreshed and never refused for its OAuth
    * status (a reauth_required secret's tokens are still listed). Its value is not for sending.
@@ -65,6 +75,8 @@ export interface SecretsAccessor {
 export interface SecretFetchSettings {
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
+  /** A stop signal for every refresh these settings make (a per-call signal takes its place). */
+  signal?: AbortSignal;
 }
 
 /** A stored secret as the loaders read it. */
@@ -121,43 +133,51 @@ export async function createSecret(
 ): Promise<Secret> {
   boundedString(name, 1024);
   boundedString(value, 65_536);
-  const named = await db.secret.findUnique({
-    where: { ownerId_name: { ownerId, name } },
-    select: { oauth: true },
-  });
-  if (named?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
-  if (value.length < MIN_WEBHOOK_SECRET_LENGTH) {
-    const current = await db.secret.findUnique({ where: { ownerId_name: { ownerId, name } }, select: { id: true } });
-    if (current && (await db.hostProvider.count({ where: { webhookSecretId: current.id } })) > 0) {
-      throw new Error(WEBHOOK_SECRET_SHORT);
-    }
-  }
   const broker = options.broker ? parseSecretBrokerConfig(options.broker) : undefined;
   if (broker) assertBrokerableValue(broker, value);
   const ciphertext = await cipher.encrypt(value);
   const keyId = cipher.keyId();
   if (!broker) {
-    // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
-    const existing = await db.secret.findUnique({
-      where: { ownerId_name: { ownerId, name } },
-      select: { broker: true },
-    });
-    if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
-    return db.secret.upsert({
-      where: { ownerId_name: { ownerId, name } },
-      create: { name, ciphertext, keyId, ownerId },
-      update: { ciphertext, keyId },
+    // One transaction: the OAuth check, the brokerable check and the write see the same row, which is
+    // locked so a connect finishing at the same moment cannot be overwritten by a plain value.
+    return db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "ownerId" = ${ownerId} AND "name" = ${name} FOR UPDATE`;
+      const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
+      if (existing?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+      if (value.length < MIN_WEBHOOK_SECRET_LENGTH && existing) {
+        if ((await tx.hostProvider.count({ where: { webhookSecretId: existing.id } })) > 0) {
+          throw new Error(WEBHOOK_SECRET_SHORT);
+        }
+      }
+      // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
+      if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
+      const written = await tx.secret.upsert({
+        where: { ownerId_name: { ownerId, name } },
+        create: { name, ciphertext, keyId, ownerId },
+        update: { ciphertext, keyId },
+      });
+      // FOR UPDATE locks nothing when the row is missing: a connect may insert it after the read above.
+      // The upsert returns the row it wrote, so an OAuth row here rolls the whole write back.
+      if (written.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+      return written;
     });
   }
   return db.$transaction(async (tx) => {
     const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
     if (existing?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+    if (existing && value.length < MIN_WEBHOOK_SECRET_LENGTH) {
+      if ((await tx.hostProvider.count({ where: { webhookSecretId: existing.id } })) > 0) {
+        throw new Error(WEBHOOK_SECRET_SHORT);
+      }
+    }
     const before = existing ? brokerOf(existing) : null;
     const secret = await tx.secret.upsert({
       where: { ownerId_name: { ownerId, name } },
       create: { name, ciphertext, keyId, ownerId, broker },
       update: { ciphertext, keyId, broker },
     });
+    // The read above can miss a row a connect inserts before this write; roll back if it landed on one.
+    if (secret.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
     if (JSON.stringify(before) !== JSON.stringify(broker)) {
       await tx.secretBrokerChange.create({
         data: {
@@ -430,20 +450,23 @@ export function buildSecretsAccessor(
     const { id, name: secretName, ciphertext, broker, oauth } = attachment.secret;
     return { id, name: secretName, ciphertext, broker: broker ?? null, oauth: oauth ?? null };
   }
-  function entryOf(row: StoredSecretRow, forceRefreshIfStill?: string): Promise<SecretEntry> {
+  function entryOf(row: StoredSecretRow, call?: SecretCallOptions, forceRefreshIfStill?: string): Promise<SecretEntry> {
     const isOAuth = row.oauth !== null && row.oauth !== undefined;
     // Refreshing needs a transaction; only a provider double lacks one.
     if (isOAuth && (!db.$transaction || !db.secret)) {
       throw new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
     }
+    const signal = call?.signal ?? fetch.signal;
     return decryptEntry(db as Pick<PrismaClient, "$transaction" | "secret">, cipher, row, {
       ...fetch,
+      ...(signal ? { signal } : {}),
       ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+      ...(call?.attributable ? { attributable: true } : {}),
     });
   }
-  async function resolve(name: string): Promise<SecretEntry | undefined> {
+  async function resolve(name: string, call?: SecretCallOptions): Promise<SecretEntry | undefined> {
     const row = await load(name);
-    return row ? entryOf(row) : undefined;
+    return row ? entryOf(row, call) : undefined;
   }
   return {
     resolve,
@@ -456,10 +479,10 @@ export function buildSecretsAccessor(
       if (entry?.broker) throw new Error(BROKERED_GET_MESSAGE);
       return entry?.value;
     },
-    async refresh(name: string, usedValue: string): Promise<SecretEntry | undefined> {
+    async refresh(name: string, usedValue: string, call?: SecretCallOptions): Promise<SecretEntry | undefined> {
       const row = await load(name);
       if (!row || row.oauth === null || row.oauth === undefined) return undefined;
-      return entryOf(row, usedValue);
+      return entryOf(row, call, usedValue);
     },
     async storedEntry(name: string): Promise<SecretEntry | undefined> {
       const row = await load(name);
@@ -483,11 +506,12 @@ export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: re
       return accessor.get(name);
     },
     ...(accessor.resolve && {
-      resolve: async (name: string) => (allowed.has(name) ? accessor.resolve!(name) : undefined),
+      resolve: async (name: string, call?: SecretCallOptions) =>
+        allowed.has(name) ? accessor.resolve!(name, call) : undefined,
     }),
     ...(accessor.refresh && {
-      refresh: async (name: string, usedValue: string) =>
-        allowed.has(name) ? accessor.refresh!(name, usedValue) : undefined,
+      refresh: async (name: string, usedValue: string, call?: SecretCallOptions) =>
+        allowed.has(name) ? accessor.refresh!(name, usedValue, call) : undefined,
     }),
     ...(accessor.storedEntry && {
       storedEntry: async (name: string) => (allowed.has(name) ? accessor.storedEntry!(name) : undefined),

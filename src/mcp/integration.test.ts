@@ -477,6 +477,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     registerAllTools(mcp, {
       secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
       secretElicitationProtocol: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -563,6 +564,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     registerAllTools(mcp, {
       secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
       secretElicitationProtocol: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -600,6 +602,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     registerAllTools(mcp, {
       secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
       secretElicitationProtocol: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 
@@ -639,6 +642,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     registerAllTools(mcp, {
       secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
       secretElicitationProtocol: false,
+      oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
     });
     const client = await connectClient(mcp);
 

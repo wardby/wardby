@@ -133,6 +133,7 @@ async function connect(
   registerSecretsTools(mcp, {
     buildElicitationUrl: async () => "https://wardby.example/secret",
     protocolElicitation: false,
+    oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
   });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

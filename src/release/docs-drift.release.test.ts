@@ -162,6 +162,7 @@ function mcpTools(): string[] {
   registerAllTools(fake, {
     secretElicitationUrl: async () => "https://example/elicit",
     secretElicitationProtocol: false,
+    oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
   });
   return names;
 }

@@ -105,6 +105,23 @@ then `register_mcp_server { name: "browserstack", url: "https://mcp.browserstack
 and `attach_mcp_server` with the coding agent, the server and the tools it
 needs.
 
+BrowserStack's registration accepts only loopback callbacks, so connect it with
+`"callback": "loopback"` (from 0.9.12):
+
+```json
+{
+  "name": "BROWSERSTACK",
+  "oauth": { "resource": "https://mcp.browserstack.com/mcp", "callback": "loopback" }
+}
+```
+
+`create_secret` returns a `command` to run in a terminal on your own computer
+and a `link` to paste when it asks; sign in in the browser it opens, then call
+`create_secret` with the `confirmationCode` the command prints. The link is a
+10-minute credential, so do not share it. The steps, requirements and security
+notes are in
+[Providers that accept only loopback callbacks](tool-secrets.md#providers-that-accept-only-loopback-callbacks).
+
 The account you sign in with sets what every agent using the server can do, so
 sign in as a dedicated service user with only the access the agents need, and
 allow only the tools they need. When the token cannot be refreshed, calls fail
@@ -268,7 +285,10 @@ When the server's secrets can't be loaded (a secret was deleted, or its
 broker config no longer lists the server's host), the owner's own agents get
 an `mcp_server_error` that names the secret. An agent using the server through
 a grant gets only "The MCP server's credentials can't be used; ask its owner
-to check it.", never the owner's secret names.
+to check it.", never the owner's secret names. When an OAuth secret's refresh
+failed only for now (the provider could not be reached, or another request held
+the secret too long), that agent gets "The MCP server's credentials could not
+be refreshed just now; try again shortly." instead.
 
 When a secret exists but the Wardby process making the call can't decrypt its
 stored value, the call returns `mcp_server_credentials_unavailable`, and
