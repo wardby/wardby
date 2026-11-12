@@ -100,8 +100,8 @@ export async function getDocumentJson(
       // Where a linked document lives is for members only.
       ...(member ? { repository: document.repository, path: document.path } : {}),
       canSend: atLeast("document", me.access, "write") && linked,
-      // Whether PNG/PDF export is available (the renderer; wired in a later step).
-      ...(design ? { canRender: false } : {}),
+      // Whether PNG/PDF export is available (a renderer is configured).
+      ...(design ? { canRender: deps.exports?.renderer != null } : {}),
     },
     version: {
       number: version.number,

@@ -8,6 +8,13 @@ import { requireDocumentAccess } from "../../core/documents/access.js";
 import { createDocument, publishVersion } from "../../core/documents/service.js";
 import { type VersionContent } from "../../core/documents/content.js";
 import { loadContent } from "../../core/documents/files.js";
+import {
+  exportBytes,
+  exportFile,
+  exportStatus,
+  requestRenderedExport,
+  runExport,
+} from "../../core/documents/exports.js";
 import { BoardFormatError } from "../../core/documents/boards/errors.js";
 import { readDesignFromRepository } from "../../core/documents/boards/repository.js";
 import { warningText, type VersionWarning } from "../../core/documents/warnings.js";
@@ -49,11 +56,18 @@ const EXACT_STATUS: Record<string, number> = {
   document_too_large_for_agent: 413,
   document_agent_unavailable: 403,
   document_send_failed: 503,
+  export_sign_in_required: 403,
+  export_not_found: 404,
+  export_rate_limited: 429,
+  export_too_large: 413,
+  export_failed: 502,
+  export_renderer_unavailable: 503,
+  export_format_unsupported: 400,
 };
 
 /** The HTTP status for a documents error code; undefined when it is not one. */
 export function documentErrorStatus(code: string): number | undefined {
-  if (!/^(document|share|comment|board)_[a-z_]+$/.test(code)) return undefined;
+  if (!/^(document|share|comment|board|export)_[a-z_]+$/.test(code)) return undefined;
   // The same statuses as the web routes (src/web/context.ts STATUS) for these codes.
   const exact = EXACT_STATUS[code];
   if (exact !== undefined) return exact;
@@ -93,6 +107,17 @@ const createArgs = z.object({
 });
 const listArgs = z.object({ documentId: z.string().min(1) });
 const revokeArgs = z.object({ shareLinkId: z.string().min(1) });
+
+const exportArgs = z.object({
+  documentId: z.string().min(1),
+  format: z.enum(["board-html", "prototype", "png", "pdf"]),
+  board: z.string().min(1).max(80).optional(),
+  versionNumber: z.number().int().min(1).optional(),
+});
+
+/** How long export_document waits for a PNG/PDF job, and the longest gap between its checks. */
+const EXPORT_WAIT_MS = 150_000;
+const EXPORT_POLL_MAX_MS = 2_000;
 
 export function registerDocumentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
@@ -691,6 +716,74 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         ),
       );
       return textResult({ runId: out.runId, status: out.status });
+    },
+  });
+  mcp.registerTool({
+    name: "export_document",
+    scope: "documents:read",
+    description:
+      "Exports a design: board-html (one board's HTML file), prototype (one HTML file with a board switcher and working links), png (one board) or pdf (all boards); a Markdown document exports as pdf only. PNG and PDF need the server's renderer (export_renderer_unavailable otherwise) and take up to 150 seconds. File text is wrapped as untrusted tool output.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: { type: "string" },
+        format: { type: "string", enum: ["board-html", "prototype", "png", "pdf"] },
+        board: { type: "string", description: "The board id; required for png and board-html." },
+        versionNumber: { type: "integer", minimum: 1 },
+      },
+      required: ["documentId", "format"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = exportArgs.parse(args);
+      const base = {
+        documentId: input.documentId,
+        viewer: viewerOf(ctx),
+        ...(input.board ? { board: input.board } : {}),
+        ...(input.versionNumber ? { versionNumber: input.versionNumber } : {}),
+      };
+      if (input.format === "board-html" || input.format === "prototype") {
+        const file = await mapped(() =>
+          exportFile(ctx.db, { ...base, format: input.format as "board-html" | "prototype" }),
+        );
+        return textResult({
+          filename: file.filename,
+          mime: file.mime,
+          fileText: wrapUntrusted(UNTRUSTED_TOOL_OUTPUT_TAG, file.body),
+        });
+      }
+      // Without a configured renderer the job fails as export_renderer_unavailable, as on the web routes.
+      const deps = ctx.providers.exports ?? { db: ctx.db, renderer: null };
+      const file = await mapped(async () => {
+        const { exportId } = await requestRenderedExport(deps, { ...base, format: input.format as "png" | "pdf" });
+        // The job runs in this process; runExport never throws.
+        void runExport(deps, exportId);
+        const until = Date.now() + EXPORT_WAIT_MS;
+        for (let gap = 100; ; gap = Math.min(gap * 2, EXPORT_POLL_MAX_MS)) {
+          const st = await exportStatus(ctx.db, { exportId, viewer: base.viewer });
+          if (st.status === "done")
+            return { exportId, ...(await exportBytes(ctx.db, { exportId, viewer: base.viewer })) };
+          if (st.status === "failed") throw new Error(st.errorCode ?? "export_failed");
+          if (Date.now() + gap > until) throw new Error("export_failed");
+          await new Promise((resolve) => setTimeout(resolve, gap));
+        }
+      });
+      const blob = file.body.toString("base64");
+      const named = { type: "text" as const, text: JSON.stringify({ filename: file.filename }) };
+      if (input.format === "png")
+        return { content: [{ type: "image" as const, data: blob, mimeType: file.mime }, named] };
+      return {
+        content: [
+          {
+            type: "resource" as const,
+            resource: {
+              uri: `wardby://documents/${input.documentId}/exports/${file.exportId}`,
+              mimeType: file.mime,
+              blob,
+            },
+          },
+          named,
+        ],
+      };
     },
   });
 }

@@ -374,7 +374,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // call via `modelCatalog.refreshNow()` after each write — there is no
   // separate refresh tool.
   const modelCatalog = await startModelCatalog(prisma);
-  const providers = options.providers ?? buildMcpProviders().providers;
+  const baseProviders = options.providers ?? buildMcpProviders().providers;
+  // PNG/PDF design exports, built once and shared by the web routes and export_document. The renderer
+  // service is wired in a later step: until then those jobs fail as export_renderer_unavailable.
+  const providers: McpProviders = baseProviders.exports
+    ? baseProviders
+    : { ...baseProviders, exports: { db: prisma, renderer: null } };
   await providers.executor.launch?.();
   warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
@@ -592,6 +597,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     authMode: authProviderKind,
     ...(selfHosted ? { selfHosted } : {}),
     ...(documentsBus ? { events: createDocumentStreams({ bus: documentsBus }) } : {}),
+    ...(providers.exports ? { exports: providers.exports } : {}),
     // The callers have required write on the document; sendThreadsToAgent checks it again.
     sendThreads: (input) =>
       sendThreadsToAgent(

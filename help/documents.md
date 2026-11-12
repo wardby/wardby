@@ -25,6 +25,7 @@ A document is a Markdown file with versions and comment threads, opened in a bro
 - Versions: `list_document_versions`, `restore_document_version`.
 - Comments: `list_comment_threads`, `get_comment_thread`, `reply_to_thread`, `resolve_thread`.
 - Sharing: `create_share_link`, `list_share_links`, `revoke_share_link`, and `grant_access` / `revoke_access` / `list_access` for people.
+- Export: `export_document` (see [Exports](document-exports.md)).
 - Agents: `send_threads_to_agent` (see [Comment threads and agents](comment-threads-and-agents.md)).
 
 They need the `documents:read` and `documents:write` scopes; `send_threads_to_agent` also needs `runs:trigger`. No Wardby role is required. Define the scopes at your identity provider (see [Identity and access](identity-and-access.md)).

@@ -56,6 +56,7 @@ import {
   removeComment,
   restoreVersionJson,
 } from "./api.js";
+import { getExportBytes, getExportFile, getExportStatus, postExport } from "./exports-api.js";
 import {
   addCookie,
   cookieOptions,
@@ -89,10 +90,11 @@ const ID = "[A-Za-z0-9_-]{1,64}";
 const DOC_PAGE = new RegExp(`^/d/(${ID})$`);
 const SHARE_PAGE = /^\/s\/([A-Za-z0-9_-]{1,200})$/;
 const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
-const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames))?$`);
+const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames|export|exports))?$`);
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
 const API_VERSIONS = new RegExp(`^/d/api/(${ID})/versions(?:/([1-9][0-9]{0,8})(/restore)?)?$`);
+const API_EXPORT = new RegExp(`^/d/api/exports/(${ID})(/file)?$`);
 const API_EVENTS = new RegExp(`^/d/api/(${ID})/events$`);
 const WEB_PREFIXES = /^\/(?:d|s|web)\//;
 const LOGOUT_URL = "/web/logout";
@@ -414,6 +416,11 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
     }
     return null;
   }
+  if ((m = API_EXPORT.exec(path))) {
+    const [, id, file] = m;
+    if (method !== "GET") return null;
+    return { write: false, run: (v) => (file ? getExportBytes(res, deps, id, v) : getExportStatus(res, deps, id, v)) };
+  }
   if ((m = API_THREAD.exec(path)) && method === "POST") {
     const [, id, action] = m;
     return {
@@ -440,6 +447,12 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
     if (sub === "send" && method === "POST") return { write: true, run: (v, _a, b) => postSend(res, deps, id, v, b) };
     if (sub === "fidelity" && method === "POST") {
       return { write: true, run: (v, _a, b) => postFidelity(res, deps, id, v, b) };
+    }
+    if (sub === "export" && method === "GET") {
+      return { write: false, shareReadable: id, run: (v) => getExportFile(res, deps, id, v, url.searchParams) };
+    }
+    if (sub === "exports" && method === "POST") {
+      return { write: true, run: (v, _a, b) => postExport(res, deps, id, v, b) };
     }
     if (sub === "frames" && method === "GET") {
       return { write: false, shareReadable: id, run: (v) => getFrames(res, deps, id, v, url.searchParams) };

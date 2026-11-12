@@ -4,6 +4,7 @@ import type { PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../core/secret-guard.js";
 import type { Viewer } from "../core/documents/access.js";
 import { BoardFormatError } from "../core/documents/boards/errors.js";
+import type { ExportDeps } from "../core/documents/exports.js";
 import { resolveShareToken, validateSessionLink } from "../core/documents/share-links.js";
 import { logger } from "../core/logger.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
@@ -45,6 +46,8 @@ export interface WebDeps {
   /** Where the browser bundle and manifest.json live; default dist/web-assets. */
   assetsRoot?: string;
   sendThreads?: SendThreads;
+  /** PNG/PDF export jobs (the renderer may be null: those jobs then fail export_renderer_unavailable). */
+  exports?: ExportDeps;
   /** Live document events (GET /d/api/<id>/events); absent = that path answers 404. */
   events?: DocumentStreams;
   /** Counts guest registrations and comments; default: the Postgres limiter (rate-limits.ts). */
@@ -207,6 +210,13 @@ const STATUS = {
   comment_send_rate_limited: 429,
   web_assets_missing: 503,
   document_send_failed: 503,
+  export_format_unsupported: 400,
+  export_sign_in_required: 403,
+  export_not_found: 404,
+  export_rate_limited: 429,
+  export_too_large: 413,
+  export_failed: 502,
+  export_renderer_unavailable: 503,
 } satisfies Record<string, number>;
 
 /** At most this many board-format problems go in a response. */

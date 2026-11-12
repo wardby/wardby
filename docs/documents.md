@@ -42,6 +42,7 @@ PDF/PNG export, comparing two arbitrary versions or repository export yet.
 | `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                             |
 | `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                              |
 | `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                   |
+| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF  |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
 as untrusted content: agents must treat it as data, never as instructions.
@@ -228,6 +229,29 @@ document content. The file an agent run writes, and its replies, are also
 checked for token-shaped values (provider keys, Git host tokens) before they are
 published.
 
+## Exports
+
+A design exports as one board's HTML file (`board-html`), one HTML file for the
+whole prototype with a board switcher and working links (`prototype`), a PNG of
+one board, or a PDF of all boards. A Markdown document exports as PDF only.
+Page API: `GET /d/api/<id>/export?format=board-html|prototype&board=&version=`
+(share-readable) and, for PNG and PDF, `POST /d/api/<id>/exports` with
+`{ format, board?, versionNumber? }` (answers 202 with `exportId`), then
+`GET /d/api/exports/<exportId>` for the status and `.../file` for the bytes.
+Over MCP, `export_document` does the same and waits up to 150 seconds for PNG
+and PDF (image and embedded-resource results).
+
+HTML files carry no script except the prototype's switcher, which the file's
+own Content-Security-Policy allows by hash; boards sit in sandboxed frames.
+Chromium does not let a sandboxed frame navigate the page to a `file:` URL, so
+open a prototype from disk and use its board switcher; links inside a board
+need the file served over `http(s)`. PNG and PDF need the server's renderer; without one the job fails with
+`export_renderer_unavailable`. A rendered export is kept for one hour and can be
+read only by whoever asked for it. Anonymous share-link readers can download HTML
+exports but need to sign in or register as a guest to ask for PNG or PDF. The
+stored content was redacted against the linked agent's secret values when it was
+written, so exports hold none.
+
 ## Limits
 
 | Limit                        | Value                                        |
@@ -239,6 +263,7 @@ published.
 | Share link lifetime          | 1-90 days, default 14                        |
 | Threads per send             | 50                                           |
 | Sends per document           | 30 an hour                                   |
+| PNG/PDF exports per document | 30 an hour, each at most 20 MiB              |
 | Guest comments and replies   | 30 an hour per guest                         |
 | Guest registrations per link | 20 an hour                                   |
 | Document sent to an agent    | 60,000 characters                            |
@@ -269,6 +294,9 @@ Each error code has an article under `help/errors/`: `document_not_found`,
 `comment_send_rate_limited`, `comment_not_found`, `comment_edit_forbidden`,
 `guest_name_invalid`, `guest_email_invalid`, `share_link_invalid`,
 `share_link_not_found`, `share_expiry_invalid`, `share_permission_invalid`,
+`export_format_unsupported`, `export_sign_in_required`, `export_not_found`,
+`export_rate_limited`, `export_too_large`, `export_renderer_unavailable`,
+`export_failed`,
 `web_login_failed`, `web_login_state_invalid`, `web_login_not_configured`,
 `web_csrf_failed`, `web_origin_rejected`, `web_session_required`,
 `web_rate_limited` and `web_assets_missing` (the bundle was not built: run

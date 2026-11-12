@@ -55,6 +55,12 @@ agent you own (or one whose owner allows task text from others with
 one `documentText` field, wrapped as untrusted tool output) and
 `list_documents`.
 
+`export_document` (scope `documents:read`) exports a design as `board-html`
+(one board), `prototype` (one HTML file with a board switcher), `png` (one
+board) or `pdf` (all boards); a Markdown document exports as `pdf` only. HTML
+comes back in `fileText`, wrapped as untrusted tool output; PNG is an image
+item and PDF an embedded resource.
+
 Version tools: `list_document_versions` (read access; newest first, `limit`
 default 50 and at most 200, `before` = the `nextBefore` it returned for older
 ones) gives each version's number, `via`, time, author kind, run id and the

@@ -16,6 +16,14 @@ const EXPECTED: Record<string, number> = {
   document_format_mismatch: 400,
   board_too_large: 413,
   document_too_large: 413,
+  board_format_invalid: 400,
+  export_format_unsupported: 400,
+  export_sign_in_required: 403,
+  export_not_found: 404,
+  export_rate_limited: 429,
+  export_too_large: 413,
+  export_failed: 502,
+  export_renderer_unavailable: 503,
 };
 
 describe("send-to-agent and design error statuses", () => {

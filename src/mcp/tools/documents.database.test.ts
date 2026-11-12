@@ -12,6 +12,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
+import type { ExportDeps } from "../../core/documents/exports.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
 import { registerDocumentTools } from "./documents.js";
@@ -30,9 +31,13 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
   async function connect(
     p: Principal,
     scopes: string[] = ["documents:read", "documents:write"],
-    link: { canonicalUri?: string; publicOrigin?: string; executor?: object } = {},
+    link: { canonicalUri?: string; publicOrigin?: string; executor?: object; exports?: ExportDeps } = {},
   ) {
-    const providers = { secrets: cipher, executor: link.executor ?? executor } as unknown as McpProviders;
+    const providers = {
+      secrets: cipher,
+      executor: link.executor ?? executor,
+      ...(link.exports ? { exports: link.exports } : {}),
+    } as unknown as McpProviders;
     const canonicalUri = link.canonicalUri ?? "https://wardby.example/mcp";
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri } });
     const ctx: McpRequestContext = {
@@ -56,7 +61,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     return async (name: string, args: Record<string, unknown> = {}) => {
       const result = (await client.callTool({ name, arguments: args })) as {
         isError?: boolean;
-        content: { text: string }[];
+        content: { type: string; text: string; data?: string; mimeType?: string; resource?: any }[];
       };
       const text = result.content[0].text;
       let json: any = null;
@@ -65,7 +70,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       } catch {
         // an error message
       }
-      return { isError: Boolean(result.isError), text, json };
+      return { isError: Boolean(result.isError), text, json, content: result.content };
     };
   }
 
@@ -185,6 +190,75 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(bad.isError).toBe(true);
       expect(bad.text.startsWith("board_format_invalid")).toBe(true);
       expect(bad.text).not.toContain("FAKE-SECRET-MCP");
+    });
+
+    describe("export_document", () => {
+      const renderer = { png: async () => Buffer.from("PNG"), pdf: async () => Buffer.from("PDF") };
+      const allow = { check: async () => {} };
+      const withRenderer = { db, renderer, rateLimiter: allow } as ExportDeps;
+
+      it("returns board and prototype HTML as untrusted file text", async () => {
+        const call = await connect(owner);
+        const docId = (await call("create_document", { kind: "design", title: "Coffee", files: coffeeFiles() })).json
+          .documentId as string;
+        const board = await call("export_document", { documentId: docId, format: "board-html", board: "menu" });
+        expect(board.isError).toBe(false);
+        expect(board.json).toMatchObject({ filename: "coffee-menu.html", mime: "text/html" });
+        expect(board.json.fileText).toContain("<untrusted_tool_output>");
+        expect(board.json.fileText).toContain("<html");
+        const proto = await call("export_document", { documentId: docId, format: "prototype" });
+        expect(proto.json.filename).toBe("coffee-prototype.html");
+        expect(proto.json.fileText).toContain('id="boards"');
+        const other = await connect(await db.principal.create({ data: { subject: `docmcp-x-${s}` } }));
+        expect((await other("export_document", { documentId: docId, format: "prototype" })).text).toContain(
+          "document_not_found",
+        );
+      });
+
+      it("returns a PNG as an image item and a PDF as an embedded resource", async () => {
+        const call = await connect(owner, undefined, { exports: withRenderer });
+        const docId = (await call("create_document", { kind: "design", title: "Coffee", files: coffeeFiles() })).json
+          .documentId as string;
+        const png = await call("export_document", { documentId: docId, format: "png", board: "home" });
+        expect(png.isError).toBe(false);
+        expect(png.content[0]).toEqual({
+          type: "image",
+          data: Buffer.from("PNG").toString("base64"),
+          mimeType: "image/png",
+        });
+        expect(JSON.parse(png.content[1].text)).toEqual({ filename: "coffee-home.png" });
+        const pdf = await call("export_document", { documentId: docId, format: "pdf" });
+        expect(pdf.content[0]).toMatchObject({
+          type: "resource",
+          resource: { mimeType: "application/pdf", blob: Buffer.from("PDF").toString("base64") },
+        });
+        expect(JSON.parse(pdf.content[1].text)).toEqual({ filename: "coffee-boards.pdf" });
+        // A Markdown document exports as PDF only.
+        const md = (await call("create_document", { title: "Plan", markdown: "# Plan" })).json.documentId as string;
+        const mdPdf = await call("export_document", { documentId: md, format: "pdf" });
+        expect(JSON.parse(mdPdf.content[1].text)).toEqual({ filename: "plan.pdf" });
+        const bad = await call("export_document", { documentId: md, format: "png", board: "home" });
+        expect(bad.isError).toBe(true);
+        expect(bad.text).toContain("export_format_unsupported");
+      });
+
+      it("reports a missing renderer, a failing one and a missing board by code", async () => {
+        const none = await connect(owner);
+        const docId = (await none("create_document", { kind: "design", title: "Coffee", files: coffeeFiles() })).json
+          .documentId as string;
+        const r = await none("export_document", { documentId: docId, format: "pdf" });
+        expect(r.isError).toBe(true);
+        expect(r.text).toContain("export_renderer_unavailable");
+        const boom = await connect(owner, undefined, {
+          exports: { ...withRenderer, renderer: { ...renderer, png: async () => Promise.reject(new Error("x")) } },
+        });
+        expect((await boom("export_document", { documentId: docId, format: "png", board: "home" })).text).toContain(
+          "export_failed",
+        );
+        expect((await boom("export_document", { documentId: docId, format: "png", board: "zzz" })).text).toContain(
+          "export_not_found",
+        );
+      });
     });
 
     it("imports a design from a linked repository directory at baseRef", async () => {

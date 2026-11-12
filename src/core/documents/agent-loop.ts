@@ -109,6 +109,9 @@ function defaultLimiter(db: PrismaClient): RateLimiter {
   return new PostgresRateLimiter(db, sendRateKeyHasher, SEND_RATE_WINDOW_MS);
 }
 
+/** The hashed per-document limiter over one-hour windows; exports count on it in their own bucket. */
+export { defaultLimiter as documentHourlyLimiter };
+
 const THREADS_CUT_MARKER = "\n\n[comment threads cut to fit the task]";
 
 /** The sent threads as plain text, for the untrusted context. */

@@ -1655,6 +1655,166 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
     });
   });
 
+  describe("exports", () => {
+    let exportDesignId: string;
+    const allow: RateLimiter = { check: async () => {} };
+    const fakeRenderer = { png: async () => Buffer.from("PNG"), pdf: async () => Buffer.from("PDF") };
+    const exportDeps = (over: object = {}): WebDeps["exports"] => ({
+      db,
+      renderer: fakeRenderer,
+      rateLimiter: allow,
+      ...over,
+    });
+    async function withServer(extra: Partial<WebDeps>, fn: (base: string) => Promise<void>) {
+      const p = await freePort();
+      const h = await startServerAt(p, extra);
+      try {
+        await fn(`http://127.0.0.1:${p}`);
+      } finally {
+        await h.close();
+      }
+    }
+    const waitDone = async (base: string, id: string, jar: Jar) => {
+      for (let i = 0; i < 50; i++) {
+        const st = (await (await callAt(base, `/d/api/exports/${id}`, { jar })).json()) as {
+          status: string;
+          errorCode: string | null;
+        };
+        if (st.status === "done" || st.status === "failed") return st;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error("export did not finish");
+    };
+
+    beforeAll(async () => {
+      exportDesignId = (
+        await createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "Coffee", files: coffee() })
+      ).id;
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: exportDesignId,
+          granteeKind: "principal",
+          granteePrincipalId: member.id,
+          granteeKey: `principal:${member.id}`,
+          level: "write",
+        },
+      });
+    });
+
+    it("serves a board and the prototype as sandboxed attachments", async () => {
+      const { jar } = await session(member.id);
+      const res = await call(`/d/api/${exportDesignId}/export?format=prototype`, { jar });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-disposition")).toBe('attachment; filename="coffee-prototype.html"');
+      expect(res.headers.get("content-security-policy")).toMatch(/^sandbox;/);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.text()).toContain('id="boards"');
+      const board = await call(`/d/api/${exportDesignId}/export?format=board-html&board=menu&version=1`, { jar });
+      expect(board.headers.get("content-disposition")).toBe('attachment; filename="coffee-menu.html"');
+      for (const bad of ["format=png", "format=board-html&board=nope", "format=prototype&version=0"]) {
+        const r = await call(`/d/api/${exportDesignId}/export?${bad}`, { jar });
+        expect(r.status).toBe(bad.includes("nope") ? 404 : 400);
+      }
+      const md = await call(`/d/api/${docId}/export?format=prototype`, { jar });
+      expect(md.status).toBe(400);
+      expect(await md.json()).toEqual({ error: "export_format_unsupported" });
+      expect((await call(`/d/api/${exportDesignId}/export?format=prototype`)).status).toBe(401);
+    });
+
+    it("lets a share-link reader without a session download a board, not request a render", async () => {
+      const link = await createShareLink(db, {
+        documentId: exportDesignId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      const res = await call(`/d/api/${exportDesignId}/export?format=board-html&board=home`, {
+        headers: { "x-wardby-share": link.token },
+      });
+      expect(res.status).toBe(200);
+      expect((await call(`/d/api/${exportDesignId}/exports`, { method: "POST", body: { format: "pdf" } })).status).toBe(
+        401,
+      );
+    });
+
+    it("runs a PNG and a PDF job for the requester, and a Markdown PDF", async () => {
+      await withServer({ exports: exportDeps() }, async (base) => {
+        const m = await session(member.id);
+        const o = await session(owner.id);
+        const bad = await callAt(base, `/d/api/${exportDesignId}/exports`, {
+          method: "POST",
+          jar: m.jar,
+          body: { format: "png", board: "home" },
+        });
+        expect(bad.status).toBe(403);
+        const post = (body: unknown, id = exportDesignId) =>
+          callAt(base, `/d/api/${id}/exports`, { method: "POST", jar: m.jar, csrf: m.csrf, body });
+        for (const body of [{ format: "gif" }, { format: "png" }, { format: "pdf", versionNumber: "x" }]) {
+          expect((await post(body)).status).toBe(400);
+        }
+        const res = await post({ format: "png", board: "home" });
+        expect(res.status).toBe(202);
+        const { exportId } = (await res.json()) as { exportId: string };
+        expect(await waitDone(base, exportId, m.jar)).toEqual({ status: "done", errorCode: null });
+        const file = await callAt(base, `/d/api/exports/${exportId}/file`, { jar: m.jar });
+        expect(file.status).toBe(200);
+        expect(file.headers.get("content-type")).toBe("image/png");
+        expect(file.headers.get("content-disposition")).toBe('attachment; filename="coffee-home.png"');
+        expect(file.headers.get("content-security-policy")).toMatch(/^sandbox;/);
+        expect(await file.text()).toBe("PNG");
+        // Someone else with read access cannot see it.
+        const other = await callAt(base, `/d/api/exports/${exportId}`, { jar: o.jar });
+        expect(other.status).toBe(404);
+        expect(await other.json()).toEqual({ error: "export_not_found" });
+
+        const pdf = (await (await post({ format: "pdf" })).json()) as { exportId: string };
+        await waitDone(base, pdf.exportId, m.jar);
+        const pdfFile = await callAt(base, `/d/api/exports/${pdf.exportId}/file`, { jar: m.jar });
+        expect(pdfFile.headers.get("content-disposition")).toBe('attachment; filename="coffee-boards.pdf"');
+        const md = (await (await post({ format: "pdf" }, docId)).json()) as { exportId: string };
+        expect((await waitDone(base, md.exportId, m.jar)).status).toBe("done");
+        expect((await post({ format: "png", board: "home" }, docId)).status).toBe(400);
+      });
+    });
+
+    it("reports canRender from the renderer, and an unavailable renderer as a failed job", async () => {
+      const { jar, csrf } = await session(member.id);
+      const canRender = async (base: string) =>
+        (
+          (await (await callAt(base, `/d/api/${exportDesignId}`, { jar })).json()) as {
+            document: { canRender: boolean };
+          }
+        ).document.canRender;
+      await withServer({ exports: exportDeps() }, async (base) => expect(await canRender(base)).toBe(true));
+      await withServer({ exports: exportDeps({ renderer: null }) }, async (base) => {
+        expect(await canRender(base)).toBe(false);
+        const res = await callAt(base, `/d/api/${exportDesignId}/exports`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { format: "pdf" },
+        });
+        const { exportId } = (await res.json()) as { exportId: string };
+        expect(await waitDone(base, exportId, jar)).toEqual({
+          status: "failed",
+          errorCode: "export_renderer_unavailable",
+        });
+        expect((await callAt(base, `/d/api/exports/${exportId}/file`, { jar })).status).toBe(404);
+      });
+      await withServer({}, async (base) => {
+        const res = await callAt(base, `/d/api/${exportDesignId}/exports`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { format: "pdf" },
+        });
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: "export_renderer_unavailable" });
+      });
+    });
+  });
+
   describe("sign-in routes (delegating)", () => {
     it("starts the OIDC login with the state cookie, and refuses an unsafe return path", async () => {
       const res = await call(`/web/login?returnTo=${encodeURIComponent(`/d/${docId}`)}`);

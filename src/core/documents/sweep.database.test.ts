@@ -34,6 +34,8 @@ describe.skipIf(!process.env.DATABASE_URL)("expired document rows sweep (databas
     const out = await sweepExpiredDocumentRows(db, now);
     expect(out.webSessions).toBeGreaterThanOrEqual(1);
     expect(out.rateLimits).toBeGreaterThanOrEqual(1);
+    expect(out.exports.deleted).toBeGreaterThanOrEqual(0);
+    expect(out.exports.failed).toBeGreaterThanOrEqual(0);
     expect(await db.webSession.findUnique({ where: { id: dead.id } })).toBeNull();
     expect(await db.webSession.findUnique({ where: { id: live.id } })).not.toBeNull();
     expect(await db.authRateLimit.findUnique({ where: { key: `sweep-${s}-dead` } })).toBeNull();

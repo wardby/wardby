@@ -131,6 +131,31 @@ describe("buildMcpServer", () => {
     await client.close();
   });
 
+  it("an image and an embedded resource in a tool result reach the client unchanged", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext(fakeCtx(["agents:read"]));
+    const image = { type: "image" as const, data: Buffer.from("PNG").toString("base64"), mimeType: "image/png" };
+    const resource = {
+      type: "resource" as const,
+      resource: {
+        uri: "wardby://export/x.pdf",
+        mimeType: "application/pdf",
+        blob: Buffer.from("PDF").toString("base64"),
+      },
+    };
+    mcp.registerTool({
+      name: "media",
+      scope: "agents:read",
+      inputSchema: {},
+      handler: async () => ({ content: [image, resource, { type: "text", text: "{}" }] }),
+    });
+    const { client } = await connectClient(mcp);
+    const result = await client.callTool({ name: "media", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([image, resource, { type: "text", text: "{}" }]);
+    await client.close();
+  });
+
   it("a handler's Prisma unique violation reaches the client as a friendly 409, not the raw Prisma text", async () => {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
     mcp.setFixedContext(fakeCtx(["agents:write"]));
