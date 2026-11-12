@@ -43,7 +43,7 @@ function checkBody(body: string): void {
 }
 
 /** Display names for principals; ids that no longer exist are absent from the map. */
-async function principalNames(db: CommentDb, ids: string[]): Promise<Map<string, string>> {
+export async function principalNames(db: CommentDb, ids: string[]): Promise<Map<string, string>> {
   const unique = [...new Set(ids)];
   const out = new Map<string, string>();
   if (unique.length === 0) return out;

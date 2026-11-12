@@ -1,14 +1,20 @@
 const FORBIDDEN = /\b(agent|via)\b/i;
 
-/** Returns the trimmed guest name, or throws `guest_name_invalid`. */
+/** NFKC-folds, trims and collapses whitespace, so look-alike forms compare equal. */
+function foldName(name: string): string {
+  return name.normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Returns the normalized (NFKC), trimmed guest name, or throws `guest_name_invalid`.
+ * The 1-40 limit counts code points, and comparison with `takenNames` is
+ * case-insensitive after the same normalization.
+ */
 export function validateGuestName(name: string, takenNames: string[]): string {
-  const n = name.trim().replace(/\s+/g, " ");
-  if (
-    n.length < 1 ||
-    n.length > 40 ||
-    FORBIDDEN.test(n) ||
-    takenNames.some((t) => t.toLowerCase() === n.toLowerCase())
-  ) {
+  const n = foldName(name);
+  const length = Array.from(n).length;
+  const lower = n.toLowerCase();
+  if (length < 1 || length > 40 || FORBIDDEN.test(n) || takenNames.some((t) => foldName(t).toLowerCase() === lower)) {
     throw new Error("guest_name_invalid");
   }
   return n;

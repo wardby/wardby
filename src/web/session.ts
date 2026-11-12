@@ -47,7 +47,10 @@ export async function createWebSession(
   owner: { principalId?: string; guestId?: string; shareLinkId?: string },
   options: WebCookieOptions = SECURE,
 ): Promise<{ token: string; csrf: string; cookie: string }> {
-  if (!owner.principalId && !owner.guestId) throw new Error("web session needs a principal or a guest");
+  // Exactly one identity: a principal, or a guest (which also carries its share link).
+  if (Boolean(owner.principalId) === Boolean(owner.guestId)) {
+    throw new Error("web session needs exactly one of principal or guest");
+  }
   const token = randomBytes(32).toString("base64url");
   const csrf = randomBytes(32).toString("base64url");
   const now = Date.now();

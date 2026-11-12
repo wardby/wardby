@@ -38,3 +38,9 @@ To follow what a run is doing, call `get_run_steps` (article `run-steps`).
 To read the rest of a long request, task, final answer or error, call
 `get_run_text`; for a coding run's packages, `get_run_packages` (article
 `troubleshooting/debugging-agent-runs`).
+
+Documents use two scopes, `documents:read` and `documents:write`; neither needs
+a role, and access is still decided per document. The owner of a document can
+call `create_share_link` (a view or comment link, 1 to 90 days, URL returned
+once), `list_share_links` (ids, permission, expiry, revoked, guest count; never
+URLs) and `revoke_share_link` (signs out the guests who used it).

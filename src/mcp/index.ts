@@ -90,6 +90,7 @@ import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
+import { registerDocumentTools } from "./tools/documents.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
@@ -200,6 +201,7 @@ export function registerAllTools(
     protocolElicitation: opts.secretElicitationProtocol,
   });
   registerWebhookTools(mcp);
+  registerDocumentTools(mcp);
 }
 
 export interface McpProviderComposition {

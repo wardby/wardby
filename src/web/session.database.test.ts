@@ -108,6 +108,10 @@ describe.skipIf(!process.env.DATABASE_URL)("web sessions (database)", () => {
     await expect(createWebSession(db, {})).rejects.toThrow();
   });
 
+  it("refuses a session with both a principal and a guest", async () => {
+    await expect(createWebSession(db, { principalId: p.id, guestId: "g" })).rejects.toThrow("exactly one");
+  });
+
   it("endWebSession deletes the row and returns a clearing cookie", async () => {
     const { token, cookie } = await createWebSession(db, { principalId: p.id });
     const cleared = await endWebSession(db, cookieValue(cookie));
