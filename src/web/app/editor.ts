@@ -8,6 +8,7 @@ import { Markdown } from "@tiptap/markdown";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { documentExtensions } from "./extensions.js";
+import { diffMarks, type DiffMarks } from "./history.js";
 
 export interface Highlight {
   /** A thread id, or "draft" while the composer is open. */
@@ -90,4 +91,65 @@ export function getHighlights(editor: Editor): Highlight[] {
 /** Replaces the highlights and/or the active one (not added to undo history). */
 export function setHighlights(editor: Editor, update: { ranges?: Highlight[]; active?: string | null }): void {
   editor.view.dispatch(editor.state.tr.setMeta(key, update).setMeta("addToHistory", false));
+}
+
+const diffKey = new PluginKey<DecorationSet>("wardby-version-diff");
+
+/** The decorations for a version's changes: inserted text highlighted, deleted text as struck widgets. */
+function diffDecorations(doc: EditorState["doc"], marks: DiffMarks): DecorationSet {
+  const size = doc.content.size;
+  const decos = [
+    ...marks.inserts
+      .filter((r) => r.to > r.from && r.from >= 0 && r.to <= size)
+      .map((r) => Decoration.inline(r.from, r.to, { class: "diff-ins" })),
+    ...marks.deletes
+      .filter((d) => d.pos >= 0 && d.pos <= size)
+      .map((d, i) =>
+        Decoration.widget(
+          d.pos,
+          () => {
+            // Text only: the deleted words are set with textContent, never parsed as markup.
+            const el = document.createElement("del");
+            el.className = "diff-del";
+            el.textContent = d.text;
+            el.setAttribute("aria-label", `Deleted: ${d.text}`);
+            return el;
+          },
+          { side: -1, key: `del-${i}-${d.pos}`, ignoreSelection: true },
+        ),
+      ),
+  ];
+  return DecorationSet.create(doc, decos);
+}
+
+/**
+ * A read-only editor showing one version with its changes against the
+ * version before (`before`: that version's plain text; null shows no
+ * changes). Decorations only: the document itself is the version's Markdown.
+ */
+export function createVersionViewer(element: HTMLElement, markdown: string, before: string | null): Editor {
+  const DiffMarksExt = Extension.create({
+    name: "wardbyVersionDiff",
+    addProseMirrorPlugins() {
+      return [
+        new Plugin<DecorationSet>({
+          key: diffKey,
+          state: {
+            init: (_config, state) =>
+              before === null ? DecorationSet.empty : diffDecorations(state.doc, diffMarks(state.doc, before)),
+            apply: (tr, set) => set.map(tr.mapping, tr.doc),
+          },
+          props: { decorations: (state) => diffKey.getState(state) },
+        }),
+      ];
+    },
+  });
+  return new Editor({
+    element,
+    injectCSS: false,
+    editable: false,
+    extensions: [...documentExtensions(), Markdown, DiffMarksExt],
+    content: markdown,
+    contentType: "markdown",
+  });
 }

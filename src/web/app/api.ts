@@ -6,6 +6,7 @@
  * Errors surface as fixed codes only (the server never sends other text).
  */
 import type { TextAnchor } from "./anchors.js";
+import type { VersionItem } from "./history.js";
 
 export interface Viewer {
   kind: "member" | "guest" | "anonymous";
@@ -143,6 +144,18 @@ export class Api {
     return this.request("POST", this.doc("/threads"), { anchor, body, ...(sendToAgent ? { sendToAgent: true } : {}) });
   }
 
+  versions(before?: number): Promise<{ versions: VersionItem[]; nextBefore?: number }> {
+    return this.request("GET", this.doc(`/versions${before !== undefined ? `?before=${before}` : ""}`));
+  }
+
+  version(number: number): Promise<{ version: { number: number; markdown: string; createdAt: string } }> {
+    return this.request("GET", this.doc(`/versions/${number}`));
+  }
+
+  restore(number: number, baseNumber: number): Promise<{ version: { number: number } }> {
+    return this.request("POST", this.doc(`/versions/${number}/restore`), { baseNumber });
+  }
+
   send(threadIds: string[]): Promise<unknown> {
     return this.request("POST", this.doc("/send"), { threadIds });
   }
@@ -201,6 +214,7 @@ const MESSAGES: Record<string, string> = {
   comment_anchor_invalid: "That selection can't be commented on.",
   comment_not_found: "That comment no longer exists. Reload to see the latest.",
   document_too_large: "The document is too large to save.",
+  document_version_not_found: "That version no longer exists. Reload to see the latest.",
   guest_name_invalid: "Use a name of 1–40 characters that isn't “agent”, “via” or a member's name.",
   guest_email_invalid: "That email address doesn't look right.",
   share_link_invalid: "This share link is no longer valid.",

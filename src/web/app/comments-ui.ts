@@ -88,6 +88,8 @@ export class CommentsUI {
   private pop: Pop | null = null;
   private layoutQueued = false;
   private panelError = "";
+  /** True while the Edits tray shows an earlier version: no comment button, badges or new comments. */
+  private suspended = false;
 
   constructor(
     private readonly host: CommentsHost,
@@ -242,7 +244,7 @@ export class CommentsUI {
       else this.closePop();
       return;
     }
-    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (typing || this.suspended || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "j" || e.key === "k") {
       const list = this.visible();
       if (list.length === 0) return;
@@ -276,7 +278,7 @@ export class CommentsUI {
   private updateBubble(): void {
     const { bubble, editor } = this.host;
     const r = this.selectionRange();
-    if (r.empty || this.pop || !this.canComment) {
+    if (r.empty || this.pop || !this.canComment || this.suspended) {
       bubble.hidden = true;
       return;
     }
@@ -291,7 +293,7 @@ export class CommentsUI {
   }
 
   startComment(): void {
-    if (!this.canComment) return;
+    if (!this.canComment || this.suspended) return;
     const r = this.selectionRange();
     if (r.empty) return;
     const made = anchorForRange(docText(this.host.editor.state.doc), r.from, r.to);
@@ -949,6 +951,21 @@ export class CommentsUI {
       stage.scrollTop += top - stage.getBoundingClientRect().top - 120;
     }
     this.openThread(t);
+  }
+
+  /** Hides the comment button and popover while an earlier version is shown; layout resumes after. */
+  suspend(on: boolean): void {
+    this.suspended = on;
+    if (on) {
+      this.closePop();
+      this.host.bubble.hidden = true;
+    } else this.scheduleLayout();
+  }
+
+  /** Opens a thread by its number (the Edits tray's "for thread #N"). */
+  revealNumber(number: number): void {
+    const t = this.threads.find((x) => x.number === number);
+    if (t) this.reveal(t);
   }
 
   /** Opens the thread a #thread-<n> link points at. */

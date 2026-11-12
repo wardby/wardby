@@ -3,7 +3,9 @@
  * bootstrap the server wrote, loads the document, mounts the Tiptap editor
  * (editable for members with write) and the comment dialog, and saves edits
  * with a debounced PUT carrying the version they were based on. Live
- * updates (live.ts) refetch threads and newer versions as they happen.
+ * updates (live.ts) refetch threads and newer versions as they happen. The
+ * side panel switches between the Comments tray and the Edits tray (version
+ * history, edits-ui.ts).
  */
 import "./styles.css";
 import {
@@ -17,6 +19,7 @@ import {
 } from "./api.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
+import { EditsTray } from "./edits-ui.js";
 import { createEditor, setHighlights } from "./editor.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
@@ -81,9 +84,30 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const margin = h("div", { class: "margin" });
   const page = h("div", { class: "page" }, editorEl, margin);
   const stage = h("div", { class: "stage" }, page);
-  const panel = h("div", { class: "panel" });
+  const panel = h("div", { class: "panel", role: "tabpanel", attrs: { id: "tray-comments" } });
+  const editsPanel = h("div", { class: "panel", role: "tabpanel", hidden: true, attrs: { id: "tray-edits" } });
   const count = h("span", { class: "ccount" });
-  const side = h("aside", { class: "side", aria: { label: "Comments" } }, h("h2", {}, "Comments ", count), panel);
+  const tab = (label: string, controls: string, on: boolean, ...extra: Node[]) =>
+    h(
+      "button",
+      {
+        type: "button",
+        role: "tab",
+        class: on ? "on" : "",
+        aria: { selected: String(on), controls },
+      },
+      label,
+      ...extra,
+    );
+  const commentsTab = tab("Comments ", "tray-comments", true, count);
+  const editsTab = tab("Edits", "tray-edits", false);
+  const side = h(
+    "aside",
+    { class: "side", aria: { label: "Comments and edits" } },
+    h("div", { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } }, commentsTab, editsTab),
+    panel,
+    editsPanel,
+  );
   const bubble = h("button", { type: "button", class: "bubble", hidden: true }, "💬 Comment");
   const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !canWrite });
   clear(root);
@@ -124,7 +148,9 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
   const lossless = isLosslessRoundTrip(payload.version.markdown, editor.getMarkdown());
   const editable = canWrite && lossless;
+  let lossyLocked = false;
   const lockLossy = () => {
+    lossyLocked = true;
     lossyNotice.hidden = false;
     toolbar.hidden = true;
     editor.setEditable(false, false);
@@ -216,6 +242,38 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     },
     viewer,
   );
+  // ---- the Edits tray ----
+  const edits = new EditsTray({
+    api,
+    panel: editsPanel,
+    stage,
+    page,
+    live: [editorEl, margin],
+    canRestore: () => viewer.kind === "member" && atLeast(viewer.access, "write"),
+    latest: () => ({ number: baseNumber, busy: saving || dirty || conflict }),
+    onViewing: (viewing) => {
+      comments.suspend(viewing);
+      toolbar.hidden = viewing || !editable || lossyLocked;
+    },
+    onRestored: () => void refresh(),
+    openThread: (n) => {
+      showTray("comments");
+      comments.revealNumber(n);
+    },
+  });
+  const showTray = (which: "comments" | "edits") => {
+    const isEdits = which === "edits";
+    panel.hidden = isEdits;
+    editsPanel.hidden = !isEdits;
+    commentsTab.className = isEdits ? "" : "on";
+    editsTab.className = isEdits ? "on" : "";
+    commentsTab.setAttribute("aria-selected", String(!isEdits));
+    editsTab.setAttribute("aria-selected", String(isEdits));
+    if (isEdits) void edits.open();
+  };
+  commentsTab.addEventListener("click", () => showTray("comments"));
+  editsTab.addEventListener("click", () => showTray("edits"));
+
   renderViewer();
   comments.apply(payload);
   void comments.loadMentions();
@@ -254,6 +312,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       showSave(dirty ? "Unsaved changes" : "Saved");
       // The server re-anchored the threads against the new version.
       await comments.reload().catch(() => undefined);
+      void edits.refresh();
     } catch (err) {
       dirty = true;
       if (err instanceof ApiError && err.code === "document_version_conflict") {
@@ -348,9 +407,16 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
             const up = statusConnected(message.data);
             if (up !== null) serverHears = up;
             showLive(liveState);
-          } else if (act) void refresh();
+          } else if (act) {
+            void refresh();
+            // A new version only updates the Edits list; a version being viewed stays on screen.
+            if (act === "version" || act === "resync") void edits.refresh();
+          }
         },
-        onReconnect: () => void refresh(),
+        onReconnect: () => {
+          void refresh();
+          void edits.refresh();
+        },
         onState: (state) => {
           liveState = state;
           showLive(state);
@@ -363,6 +429,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       resume: () => {
         live.start();
         void refresh();
+        void edits.refresh();
       },
     });
     document.addEventListener("visibilitychange", () => stopper.visible(!document.hidden));

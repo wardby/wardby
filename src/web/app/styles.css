@@ -15,6 +15,8 @@
   --pin: #e8590c;
   --hl: #ffe3c2;
   --hl-on: #ffc98a;
+  --ins-bg: #d8f5e2;
+  --del-bg: #fde2e1;
   font-family:
     system-ui,
     -apple-system,
@@ -34,6 +36,8 @@
     --accent-text: #0c1018;
     --hl: #5a3a17;
     --hl-on: #7a4a14;
+    --ins-bg: #123d26;
+    --del-bg: #4a1b1b;
   }
 }
 
@@ -731,4 +735,87 @@ img.ProseMirror-separator {
   color: var(--muted);
   font-size: 0.76rem;
   padding: 0 0.9rem 0.8rem;
+}
+
+/* ---- side panel tabs and the Edits tray ---- */
+.tray-tabs {
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.7rem 0.9rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.tray-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.tray-tabs button.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.ed-row .vn {
+  font-weight: 700;
+  color: var(--text);
+}
+.ed-row .t {
+  white-space: normal;
+}
+.ed-row .m button.link {
+  font-size: inherit;
+}
+.tp-more {
+  padding: 0 0.9rem 0.8rem;
+}
+.tp-more button {
+  font-size: 0.82rem;
+}
+.vbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 860px;
+  margin: 0 auto 12px;
+  padding: 0.5rem 0.75rem;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  font-size: 0.88rem;
+}
+.vbar .vb-text {
+  margin-right: auto;
+}
+.vbar .vb-key {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.vbar .err {
+  flex-basis: 100%;
+  padding: 0;
+}
+.diff-ins {
+  background: var(--ins-bg);
+  border-bottom: 2px solid var(--ok);
+}
+.diff-del,
+.vbar del {
+  background: var(--del-bg);
+  color: var(--bad);
+  text-decoration: line-through;
+}
+.diff-del {
+  margin: 0 0.1em;
+  padding: 0 0.1em;
+  border-radius: 2px;
 }
