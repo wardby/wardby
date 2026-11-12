@@ -537,6 +537,18 @@ export const ClaudeContextFileSchema = z
   .strict();
 export type ClaudeContextFile = z.infer<typeof ClaudeContextFileSchema>;
 
+export const RunRepositoryInputSchema = z
+  .object({
+    name: z.string().refine(isCodingRepositoryName, "must be a repository folder name"),
+    path: z.string(),
+    access: z.enum(["read", "write"]),
+    repository: repositorySchema,
+    commit: z.string().regex(COMMIT_SHA),
+  })
+  .strict()
+  .refine((value) => value.path === `/repos/${value.name}`, { path: ["path"], message: "must be /repos/<name>" });
+export type RunRepositoryInput = z.infer<typeof RunRepositoryInputSchema>;
+
 export const CodingTaskInputSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
@@ -631,9 +643,15 @@ export const CodingTaskInputSchema = z
       .object({ files: z.array(ClaudeContextFileSchema).min(1).max(CLAUDE_CONTEXT_LIMITS.maxFiles) })
       .strict()
       .optional(),
+    /** Extra repositories (#537), mounted at /repos/<name>; written only when the run has some. */
+    repositories: z.array(RunRepositoryInputSchema).min(1).max(MAX_RUN_REPOSITORIES_IN_INPUT).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
+    const repositoryNames = (value.repositories ?? []).map((entry) => entry.name);
+    if (new Set(repositoryNames).size !== repositoryNames.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["repositories"], message: "must name each repository once" });
+    }
     const expectedHeadRunId = value.continuationOf?.runId ?? value.runId;
     if (value.headRef !== `wardby/run-${expectedHeadRunId}`) {
       ctx.addIssue({
@@ -664,6 +682,23 @@ export const CodingTaskInputSchema = z
     }
   });
 
+const optionalTag = z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema;
+
+/** Codex's strict mode lists every key as required, so null means "none" here too. */
+const nullable = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === null ? undefined : v), schema.optional());
+
+/** One pull request's note in a multi-repository run (#537); `workspace` names /workspace. */
+export const PullRequestNoteSchema = z
+  .object({
+    name: z.string().min(1).max(63),
+    title: optionalTag,
+    description: summaryText(),
+    mergeOrder: nullable(z.number().int().min(1).max(99)),
+  })
+  .strict();
+export type PullRequestNote = z.infer<typeof PullRequestNoteSchema>;
+
 const agentOutputFields = {
   schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
   runId: runIdSchema,
@@ -671,12 +706,29 @@ const agentOutputFields = {
   summary: summaryText(),
   tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
   // Model-written, so normalized rather than rejected; see normalizeCodingTag.
-  tag: z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema,
+  tag: optionalTag,
+  pullRequests: nullable(z.array(PullRequestNoteSchema).max(MAX_RUN_REPOSITORIES_IN_INPUT)),
 };
 
-function redactAgentOutput<T extends { summary: string; tests: { command: string }[]; tag?: string }>(value: T): T {
+function redactAgentOutput<
+  T extends {
+    summary: string;
+    tests: { command: string }[];
+    tag?: string;
+    pullRequests?: { title?: string; description: string }[];
+  },
+>(value: T): T {
   return {
     ...value,
+    ...(value.pullRequests !== undefined
+      ? {
+          pullRequests: value.pullRequests.map((pr) => ({
+            ...pr,
+            description: redactTokenShapedValues(pr.description),
+            ...(pr.title !== undefined ? { title: redactTokenShapedValues(pr.title) } : {}),
+          })),
+        }
+      : {}),
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
     ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),

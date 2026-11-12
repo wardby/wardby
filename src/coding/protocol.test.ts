@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CodingReadRefSchema,
+  RunRepositoryInputSchema,
   CODING_TASK_TRAILER_RESERVE_BYTES,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
@@ -772,5 +773,80 @@ describe("CodingReadRefSchema", () => {
   });
   it.each(["", "-x", "a..b", "a b", "refs/heads/"])("refuses %j", (ref) => {
     expect(CodingReadRefSchema.safeParse(ref).success).toBe(false);
+  });
+});
+
+describe("input.repositories", () => {
+  const base = {
+    schemaVersion: CODING_PROTOCOL_VERSION,
+    runId: "run-1",
+    repository: "o/r",
+    baseRef: "main",
+    headRef: "wardby/run-run-1",
+    task: "t",
+    model: "claude-sonnet-5",
+    budgetUsd: 1,
+    deadlineAt: new Date().toISOString(),
+  };
+  const entry = {
+    name: "base",
+    path: "/repos/base",
+    access: "read",
+    repository: "upstream-org/upstream",
+    commit: "a".repeat(40),
+  };
+
+  it("accepts extras at /repos/<name>", () => {
+    const parsed = CodingTaskInputSchema.parse({ ...base, repositories: [entry] });
+    expect(parsed.repositories?.[0].name).toBe("base");
+    expect(RunRepositoryInputSchema.safeParse(entry).success).toBe(true);
+  });
+  it("still parses an input without repositories (single-repository run)", () => {
+    expect(CodingTaskInputSchema.parse(base)).not.toHaveProperty("repositories");
+  });
+  it.each([
+    [{ ...entry, path: "/repos/other" }],
+    [{ ...entry, name: "workspace", path: "/repos/workspace" }],
+    [{ ...entry, token: "ghs_FAKEtoken0123456789abcdefABCDEF" }],
+  ])("refuses %j (no token fields)", (bad) => {
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [bad] }).success).toBe(false);
+  });
+  it("refuses duplicate names and an empty list", () => {
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [entry, entry] }).success).toBe(false);
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [] }).success).toBe(false);
+  });
+});
+
+describe("output pullRequests", () => {
+  const output = { schemaVersion: 1, runId: "run-1", outcome: "changes_ready", summary: "s", tests: [] };
+  it("is optional and null means none (Codex strict mode)", () => {
+    expect(CodingAgentOutputSchema.parse({ ...output, pullRequests: null }).pullRequests).toBeUndefined();
+    expect(CodingAgentOutputSchema.parse(output).pullRequests).toBeUndefined();
+  });
+  it("parses entries, normalizes title as a tag, nulls drop, and redacts descriptions", () => {
+    const parsed = CodingAgentOutputSchema.parse({
+      ...output,
+      pullRequests: [
+        {
+          name: "workspace",
+          title: "Sync Upstream",
+          description: "token ghs_FAKEtoken0123456789abcdefABCDEF",
+          mergeOrder: null,
+        },
+        { name: "tools", title: null, description: "d", mergeOrder: 2 },
+      ],
+    });
+    expect(parsed.pullRequests?.[0]).toEqual({
+      name: "workspace",
+      title: "sync-upstream",
+      description: expect.not.stringContaining("ghs_FAKE"),
+    });
+    expect(parsed.pullRequests?.[1]).toEqual({ name: "tools", description: "d", mergeOrder: 2 });
+  });
+  it("refuses a mergeOrder outside 1-99", () => {
+    expect(
+      CodingAgentOutputSchema.safeParse({ ...output, pullRequests: [{ name: "x", description: "d", mergeOrder: 100 }] })
+        .success,
+    ).toBe(false);
   });
 });
