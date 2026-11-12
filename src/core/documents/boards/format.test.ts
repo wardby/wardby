@@ -38,6 +38,12 @@ describe("board format v1", () => {
     expect(out.warnings).toEqual([]);
   });
 
+  it("is idempotent: normalising a normalised design changes nothing", () => {
+    const once = normalizeDesign(coffee()).files;
+    const twice = normalizeDesign(once).files;
+    expect(twice).toEqual(once);
+  });
+
   it("rejects bad manifests with named problems", () => {
     const bad = (m: unknown) => () => parseManifest(JSON.stringify(m));
     expect(bad({ title: "x", boards: [] })).toThrow(BoardFormatError);

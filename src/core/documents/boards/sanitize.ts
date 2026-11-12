@@ -325,7 +325,9 @@ export function sanitizeFragment(html: string, opts: FragmentOptions): Sanitized
   try {
     const body = dom.window.document.body;
     body.innerHTML = html;
-    const clean = cleanContainer(body, s);
+    // The newlines after </body> and </html> below parse back into the body, so trailing
+    // whitespace is collapsed to one newline: sanitising a sanitised board changes nothing.
+    const clean = cleanContainer(body, s).replace(/\s+$/, "\n");
     return { html: clean, removed: s.removed, problems: [...s.problems] };
   } finally {
     dom.window.close();
@@ -412,7 +414,9 @@ export function sanitizeBoard(input: string): SanitizedBoard {
       .map((a) => ` ${a}="${escapeHtml(body.getAttribute(a)!)}"`)
       .join("");
 
-    const clean = cleanContainer(body, s);
+    // The newlines after </body> and </html> below parse back into the body, so trailing
+    // whitespace is collapsed to one newline: sanitising a sanitised board changes nothing.
+    const clean = cleanContainer(body, s).replace(/\s+$/, "\n");
 
     const title = (doc.title || "").trim().slice(0, 200);
     const lang = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/.test(doc.documentElement.lang)
