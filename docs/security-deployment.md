@@ -46,6 +46,8 @@ Use the same database and credential hash key for provisioning and the server:
 ```sh
 node dist/cli.js auth user create --subject user-identifier
 node dist/cli.js auth user create --subject operator-identifier --role admin
+node dist/cli.js auth user create --subject user-identifier --name "Ana Ruiz"
+node dist/cli.js auth user name --subject user-identifier --name "Ana Ruiz"
 node dist/cli.js auth user list
 node dist/cli.js auth user grant --subject user-identifier --role package-approver
 node dist/cli.js auth user grant --subject user-identifier --revoke-role package-approver
@@ -67,7 +69,9 @@ requires a separately reviewed operator workflow.
 The CLI rejects any flag a command does not take, for example
 `auth key create --role admin`. It also rejects any unknown role name.
 `auth user grant` changes only an existing user and never creates one. Both
-`--role` and `--revoke-role` can be repeated.
+`--role` and `--revoke-role` can be repeated. `--name` (at most 80
+characters) sets the display name shown on documents and comments; without
+one, the subject is shown.
 
 ## Roles and privileged operations
 

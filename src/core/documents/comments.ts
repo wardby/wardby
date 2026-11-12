@@ -10,6 +10,7 @@ import type { TextAnchor } from "./anchors.js";
 import { MAX_COMMENT_CHARS } from "./limits.js";
 import { parseMentions } from "./mentions.js";
 import { displayNameFor } from "./names.js";
+import { profileNames } from "./profiles.js";
 import { redactForDocumentAgent } from "./redact.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
@@ -46,18 +47,14 @@ async function principalNames(db: CommentDb, ids: string[]): Promise<Map<string,
   const unique = [...new Set(ids)];
   const out = new Map<string, string>();
   if (unique.length === 0) return out;
-  const [principals, profiles, hosts] = await Promise.all([
+  const [principals, profile, hosts] = await Promise.all([
     db.principal.findMany({ where: { id: { in: unique } }, select: { id: true, subject: true } }),
-    db.principalProfile.findMany({
-      where: { principalId: { in: unique } },
-      select: { principalId: true, displayName: true },
-    }),
+    profileNames(db, unique),
     db.hostIdentity.findMany({
       where: { principalId: { in: unique }, provider: "github" },
       select: { principalId: true, login: true },
     }),
   ]);
-  const profile = new Map(profiles.map((p) => [p.principalId, p.displayName]));
   const login = new Map(hosts.map((h) => [h.principalId, h.login]));
   for (const p of principals) {
     out.set(p.id, displayNameFor({ profileName: profile.get(p.id), githubLogin: login.get(p.id), subject: p.subject }));

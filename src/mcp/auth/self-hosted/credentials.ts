@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Prisma, PrismaClient } from "#prisma";
+import { cleanDisplayName, upsertProfile } from "../../../core/documents/profiles.js";
 import { requireSubject } from "../../../providers/auth/subject.js";
 import { ROLE_NAMES, isRoleName } from "../resource-server.js";
 
@@ -45,6 +46,11 @@ export async function lockUser(tx: AuthDb, id: string) {
   requireSubject(user.principal.subject);
   return user;
 }
+function requireDisplayName(name: string): string {
+  const clean = cleanDisplayName(name);
+  if (!clean) throw new Error("--name must not be empty.");
+  return clean;
+}
 export class IdentityService {
   readonly credentials: Credentials;
   constructor(
@@ -53,18 +59,31 @@ export class IdentityService {
   ) {
     this.credentials = new Credentials(hashKey);
   }
-  async createUser(subject: string, roles: readonly string[] = []) {
+  async createUser(subject: string, roles: readonly string[] = [], name?: string) {
     requireSubject(subject);
     const granted = validateRoles(roles);
     return this.db.$transaction(async (tx) => {
       const principal = await tx.principal.upsert({ where: { subject }, create: { subject }, update: {} });
-      const user = await tx.authUser.create({ data: { principalId: principal.id, roles: granted } });
+      const displayName = name === undefined ? null : requireDisplayName(name);
+      const user = await tx.authUser.create({ data: { principalId: principal.id, roles: granted, displayName } });
+      if (displayName) await upsertProfile(tx, principal.id, { displayName, source: "operator" });
       const key = this.credentials.create("rvk");
       await tx.authLoginKey.create({
         data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) },
       });
       return { userId: user.id, subject, roles: granted, loginKey: key.token };
     });
+  }
+  /** Sets the display name shown on documents and comments; also copied into the principal profile. */
+  async setDisplayName(subject: string, name: string) {
+    const displayName = requireDisplayName(name);
+    const user = await this.db.authUser.findFirst({ where: { principal: { subject: requireSubject(subject) } } });
+    if (!user) throw new Error("Unknown user.");
+    await this.db.$transaction(async (tx) => {
+      await tx.authUser.update({ where: { id: user.id }, data: { displayName } });
+      await upsertProfile(tx, user.principalId, { displayName, source: "operator" });
+    });
+    return { subject, displayName };
   }
   async createKey(subject: string) {
     const user = await this.db.authUser.findFirst({ where: { principal: { subject: requireSubject(subject) } } });
