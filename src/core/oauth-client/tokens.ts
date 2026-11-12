@@ -1,7 +1,25 @@
 import { z } from "zod";
 import type { safeFetch, SafeFetchOptions } from "../../sandbox/safe-fetch.js";
 import type { OAuthMetadata } from "./discovery.js";
-import { oauthFetch, OAuthProtocolError, type OAuthFetchResult } from "./http.js";
+import { logger } from "../logger.js";
+import { oauthFetch, OAuthProtocolError, type OAuthFetchResult, type OAuthRegistrationDetail } from "./http.js";
+
+const log = logger.child({ module: "oauth-client" });
+
+const PROVIDER_ERROR_CODE = /^[a-z_]{1,64}$/;
+const KNOWN_OTHER_AUTH_METHODS = [
+  "client_secret_jwt",
+  "private_key_jwt",
+  "tls_client_auth",
+  "self_signed_tls_client_auth",
+];
+
+/** Operator-log text from a provider: control characters dropped, at most 300 characters. */
+function boundedDescription(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, 300);
+}
 
 export type OAuthClientAuthMethod = "none" | "client_secret_post" | "client_secret_basic";
 
@@ -53,8 +71,8 @@ export async function registerClient(
   options?: SafeFetchOptions,
   fetchImpl?: Fetch,
 ): Promise<OAuthClient> {
-  const fail = (): never => {
-    throw new OAuthProtocolError("registration_failed", "The OAuth provider did not register the client.");
+  const fail = (detail?: OAuthRegistrationDetail): never => {
+    throw new OAuthProtocolError("registration_failed", "The OAuth provider did not register the client.", detail);
   };
   if (!meta.registrationEndpoint) fail();
   let r: OAuthFetchResult;
@@ -81,9 +99,40 @@ export async function registerClient(
   if (retryable(r.status)) {
     throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
   }
-  if (r.status < 200 || r.status >= 300) fail();
+  if (r.status < 200 || r.status >= 300) {
+    const body = r.json !== null && typeof r.json === "object" ? (r.json as Record<string, unknown>) : {};
+    const providerError =
+      typeof body.error === "string" && PROVIDER_ERROR_CODE.test(body.error) ? body.error : undefined;
+    // A registration request carries no secret values, so a bounded description may go to the operator log.
+    let host = "";
+    try {
+      host = new URL(meta.registrationEndpoint as string).hostname;
+    } catch {
+      /* the endpoint was already fetched; keep the log line anyway */
+    }
+    log.warn(
+      {
+        host,
+        status: r.status,
+        ...(providerError ? { error: providerError } : {}),
+        reason: "registration_failed",
+        ...(boundedDescription(body.error_description) !== undefined
+          ? { description: boundedDescription(body.error_description) }
+          : {}),
+      },
+      "oauth client registration refused",
+    );
+    return fail({ status: r.status, ...(providerError ? { providerError } : {}) });
+  }
+  const rawMethod = (r.json as { token_endpoint_auth_method?: unknown } | null | undefined)?.token_endpoint_auth_method;
+  if (typeof rawMethod === "string" && !(AUTH_METHODS as readonly string[]).includes(rawMethod)) {
+    return fail({
+      status: r.status,
+      authMethod: KNOWN_OTHER_AUTH_METHODS.includes(rawMethod) ? rawMethod : "unsupported",
+    });
+  }
   const parsed = registrationSchema.safeParse(r.json);
-  if (!parsed.success) fail();
+  if (!parsed.success) fail({ status: r.status });
   const d = parsed.data as z.infer<typeof registrationSchema>;
   return {
     clientId: d.client_id,

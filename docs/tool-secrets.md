@@ -116,6 +116,10 @@ Provider requirements:
   URI `https://<your-wardby-host>/oauth/callback` and pass its id as
   `oauth.clientId`; without it the call fails with
   [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md).
+  From 0.9.12, a provider that refuses the registration fails with
+  [`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md),
+  which names the provider's error code and the HTTP status (its description goes
+  only to the operator log).
 - `oauth.resource` must be an `https` URL with a host name (not an IP address); otherwise the call fails with
   [`secret_oauth_resource_invalid`](../help/errors/secret-oauth-resource-invalid.md). A secret name, scope or
   client id over its length limit fails with
@@ -405,6 +409,7 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 | [`secret_oauth_managed`](../help/errors/secret-oauth-managed.md)                           | An OAuth secret's value or broker cannot be changed by hand.               |
 | [`secret_oauth_name_taken`](../help/errors/secret-oauth-name-taken.md)                     | The name belongs to a secret that is not an OAuth secret.                  |
 | [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md)     | The provider needs a `clientId` you registered.                            |
+| [`secret_oauth_registration_failed`](../help/errors/secret-oauth-registration-failed.md)   | The provider refused to register Wardby (from 0.9.12).                     |
 | [`secret_oauth_encryption_failed`](../help/errors/secret-oauth-encryption-failed.md)       | The OAuth secret could not be encrypted or decrypted.                      |
 | [`secret_oauth_provider_unavailable`](../help/errors/secret-oauth-provider-unavailable.md) | The provider could not be reached while connecting.                        |
 | [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)   | The provider could not be reached to refresh the token.                    |

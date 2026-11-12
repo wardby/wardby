@@ -55,6 +55,10 @@ export function describeOAuthSecretError(err: unknown): OAuthSecretErrorDescript
     return described(502, err.message, code);
   }
   const message = err instanceof Error ? err.message : "";
+  // Composed by registrationFailedMessage from a validated code, a status and fixed sentences only.
+  if (message.startsWith("secret_oauth_registration_failed:")) {
+    return described(502, message, "secret_oauth_registration_failed");
+  }
   const fixed: [prefix: string, status: number, message: string][] = [
     ["secret_oauth_discovery_failed", 400, SECRET_OAUTH_DISCOVERY_FAILED],
     ["secret_oauth_resource_invalid", 400, SECRET_OAUTH_RESOURCE_INVALID],

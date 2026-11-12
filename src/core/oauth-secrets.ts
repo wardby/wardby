@@ -70,6 +70,27 @@ export const SECRET_OAUTH_INPUT_TOO_LONG =
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
 
+/**
+ * The caller-facing text of a refused client registration: only the validated error code, the HTTP
+ * status, a fixed-list method name and fixed sentences, never provider text. The loopback hint
+ * applies to the web flow only; on the loopback flow the provider refused even a loopback URI.
+ */
+export function registrationFailedMessage(err: OAuthProtocolError, callback: OAuthCallbackKind): string {
+  const d = err.registration ?? {};
+  const prefix = "secret_oauth_registration_failed:";
+  if (d.authMethod !== undefined) {
+    return `${prefix} the OAuth provider registered Wardby with an unsupported client authentication method (${d.authMethod})`;
+  }
+  const facts = [d.providerError, d.status !== undefined ? `HTTP ${d.status}` : undefined].filter(Boolean).join(", ");
+  const refused = d.status === undefined || d.status < 200 || d.status >= 300;
+  const base = refused
+    ? `${prefix} the OAuth provider refused to register Wardby${facts ? ` (${facts})` : ""}`
+    : `${prefix} the OAuth provider's registration reply was unusable (${facts})`;
+  return d.providerError === "invalid_redirect_uri" && callback === "web"
+    ? `${base}; it may accept only loopback callbacks — connect with oauth.callback "loopback" and the Wardby CLI`
+    : base;
+}
+
 /** Connecting (discovery, registration, start or finish) could not reach the provider: nothing changed. */
 export const SECRET_OAUTH_PROVIDER_UNAVAILABLE =
   "secret_oauth_provider_unavailable: the OAuth provider could not be reached; try again";
@@ -369,7 +390,14 @@ export async function startOAuthSecretConnect(input: {
   } else if (!meta.registrationEndpoint) {
     throw new Error(SECRET_OAUTH_CLIENT_ID_REQUIRED);
   } else {
-    client = await registerClient(meta, input.redirectUri, options, input.fetchImpl);
+    try {
+      client = await registerClient(meta, input.redirectUri, options, input.fetchImpl);
+    } catch (err) {
+      if (err instanceof OAuthProtocolError && err.code === "registration_failed") {
+        throw new Error(registrationFailedMessage(err, input.callback ?? "web"), { cause: err });
+      }
+      throw err;
+    }
   }
   const context: OAuthSecretContext = {
     ownerId: input.ownerId,

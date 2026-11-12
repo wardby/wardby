@@ -240,6 +240,46 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(changes[1].before).toEqual({ ...oauthBroker(fake.mcpUrl), oauthStatus: "connected" });
   });
 
+  it("names a refused registration's cause; the loopback hint is for the web flow only", async () => {
+    const refusing = await startFakeOAuthServer({
+      publicHost: HOST,
+      registerResponse: {
+        status: 400,
+        body: { error: "invalid_redirect_uri", error_description: "SECRET-DESCRIPTION" },
+      },
+    });
+    try {
+      const ownerId = await owner();
+      const start = (callback?: "web" | "loopback") =>
+        startOAuthSecretConnect({
+          db,
+          cipher,
+          ownerId,
+          name: "refused",
+          resource: refusing.mcpUrl,
+          redirectUri: REDIRECT,
+          options: OPTS,
+          ...(callback ? { callback } : {}),
+        }).then(
+          () => new Error("unreachable"),
+          (e: unknown) => e as Error,
+        );
+      logged.mockClear();
+      const web = await start("web");
+      expect(web.message).toBe(
+        'secret_oauth_registration_failed: the OAuth provider refused to register Wardby (invalid_redirect_uri, HTTP 400); it may accept only loopback callbacks — connect with oauth.callback "loopback" and the Wardby CLI',
+      );
+      const loop = await start("loopback");
+      expect(loop.message).toBe(
+        "secret_oauth_registration_failed: the OAuth provider refused to register Wardby (invalid_redirect_uri, HTTP 400)",
+      );
+      expect(web.message + loop.message).not.toContain("SECRET-DESCRIPTION");
+      expect(JSON.stringify(logged.mock.calls)).toContain("SECRET-DESCRIPTION");
+    } finally {
+      await refusing.close();
+    }
+  });
+
   it("refuses a name used by a non-OAuth secret, at start and at confirm", async () => {
     const ownerId = await owner();
     await db.secret.create({ data: { ownerId, name: "plain", ciphertext: "enc:eA==", keyId: "test-key" } });
