@@ -190,6 +190,10 @@ the repository root) and `baseRef`, with no `files`: Wardby reads the design
 from that directory at that branch. A document or design can only be linked to a
 repository its agent is already authorized for (`document_repo_link_invalid`
 otherwise). Publish changes with `publish_version` and a full `files` map.
+The full file set travels in one MCP request, which is capped at 1 MiB, so a
+design over about 1 MiB cannot be updated over MCP: change it in the browser
+editor, or send its comment threads to the design's agent. Importing from a
+repository only creates a design; it does not update one.
 `get_document` returns each file as a `--- <path> ---` section of
 `documentText`, with `kind`, the file sizes and any `warnings`. A request that
 does not fit the document's kind (Markdown for a design, files for a document)
@@ -442,26 +446,26 @@ plain `http` cannot be opened from the viewer (copy the address instead).
 
 ## Limits
 
-| Limit                        | Value                                                            |
-| ---------------------------- | ---------------------------------------------------------------- |
-| Markdown per version         | 1 MiB (UTF-8 bytes)                                              |
-| Design per version           | 2 MiB in all (`document_too_large`)                              |
-| One board                    | 40 KB recommended (a warning), 512 KB hard (`board_too_large`)   |
-| Boards per design            | 50                                                               |
-| `brand.md`                   | 64 KB                                                            |
-| MCP request body             | 1 MiB (publish larger designs from the repository or the editor) |
-| Comment or reply             | 10,000 characters                                                |
-| Quoted anchor text           | 500 characters                                                   |
-| Guest name                   | 1-40 characters                                                  |
-| Share link lifetime          | 1-90 days, default 14                                            |
-| Threads per send             | 50                                                               |
-| Sends per document           | 30 an hour                                                       |
-| PNG/PDF exports per document | 30 an hour, each at most 20 MiB                                  |
-| Guest comments and replies   | 30 an hour per guest                                             |
-| Guest registrations per link | 20 an hour                                                       |
-| Document sent to an agent    | 60,000 characters (a design: the 64 KiB coding task)             |
-| Mentions checked per comment | 20 (members and guests)                                          |
-| Live-update streams          | 5 per browser session on each server replica                     |
+| Limit                        | Value                                                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Markdown per version         | 1 MiB (UTF-8 bytes)                                                                                       |
+| Design per version           | 2 MiB in all (`document_too_large`)                                                                       |
+| One board                    | 40 KB recommended (a warning), 512 KB hard (`board_too_large`)                                            |
+| Boards per design            | 50                                                                                                        |
+| `brand.md`                   | 64 KB                                                                                                     |
+| MCP request body             | 1 MiB (`publish_version` sends every file: update a larger design in the editor; see [Designs](#designs)) |
+| Comment or reply             | 10,000 characters                                                                                         |
+| Quoted anchor text           | 500 characters                                                                                            |
+| Guest name                   | 1-40 characters                                                                                           |
+| Share link lifetime          | 1-90 days, default 14                                                                                     |
+| Threads per send             | 50                                                                                                        |
+| Sends per document           | 30 an hour                                                                                                |
+| PNG/PDF exports per document | 30 an hour, each at most 20 MiB                                                                           |
+| Guest comments and replies   | 30 an hour per guest                                                                                      |
+| Guest registrations per link | 20 an hour                                                                                                |
+| Document sent to an agent    | 60,000 characters (a design: the 64 KiB coding task)                                                      |
+| Mentions checked per comment | 20 (members and guests)                                                                                   |
+| Live-update streams          | 5 per browser session on each server replica                                                              |
 
 ## Security
 

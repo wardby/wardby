@@ -18,7 +18,7 @@ A design is a document of kind `design`: a `manifest.json` and one HTML file per
 - `files`: a map of path to text (`manifest.json`, `boards/<id>.html`, optional `brand.md`), following the [board format](design-boards-format.md); or
 - a coding `agentId`, `repository`, `path` (the directory with `manifest.json`; `.` for the root) and `baseRef`, with no `files`: Wardby imports the design from that directory at that branch.
 
-The result has the `documentId`, `url` and any `warnings` (scripts removed, a board over 40 KB). A design cannot be created from the browser. A document or design can only be linked to a repository its agent is already authorized for. Publish changes with `publish_version` and a full `files` map; read a design with `get_document`.
+The result has the `documentId`, `url` and any `warnings` (scripts removed, a board over 40 KB). A design cannot be created from the browser. A document or design can only be linked to a repository its agent is already authorized for. Publish changes with `publish_version` and a full `files` map; read a design with `get_document`. The full file set travels in one MCP request (at most 1 MiB), so a design over about 1 MiB cannot be updated over MCP: change it in the editor or send its threads to the agent. Importing from a repository only creates a design.
 
 Files that break the format are refused with [`board_format_invalid`](errors/board-format-invalid.md); asking for Markdown on a design (or files on a document) gives [`document_format_mismatch`](errors/document-format-mismatch.md).
 
@@ -46,7 +46,7 @@ A design linked to a repository directory and `baseRef` can send open pin thread
 
 ## Limits
 
-40 KB recommended and 512 KB hard per board ([`board_too_large`](errors/board-too-large.md)), 2 MiB per version ([`document_too_large`](errors/document-too-large.md)), 50 boards, and 1 MiB per MCP request (publish larger designs from the repository or the editor).
+40 KB recommended and 512 KB hard per board ([`board_too_large`](errors/board-too-large.md)), 2 MiB per version ([`document_too_large`](errors/document-too-large.md)), 50 boards, and 1 MiB per MCP request (create a larger design from a repository; update it in the editor or by sending threads to its agent, since `publish_version` sends every file).
 
 ## Security
 
