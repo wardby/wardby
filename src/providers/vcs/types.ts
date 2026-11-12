@@ -201,6 +201,8 @@ export interface VcsProvider {
    * provider (or test double) without it gives runs no services.
    */
   readRepositoryFile?(input: RepositoryFileInput): Promise<string | null>;
+  /** The commit a branch, tag or SHA names, or null when it does not exist. */
+  resolveRef?(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null>;
   /**
    * Re-derive a continuation's pull request description without pushing (a fix
    * round that made no changes). Undefined when there is nothing to refresh

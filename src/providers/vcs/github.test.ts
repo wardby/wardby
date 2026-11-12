@@ -2431,3 +2431,60 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     ).resolves.toEqual({ kind: "skipped", reason: "error" });
   });
 });
+
+describe("GitHubAppClient.resolveCommit", () => {
+  const SHA = "a".repeat(40);
+  function setup(opts: { installed: boolean; status?: number }) {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/repos/upstream-org/upstream/installation")) {
+        return opts.installed ? json({ id: 42 }) : json({ message: "Not Found" }, 404);
+      }
+      if (url.endsWith("/app/installations/42/access_tokens")) {
+        return tokenResponse({
+          permissions: { contents: "read" },
+          repositories: [{ full_name: "upstream-org/upstream" }],
+        });
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      if (url.includes("/repos/upstream-org/upstream/commits/")) {
+        return new Response(opts.status && opts.status !== 200 ? "{}" : `${SHA}\n`, { status: opts.status ?? 200 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    return { calls, client: new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW) };
+  }
+  const commitCall = (calls: Array<{ url: string; init?: RequestInit }>) =>
+    calls.find((c) => c.url.includes("/commits/"))!;
+
+  it("asks for the sha media type with a contents:read token", async () => {
+    const { calls, client } = setup({ installed: true });
+    await expect(client.resolveCommit("upstream-org/upstream", "main", "write")).resolves.toBe(SHA);
+    const call = commitCall(calls);
+    expect(call.url).toMatch(/\/repos\/upstream-org\/upstream\/commits\/main$/);
+    const headers = new Headers(call.init?.headers);
+    expect(headers.get("accept")).toBe("application/vnd.github.sha");
+    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(JSON.parse(bodyText(calls[1].init?.body)).permissions).toEqual({ contents: "read" });
+  });
+
+  it.each([404, 422])("returns null on %i", async (status) => {
+    const { client } = setup({ installed: true, status });
+    await expect(client.resolveCommit("upstream-org/upstream", "nope", "read")).resolves.toBeNull();
+  });
+
+  it("reads a public repository anonymously when the App is not installed (read links)", async () => {
+    const { calls, client } = setup({ installed: false });
+    await expect(client.resolveCommit("upstream-org/upstream", "main", "read")).resolves.toBe(SHA);
+    expect(new Headers(commitCall(calls).init?.headers).has("authorization")).toBe(false);
+  });
+
+  it("refuses a write link where the App is not installed", async () => {
+    const { client } = setup({ installed: false });
+    await expect(client.resolveCommit("upstream-org/upstream", "main", "write")).rejects.toThrow(
+      "github_app_not_installed",
+    );
+  });
+});

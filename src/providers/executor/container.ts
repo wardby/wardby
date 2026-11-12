@@ -2549,6 +2549,15 @@ export class ContainerExecutor implements Executor {
     });
   }
 
+  /** The commit a ref names (Executor.resolveCodingRepositoryRef). */
+  async resolveCodingRepositoryRef(input: {
+    repository: string;
+    ref: string;
+    access: "read" | "write";
+  }): Promise<string | null> {
+    return this.options.vcs.resolveRef ? this.options.vcs.resolveRef(input) : null;
+  }
+
   /** The job launcher decides (Kubernetes and Docker start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;

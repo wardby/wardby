@@ -110,6 +110,10 @@ export class RoutingVcsProvider implements VcsProvider {
     return this.optionalTarget(workspace.repository)?.continuationPullRequestDraft?.(workspace);
   }
 
+  async resolveRef(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null> {
+    return (await this.optionalTarget(input.repository)?.resolveRef?.(input)) ?? null;
+  }
+
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
     return (await this.optionalTarget(input.repository)?.readRepositoryFile?.(input)) ?? null;
   }

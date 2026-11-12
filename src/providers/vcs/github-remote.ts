@@ -64,6 +64,17 @@ export class GitHubRemote implements GitRemote {
     return this.options.github.withRepositoryToken(repository, fn);
   }
 
+  resolveCommit(repository: string, ref: string, access: "read" | "write"): Promise<string | null> {
+    const github = this.options.github;
+    if (!github.resolveCommit) throw new Error("vcs_resolve_ref_unsupported");
+    return github.resolveCommit(repository, ref, access);
+  }
+
+  withReadAccess<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T> {
+    const github = this.options.github;
+    return github.withReadToken ? github.withReadToken(repository, fn) : github.withRepositoryToken(repository, fn);
+  }
+
   conflictError(): Error {
     return new Error("vcs_head_ref_conflict");
   }

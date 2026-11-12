@@ -728,6 +728,11 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  async resolveRef(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null> {
+    if (!this.remote.resolveCommit) throw new Error("vcs_resolve_ref_unsupported");
+    return this.remote.resolveCommit(this.remote.normalizeRepository(input.repository), input.ref, input.access);
+  }
+
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
     if (!this.remote.readRepositoryFile) throw new Error("vcs_read_file_unsupported");
     return this.remote.readRepositoryFile(input);

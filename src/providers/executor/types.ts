@@ -89,6 +89,15 @@ export interface Executor {
     maxBytes: number;
   }): Promise<string | null>;
   /**
+   * The commit a ref names in a repository (null when the ref does not exist). Throws on a host
+   * failure. Called by dispatch before its transaction (network call).
+   */
+  resolveCodingRepositoryRef?(input: {
+    repository: string;
+    ref: string;
+    access: "read" | "write";
+  }): Promise<string | null>;
+  /**
    * Whether this executor can start coding-run services for a run of `provider`: its job launcher
    * says so (Kubernetes and Docker, for Codex and Claude Code).
    */

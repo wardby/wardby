@@ -127,6 +127,15 @@ export class RoutingExecutor implements Executor {
     return this.coding.readCodingRepositoryFile(input);
   }
 
+  async resolveCodingRepositoryRef(input: {
+    repository: string;
+    ref: string;
+    access: "read" | "write";
+  }): Promise<string | null> {
+    if (!this.coding.resolveCodingRepositoryRef) return null;
+    return this.coding.resolveCodingRepositoryRef(input);
+  }
+
   supportsNativeSandbox(): boolean {
     return this.sandbox !== undefined;
   }

@@ -5,6 +5,7 @@ import {
   normalizeLocalRepository,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
+import { COMMIT_SHA } from "../../coding/protocol.js";
 import { SHA, isSafeRefName, isSafeRepoPath, localGit, localGitBytes } from "../../coding/local-git.js";
 import type { RepositoryFileInput } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
@@ -51,6 +52,26 @@ export class LocalRemote implements GitRemote {
       throw new LocalRepoError("local_repo_not_allowed", "repository must be named by its real path");
     }
     return fn(undefined);
+  }
+
+  withReadAccess<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T> {
+    return this.withAccess(repository, fn);
+  }
+
+  /** The commit a ref names in the local repository, or null when the ref does not exist. */
+  async resolveCommit(repository: string, ref: string): Promise<string | null> {
+    const { path: dir } = await resolveLocalRepository(repository, this.options.roots());
+    if (!COMMIT_SHA.test(ref) && !(await isSafeRefName(dir, ref))) {
+      throw new LocalRepoError("local_ref_invalid", "invalid ref");
+    }
+    try {
+      const sha = (
+        await localGit(dir, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], 64 * 1024)
+      ).trim();
+      return COMMIT_SHA.test(sha) ? sha : null;
+    } catch {
+      return null;
+    }
   }
 
   /** No pull request to check: a continuation's branch must exist, which prepare's ls-remote pre-check enforces. */
