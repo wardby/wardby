@@ -7,8 +7,11 @@
  * webhooks use). Strictly the owner: the stdio operator's owner-level access
  * does not make it the owner whose repository authority the task steers.
  *
- * One rule for every path that hands a coding agent task text on someone's
- * behalf: trigger_agent and documents (linking and send). Resource-sharing
+ * One rule for the paths that hand a coding agent task text on behalf of a
+ * principal: trigger_agent and documents (linking and send). Not the only
+ * path: webhooks have no principal and read the opt-in directly, and the
+ * runner's cross-owner sub-agent checks compare owners (an owner-less agent
+ * counts as one owner) before applying the same opt-in. Resource-sharing
  * grants spec §3.4.5.
  */
 export interface CodingOverrideAgent {

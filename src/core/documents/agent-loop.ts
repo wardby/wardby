@@ -20,7 +20,13 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { Prisma, type PrismaClient } from "#prisma";
-import { byteLength, MAX_CODING_TASK_BYTES, publicCodingRunResult, truncateText } from "../../coding/protocol.js";
+import {
+  byteLength,
+  MAX_CODING_TASK_BYTES,
+  publicCodingRunResult,
+  redactTokenShapedValues,
+  truncateText,
+} from "../../coding/protocol.js";
 import { PostgresRateLimiter, RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 import type { Executor } from "../../providers/executor/types.js";
 import { RepositoryChoiceRefusedError } from "../coding-repository.js";
@@ -35,7 +41,7 @@ import { assertDocumentAgentOverride, validDocumentBaseRef, validDocumentPath } 
 import { listThreads, postAgentReply } from "./comments.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { publishVersion } from "./service.js";
-import { redactSecrets } from "../../coding/redact.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 
 const log = logger.child({ module: "documents-agent-loop" });
 
@@ -465,9 +471,11 @@ async function publishRunEdit(
       maxBytes: MAX_MARKDOWN_BYTES,
     });
     if (read === null) return { kind: "failed" };
-    // Agent output: the agent's secret values by exact value, then every token shape (an installation
-    // token or provider key the run saw), as its replies are. publishVersion's exact-value pass runs too.
-    const markdown = redactSecrets(read, secretValues);
+    // Agent output: every token shape (an installation token or provider key the run saw), then the
+    // agent's secret values by exact value at the default minimum length. Not redactSecrets: its loose
+    // "Bearer <word>" pattern and 1-character exact matching would corrupt ordinary prose that is then
+    // written back to the repository. publishVersion's exact-value pass runs too.
+    const markdown = redactExactSecretValues(redactTokenShapedValues(read), secretValues);
     const branch = result?.headRef ?? ref;
     if (markdown === doc.currentVersion?.markdown) {
       return doc.currentVersion.number === sentVersion ? { kind: "unchanged" } : { kind: "conflict", branch };

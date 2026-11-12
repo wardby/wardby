@@ -11,7 +11,7 @@ import type { Principal } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
 import { RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 import { createPrismaClient } from "../db.js";
-import { attachSecret, createSecret } from "../secrets.js";
+import { attachSecret, createSecret, detachSecret } from "../secrets.js";
 import { UNTRUSTED_CONTEXT_TAG } from "../untrusted-content.js";
 import type { Viewer } from "./access.js";
 import { markRunFailedFromExecutorError } from "../dispatch.js";
@@ -313,6 +313,32 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await onDocumentRunFinished(db, deps, runId);
     expect(await db.comment.count({ where: { runId } })).toBe(2);
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
+  });
+
+  it("publishes agent Markdown prose unchanged: Bearer wording and short secret values are not redacted", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Explain auth");
+    const shortName = `AL_SHORT_${Math.random().toString(36).slice(2, 8)}`;
+    await createSecret(shortName, "ab", owner.id, cipher, db);
+    await attachSecret(codingAgentId, shortName, owner.id, db);
+    try {
+      const { runId } = await sendThreadsToAgent(db, deps, {
+        documentId: docId,
+        viewer: asWriter(),
+        threadIds: [t1.threadId],
+      });
+      const sha = await finish(runId, "succeeded", "Done.");
+      const prose =
+        "hello world\n\nSend a Bearer token with each call: `Authorization: Bearer <token>`.\n\nThe abacus.";
+      files.set(`${sha}:${path}`, prose);
+      await onDocumentRunFinished(db, deps, runId);
+      const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+      expect(doc.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
+      expect(doc.currentVersion!.markdown).toBe(prose);
+    } finally {
+      await detachSecret(codingAgentId, shortName, db);
+      await db.secret.deleteMany({ where: { name: shortName, ownerId: owner.id } });
+    }
   });
 
   it("publishes the agent's file with its secret values and token-shaped values redacted", async () => {

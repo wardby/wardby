@@ -46,8 +46,9 @@ once), `list_share_links` (ids, permission, expiry, revoked, guest count; never
 URLs) and `revoke_share_link` (signs out the guests who used it).
 
 Content tools: `create_document` (Markdown up to 1 MiB; to let a coding agent
-edit it, give `repository` and `path` together with an `agentId` you can
-execute; `local:` repositories must be inside the trusted roots, else
+edit it, give `repository` and `path` together with an `agentId` of a coding
+agent you own (or one whose owner allows task text from others with
+`allowWebhookTaskOverride`, with execute access for you); `local:` repositories must be inside the trusted roots, else
 `document_repo_link_invalid` or the usual repository errors), `publish_version`
 (needs write access; open threads whose text is gone become outdated),
 `get_document` (current or a `versionNumber`; the title and Markdown come in
