@@ -142,6 +142,103 @@ describe("brokeredFetch 401 retry", () => {
   });
 });
 
+describe("brokeredFetch 401 retry with several secrets", () => {
+  const apiKey = {
+    placement: { kind: "header", name: "X-Api-Key", format: "{value}" },
+    hosts: ["oauth.fake.test"],
+  };
+  const sigv4 = {
+    placement: { kind: "aws-sigv4", region: "us-east-1", service: "service" },
+    hosts: ["oauth.fake.test"],
+  };
+  const awsValue = JSON.stringify({
+    accessKeyId: "AKIDEXAMPLE",
+    secretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  });
+
+  it("refreshes both OAuth secrets once and re-applies both placements on the retry", async () => {
+    const t = setup([401, 200]);
+    const refreshCalls: Array<[string, string]> = [];
+    const secrets = {
+      resolve: async (name: string) =>
+        name === "a"
+          ? oauthEntry("old-a-token-1", ["old-a-token-1", "old-a-refresh-1"])
+          : ({
+              value: "old-b-token-1",
+              broker: apiKey,
+              oauth: { redact: ["old-b-token-1"] },
+            } as unknown as SecretEntry),
+      refresh: async (name: string, used: string) => {
+        refreshCalls.push([name, used]);
+        return name === "a"
+          ? oauthEntry("new-a-token-2", ["new-a-token-2", "new-a-refresh-2"])
+          : ({
+              value: "new-b-token-2",
+              broker: apiKey,
+              oauth: { redact: ["new-b-token-2"] },
+            } as unknown as SecretEntry);
+      },
+    } as unknown as SecretsAccessor;
+    const out = (await brokeredFetch({
+      ...base,
+      secretNames: ["a", "b"],
+      init: { method: "POST", body: '{"a":1}' },
+      secrets,
+      fetchImpl: t.fetchImpl,
+      redactFromConsole: t.redactFromConsole,
+    })) as { status: number };
+    expect(out.status).toBe(200);
+    expect(refreshCalls).toEqual([
+      ["a", "old-a-token-1"],
+      ["b", "old-b-token-1"],
+    ]);
+    expect(t.calls).toHaveLength(2);
+    expect(t.calls[0].init.headers).toMatchObject({
+      authorization: "Bearer old-a-token-1",
+      "x-api-key": "old-b-token-1",
+    });
+    expect(t.calls[1].init.headers).toMatchObject({
+      authorization: "Bearer new-a-token-2",
+      "x-api-key": "new-b-token-2",
+    });
+    expect(t.calls[1].init.body).toBe('{"a":1}');
+    expect(t.console_).toEqual(expect.arrayContaining(["new-a-token-2", "new-a-refresh-2", "new-b-token-2"]));
+  });
+
+  it("refreshes only the OAuth secret next to an AWS SigV4 one, and signs the retry again", async () => {
+    const t = setup([401, 200]);
+    const refreshCalls: string[] = [];
+    const secrets = {
+      resolve: async (name: string) =>
+        name === "oauth"
+          ? ({ value: "old-token-1", broker: apiKey, oauth: { redact: ["old-token-1"] } } as unknown as SecretEntry)
+          : { value: awsValue, broker: sigv4 },
+      refresh: async (name: string) => {
+        refreshCalls.push(name);
+        return { value: "new-token-2", broker: apiKey, oauth: { redact: ["new-token-2"] } } as unknown as SecretEntry;
+      },
+    } as unknown as SecretsAccessor;
+    const out = (await brokeredFetch({
+      ...base,
+      secretNames: ["oauth", "aws"],
+      init: { method: "GET" },
+      secrets,
+      fetchImpl: t.fetchImpl,
+      redactFromConsole: t.redactFromConsole,
+    })) as { status: number };
+    expect(out.status).toBe(200);
+    expect(refreshCalls).toEqual(["oauth"]);
+    expect(t.calls).toHaveLength(2);
+    expect(t.calls[0].init.headers?.["x-api-key"]).toBe("old-token-1");
+    // Both placements are applied again: the API key is the new token, the SigV4 headers are present.
+    expect(t.calls[1].init.headers?.["x-api-key"]).toBe("new-token-2");
+    for (const call of t.calls) {
+      expect(call.init.headers?.["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+      expect(JSON.stringify(call.init.headers)).not.toContain("wJalrXUtnFEMI");
+    }
+  });
+});
+
 describe("brokeredFetch stop signal", () => {
   it("passes the policy's signal to resolve and to the 401 refresh", async () => {
     const t = setup([401, 200]);

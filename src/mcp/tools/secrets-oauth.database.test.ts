@@ -149,6 +149,32 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     await close();
   });
 
+  it("delete_secret revokes the refresh and access tokens at the provider, then deletes and audits", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    const started = await call("create_secret", { name: "revoke-me", oauth: { resource: fake.mcpUrl } });
+    const html = await visitCallback((JSON.parse(started.text) as { url: string }).url);
+    const code = /([A-Z2-7]{4}-[A-Z2-7]{4})/.exec(html)?.[1] ?? "";
+    expect((await call("create_secret", { name: "revoke-me", confirmationCode: code })).isError).toBe(false);
+    const row = await db.secret.findUniqueOrThrow({ where: { ownerId_name: { ownerId: p.id, name: "revoke-me" } } });
+    const tokens = JSON.parse(await cipher.decrypt(row.ciphertext)) as { accessToken: string; refreshToken: string };
+    expect(fake.revoked.size).toBe(0);
+
+    const deleted = await call("delete_secret", { id: row.id });
+    expect(deleted.isError).toBe(false);
+    expect(JSON.parse(deleted.text)).toEqual({ deleted: row.id });
+    expect(fake.revoked.has(tokens.refreshToken)).toBe(true);
+    expect(fake.revoked.has(tokens.accessToken)).toBe(true);
+    expect(await db.secret.findUnique({ where: { id: row.id } })).toBeNull();
+    const audit = await db.secretBrokerChange.findMany({ where: { secretId: row.id }, orderBy: { createdAt: "asc" } });
+    expect(audit.at(-1)).toMatchObject({ after: null, via: "mcp", actorId: p.id });
+    for (const leak of [tokens.accessToken, tokens.refreshToken]) {
+      expect(deleted.text).not.toContain(leak);
+      expect(JSON.stringify(audit)).not.toContain(leak);
+    }
+    await close();
+  });
+
   it("refuses oauth over stdio (no canonical URI)", async () => {
     const p = await principal();
     const { call, close } = await connect(p, "stdio");

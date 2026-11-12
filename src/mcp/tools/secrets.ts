@@ -553,6 +553,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       }
       await deleteSecret(args.id, ctx.db, {
         cipher: ctx.providers.secrets,
+        options: ctx.providers.sandboxFetchOptions,
         fetchImpl: ctx.providers.sandboxFetch,
         actorId: ctx.principal.id,
       });
