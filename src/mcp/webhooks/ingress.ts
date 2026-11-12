@@ -57,12 +57,23 @@ export async function handleWebhookIngress(
     return { status: 400, body: { error: "invalid_repository" } };
   }
 
+  const repositories = req.body.wardbyRepositories;
+  if (
+    repositories !== undefined &&
+    (!Array.isArray(repositories) ||
+      repositories.length > 32 ||
+      repositories.some((r) => typeof r !== "string" || r.length === 0 || r.length > 63))
+  ) {
+    return { status: 400, body: { error: "invalid_repositories" } };
+  }
+
   // `wardbyIssue`, not `issue`: forwarded third-party payloads (GitHub, Jira)
   // carry their own top-level `issue` object, which is not ours to read.
   const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask, {
     issue: req.body.wardbyIssue,
     issueTrackers,
     repository,
+    repositories: repositories as string[] | undefined,
   });
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
@@ -72,6 +83,17 @@ export async function handleWebhookIngress(
       return { status: 400, body: { error: "invalid_issue", error_description: result.message } };
     case "invalid_repository":
       return { status: 400, body: { error: "invalid_repository" } };
+    case "invalid_repositories":
+      // A duplicate name carries the plain code and gets no description.
+      return {
+        status: 400,
+        body: {
+          error: "invalid_repositories",
+          ...(result.code !== "invalid_repositories" ? { error_description: result.code } : {}),
+        },
+      };
+    case "repository_ref_unreadable":
+      return { status: 400, body: { error: "repository_ref_unreadable" } };
     case "not_found":
       return { status: 404, body: { error: "not_found" } };
     case "invalid_secret":

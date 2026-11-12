@@ -1,5 +1,6 @@
 import type { CodingProvider } from "../../coding/provider.js";
 import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
+import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";
 
 /**
  * Which executor owns a run: a coding run, a native run in the control plane
@@ -134,6 +135,12 @@ export class RoutingExecutor implements Executor {
   }): Promise<string | null> {
     if (!this.coding.resolveCodingRepositoryRef) return null;
     return this.coding.resolveCodingRepositoryRef(input);
+  }
+
+  async authorizeCodingRepository(input: AuthorizeUseInput): Promise<RepoAccessDecision> {
+    // Fail closed: a coding executor without the gate authorizes nothing.
+    if (!this.coding.authorizeCodingRepository) return { ok: false, reason: "check_failed" };
+    return this.coding.authorizeCodingRepository(input);
   }
 
   supportsNativeSandbox(): boolean {

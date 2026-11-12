@@ -31,13 +31,17 @@ import {
 } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import {
-  CODING_REPOSITORY_LINK_FILTER,
   type CodingRepositoryReader,
   extraCodingRepositoryLinks,
   hasCodingRepositoryList,
   RepositoryChoiceRefusedError,
   resolveCodingRepository,
 } from "./coding-repository.js";
+import {
+  CODING_SET_LINK_FILTER,
+  RepositoryRefUnreadableError,
+  RepositorySetRefusedError,
+} from "./coding-repository-set.js";
 import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
 import { runStepsHook } from "./run-steps/native.js";
 import type { RunStepSink } from "./run-steps/types.js";
@@ -177,6 +181,8 @@ export function delegateToolDef(
   boundName: string,
   parallel: boolean,
   repositories: readonly string[] = [],
+  /** The child's repository link names a run can add (#537); none keeps the cached definition. */
+  repositoryNames: readonly string[] = [],
 ): LoadedTool {
   // With the flag off the description stays byte-identical to before, so
   // existing leads keep their cached tool definitions.
@@ -192,6 +198,17 @@ export function delegateToolDef(
             enum: [...repositories],
             description:
               "Which repository this sub-agent run works in. Required unless continuePriorRun names the run to continue.",
+          },
+        }
+      : {};
+  const repositoriesProperty =
+    repositoryNames.length > 0
+      ? {
+          repositories: {
+            type: "array",
+            items: { type: "string", enum: [...repositoryNames] },
+            description:
+              "Which of the sub-agent's repository links this run also gets, at /repos/<name>, replacing its default set. [] = its default repository only.",
           },
         }
       : {};
@@ -224,6 +241,7 @@ export function delegateToolDef(
             "equal numbers have no order between them. Set it whenever one change spans several repositories.",
         },
         ...repositoryProperty,
+        ...repositoriesProperty,
       },
       required: ["task"],
       additionalProperties: false,
@@ -247,6 +265,7 @@ const DelegateArgs = z
       .max(99, MERGE_ORDER_RANGE_MESSAGE)
       .optional(),
     repository: z.string().min(1).max(300).optional(),
+    repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
   })
   .strict();
 
@@ -369,7 +388,7 @@ async function delegationTarget(
   | { refusal: string }
 > {
   if (childAgent.kind !== "coding" || !childAgent.codingProfile) {
-    if (args.repository !== undefined) {
+    if (args.repository !== undefined || args.repositories !== undefined) {
       return {
         refusal: JSON.stringify({
           error: "repository_requires_coding_agent",
@@ -399,6 +418,11 @@ async function delegationTarget(
     }
     throw err;
   }
+}
+
+/** Its message names link names and ref-file paths only (owner-set), never a model-written value or a file's content. */
+function repositorySetRefusal(err: RepositorySetRefusedError | RepositoryRefUnreadableError): string {
+  return JSON.stringify({ error: err.code, message: err.message });
 }
 
 function repositoryRefusal(err: RepositoryChoiceRefusedError): string {
@@ -906,7 +930,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
         ? await db.agentRepository.findMany({
             where: {
               agentId: { in: subAgentEdges.map((edge) => edge.childAgentId) },
-              ...CODING_REPOSITORY_LINK_FILTER,
+              ...CODING_SET_LINK_FILTER,
               agent: { kind: "coding" },
             },
             include: {
@@ -920,13 +944,20 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
             orderBy: { repository: "asc" },
           })
         : [];
-    const repositoriesOf = async (childAgentId: string): Promise<string[]> => {
+    const repositoriesOf = async (childAgentId: string): Promise<{ repositories: string[]; names: string[] }> => {
+      const none = { repositories: [], names: [] };
       const links = childLinks.filter((link) => link.agentId === childAgentId);
       const child = links[0]?.agent;
       const profile = child?.codingProfile;
-      if (!profile) return [];
-      const extras = extraCodingRepositoryLinks(links, profile.repository);
-      if (extras.length === 0) return [];
+      if (!profile) return none;
+      // The `repository` choice is among write links; the `repositories` set is any set-eligible link
+      // but a write link to the child's default repository (that is the run's /workspace, never an extra).
+      const writeExtras = extraCodingRepositoryLinks(
+        links.filter((link) => link.access === "write"),
+        profile.repository,
+      );
+      const names = links.filter((link) => link.access !== "write" || writeExtras.includes(link)).map((l) => l.name);
+      if (names.length === 0) return none;
       // Across owners, as authorizeDelegation compares them (owner-less on both sides is the same
       // owner): the list is the child's owner's to show, so only a lead that could choose sees it.
       // That takes the opt-in and the lead's owner's execute access; revoke_access leaves the edge.
@@ -939,14 +970,18 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
           (await canDelegate(db, { ownerId: leadOwnerId }, { id: childAgentId, ownerId: childOwnerId }))
         )
       ) {
-        return [];
+        return none;
       }
-      return [profile.repository, ...extras.map((link) => link.repository)];
+      return {
+        repositories: writeExtras.length > 0 ? [profile.repository, ...writeExtras.map((link) => link.repository)] : [],
+        names,
+      };
     };
     const delegateTools = await Promise.all(
-      subAgentEdges.map(async (edge): Promise<LoadedTool> =>
-        delegateToolDef(edge.boundName, agent.parallelDelegations, await repositoriesOf(edge.childAgentId)),
-      ),
+      subAgentEdges.map(async (edge): Promise<LoadedTool> => {
+        const { repositories, names } = await repositoriesOf(edge.childAgentId);
+        return delegateToolDef(edge.boundName, agent.parallelDelegations, repositories, names);
+      }),
     );
     // Only queried when the runner was given review hosts. buildReviewHosts
     // always includes the local host, so a configured server always queries;
@@ -1594,6 +1629,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
                 codingRepository: delegation.repository,
+                codingRepositories: args.repositories,
                 requireExplicitRepository: true,
                 parentRunId: runId,
                 parentCallId: callId,
@@ -1613,6 +1649,9 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             } catch (err) {
               // An unlink since the check above (a wait for budget, say) is the model's to report.
               if (err instanceof RepositoryChoiceRefusedError) return repositoryRefusal(err);
+              if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
+                return repositorySetRefusal(err);
+              }
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
@@ -2323,6 +2362,7 @@ export async function durableDelegate(
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
               codingRepository: delegation.repository,
+              codingRepositories: dispatchArgs.repositories,
               requireExplicitRepository: true,
             }
           : {
@@ -2343,6 +2383,9 @@ export async function durableDelegate(
     } catch (err) {
       // An unlink since the check above (a wait for budget, say) is the model's to report.
       if (err instanceof RepositoryChoiceRefusedError) return finish(repositoryRefusal(err));
+      if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
+        return finish(repositorySetRefusal(err));
+      }
       if (err instanceof ContinuationRefusedError) {
         return finish(
           JSON.stringify({

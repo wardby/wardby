@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
-import { normalizeHostedRepository } from "../coding/code-host.js";
+import { codeProviderOf, normalizeHostedRepository } from "../coding/code-host.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingTaskInputSchema,
@@ -42,6 +42,15 @@ import {
   type CodingRepositoryReader,
   type CodingRepositoryTarget,
 } from "./coding-repository.js";
+import {
+  CODING_SET_LINK_FILTER,
+  planRepositorySet,
+  resolveRepositorySetRefs,
+  type PlannedRunRepository,
+  type ResolvedRunRepository,
+} from "./coding-repository-set.js";
+import { loadCodingRunRepositoryLimit } from "../config/providers.js";
+import { describeDenial, requiredLevel } from "./repo-access.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
@@ -71,6 +80,7 @@ export type DispatchTx = Pick<
   | "runHostStatus"
   | "runIssueStatus"
   | "codingRun"
+  | "codingRunRepository"
   | "codingService"
   | "task"
   | "webhook"
@@ -157,6 +167,8 @@ export interface DispatchRunOptions {
   taskOverride?: string;
   /** The repository for a coding run; must be on the agent's list. Default: codingProfile.repository. */
   codingRepository?: string;
+  /** The run's extra repositories by link name, replacing the agent's default set (#537). [] = the default repository only. */
+  codingRepositories?: string[];
   /** Refuse with repository_required when the agent has links and nothing names a repository. */
   requireExplicitRepository?: boolean;
   /**
@@ -700,6 +712,121 @@ export async function resolveDispatchServices(
   );
 }
 
+/** The run's extra repositories (#537 §1) from the agent's set-eligible links, before any ref is resolved. */
+async function planExtras(
+  reader: Pick<DispatchTx, "agentRepository">,
+  options: DispatchRunOptions,
+  target: CodingRepositoryTarget,
+  profileBaseRef: string,
+): Promise<PlannedRunRepository[]> {
+  const links = await reader.agentRepository.findMany({
+    where: { agentId: options.agentId, ...CODING_SET_LINK_FILTER },
+    select: {
+      id: true,
+      name: true,
+      provider: true,
+      repository: true,
+      access: true,
+      baseRef: true,
+      ref: true,
+      refFromFile: true,
+      inDefaultSet: true,
+      createdAt: true,
+    },
+  });
+  return planRepositorySet({
+    links,
+    workspace: { provider: codeProviderOf(target.repository), repository: target.repository },
+    requested: options.codingRepositories,
+    limit: loadCodingRunRepositoryLimit(),
+    profileBaseRef,
+  });
+}
+
+/** What a plan is compared by: a link changed between the preview and the transaction refuses the dispatch. */
+function planKey(plan: readonly PlannedRunRepository[]): string {
+  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile]));
+}
+
+/**
+ * Every extra repository through the repository-access gate (the GitHub allowlist included, for read
+ * links too), before any of their refs is read: nothing is fetched from a repository the agent may not
+ * use. Returns the refusal (`repo_access_<reason>: …`) for the first denied row, else undefined. A row
+ * whose link is gone is not authorized.
+ */
+export async function authorizeRunRepositories(
+  reader: Pick<DispatchTx, "agentRepository">,
+  executor: Executor,
+  agentId: string,
+  ownerId: string | null,
+  rows: readonly Pick<PlannedRunRepository, "linkId" | "provider" | "repository" | "access">[],
+): Promise<string | undefined> {
+  if (rows.length === 0) return undefined;
+  if (!executor.authorizeCodingRepository) throw new Error(CODING_REPOSITORIES_UNSUPPORTED);
+  const linkIds = rows.flatMap((r) => (r.linkId === null ? [] : [r.linkId]));
+  const links = await reader.agentRepository.findMany({
+    where: { agentId, id: { in: linkIds } },
+    select: { id: true, access: true, authorizedVia: true },
+  });
+  for (const row of rows) {
+    const link = links.find((l) => l.id === row.linkId && l.access === row.access);
+    const decision = link
+      ? await executor.authorizeCodingRepository({
+          ownerId,
+          provider: row.provider,
+          repository: row.repository,
+          required: requiredLevel(row.access === "read" ? "coding_read" : "coding"),
+          authorizedVia: link.authorizedVia,
+        })
+      : ({ ok: false, reason: "not_authorized" } as const);
+    if (!decision.ok) return `repo_access_${decision.reason}: ${describeDenial(decision, row.repository)}`;
+  }
+  return undefined;
+}
+
+const CODING_REPOSITORIES_UNSUPPORTED =
+  "coding_repositories_unsupported: this deployment cannot resolve extra repositories.";
+
+/** Resolves a plan's refs with the executor; throws coding_repositories_unsupported without its methods. */
+export function resolveExtrasWith(
+  executor: Executor,
+  plan: readonly PlannedRunRepository[],
+  workspace: { repository: string; baseRef: string },
+): Promise<ResolvedRunRepository[]> {
+  if (plan.length === 0) return Promise.resolve([]);
+  const readFile = executor.readCodingRepositoryFile?.bind(executor);
+  const resolveRef = executor.resolveCodingRepositoryRef?.bind(executor);
+  if (!readFile || !resolveRef) throw new Error(CODING_REPOSITORIES_UNSUPPORTED);
+  return resolveRepositorySetRefs(plan, { workspace, readFile, resolveRef });
+}
+
+/** A continuation's rows: its root's, as they are (D5); never re-resolved. */
+export async function copyRootRepositoryRows(
+  tx: Pick<DispatchTx, "codingRunRepository">,
+  rootRunId: string,
+  runId: string,
+): Promise<void> {
+  const rows = await tx.codingRunRepository.findMany({ where: { runId: rootRunId }, orderBy: { position: "asc" } });
+  if (rows.length === 0) return;
+  await tx.codingRunRepository.createMany({
+    data: rows.map((r) => ({
+      runId,
+      position: r.position,
+      name: r.name,
+      access: r.access,
+      provider: r.provider,
+      repository: r.repository,
+      requestedRef: r.requestedRef,
+      refFromFile: r.refFromFile,
+      resolvedSha: r.resolvedSha,
+      viaRepositoryLink: r.viaRepositoryLink,
+      linkId: r.linkId,
+      baseRef: r.baseRef,
+      headRef: r.headRef,
+    })),
+  });
+}
+
 /**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
@@ -731,6 +858,29 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     !deferCoding && preview?.kind === "coding" && preview.codingProfile
       ? await codingTarget(options.db, options, preview.codingProfile)
       : undefined;
+  // The run's extra repositories (#537): planned from the agent's links, each authorized, then each
+  // ref resolved to a commit, all before the transaction (network calls). A set or ref refusal
+  // propagates: nothing has been written. An access denial refuses the run in the transaction below.
+  // A continuation takes its root's rows instead, and a deferred run resolves them when it starts.
+  let previewPlan: PlannedRunRepository[] | undefined;
+  let resolvedExtras: ResolvedRunRepository[] = [];
+  let extrasRefusal: string | undefined;
+  if (!deferCoding && preview?.codingProfile && previewTarget && options.continuesCodingRunId === undefined) {
+    previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile.baseRef);
+    extrasRefusal = await authorizeRunRepositories(
+      options.db,
+      options.executor,
+      options.agentId,
+      preview.ownerId ?? null,
+      previewPlan,
+    );
+    if (!extrasRefusal) {
+      resolvedExtras = await resolveExtrasWith(options.executor, previewPlan, {
+        repository: previewTarget.repository,
+        baseRef: options.codingBaseRef ?? previewTarget.baseRef,
+      });
+    }
+  }
   // Only an agent allowed some service reads the repository's declaration; any
   // other coding agent never calls the host for it and gets no services.
   const declarationRead =
@@ -782,12 +932,20 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         let services: ResolvedCodingService[] = [];
         let servicesRefusal: string | undefined;
         let target: CodingRepositoryTarget | undefined;
+        let inTxPlan: PlannedRunRepository[] = [];
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           // An unknown coding provider is a broken profile, not a catalog state: still thrown.
           assertCodingProvider(agent.codingProfile.provider);
           // Resolved again inside the transaction: an unlink since the preview refuses the run here.
           target = await codingTarget(tx, options, agent.codingProfile);
+          if (options.continuesCodingRunId === undefined) {
+            // Planned again inside the transaction: a link changed since the preview refuses the dispatch.
+            inTxPlan = await planExtras(tx, options, target, agent.codingProfile.baseRef);
+            if (!deferCoding && planKey(inTxPlan) !== planKey(previewPlan ?? [])) {
+              throw new Error("The coding agent's repository links changed during dispatch; try again.");
+            }
+          }
           // Recorded on the run row below: the run is billed at this entry for its whole life.
           // A model the catalog cannot run (missing, disabled, or another provider's) fails
           // the run here instead of throwing: the run row commits with the reason, so the
@@ -819,9 +977,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!modelFailure && !servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          if (!modelFailure && !servicesRefusal && !extrasRefusal) {
+            codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          }
         }
-        const refusal = servicesRefusal ?? codingBudget?.refusal;
+        const refusal = modelFailure ? undefined : (servicesRefusal ?? extrasRefusal ?? codingBudget?.refusal);
 
         const run = await tx.run.create({
           data: {
@@ -971,12 +1131,39 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               services,
             },
           });
+          // The run's repository set, fixed here with the CodingRun (#537 §2).
+          if (rootCodingRunId) {
+            await copyRootRepositoryRows(tx, rootCodingRunId, run.id);
+          } else {
+            const rows: (PlannedRunRepository & { resolvedSha: string | null })[] = deferCoding
+              ? inTxPlan.map((r) => ({ ...r, requestedRef: r.refFromFile ? null : r.requestedRef, resolvedSha: null }))
+              : resolvedExtras;
+            if (rows.length > 0) {
+              await tx.codingRunRepository.createMany({
+                data: rows.map((r) => ({
+                  runId: run.id,
+                  position: r.position,
+                  name: r.name,
+                  access: r.access,
+                  provider: r.provider,
+                  repository: r.repository,
+                  requestedRef: r.requestedRef,
+                  refFromFile: r.refFromFile,
+                  resolvedSha: r.resolvedSha,
+                  linkId: r.linkId,
+                  baseRef: r.access === "write" ? r.baseRef : null,
+                  headRef: r.access === "write" ? headRef : null,
+                })),
+              });
+            }
+          }
         } else if (
           agent.kind !== "coding" &&
           (options.codingTask !== undefined ||
             options.codingBaseRef !== undefined ||
             options.continuesCodingRunId !== undefined ||
-            options.codingRepository !== undefined)
+            options.codingRepository !== undefined ||
+            options.codingRepositories !== undefined)
         ) {
           throw new Error("Coding overrides cannot be supplied for a native agent.");
         }

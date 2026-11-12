@@ -5,7 +5,14 @@ import { parseAllowedServiceNames, type ResolvedCodingService } from "../coding/
 import { servicesInstructionNote } from "../coding/services/note.js";
 import { knowledgeSection } from "../knowledge/note.js";
 import type { Executor } from "../providers/executor/types.js";
-import { readKnowledgeIndexAt, readServiceDeclarationAt, resolveDispatchServices } from "./dispatch.js";
+import { RepositoryRefUnreadableError, type PlannedRunRepository } from "./coding-repository-set.js";
+import {
+  authorizeRunRepositories,
+  readKnowledgeIndexAt,
+  readServiceDeclarationAt,
+  resolveDispatchServices,
+  resolveExtrasWith,
+} from "./dispatch.js";
 
 export interface ResolveDeferredCodingInput {
   db: PrismaClient;
@@ -38,6 +45,47 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
   };
+  const refuse = async (error: string) => {
+    await db.run.updateMany({
+      where: { id: runId, status: "pending" },
+      data: { status: "refused", error, finishedAt: new Date() },
+    });
+    return false;
+  };
+  // The extra repositories dispatch recorded unresolved (#537), in dispatch's order: each authorized,
+  // then each ref resolved to a commit, before the services.
+  const rows = await db.codingRunRepository.findMany({
+    where: { runId, resolvedSha: null },
+    orderBy: { position: "asc" },
+  });
+  if (rows.length > 0) {
+    const planned: PlannedRunRepository[] = rows.map((r) => ({
+      position: r.position,
+      name: r.name,
+      access: r.access === "write" ? "write" : "read",
+      provider: r.provider,
+      repository: r.repository,
+      requestedRef: r.requestedRef,
+      refFromFile: r.refFromFile,
+      linkId: r.linkId,
+      baseRef: r.baseRef,
+    }));
+    const denied = await authorizeRunRepositories(db, executor, run.agentId, run.agent.ownerId, planned);
+    if (denied) return refuse(denied);
+    let resolved;
+    try {
+      resolved = await resolveExtrasWith(executor, planned, { repository: coding.repository, baseRef: coding.baseRef });
+    } catch (err) {
+      if (err instanceof RepositoryRefUnreadableError) return refuse(err.message);
+      throw err;
+    }
+    for (const row of resolved) {
+      await db.codingRunRepository.updateMany({
+        where: { runId, name: row.name, resolvedSha: null },
+        data: { requestedRef: row.requestedRef, resolvedSha: row.resolvedSha },
+      });
+    }
+  }
   // Services before images, in dispatch's order: a run with both a refused declaration and a bad
   // image ends refused. As at dispatch, only an agent allowed some service reads the declaration,
   // and any refusal dispatch would have raised refuses the run here instead.
@@ -53,13 +101,7 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
       coding.task,
       run.agent.systemPrompt,
     );
-    if ("refusal" in resolved) {
-      await db.run.updateMany({
-        where: { id: runId, status: "pending" },
-        data: { status: "refused", error: resolved.refusal, finishedAt: new Date() },
-      });
-      return false;
-    }
+    if ("refusal" in resolved) return refuse(resolved.refusal);
     services = resolved.services;
   }
   if (!executor.resolveCodingWorkerImage) {

@@ -1,0 +1,282 @@
+/**
+ * A coding run's repository set (#537) against real PostgreSQL: dispatch writes the
+ * CodingRunRepository rows in the same transaction as the CodingRun, each extra authorized
+ * through the repository-access gate before its ref is resolved. The executor is a fake; the gate
+ * is the real one, with a fixed GitHub allowlist. Skipped without DATABASE_URL.
+ */
+import { randomUUID } from "node:crypto";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { Executor } from "../providers/executor/types.js";
+import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "./coding-repository-set.js";
+import { createPrismaClient } from "./db.js";
+import { setLogLineFilter } from "./logger.js";
+import { dispatchRun } from "./dispatch.js";
+import { createRepoAccessGate } from "./repo-access.js";
+
+const BASE_SHA = "c".repeat(40);
+const MAIN_SHA = "d".repeat(40);
+const FAKE_TOKEN = "ghs_FAKEtoken0123456789abcdefABCDEF";
+
+describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database)", () => {
+  const db = createPrismaClient();
+  const PREFIX = "drsdb-";
+  const suffix = randomUUID().slice(0, 8);
+  const owner = `${PREFIX}owner-${suffix}`;
+  let counter = 0;
+  /** The served GitHub accounts: `acme` only. */
+  const gate = createRepoAccessGate({ db: {} as never, hosts: {}, trustedAccounts: async () => new Set(["acme"]) });
+
+  function fakeExecutor(refFile: string | null = BASE_SHA) {
+    const spies = {
+      authorizeCodingRepository: vi.fn((input: Parameters<typeof gate.authorizeUse>[0]) => gate.authorizeUse(input)),
+      readCodingRepositoryFile: vi.fn(async () => refFile),
+      // `main` names MAIN_SHA; a SHA names itself; anything else does not exist.
+      resolveCodingRepositoryRef: vi.fn(async ({ ref }: { ref: string }) =>
+        ref === "main" ? MAIN_SHA : /^[0-9a-f]{40}$/.test(ref) ? ref : null,
+      ),
+    };
+    const executor: Executor = { start: vi.fn(async () => {}), async stop() {}, ...spies };
+    return { executor, spies };
+  }
+
+  /** A coding agent with read links `base` (ref file upstream-sync) and `upstream` (ref main), both in its default set. */
+  async function codingAgent(links: { upstreamRepository?: string } = {}) {
+    const agentId = `${PREFIX}agent-${suffix}-${++counter}`;
+    await db.agent.create({
+      data: {
+        id: agentId,
+        name: agentId,
+        systemPrompt: "Sync things.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 2,
+        kind: "coding",
+        ownerId: owner,
+        codingProfile: {
+          create: { provider: "codex", repository: "acme/fork", defaultTask: "Sync.", protectedPaths: [] },
+        },
+      },
+    });
+    const base = await db.agentRepository.create({
+      data: {
+        agentId,
+        name: "base",
+        provider: "github",
+        repository: `acme/base-${suffix}-${counter}`,
+        access: "read",
+        refFromFile: "upstream-sync",
+        inDefaultSet: true,
+        authorizedVia: "admin",
+        createdAt: new Date(1_000),
+      },
+    });
+    const upstream = await db.agentRepository.create({
+      data: {
+        agentId,
+        name: "upstream",
+        provider: "github",
+        repository: links.upstreamRepository ?? `acme/upstream-${suffix}-${counter}`,
+        access: "read",
+        ref: "main",
+        inDefaultSet: true,
+        authorizedVia: "admin",
+        createdAt: new Date(2_000),
+      },
+    });
+    return { agentId, base, upstream };
+  }
+
+  const rowsOf = (runId: string) => db.codingRunRepository.findMany({ where: { runId }, orderBy: { position: "asc" } });
+  const runsOf = (agentId: string) => db.run.findMany({ where: { agentId } });
+
+  async function cleanup(): Promise<void> {
+    const agents = { agentId: { startsWith: PREFIX } };
+    await db.run.deleteMany({ where: agents });
+    await db.agent.deleteMany({ where: { id: { startsWith: PREFIX } } });
+    await db.principal.deleteMany({ where: { id: { startsWith: PREFIX } } });
+  }
+
+  beforeAll(async () => {
+    await cleanup();
+    await db.principal.create({ data: { id: owner, subject: owner } });
+  });
+  afterEach(() => vi.restoreAllMocks());
+  afterAll(async () => {
+    await cleanup();
+    await db.$disconnect();
+  });
+
+  it("writes the default set's rows, the file's ref resolved and the link's ref resolved", async () => {
+    const { agentId, base, upstream } = await codingAgent();
+    const { executor, spies } = fakeExecutor();
+    const result = await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+
+    expect(spies.readCodingRepositoryFile).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "acme/fork", baseRef: "main", path: "upstream-sync" }),
+    );
+    expect(await rowsOf(result!.run.id)).toEqual([
+      expect.objectContaining({
+        position: 0,
+        name: "base",
+        requestedRef: BASE_SHA,
+        refFromFile: "upstream-sync",
+        resolvedSha: BASE_SHA,
+        access: "read",
+        linkId: base.id,
+        baseRef: null,
+        headRef: null,
+        viaRepositoryLink: true,
+      }),
+      expect.objectContaining({
+        position: 1,
+        name: "upstream",
+        requestedRef: "main",
+        refFromFile: null,
+        resolvedSha: MAIN_SHA,
+        linkId: upstream.id,
+      }),
+    ]);
+  });
+
+  it("writes no rows for repositories: []", async () => {
+    const { agentId } = await codingAgent();
+    const { executor, spies } = fakeExecutor();
+    const result = await dispatchRun({ db, executor, agentId, codingTask: "sync", codingRepositories: [] });
+    expect(await rowsOf(result!.run.id)).toEqual([]);
+    expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unlisted name before any run exists", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    await expect(
+      dispatchRun({ db, executor, agentId, codingTask: "sync", codingRepositories: ["nope"] }),
+    ).rejects.toBeInstanceOf(RepositorySetRefusedError);
+    expect(await runsOf(agentId)).toEqual([]);
+  });
+
+  it.each([FAKE_TOKEN, "sk-fake-secret-0123456789"])(
+    "names a ref file by its path, never its content (%s), anywhere: error, run record, logs",
+    async (secret) => {
+      const { agentId } = await codingAgent();
+      // A valid branch name that does not exist: the fake resolves it to null.
+      const { executor } = fakeExecutor(`${secret}\n`);
+      // Every dispatch log line (pino writes to fd 2, past any console or stream spy).
+      const logged: string[] = [];
+      setLogLineFilter((line) => {
+        logged.push(line);
+        return line;
+      });
+      for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+        vi.spyOn(console, method).mockImplementation(
+          (...args: unknown[]) => void logged.push(args.map(String).join(" ")),
+        );
+      }
+
+      let caught: unknown;
+      try {
+        await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+      } catch (err) {
+        caught = err;
+      } finally {
+        setLogLineFilter((line) => line);
+      }
+
+      expect(caught).toBeInstanceOf(RepositoryRefUnreadableError);
+      const err = caught as RepositoryRefUnreadableError;
+      expect(err.message).toBe(
+        'repository_ref_unreadable: the ref file upstream-sync for link "base" names a ref that does not exist.',
+      );
+      expect(await runsOf(agentId)).toEqual([]);
+      const seen = [err.message, JSON.stringify(err), String(err.stack), ...logged].join("\n");
+      expect(seen).not.toContain(secret);
+    },
+  );
+
+  it("refuses a run whose host is unavailable as repository_ref_unreadable (unavailable), before any run exists", async () => {
+    const { agentId } = await codingAgent();
+    const { executor, spies } = fakeExecutor();
+    spies.resolveCodingRepositoryRef.mockRejectedValue(new Error("github_api_unavailable"));
+    const attempt = dispatchRun({ db, executor, agentId, codingTask: "sync" });
+    await expect(attempt).rejects.toBeInstanceOf(RepositoryRefUnreadableError);
+    await expect(attempt).rejects.toMatchObject({ reason: "unavailable" });
+    expect(await runsOf(agentId)).toEqual([]);
+  });
+
+  it("refuses a read link outside the GitHub allowlist without resolving any ref", async () => {
+    // Stamped admin: the allowlist is still a hard limit.
+    const { agentId } = await codingAgent({ upstreamRepository: `outside-org/upstream-${suffix}` });
+    const { executor, spies } = fakeExecutor();
+    const result = await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+
+    expect(result!.run).toMatchObject({ status: "refused" });
+    expect(result!.run.error).toMatch(/^repo_access_github_account_not_allowed: /);
+    expect(spies.authorizeCodingRepository).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: `outside-org/upstream-${suffix}`, required: "read", ownerId: owner }),
+    );
+    expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+    expect(spies.readCodingRepositoryFile).not.toHaveBeenCalledWith(expect.objectContaining({ path: "upstream-sync" }));
+    expect(executor.start).not.toHaveBeenCalled();
+    expect(await db.codingRun.findUnique({ where: { runId: result!.run.id } })).toBeNull();
+  });
+
+  it("copies a continuation's rows from its root, never resolving again", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    const root = await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+    await db.codingRun.update({
+      where: { runId: root!.run.id },
+      data: {
+        result: {
+          schemaVersion: 1,
+          outcome: "pull_request_opened",
+          repository: "acme/fork",
+          baseRef: "main",
+          headRef: `wardby/run-${root!.run.id}`,
+          commitSha: "a".repeat(40),
+          pullRequestUrl: "https://github.com/acme/fork/pull/1",
+          pullRequestNumber: 1,
+          summary: "Opened the PR",
+          tests: [],
+          usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+        },
+      },
+    });
+
+    const second = fakeExecutor();
+    const continuation = await dispatchRun({
+      db,
+      executor: second.executor,
+      agentId,
+      codingTask: "again",
+      continuesCodingRunId: root!.run.id,
+    });
+
+    const strip = (rows: Awaited<ReturnType<typeof rowsOf>>) =>
+      rows.map(({ name, position, resolvedSha, requestedRef, refFromFile, linkId, access }) => ({
+        name,
+        position,
+        resolvedSha,
+        requestedRef,
+        refFromFile,
+        linkId,
+        access,
+      }));
+    expect(strip(await rowsOf(continuation!.run.id))).toEqual(strip(await rowsOf(root!.run.id)));
+    expect((await rowsOf(continuation!.run.id)).map((r) => r.name)).toEqual(["base", "upstream"]);
+    expect(second.spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+    expect(second.spies.authorizeCodingRepository).not.toHaveBeenCalled();
+  });
+
+  it("records a deferred run's rows unresolved, the file's ref left for the start", async () => {
+    const { agentId } = await codingAgent();
+    const { executor, spies } = fakeExecutor();
+    const deferred: Executor = { ...executor, defersCodingResolution: true };
+    const result = await dispatchRun({ db, executor: deferred, agentId, codingTask: "sync" });
+    expect(await rowsOf(result!.run.id)).toEqual([
+      expect.objectContaining({ name: "base", requestedRef: null, refFromFile: "upstream-sync", resolvedSha: null }),
+      expect.objectContaining({ name: "upstream", requestedRef: "main", resolvedSha: null }),
+    ]);
+    expect(spies.authorizeCodingRepository).not.toHaveBeenCalled();
+    expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+  });
+});

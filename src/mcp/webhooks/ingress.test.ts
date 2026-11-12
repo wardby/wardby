@@ -308,6 +308,117 @@ describe("webhook ingress", () => {
     });
   });
 
+  describe("wardbyRepositories", () => {
+    const codingProfile = {
+      provider: "codex",
+      repository: "acme/service-a",
+      baseRef: "main",
+      defaultTask: "Default task",
+      allowWebhookTaskOverride: true,
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    const links = [
+      {
+        id: "link-a",
+        name: "a",
+        provider: "github",
+        repository: "acme/a",
+        access: "read",
+        baseRef: null,
+        ref: "main" as string | null,
+        refFromFile: null as string | null,
+        inDefaultSet: false,
+        authorizedVia: "host_permission",
+        createdAt: new Date(0),
+      },
+    ];
+    async function setup(profile: Record<string, unknown> = codingProfile) {
+      const db = fakeDb([
+        { id: "a1", name: "coder", kind: "coding", model: "gpt-5.6-luna", codingProfile: profile },
+      ]) as any;
+      db.agentRepository = { findMany: async () => links };
+      const rows: unknown[] = [];
+      db.codingRunRepository = { createMany: async ({ data }: { data: unknown[] }) => void rows.push(...data) };
+      const resolveCodingRepositoryRef = vi.fn(async (): Promise<string | null> => "d".repeat(40));
+      const withRepositories: Executor = {
+        ...executor,
+        authorizeCodingRepository: async () => ({ ok: true }),
+        readCodingRepositoryFile: async () => null,
+        resolveCodingRepositoryRef,
+      };
+      const { id, secret } = await createWebhook("a1", "p1", db);
+      const handle = (body: Record<string, unknown>) =>
+        handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body }, db, withRepositories);
+      return { handle, rows, resolveCodingRepositoryRef };
+    }
+
+    it("a listed name runs with that repository", async () => {
+      const { handle, rows } = await setup();
+      expect((await handle({ wardbyRepositories: ["a"] })).status).toBe(202);
+      expect(rows).toEqual([expect.objectContaining({ name: "a", resolvedSha: "d".repeat(40) })]);
+    });
+
+    it("a value that is not an array of names is a plain 400", async () => {
+      const { handle } = await setup();
+      for (const value of ["x", [1], [""], ["x".repeat(64)], Array.from({ length: 33 }, (_, i) => `r${i}`)]) {
+        expect(await handle({ wardbyRepositories: value })).toEqual({
+          status: 400,
+          body: { error: "invalid_repositories" },
+        });
+      }
+    });
+
+    it("a duplicate name is the plain 400", async () => {
+      const { handle } = await setup();
+      expect(await handle({ wardbyRepositories: ["a", "a"] })).toEqual({
+        status: 400,
+        body: { error: "invalid_repositories" },
+      });
+    });
+
+    it("an unlisted name is a 400 with the refusal code only", async () => {
+      const { handle } = await setup();
+      expect(await handle({ wardbyRepositories: ["nope"] })).toEqual({
+        status: 400,
+        body: { error: "invalid_repositories", error_description: "repository_not_listed" },
+      });
+    });
+
+    it("a ref that does not exist, or a host that is unavailable, is repository_ref_unreadable", async () => {
+      const { handle, resolveCodingRepositoryRef } = await setup();
+      resolveCodingRepositoryRef.mockResolvedValueOnce(null);
+      expect(await handle({ wardbyRepositories: ["a"] })).toEqual({
+        status: 400,
+        body: { error: "repository_ref_unreadable" },
+      });
+      resolveCodingRepositoryRef.mockRejectedValueOnce(new Error("github_api_unavailable"));
+      expect(await handle({ wardbyRepositories: ["a"] })).toEqual({
+        status: 400,
+        body: { error: "repository_ref_unreadable" },
+      });
+    });
+
+    it("an unreadable ref file is repository_ref_unreadable", async () => {
+      const { handle } = await setup();
+      links[0] = { ...links[0], ref: null, refFromFile: "upstream-sync" };
+      try {
+        expect(await handle({ wardbyRepositories: ["a"] })).toEqual({
+          status: 400,
+          body: { error: "repository_ref_unreadable" },
+        });
+      } finally {
+        links[0] = { ...links[0], ref: "main", refFromFile: null };
+      }
+    });
+
+    it("without the opt-in is refused as disabled", async () => {
+      const { handle } = await setup({ ...codingProfile, allowWebhookTaskOverride: false });
+      expect(await handle({ wardbyRepositories: ["a"] })).toEqual({ status: 403, body: { error: "disabled" } });
+    });
+  });
+
   it("rejects a malformed wardbyIssue with 400 invalid_issue", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
     const runCreate = vi.spyOn(db.run, "create");

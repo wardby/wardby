@@ -74,7 +74,9 @@ function fakeDb(
   const linkReads: unknown[] = [];
   const db: any = {
     agentRepository: {
-      findMany: async (args: unknown) => {
+      findMany: async (args: { where?: { OR?: unknown } }) => {
+        // The repository-set read (#537) asks for set-eligible links; these fakes have none.
+        if (args.where?.OR !== undefined) return [];
         linkReads.push(args);
         return budget.links ?? [];
       },
@@ -165,6 +167,8 @@ function fakeDb(
         return matches[0] ? { mergeOrder: matches[0].mergeOrder } : null;
       },
     },
+    // No extra repositories unless a test seeds them (a continuation copies its root's: none here).
+    codingRunRepository: { findMany: async () => [], createMany: async () => ({ count: 0 }) },
     task: {
       create: async ({ data }: any) => {
         const now = new Date();
@@ -2367,7 +2371,9 @@ describe("coding-run services", () => {
       const a = agent();
       const state = fakeDb(a, [], { links: listed });
       const findMany = vi.fn(async (): Promise<typeof listed> => []).mockResolvedValueOnce(listed);
-      state.db.agentRepository.findMany = findMany as never;
+      // The repository-set read (#537) has its own answer: none.
+      state.db.agentRepository.findMany = (async (args: { where?: { OR?: unknown } }) =>
+        args.where?.OR !== undefined ? [] : findMany()) as never;
       const attempt = dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingRepository: "acme/service-a" });
       await expect(attempt).rejects.toBeInstanceOf(RepositoryChoiceRefusedError);
       await expect(attempt).rejects.toMatchObject({ code: "repository_not_listed", allowed: ["acme/default"] });

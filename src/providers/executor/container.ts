@@ -67,7 +67,12 @@ import {
   type ProviderFailureClass,
 } from "../../core/provider-wording.js";
 import { logger } from "../../core/logger.js";
-import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
+import {
+  requiredLevel,
+  type AuthorizeUseInput,
+  type RepoAccessDecision,
+  type RepoAccessGate,
+} from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
@@ -2556,6 +2561,11 @@ export class ContainerExecutor implements Executor {
     access: "read" | "write";
   }): Promise<string | null> {
     return this.options.vcs.resolveRef ? this.options.vcs.resolveRef(input) : null;
+  }
+
+  /** One extra repository through the repository-access gate (Executor.authorizeCodingRepository). */
+  authorizeCodingRepository(input: AuthorizeUseInput): Promise<RepoAccessDecision> {
+    return this.options.repoAccess.authorizeUse(input);
   }
 
   /** The job launcher decides (Kubernetes and Docker start services for both providers). */
