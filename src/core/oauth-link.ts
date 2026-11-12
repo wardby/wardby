@@ -60,6 +60,13 @@ export interface OAuthLinkAdapter<Ctx, Result> {
     result: Result;
     payload?: string;
   }>;
+  /**
+   * The redirect URI this request's authorize URL carried, when the adapter stores one per request in
+   * its context (e.g. a loopback URI on the owner's machine). The callback step then uses it for the
+   * code exchange instead of its own per-purpose URI. Absent or undefined: the callback's URI.
+   * `context` is the stored JSON as read back, not yet validated.
+   */
+  redirectUri?(context: unknown): string | undefined;
   /** A fixed code for why `complete` failed, safe to log (never the error's own text). Omit to log none. */
   safeReason?(err: unknown): string;
   /** Shown on the callback page: what was signed in to, never a token. */
@@ -133,7 +140,10 @@ export async function completeOAuthCallback(input: {
   code: string | null;
   /** The callback's `iss` parameter (RFC 9207), when present. */
   iss?: string | null;
-  /** Exactly the redirect_uri the authorize URL carried: one value, or one per purpose. */
+  /**
+   * Exactly the redirect_uri the authorize URL carried: one value, or one per purpose. An adapter's
+   * per-request URI (`adapter.redirectUri(context)`) takes precedence when it names one.
+   */
   redirectUri: string | ((purpose: string) => string);
   now?: Date;
 }): Promise<OAuthCallbackOutcome> {
@@ -158,10 +168,13 @@ export async function completeOAuthCallback(input: {
   // Everything after the provider has been asked fails closed: the request is
   // spent (its verifier with it) and the route sees `failed`, never a raw error.
   try {
+    const redirectUri =
+      adapter.redirectUri?.(request.context) ??
+      (typeof input.redirectUri === "string" ? input.redirectUri : input.redirectUri(request.purpose));
     const done = await adapter.complete({
       code: input.code,
       codeVerifier: request.codeVerifier,
-      redirectUri: typeof input.redirectUri === "string" ? input.redirectUri : input.redirectUri(request.purpose),
+      redirectUri,
       context: request.context,
       ...(input.iss != null ? { iss: input.iss } : {}),
     });

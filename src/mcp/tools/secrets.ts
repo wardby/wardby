@@ -20,6 +20,7 @@ import {
   finishOAuthSecretConnect,
   OAUTH_SECRET_PURPOSE,
   OAuthSecretFlowError,
+  precheckOAuthSecretConnect,
   SECRET_NOT_OAUTH,
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
@@ -50,6 +51,13 @@ import {
 } from "./secret-elicitation.js";
 import { allowedSecretNames, brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 import { textResult } from "./text-result.js";
+import {
+  mintOAuthLoopbackLink,
+  OAUTH_LOOPBACK_LINK_TTL_MS,
+  oauthLoopbackCommand,
+  type OAuthLoopbackLinkAudience,
+  type OAuthLoopbackLinkPayload,
+} from "./oauth-loopback-link.js";
 
 const BROKER_SCHEMA_DOC =
   '{ hosts: exact hostnames, pathPrefixes?: ["/..."], placement: { kind: "header", name, format containing {value} } | { kind: "query", name } | { kind: "body", field } | { kind: "aws-sigv4", region, service } }';
@@ -84,6 +92,14 @@ const CONFIRMATION_CODE_ALONE =
 const OAUTH_NEEDS_HTTP =
   "Connecting an OAuth secret needs wardby's HTTP transport (the sign-in callback is served at MCP_CANONICAL_URI); " +
   "use an MCP client connected over HTTP.";
+
+const OAUTH_LOOPBACK_UNAVAILABLE =
+  'secret_oauth_loopback_unavailable: this wardby server does not hand out loopback sign-in links; use oauth.callback "web"';
+
+const OAUTH_LOOPBACK_MESSAGE =
+  "Run this command in a terminal on the computer where you use your browser: it opens the sign-in, then prints a confirmation code. " +
+  "Then call create_secret again with the same name and that confirmationCode. " +
+  "The command holds a sign-in link for this secret that works until expiresAt: do not share it.";
 
 /**
  * Maps the OAuth secret flow's errors to MCP statuses. Every message is a fixed constant or a
@@ -125,6 +141,8 @@ interface OAuthArg {
   resource: string;
   scope?: string;
   clientId?: string;
+  /** Where the provider sends the browser back: wardby's web callback, or the owner's CLI on 127.0.0.1. */
+  callback: "web" | "loopback";
 }
 
 /** Validates the caller's `oauth` argument; an invalid one is the caller's 400. */
@@ -132,7 +150,7 @@ function parseOAuthArg(input: unknown): OAuthArg {
   const o = input as Record<string, unknown> | null;
   if (typeof o !== "object" || o === null || Array.isArray(o)) throw new McpError(400, "oauth must be an object.");
   for (const key of Object.keys(o)) {
-    if (key !== "resource" && key !== "scope" && key !== "clientId") {
+    if (key !== "resource" && key !== "scope" && key !== "clientId" && key !== "callback") {
       throw new McpError(400, `oauth has an unknown field "${key}".`);
     }
   }
@@ -144,7 +162,16 @@ function parseOAuthArg(input: unknown): OAuthArg {
   };
   const scope = str("scope", false);
   const clientId = str("clientId", false);
-  return { resource: str("resource", true)!, ...(scope ? { scope } : {}), ...(clientId ? { clientId } : {}) };
+  const callback = o.callback ?? "web";
+  if (callback !== "web" && callback !== "loopback") {
+    throw new McpError(400, 'oauth.callback must be "web" or "loopback".');
+  }
+  return {
+    resource: str("resource", true)!,
+    ...(scope ? { scope } : {}),
+    ...(clientId ? { clientId } : {}),
+    callback,
+  };
 }
 
 /**
@@ -211,6 +238,15 @@ export interface SecretsToolsOptions {
    * See McpConfig.secretElicitationProtocol for why this defaults off.
    */
   protocolElicitation: boolean;
+  /**
+   * Loopback sign-in links (`oauth.callback: "loopback"`): the origin the link names (HTTP: the
+   * canonical origin; stdio: the loopback link host) and the host that will accept it. Absent: refused.
+   */
+  oauthLoopback?: {
+    origin: () => Promise<string>;
+    audience: OAuthLoopbackLinkAudience;
+    now?: () => Date;
+  };
 }
 
 export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOptions): void {
@@ -218,7 +254,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "create_secret",
     scope: "secrets:write",
     description:
-      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. See the help article "brokered-secrets".',
+      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. With `oauth.callback: "loopback"` (for providers that only accept a 127.0.0.1 redirect) it returns a command for the user to run in a terminal on their own computer instead; it prints the confirmationCode. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {
@@ -228,8 +264,13 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         oauth: {
           type: "object",
           description:
-            "Connect an OAuth-only service: resource is its URL; scope and clientId are optional (clientId is needed only when the provider has no dynamic client registration).",
-          properties: { resource: { type: "string" }, scope: { type: "string" }, clientId: { type: "string" } },
+            'Connect an OAuth-only service: resource is its URL; scope and clientId are optional (clientId is needed only when the provider has no dynamic client registration). callback is "web" (default: sign in through wardby\'s callback page) or "loopback" (sign in through the Wardby CLI on the user\'s computer, for providers that only accept a 127.0.0.1 redirect).',
+          properties: {
+            resource: { type: "string" },
+            scope: { type: "string" },
+            clientId: { type: "string" },
+            callback: { type: "string", enum: ["web", "loopback"] },
+          },
           required: ["resource"],
           additionalProperties: false,
         },
@@ -266,6 +307,44 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           throw new McpError(400, "An OAuth secret's broker is set by wardby; do not pass broker with oauth.");
         }
         const oauth = parseOAuthArg(args.oauth);
+        if (oauth.callback === "loopback") {
+          const loopback = opts.oauthLoopback;
+          if (!loopback) throw new McpError(400, OAUTH_LOOPBACK_UNAVAILABLE);
+          // No discovery yet (that runs when the CLI starts the sign-in); only the checks that need no provider.
+          let resource: string;
+          try {
+            ({ resource } = await precheckOAuthSecretConnect({
+              db: ctx.db,
+              ownerId: ctx.principal.id,
+              name: args.name,
+              resource: oauth.resource,
+              ...(oauth.scope ? { scope: oauth.scope } : {}),
+              ...(oauth.clientId ? { clientId: oauth.clientId } : {}),
+              options: ctx.providers.sandboxFetchOptions,
+            }));
+          } catch (err) {
+            mapOAuthSecretError(err);
+          }
+          const exp = (loopback.now ?? (() => new Date()))().getTime() + OAUTH_LOOPBACK_LINK_TTL_MS;
+          const payload: OAuthLoopbackLinkPayload = {
+            kind: "oauth-loopback",
+            principalId: ctx.principal.id,
+            name: args.name,
+            resource,
+            ...(oauth.scope ? { scope: oauth.scope } : {}),
+            ...(oauth.clientId ? { clientId: oauth.clientId } : {}),
+            aud: loopback.audience,
+            ...(ctx.operator && loopback.audience === "stdio" ? { operator: true } : {}),
+            exp,
+          };
+          const link = await mintOAuthLoopbackLink((p) => mcp.mintRequestState(p), await loopback.origin(), payload);
+          return textResult({
+            status: "pending",
+            command: oauthLoopbackCommand(link),
+            expiresAt: new Date(exp).toISOString(),
+            message: OAUTH_LOOPBACK_MESSAGE,
+          });
+        }
         const origin = callbackOrigin(ctx.canonicalUri);
         if (!origin) throw new McpError(400, OAUTH_NEEDS_HTTP);
         let started;

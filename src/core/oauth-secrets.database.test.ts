@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "#prisma";
 import { brokeredFetch } from "../sandbox/brokered-fetch.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-support/fake-oauth-server.test-support.js";
@@ -310,6 +311,70 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     await expect(
       startOAuthSecretConnect({ db, cipher, ownerId, name: "x", resource: fake.mcpUrl, redirectUri: REDIRECT }),
     ).rejects.toThrow(/https/);
+  });
+
+  it("uses a per-request loopback redirect URI for registration, authorize and the token exchange", async () => {
+    const ownerId = await owner();
+    const LOOPBACK = "http://127.0.0.1:53111/callback";
+    const rec = recordingFetch();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "loopback",
+      resource: fake.mcpUrl,
+      redirectUri: LOOPBACK,
+      options: OPTS,
+      fetchImpl: rec.impl,
+    });
+    const registration = rec.requests.find((r) => r.url.endsWith("/register"));
+    expect(JSON.parse(registration?.body ?? "{}")).toMatchObject({ redirect_uris: [LOOPBACK] });
+    expect(new URL(started.authorizeUrl).searchParams.get("redirect_uri")).toBe(LOOPBACK);
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(request.context).toMatchObject({ redirectUri: LOOPBACK });
+
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    expect(callbackUrl.startsWith(`${LOOPBACK}?`)).toBe(true);
+    // The callback step is given the web URI; the request's own (loopback) URI wins, so the
+    // exchange matches what the authorize URL carried (the fake checks redirect_uri).
+    const adapter = oauthSecretAdapter(cipher, OPTS, rec.impl) as OAuthLinkAdapter<unknown, unknown>;
+    const outcome = await callback(callbackUrl, adapter);
+    expect(outcome.kind).toBe("confirm");
+    const token = rec.requests.find((r) => r.url.endsWith("/token"));
+    expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(LOOPBACK);
+    if (outcome.kind !== "confirm") throw new Error("unreachable");
+    await expect(confirmCode(ownerId, "loopback", outcome.code)).resolves.toMatchObject({ status: "connected" });
+  });
+
+  it("stores the web redirect URI in the context, and the web callback is unchanged", async () => {
+    const ownerId = await owner();
+    const rec = recordingFetch();
+    const { outcome } = await connect(ownerId, "web-uri", { fetchImpl: rec.impl });
+    expect(outcome.kind).toBe("confirm");
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(request.context).toMatchObject({ redirectUri: REDIRECT });
+    const token = rec.requests.find((r) => r.url.endsWith("/token"));
+    expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(REDIRECT);
+  });
+
+  it("a request stored before per-request URIs (no redirectUri in its context) uses the callback's URI", async () => {
+    const ownerId = await owner();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "legacy",
+      resource: fake.mcpUrl,
+      redirectUri: REDIRECT,
+      options: OPTS,
+    });
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    const legacy = { ...(request.context as Prisma.JsonObject) };
+    delete legacy.redirectUri;
+    await db.oAuthLinkRequest.update({ where: { id: request.id }, data: { context: legacy } });
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    const adapter = oauthSecretAdapter(cipher, OPTS) as OAuthLinkAdapter<unknown, unknown>;
+    expect((await callback(callbackUrl, adapter)).kind).toBe("confirm");
   });
 
   it("refuses a replayed callback state", async () => {

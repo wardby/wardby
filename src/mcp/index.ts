@@ -89,7 +89,7 @@ import { registerRunHookTools } from "./tools/run-hooks.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
-import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
+import { registerSecretsTools, type SecretElicitationUrlBuilder, type SecretsToolsOptions } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
@@ -162,6 +162,8 @@ export function registerAllTools(
     runTranscriptAudience?: "stdio" | "http";
     /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
     refreshModelCatalog?: () => Promise<void>;
+    /** Where create_secret's loopback sign-in links point, and which host accepts them; absent = not offered. */
+    oauthLoopback?: SecretsToolsOptions["oauthLoopback"];
   },
 ): void {
   registerAgentTools(mcp);
@@ -198,6 +200,7 @@ export function registerAllTools(
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
     protocolElicitation: opts.secretElicitationProtocol,
+    ...(opts.oauthLoopback ? { oauthLoopback: opts.oauthLoopback } : {}),
   });
   registerWebhookTools(mcp);
 }
@@ -391,6 +394,8 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       secretElicitationUrl: (token) => linkHost.urlFor(STDIO_SECRET_PATH, token),
       runTranscriptUrl: (token) => linkHost.urlFor(RUN_TRANSCRIPT_DOWNLOAD_PATH, token),
       runTranscriptAudience: "stdio",
+      // Loopback sign-in links name this process's loopback link host, as transcript links do.
+      oauthLoopback: { origin: () => linkHost.origin(), audience: "stdio" },
       blobStoreConfigured: blobs !== undefined,
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
       refreshModelCatalog: () => modelCatalog.refreshNow(),
@@ -440,6 +445,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
     runTranscriptUrl: (token) =>
       Promise.resolve(`${httpOrigin}${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`),
+    oauthLoopback: { origin: () => Promise.resolve(httpOrigin), audience: "http" },
     blobStoreConfigured: blobs !== undefined,
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
     refreshModelCatalog: () => modelCatalog.refreshNow(),

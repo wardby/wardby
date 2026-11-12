@@ -21,6 +21,11 @@ export type StdioLinkHandler = (req: IncomingMessage, res: ServerResponse, token
 export interface StdioLinkHost {
   /** The loopback URL for `path` carrying `token`; starts the server if it is not running. */
   urlFor(path: string, token: string): Promise<string>;
+  /**
+   * The server's loopback origin (`http://127.0.0.1:<port>`), for a link that carries its token
+   * some other way (the OAuth loopback link's fragment); starts the server if it is not running.
+   */
+  origin(): Promise<string>;
 }
 
 export function createStdioLinkHost(routes: Record<string, StdioLinkHandler>): StdioLinkHost {
@@ -72,6 +77,9 @@ export function createStdioLinkHost(routes: Record<string, StdioLinkHandler>): S
     async urlFor(path: string, token: string): Promise<string> {
       const p = await ensureServer();
       return `http://127.0.0.1:${p}${path}?t=${encodeURIComponent(token)}`;
+    },
+    async origin(): Promise<string> {
+      return `http://127.0.0.1:${await ensureServer()}`;
     },
   };
 }

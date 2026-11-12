@@ -463,4 +463,42 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     expect(done.kind).toBe("confirm");
     expect(calls[0]).toHaveProperty("iss", "");
   });
+
+  it("uses the request's own redirect URI when the adapter names one in its context", async () => {
+    const p = await principal();
+    const LOOPBACK = "http://127.0.0.1:53111/callback";
+    const perRequest: OAuthLinkAdapter<{ label: string; redirectUri?: string }, { login: string }> = {
+      ...testAdapter,
+      redirectUri: (context) => {
+        const c = context as { redirectUri?: unknown } | null;
+        return typeof c?.redirectUri === "string" ? c.redirectUri : undefined;
+      },
+    };
+    const perRequestAdapters = new Map([["test", perRequest]]);
+    for (const [label, stored, expected] of [
+      ["loopback", LOOPBACK, LOOPBACK],
+      ["none", undefined, REDIRECT],
+    ] as const) {
+      const started = await startOAuthLink({
+        db,
+        adapter: perRequest,
+        principalId: p.id,
+        context: { label, ...(stored ? { redirectUri: stored } : {}) },
+        redirectUri: stored ?? REDIRECT,
+      });
+      const params = new URL(started.authorizeUrl).searchParams;
+      expect(params.get("redirect_uri")).toBe(expected);
+      calls.length = 0;
+      const done = await completeOAuthCallback({
+        db,
+        adapters: perRequestAdapters,
+        cipher,
+        state: params.get("state"),
+        code: "idp-code",
+        redirectUri: () => REDIRECT,
+      });
+      expect(done.kind).toBe("confirm");
+      expect(calls[0].redirectUri).toBe(expected);
+    }
+  });
 });
