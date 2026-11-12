@@ -5,7 +5,7 @@ FROM --platform=$BUILDPLATFORM node:24.22.0-bookworm-slim@sha256:91acba91b842bec
 WORKDIR /build
 COPY package.json package-lock.json .
 RUN npm ci --ignore-scripts
-COPY tsconfig.json tsconfig.build.json prisma.config.ts .
+COPY tsconfig.json tsconfig.build.json prisma.config.ts NOTICE ./
 COPY prisma ./prisma
 COPY scripts ./scripts
 COPY help ./help

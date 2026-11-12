@@ -4,12 +4,24 @@
 // JavaScript and CSS with content-hashed names, plus manifest.json mapping the
 // logical names to the hashed ones. The server (src/web/static.ts) serves only
 // the files the manifest lists. Run by `npm run build` (npm run build:web).
-import { mkdir, rm, writeFile } from "node:fs/promises";
+// The bundled packages' licence notices (NOTICE's third-party section) head the
+// JavaScript as a /*! */ comment, and any legal comments in the packages are kept.
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** NOTICE from its third-party section on, as a comment that minifiers keep. */
+async function licenceBanner() {
+  const notice = await readFile(join(repoRoot, "NOTICE"), "utf8");
+  const at = notice.indexOf("Third-party software");
+  if (at < 0) throw new Error("build-web: NOTICE has no third-party section");
+  const text = notice.slice(at).trimEnd();
+  if (text.includes("*/")) throw new Error("build-web: NOTICE text cannot hold */");
+  return `/*!\n${text}\n*/`;
+}
 
 export async function buildWeb({ outDir = join(repoRoot, "dist", "web-assets") } = {}) {
   // Start clean so the folder holds exactly what the manifest lists.
@@ -25,7 +37,8 @@ export async function buildWeb({ outDir = join(repoRoot, "dist", "web-assets") }
     target: ["es2022"],
     minify: true,
     sourcemap: false,
-    legalComments: "none",
+    legalComments: "eof",
+    banner: { js: await licenceBanner() },
     metafile: true,
     logLevel: "warning",
     tsconfig: join(repoRoot, "src", "web", "app", "tsconfig.json"),
