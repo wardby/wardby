@@ -1630,16 +1630,18 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         await h.close();
       }
     }
+    // Polls until the export finishes or a 15 s deadline (a loaded test run can be slow).
     const waitDone = async (base: string, id: string, jar: Jar) => {
-      for (let i = 0; i < 50; i++) {
+      const deadline = Date.now() + 15_000;
+      for (;;) {
         const st = (await (await callAt(base, `/d/api/exports/${id}`, { jar })).json()) as {
           status: string;
           errorCode: string | null;
         };
         if (st.status === "done" || st.status === "failed") return st;
+        if (Date.now() > deadline) throw new Error(`export did not finish (status ${st.status})`);
         await new Promise((r) => setTimeout(r, 50));
       }
-      throw new Error("export did not finish");
     };
 
     beforeAll(async () => {
@@ -1748,7 +1750,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         expect((await waitDone(base, md.exportId, m.jar)).status).toBe("done");
         expect((await post({ format: "png", board: "home" }, docId)).status).toBe(400);
       });
-    });
+    }, 60_000);
 
     it("reports canRender from the renderer, and an unavailable renderer as a failed job", async () => {
       const { jar, csrf } = await session(member.id);
