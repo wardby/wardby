@@ -637,6 +637,7 @@ describe("reconcileOnce orphaned status comments", () => {
     const runHostCheck = { findMany: vi.fn(async () => []) };
     const run = {
       ...base.run,
+      findUnique: vi.fn(async () => null),
       findMany: vi.fn(async (args: any) =>
         args.where.parentRunId ? [] : (base.run.findMany as (a: unknown) => unknown)(args),
       ),

@@ -361,7 +361,7 @@ export class GitHubRemote implements GitRemote {
           : outcome === "budget_exhausted" && details?.changesPushed
             ? `⚠️ ${label} ran out of budget before finishing.${budgetSuffix} ${budgetStoppedChangesSentence(
                 details.changesPushed.pullRequestNumber
-                  ? `#${details.changesPushed.pullRequestNumber}`
+                  ? `${details.changesPushed.repository ?? ""}#${details.changesPushed.pullRequestNumber}`
                   : "this pull request",
                 false,
               )}${details?.mergeSentence ? ` ${details.mergeSentence}` : ""}${summarySuffix}`

@@ -280,9 +280,10 @@ export interface ContinuationFinishedDetails {
   conflictMarkersSentence?: string;
   /**
    * Set with `budget_exhausted` when the run's changes so far were pushed anyway
-   * (the pull request it opened or continued, or a branch with no number).
+   * (the pull request it opened or continued, or a branch with no number). `repository` is set when
+   * that pull request is in another of the run's repositories than the one being notified.
    */
-  changesPushed?: { pullRequestNumber?: number };
+  changesPushed?: { pullRequestNumber?: number; repository?: string };
 }
 
 /** What wardby last wrote into a pull request description (control-plane records). */

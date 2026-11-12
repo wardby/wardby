@@ -229,6 +229,9 @@ function pushedRecord(finalized: Awaited<ReturnType<VcsProvider["finalizeChanges
 
 type FinalizeResult = Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
 
+/** The last step of a merge order: every writer keeps CodingRun.mergeOrder within 1-99. */
+const MAX_MERGE_ORDER = 99;
+
 /** A run with any writable extra repository: the control plane collects and diffs each writable one itself (#537). */
 function hasWritableExtras(run: Pick<ContainerRunSnapshot, "repositories">): boolean {
   return run.repositories.some((extra) => extra.access === "write");
@@ -279,8 +282,10 @@ interface RepositoryPublish {
   /** The driver's output with this repository's own description and title. */
   agentOutput: CodingWorkerOutput;
   descriptionState: DescriptionState;
-  /** Its step in the merge order, should it publish. */
+  /** Its step in the merge order, should it publish alongside another of the run's repositories. */
   mergeOrder: number;
+  /** Its step should it be the run's only push: what a run with one repository records (null = none). */
+  soleMergeOrder: number | null;
 }
 
 const isNoLongerActive = (error: unknown) => error instanceof Error && error.message === "coding_run_no_longer_active";
@@ -2305,7 +2310,7 @@ export class ContainerExecutor implements Executor {
     // Set with a success whose push merged the pull request's target branch; says what on the host.
     let merged: { mergeSentence?: string } = {};
     // Set when a run stopped at its budget still pushed its changes so far; says so on the host.
-    let changesPushed: { pullRequestNumber?: number } | undefined;
+    let changesPushed: { pullRequestNumber?: number; repository?: string } | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -2354,10 +2359,20 @@ export class ContainerExecutor implements Executor {
         );
         for (const pushed of kept.pushed) this.emit({ stage: pushed.outcome, runId: run.runId, jobId: handle.id });
         this.terminal(latest, "budget_exhausted");
+        // Kept changes in any writable repository are reported: the default repository's first, else
+        // the first extra's (named by its repository, since the comment is on the default one's PR).
+        const reported = kept.main?.finalized ?? kept.pushed[0];
+        if (reported) {
+          changesPushed =
+            reported.outcome === "branch_pushed"
+              ? {}
+              : {
+                  pullRequestNumber: reported.pullRequestNumber,
+                  ...(kept.main ? {} : { repository: reported.repository }),
+                };
+        }
         if (kept.main) {
           const mainFinalized = kept.main.finalized;
-          changesPushed =
-            mainFinalized.outcome === "branch_pushed" ? {} : { pullRequestNumber: mainFinalized.pullRequestNumber };
           if (mainFinalized.outcome === "pull_request_updated" && mainFinalized.targetMerge) {
             merged = { mergeSentence: mergeSentence(mainFinalized.targetMerge) };
           }
@@ -2882,12 +2897,19 @@ export class ContainerExecutor implements Executor {
     const view = slot.extra ? extraView(latest, slot.extra) : latest;
     const note = pullRequestNoteFor(output, slot.name);
     // An explicit order wins (the default repository's existing one first); otherwise the run's pull
-    // requests are numbered after the order it inherited, in publish order.
+    // requests are numbered after the order it inherited, in publish order, never past the last step
+    // (99). So with an inherited order the default repository keeps it and the extras number from the
+    // step after its own (inherited 3: the default 3, the first extra 5), which may leave a gap.
+    // publishRecords keeps the number only when two or more repositories pushed; a lone push records
+    // soleMergeOrder, as a run with one repository would.
     const pushedSoFar = published.filter((publish) => publish.finalized.outcome !== "no_changes");
-    const numbered = (latest.mergeOrder ?? 0) + pushedSoFar.length + 1;
+    const numbered = Math.min(MAX_MERGE_ORDER, (latest.mergeOrder ?? 0) + pushedSoFar.length + 1);
     const mergeOrder = slot.extra
       ? (note?.mergeOrder ?? numbered)
       : (latest.mergeOrder ?? note?.mergeOrder ?? numbered);
+    const soleMergeOrder = slot.extra
+      ? (note?.mergeOrder ?? latest.mergeOrder ?? null)
+      : (latest.mergeOrder ?? note?.mergeOrder ?? null);
     const agentOutput: CodingWorkerOutput = {
       ...output,
       summary: options.summary(note?.description ?? output.summary),
@@ -2918,7 +2940,7 @@ export class ContainerExecutor implements Executor {
         ? { description: { baseline: descriptionState.baseline } }
         : {}),
     });
-    return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder };
+    return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
   }
 
   /**
@@ -2942,8 +2964,11 @@ export class ContainerExecutor implements Executor {
     let main: FinalizeResult | undefined;
     let record: CodingRunRecord = dependencyCacheRecord(output);
     const extras: ExtraPublishRecord[] = [];
+    // Numbered only when the run pushed two or more repositories; a lone push keeps a single run's order.
+    const several = done.filter((publish) => publish.finalized.outcome !== "no_changes").length >= 2;
     for (const publish of done) {
       const { finalized, view, slot } = publish;
+      const mergeOrder = several ? publish.mergeOrder : publish.soleMergeOrder;
       const pushed = finalized.outcome !== "no_changes";
       const name = slot.extra?.name;
       const description = !pushed
@@ -2961,7 +2986,7 @@ export class ContainerExecutor implements Executor {
           ...record,
           ...(pushed ? pushedRecord(finalized) : {}),
           ...description,
-          ...(pushed && run.mergeOrder == null ? { mergeOrder: publish.mergeOrder } : {}),
+          ...(pushed && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
         };
         continue;
       }
@@ -2975,7 +3000,7 @@ export class ContainerExecutor implements Executor {
             : null,
         resultBranch: finalized.outcome === "branch_pushed" ? finalized.headRef : null,
         baseSha: pushed ? finalized.baseCommit : null,
-        mergeOrder: pushed ? publish.mergeOrder : null,
+        mergeOrder: pushed ? mergeOrder : null,
         ...(description.prDescriptionOutcome ? { prDescriptionOutcome: description.prDescriptionOutcome } : {}),
         ...(description.prDescriptionSha256 && description.prDescriptionRunId
           ? { prDescriptionSha256: description.prDescriptionSha256, prDescriptionRunId: description.prDescriptionRunId }

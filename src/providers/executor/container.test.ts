@@ -5741,6 +5741,49 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(extrasOf(explicit)?.[0].mergeOrder).toBe(5);
     });
 
+    it("never numbers a pull request past step 99", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {}, { mergeOrder: 98 });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // The default repository keeps its inherited 98; the extras would be 100 and 101.
+      expect(created.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(created)?.map((extra) => extra.mergeOrder)).toEqual([99, 99]);
+      for (const call of created.vcs.finalizeCalls) {
+        for (const entry of call.details?.related?.entries ?? []) {
+          expect(entry.mergeOrder ?? 0).toBeLessThanOrEqual(99);
+        }
+      }
+    });
+
+    it("gives a lone pull request the order a run with one repository would", async () => {
+      // Only the default repository pushed: no order of its own, as with one repository.
+      const defaultOnly = await multi([writeRow("tools")]);
+      defaultOnly.vcs.emptySlots.add("tools");
+      await defaultOnly.executor.start("run-1");
+      expect(defaultOnly.store.run.status).toBe("succeeded");
+      expect(defaultOnly.store.completions[0].result).toMatchObject({ pullRequestNumber: 42 });
+      expect(defaultOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      // Only an extra pushed: no order, or the inherited one, or the driver's own.
+      const extraOnly = await multi([writeRow("tools")]);
+      extraOnly.vcs.finalizeEmpty = true;
+      await extraOnly.executor.start("run-1");
+      expect(extrasOf(extraOnly)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: null })]);
+      expect(extraOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      inherited.vcs.finalizeEmpty = true;
+      await inherited.executor.start("run-1");
+      expect(extrasOf(inherited)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 3 })]);
+
+      const given = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 6 }],
+      });
+      given.vcs.finalizeEmpty = true;
+      await given.executor.start("run-1");
+      expect(extrasOf(given)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 6 })]);
+    });
+
     it("(d) ends partially_published when an extra fails after the default published", async () => {
       const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })]);
       created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
@@ -5804,6 +5847,27 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(extrasOf(created)).toEqual([
         expect.objectContaining({ name: "tools", pullRequestNumber: 7, mergeOrder: 2 }),
       ]);
+    });
+
+    it("(f) a budget stop that kept only an extra's changes says so on the status comment", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "budget_exhausted",
+        changesPushed: { pullRequestNumber: 7, repository: "openai/tools" },
+      });
+    });
+
+    it("(f) a budget stop that kept the default repository's changes reports its own pull request", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      await created.executor.start("run-1");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: { pullRequestNumber: 42 } });
+      expect(created.vcs.notifyFinishedCalls[0].changesPushed).not.toHaveProperty("repository");
     });
 
     it("(f) a budget stop whose extra fails to push still keeps the others", async () => {

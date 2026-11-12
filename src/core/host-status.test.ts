@@ -752,6 +752,7 @@ describe("collectRunOutcome", () => {
   it("returns opened PRs and failed children for a finished run", async () => {
     const database = {
       run: {
+        findUnique: vi.fn(async () => null),
         findMany: vi.fn(async () => [
           {
             id: "c1",
@@ -783,6 +784,7 @@ describe("collectRunOutcome", () => {
   it("counts a pull request's failed checks from the coding result", async () => {
     const database = {
       run: {
+        findUnique: vi.fn(async () => null),
         findMany: vi.fn(async () => [
           {
             id: "c1",
@@ -886,6 +888,20 @@ describe("collectRunOutcome with several repositories (#537)", () => {
     const out = await collectRunOutcome(database, { id: "c1", status: "succeeded", finalText: null });
     expect(out.pullRequests).toEqual([]);
   });
+
+  it("never turns a failed read of the run's own coding run into 'no pull requests'", async () => {
+    const database = {
+      run: {
+        findUnique: vi.fn(async () => {
+          throw new Error("connection reset");
+        }),
+        findMany: vi.fn(async () => []),
+      },
+    } as never;
+    await expect(collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null })).rejects.toThrow(
+      "connection reset",
+    );
+  });
 });
 
 describe("package audit mode in the outcome", () => {
@@ -897,7 +913,7 @@ describe("package audit mode in the outcome", () => {
   });
   const auditDb = (children: unknown[], rows: unknown[]) =>
     ({
-      run: { findMany: vi.fn(async () => children) },
+      run: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => children) },
       registryFetch: { findMany: vi.fn(async () => []) },
       registryAuditRecord: { findMany: vi.fn(async () => rows) },
     }) as never;

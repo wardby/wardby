@@ -436,26 +436,23 @@ export type RunOutcomeDb = Pick<PrismaClient, "run" | "runBudgetEvent" | "regist
 
 /**
  * A top-level coding run's own results (its default repository's, then its extra repositories'), or
- * null for any other run. Best effort: a read failure reports none.
+ * null for any other run (or one that no longer exists). A read failure throws, like the rest of
+ * collectRunOutcome: it is never reported as "no pull requests".
  */
 async function ownCodingRun(
   db: RunOutcomeDb,
   runId: string,
 ): Promise<{ result: unknown; repositories: Array<{ result: unknown }> } | null> {
-  try {
-    const own = await db.run.findUnique({
-      where: { id: runId },
-      select: {
-        parentRunId: true,
-        codingRun: {
-          select: { result: true, repositories: { select: { result: true }, orderBy: { position: "asc" } } },
-        },
+  const own = await db.run.findUnique({
+    where: { id: runId },
+    select: {
+      parentRunId: true,
+      codingRun: {
+        select: { result: true, repositories: { select: { result: true }, orderBy: { position: "asc" } } },
       },
-    });
-    return own && own.parentRunId === null ? (own.codingRun ?? null) : null;
-  } catch {
-    return null;
-  }
+    },
+  });
+  return own && own.parentRunId === null ? (own.codingRun ?? null) : null;
 }
 
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
