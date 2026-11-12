@@ -137,19 +137,75 @@ describe("wardby secret connect", () => {
   it("closes the listener after the first callback and answers other paths 404", async () => {
     const w = await wardby();
     let redirect: URL | undefined;
+    const statuses: number[] = [];
     const { code } = await run(w.link, {
+      waitMs: 2000,
       openBrowser: async (u) => {
         redirect = new URL(new URL(u).searchParams.get("redirect_uri") as string);
         const other = await fetch(`${redirect.origin}/other`);
-        expect(other.status).toBe(404);
+        statuses.push(other.status);
         const post = await fetch(`${redirect.origin}/callback`, { method: "POST" });
-        expect(post.status).toBe(404);
+        statuses.push(post.status);
         void fetch(`${redirect.origin}/callback?code=${PROVIDER_CODE}&state=${STATE}`);
         return true;
       },
     });
     expect(code).toBe(0);
+    expect(statuses).toEqual([404, 404]);
     await expect(fetch(`${redirect?.origin}/callback?code=x&state=y`)).rejects.toThrow();
+  });
+
+  it("ignores a callback with the wrong state and completes on the real one", async () => {
+    const w = await wardby();
+    const { code } = await run(w.link, {
+      waitMs: 2000,
+      openBrowser: async (u) => {
+        const r = new URL(new URL(u).searchParams.get("redirect_uri") as string);
+        const bad = await fetch(`${r.origin}/callback?code=evil&state=WRONG`);
+        await bad.text();
+        const spoof = await fetch(`${r.origin}/callback?error=access_denied&state=WRONG`);
+        await spoof.text();
+        const none = await fetch(`${r.origin}/callback?code=evil`);
+        await none.text();
+        void fetch(`${r.origin}/callback?code=${PROVIDER_CODE}&state=${STATE}`);
+        return true;
+      },
+    });
+    expect(code).toBe(0);
+    expect(w.seen.complete).toHaveLength(1);
+    expect(w.seen.complete[0].body).toEqual({ code: PROVIDER_CODE, state: STATE });
+  });
+
+  it("refuses an authorize address with no state", async () => {
+    const w = await wardby({
+      startBody: { authorizeUrl: "https://provider.example/authorize?x=1", expiresAt: "x", name: "n" },
+    });
+    const { code, text } = await run(w.link, {
+      openBrowser: async () => {
+        throw new Error("must not open");
+      },
+    });
+    expect(code).toBe(1);
+    expect(text).toBe(CONNECT_MESSAGES.badAuthorizeUrl);
+  });
+
+  it("opens and prints the normalised address so control characters cannot reach the terminal", async () => {
+    const w = await wardby({
+      startBody: {
+        authorizeUrl: `https://provider.example/authorize?state=${STATE}&x=\u001b[31mred`,
+        expiresAt: "x",
+        name: "n",
+      },
+    });
+    const opened: string[] = [];
+    const { text } = await run(w.link, {
+      waitMs: 50,
+      openBrowser: async (u) => (opened.push(u), false),
+    });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).not.toContain("\u001b");
+    expect(text).not.toContain("\u001b");
+    expect(opened[0]).toContain("%1B");
   });
 
   it("prints the sign-in address only with --no-browser or when no browser starts", async () => {
@@ -199,7 +255,7 @@ describe("wardby secret connect", () => {
     const err = await run(a.link, { openBrowser: browser(`error=server_error&state=${STATE}`) });
     expect(err.text).toContain(CONNECT_MESSAGES.providerError);
     const b = await wardby();
-    const missing = await run(b.link, { openBrowser: browser(`code=${PROVIDER_CODE}`) });
+    const missing = await run(b.link, { openBrowser: browser(`state=${STATE}`) });
     expect(missing.code).toBe(1);
     expect(missing.text).toContain(CONNECT_MESSAGES.badCallback);
     expect(b.seen.complete).toHaveLength(0);
@@ -308,7 +364,10 @@ describe("wardby secret connect", () => {
 
   it("falls back to a generic next step when the start response has no name", async () => {
     const w = await wardby({
-      startBody: { authorizeUrl: "https://provider.example/authorize?redirect_uri=PLACEHOLDER", expiresAt: "x" },
+      startBody: {
+        authorizeUrl: `https://provider.example/authorize?state=${STATE}&redirect_uri=PLACEHOLDER`,
+        expiresAt: "x",
+      },
     });
     // Rewrite the placeholder to the real redirect URI the CLI sent.
     const fix = browser(`code=${PROVIDER_CODE}&state=${STATE}`);

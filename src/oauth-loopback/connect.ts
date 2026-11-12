@@ -13,6 +13,7 @@
  * cannot be started), which prints the provider's sign-in address because the owner must open it.
  */
 import { spawn } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createInterface } from "node:readline";
@@ -123,8 +124,20 @@ interface CallbackParams {
   error: string | null;
 }
 
-/** Listens on 127.0.0.1 for exactly one `GET /callback`. */
+/** Compares two states in constant time (the lengths are not secret-bearing). */
+function sameState(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/**
+ * Listens on 127.0.0.1 for one `GET /callback` that carries the expected state. A callback with any
+ * other state (a stray local page or process) is answered but ignored, so it cannot end the wait.
+ */
 function listenForCallback(waitMs: number) {
+  let expectedState: string | null = null;
   let settle!: (value: CallbackParams | "timeout") => void;
   const result = new Promise<CallbackParams | "timeout">((resolve) => (settle = resolve));
   let done = false;
@@ -143,9 +156,9 @@ function listenForCallback(waitMs: number) {
       connection: "close",
     });
     res.end(CLOSE_PAGE);
-    if (done) return;
-    done = true;
     const q = url.searchParams;
+    if (done || !sameState(q.get("state"), expectedState)) return;
+    done = true;
     settle({ code: q.get("code"), state: q.get("state"), iss: q.get("iss"), error: q.get("error") });
   });
   const timer = setTimeout(() => {
@@ -163,7 +176,10 @@ function listenForCallback(waitMs: number) {
     server.close();
     server.closeAllConnections();
   };
-  return { ready, result, close };
+  const expect = (state: string) => {
+    expectedState = state;
+  };
+  return { ready, result, close, expect };
 }
 
 async function postJson(
@@ -256,13 +272,18 @@ export async function secretConnectCommand(argv: string[], deps: ConnectDeps = {
     }
     const scheme = new URL(authorizeUrl).protocol;
     if (scheme !== "https:" && scheme !== "http:") throw new ConnectError(CONNECT_MESSAGES.badAuthorizeUrl);
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    if (!state) throw new ConnectError(CONNECT_MESSAGES.badAuthorizeUrl);
+    listener.expect(state);
+    // The normalised address percent-encodes control characters, so it cannot inject terminal escapes.
+    const safeUrl = new URL(authorizeUrl).href;
     const name = typeof start.json?.name === "string" ? start.json.name : undefined;
 
     // The address carries the sign-in state, so it is printed only when the owner has to open it.
     let opened = false;
     if (!parsed.values["no-browser"]) {
       try {
-        opened = await (deps.openBrowser ?? openInBrowser)(authorizeUrl);
+        opened = await (deps.openBrowser ?? openInBrowser)(safeUrl);
       } catch {
         opened = false;
       }
@@ -270,7 +291,7 @@ export async function secretConnectCommand(argv: string[], deps: ConnectDeps = {
     } else {
       out("Open this address to sign in:");
     }
-    if (!opened) out(authorizeUrl);
+    if (!opened) out(safeUrl);
     else out("Complete the sign-in in your browser. Waiting for the provider ...");
 
     const callback = await listener.result;
