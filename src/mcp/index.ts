@@ -86,6 +86,7 @@ import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerIssueProjectTools } from "./tools/issue-projects.js";
 import { registerNotificationChannelTools } from "./tools/notification-channels.js";
 import { registerRunHookTools } from "./tools/run-hooks.js";
+import { registerSystemToolTools } from "./tools/system-tools.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
@@ -192,6 +193,7 @@ export function registerAllTools(
   registerIssueProjectTools(mcp);
   registerNotificationChannelTools(mcp);
   registerRunHookTools(mcp);
+  registerSystemToolTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
   registerPackageTools(mcp);
