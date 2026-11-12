@@ -78,7 +78,7 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
     name: "create_share_link",
     scope: "documents:write",
     description:
-      "Creates a share link for a document you own and returns its URL once; it is never shown again. permission is view or comment; expiresInDays is 1-90 (default 14). Guests choose a name when they open it.",
+      "Creates a share link for a document you own and returns its URL once (only its path, with a note, when the server has no public address); it is never shown again. permission is view or comment; expiresInDays is 1-90 (default 14). Guests choose a name when they open it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -96,10 +96,16 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
           viewer: viewerOf(ctx),
           permission: input.permission,
           expiresInDays: input.expiresInDays,
-          origin: new URL(ctx.canonicalUri).origin,
+          ...(linkOrigin(ctx) ? { origin: linkOrigin(ctx)! } : {}),
         }),
       );
-      return textResult({ id: created.id, url: created.url, expiresAt: created.expiresAt.toISOString() });
+      // Without an origin createShareLink's url is the bare path.
+      return textResult({
+        id: created.id,
+        ...(linkOrigin(ctx) ? { url: created.url } : { path: created.url }),
+        expiresAt: created.expiresAt.toISOString(),
+        ...linkNote(ctx),
+      });
     },
   });
 
@@ -142,7 +148,33 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
 /** Documents list_documents returns at most. */
 const MAX_LISTED_DOCUMENTS = 200;
 
-const documentUrl = (ctx: McpRequestContext, docId: string) => `${new URL(ctx.canonicalUri).origin}/d/${docId}`;
+/** The http(s) origin of a URI, or null (unset, unparsable, or not http(s) such as the stdio placeholder). */
+export function httpOrigin(uri: string | undefined): string | null {
+  if (!uri) return null;
+  try {
+    const u = new URL(uri);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The origin links to Wardby's pages use: stdio's configured public origin, else the canonical URI's. */
+export const linkOrigin = (ctx: McpRequestContext): string | null => ctx.publicOrigin ?? httpOrigin(ctx.canonicalUri);
+
+/** Told to the caller when only paths can be given. */
+export const NO_ORIGIN_NOTE =
+  "This server has no public address configured (MCP_CANONICAL_URI), so links are given as paths: open them on the address that serves Wardby's pages.";
+
+/**
+ * `{ url }` when the origin is known, otherwise the bare path under `key` (the caller adds NO_ORIGIN_NOTE
+ * once). get_document and list_documents already use `path` for the repo file, so they pass `pagePath`.
+ */
+const pageLink = (ctx: McpRequestContext, path: string, key: "path" | "pagePath" = "path"): Record<string, string> => {
+  const origin = linkOrigin(ctx);
+  return origin ? { url: `${origin}${path}` } : { [key]: path };
+};
+const linkNote = (ctx: McpRequestContext) => (linkOrigin(ctx) ? {} : { note: NO_ORIGIN_NOTE });
 const id = z.string().min(1);
 
 const createDocArgs = z.object({
@@ -249,7 +281,12 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           via: "mcp",
         }),
       );
-      return textResult({ documentId: created.id, versionId: created.versionId, url: documentUrl(ctx, created.id) });
+      return textResult({
+        documentId: created.id,
+        versionId: created.versionId,
+        ...pageLink(ctx, `/d/${created.id}`),
+        ...linkNote(ctx),
+      });
     },
   });
 
@@ -306,7 +343,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         number: out.version.number,
         ...(out.doc.repository ? { repository: out.doc.repository } : {}),
         ...(out.doc.path ? { path: out.doc.path } : {}),
-        url: documentUrl(ctx, out.doc.id),
+        ...pageLink(ctx, `/d/${out.doc.id}`, "pagePath"),
+        ...linkNote(ctx),
       });
     },
   });
@@ -334,7 +372,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           mine: d.ownerId === ctx.principal.id,
           ...(d.repository ? { repository: d.repository } : {}),
           ...(d.path ? { path: d.path } : {}),
-          url: documentUrl(ctx, d.id),
+          ...pageLink(ctx, `/d/${d.id}`, "pagePath"),
           updatedAt: d.updatedAt.toISOString(),
         })),
         titlesText: wrapUntrusted(
@@ -342,6 +380,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           rows.map((d) => `${d.id}: ${JSON.stringify(d.title)}`).join("\n"),
         ),
         ...(found.length > MAX_LISTED_DOCUMENTS ? { truncated: true } : {}),
+        ...linkNote(ctx),
       });
     },
   });

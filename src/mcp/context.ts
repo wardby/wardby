@@ -69,6 +69,12 @@ export interface McpRequestContext {
    * Passed to requireScope the same way WardbyMcpServer does centrally.
    */
   canonicalUri: string;
+  /**
+   * stdio only: the http(s) origin of MCP_CANONICAL_URI when the operator set
+   * one, for links to Wardby's pages (documents, share links). Over HTTP the
+   * canonical URI's own origin is used. Absent = links are given as paths.
+   */
+  publicOrigin?: string;
   providers: McpProviders;
   db: PrismaClient;
   /**

@@ -23,15 +23,20 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
   let profiledAgentId: string;
 
   const executor = { start: async () => {}, stop: async () => {} };
-  async function connect(p: Principal, scopes: string[] = ["documents:read", "documents:write"]) {
+  async function connect(
+    p: Principal,
+    scopes: string[] = ["documents:read", "documents:write"],
+    link: { canonicalUri?: string; publicOrigin?: string } = {},
+  ) {
     const providers = { secrets: cipher, executor } as unknown as McpProviders;
-    const canonicalUri = "https://wardby.example/mcp";
+    const canonicalUri = link.canonicalUri ?? "https://wardby.example/mcp";
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri } });
     const ctx: McpRequestContext = {
       principal: p,
       scopes: new Set(scopes),
       roles: [],
       canonicalUri,
+      ...(link.publicOrigin ? { publicOrigin: link.publicOrigin } : {}),
       providers,
       db,
       clientSupportsTasks: false,
@@ -95,6 +100,42 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
   });
 
   const anchor = { type: "text" as const, quote: "hello world", prefix: "", suffix: "" };
+
+  describe("links over stdio", () => {
+    const STDIO = "urn:wardby:local-stdio";
+
+    it("uses the configured public origin when there is one", async () => {
+      const call = await connect(owner, undefined, { canonicalUri: STDIO, publicOrigin: "https://docs.example" });
+      const created = await call("create_document", { title: "Linked", markdown: "hello" });
+      expect(created.json.url).toBe(`https://docs.example/d/${created.json.documentId}`);
+      expect(created.json).not.toHaveProperty("note");
+      const share = await call("create_share_link", { documentId: created.json.documentId, permission: "view" });
+      expect(share.json.url).toMatch(/^https:\/\/docs\.example\/s\/[A-Za-z0-9_-]{43}$/);
+      expect(share.text).not.toContain("null/");
+    });
+
+    it("gives paths and says so when no origin is configured", async () => {
+      const call = await connect(owner, undefined, { canonicalUri: STDIO });
+      const created = await call("create_document", { title: "Pathed", markdown: "hello" });
+      const docId = created.json.documentId as string;
+      expect(created.json).not.toHaveProperty("url");
+      expect(created.json.path).toBe(`/d/${docId}`);
+      expect(created.json.note).toMatch(/MCP_CANONICAL_URI/);
+      const got = await call("get_document", { documentId: docId });
+      expect(got.json.pagePath).toBe(`/d/${docId}`);
+      expect(got.json).not.toHaveProperty("url");
+      const listed = await call("list_documents", { ownedOnly: true });
+      expect(listed.json.note).toMatch(/MCP_CANONICAL_URI/);
+      expect(listed.json.documents.find((d: { documentId: string }) => d.documentId === docId).pagePath).toBe(
+        `/d/${docId}`,
+      );
+      expect(listed.text).not.toContain("null/");
+      const share = await call("create_share_link", { documentId: docId, permission: "comment" });
+      expect(share.json).not.toHaveProperty("url");
+      expect(share.json.path).toMatch(/^\/s\/[A-Za-z0-9_-]{43}$/);
+      expect(share.json.note).toMatch(/MCP_CANONICAL_URI/);
+    });
+  });
 
   it("creates, reads, lists and publishes a document", async () => {
     const call = await connect(owner);

@@ -95,7 +95,7 @@ import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
-import { registerDocumentTools } from "./tools/documents.js";
+import { httpOrigin as publicHttpOrigin, registerDocumentTools } from "./tools/documents.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
@@ -136,8 +136,10 @@ export function localOperatorContext(
   principal: Principal,
   providers: McpProviders,
   db: PrismaClient,
+  publicOrigin?: string,
 ): McpRequestContext {
   return {
+    ...(publicOrigin ? { publicOrigin } : {}),
     principal,
     scopes: new Set(SCOPES_SUPPORTED),
     roles: [...ROLE_NAMES],
@@ -407,7 +409,10 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     // local identity for the whole connection, per the design's own
     // "stdio local mode: no token; the operator is trusted."
     const principal = await resolvePrincipal(mcpConfig.localPrincipal, prisma);
-    mcp.setFixedContext(localOperatorContext(principal, providers, prisma));
+    // Links to the document pages use MCP_CANONICAL_URI's origin when the operator set one.
+    mcp.setFixedContext(
+      localOperatorContext(principal, providers, prisma, publicHttpOrigin(mcpConfig.canonicalUri) ?? undefined),
+    );
     const stdio = runStdioServer(mcp);
     return {
       close: async () => {
