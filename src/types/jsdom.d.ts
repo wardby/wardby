@@ -14,6 +14,7 @@ declare module "jsdom" {
     readonly isConnected: boolean;
     readonly parentElement: DomElement | null;
     contains(other: DomNode | null): boolean;
+    insertBefore<T extends DomNode>(node: T, child: DomNode | null): T;
   }
   export interface DomParent {
     querySelector(selectors: string): DomElement | null;
@@ -23,6 +24,7 @@ declare module "jsdom" {
   export interface DomElement extends DomNode, DomParent {
     readonly localName: string;
     readonly tagName: string;
+    id: string;
     readonly namespaceURI: string | null;
     readonly attributes: ArrayLike<DomAttr> & Iterable<DomAttr>;
     innerHTML: string;
@@ -30,6 +32,7 @@ declare module "jsdom" {
     getAttribute(name: string): string | null;
     hasAttribute(name: string): boolean;
     closest(selectors: string): DomElement | null;
+    matches(selectors: string): boolean;
     remove(): void;
   }
   export interface DomDocument extends DomNode, DomParent {
@@ -37,6 +40,8 @@ declare module "jsdom" {
     readonly head: DomElement;
     readonly body: DomElement;
     readonly documentElement: DomElement;
+    getElementById(id: string): DomElement | null;
+    createElement(tagName: string): DomElement;
   }
   export interface DomWindow {
     readonly document: DomDocument;
