@@ -177,7 +177,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
 
 const MIGRATIONS = join(process.cwd(), "prisma", "migrations");
 const LAST_BEFORE = "20261115000000_secret_oauth";
-const MULTI_REPO = "20261116000000_multi_repo_runs";
+const MULTI_REPO = "20261117000000_multi_repo_runs";
 
 describe.skipIf(!process.env.DATABASE_URL)("multi-repo migration backfills link names (PostgreSQL)", () => {
   it("names coding links by short name with suffixes, and other links <provider>:<repository>", async () => {
