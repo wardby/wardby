@@ -729,4 +729,196 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.run.deleteMany({ where: { id: { in: [fresh, round] } } });
     }
   });
+
+  describe("a run with several repositories (#537)", () => {
+    const codingRunData = (runId: string) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${runId}`,
+      provider: "codex",
+      model: "gpt-5.6-luna",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+    });
+    const opened = (repository: string, baseRef: string, n: number) => ({
+      schemaVersion: 1 as const,
+      outcome: "pull_request_opened" as const,
+      repository,
+      baseRef,
+      headRef: "wardby/run-x",
+      commitSha: "d".repeat(40),
+      pullRequestNumber: n,
+      pullRequestUrl: `https://github.com/${repository}/pull/${n}`,
+      summary: `PR for ${repository}.`,
+      tests: [],
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
+    async function seed(runId: string, names: string[]) {
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "running" } });
+      await db.codingRun.create({ data: codingRunData(runId) });
+      const rows = [];
+      for (const [i, name] of names.entries()) {
+        rows.push(
+          await db.codingRunRepository.create({
+            data: {
+              runId,
+              position: i + 1,
+              name,
+              access: "write",
+              provider: "github",
+              repository: `openai/${name}`,
+              requestedRef: "develop",
+              resolvedSha: "a".repeat(40),
+              baseRef: "develop",
+              headRef: `wardby/run-${runId}`,
+            },
+          }),
+        );
+      }
+      return rows;
+    }
+    async function drop(runIds: string[]) {
+      await db.codingRun.deleteMany({ where: { runId: { in: runIds } } });
+      await db.run.deleteMany({ where: { id: { in: runIds } } });
+    }
+
+    it("completePartially records what published, on the run and each row, and ends the run failed", async () => {
+      const runId = `container-partial-${randomUUID()}`;
+      try {
+        const [tools, docs] = await seed(runId, ["tools", "docs"]);
+        const store = new PrismaContainerExecutionStore(db);
+        const error = "partially_published: workspace: published; tools: published; docs: failed(workspace)";
+        await store.completePartially(runId, {
+          mainResult: opened("openai/example", "main", 42),
+          record: { baseSha: "b".repeat(40), mergeOrder: 1 },
+          extras: [
+            {
+              id: tools.id,
+              name: "tools",
+              result: opened("openai/tools", "develop", 7),
+              pullRequestNumber: 7,
+              resultBranch: null,
+              baseSha: "c".repeat(40),
+              mergeOrder: 2,
+              prDescriptionOutcome: "written",
+              prDescriptionSha256: "5".repeat(64),
+              prDescriptionRunId: runId,
+            },
+          ],
+          error,
+          audit: { failureCategory: "partially_published", diagnosticId: "coding_diag_x" },
+        });
+        const run = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+        expect(run.status).toBe("failed");
+        expect(run.error).toBe(error);
+        expect(run.finishedAt).not.toBeNull();
+        expect(run.codingRun).toMatchObject({
+          result: expect.objectContaining({ pullRequestNumber: 42 }),
+          baseSha: "b".repeat(40),
+          mergeOrder: 1,
+          failureCategory: "partially_published",
+          diagnosticId: "coding_diag_x",
+        });
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          result: expect.objectContaining({ repository: "openai/tools", pullRequestNumber: 7 }),
+          pullRequestNumber: 7,
+          baseSha: "c".repeat(40),
+          mergeOrder: 2,
+          prDescriptionOutcome: "written",
+          prDescriptionSha256: "5".repeat(64),
+          prDescriptionRunId: runId,
+        });
+        // A repository that failed records nothing.
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: docs.id } })).resolves.toMatchObject({
+          result: null,
+          pullRequestNumber: null,
+          mergeOrder: null,
+        });
+        // A second write changes nothing: the run already ended.
+        await store.completePartially(runId, {
+          mainResult: null,
+          record: {},
+          extras: [],
+          error: "partially_published: other",
+          audit: { failureCategory: "partially_published", diagnosticId: "coding_diag_y" },
+        });
+        await expect(db.run.findUniqueOrThrow({ where: { id: runId } })).resolves.toMatchObject({ error });
+      } finally {
+        await drop([runId]);
+      }
+    });
+
+    it("complete records each extra on its own row, never another run's", async () => {
+      const runId = `container-extras-${randomUUID()}`;
+      const other = `container-extras-other-${randomUUID()}`;
+      try {
+        const [tools] = await seed(runId, ["tools"]);
+        const [otherTools] = await seed(other, ["tools"]);
+        const store = new PrismaContainerExecutionStore(db);
+        const record = (id: string) => ({
+          id,
+          name: "tools",
+          result: opened("openai/tools", "develop", 7),
+          pullRequestNumber: 7,
+          resultBranch: null,
+          baseSha: "c".repeat(40),
+          mergeOrder: 2,
+        });
+        // The other run's row id, passed for this run: not written.
+        await store.complete(runId, "succeeded", opened("openai/example", "main", 42), {}, [
+          record(tools.id),
+          record(otherTools.id),
+        ]);
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          pullRequestNumber: 7,
+          mergeOrder: 2,
+        });
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: otherTools.id } })).resolves.toMatchObject(
+          { pullRequestNumber: null, result: null },
+        );
+      } finally {
+        await drop([runId, other]);
+      }
+    });
+
+    it("reads and compare-and-sets an extra's description on the root's row of that name", async () => {
+      const rootId = `container-extra-desc-${randomUUID()}`;
+      try {
+        const [tools] = await seed(rootId, ["tools"]);
+        await db.codingRunRepository.update({
+          where: { id: tools.id },
+          data: { result: opened("openai/tools", "develop", 7), prDescriptionSha256: "1".repeat(64) },
+        });
+        const store = new PrismaContainerExecutionStore(db);
+        await expect(store.pullRequestDescriptionBaseline(rootId, "tools")).resolves.toEqual({
+          recordedSha256: "1".repeat(64),
+          previousAgentText: "PR for openai/tools.",
+          agentTextRunId: rootId,
+        });
+        const write = (expectedSha256: string) =>
+          store.recordPullRequestDescription({
+            rootRunId: rootId,
+            expectedSha256,
+            sha256: "2".repeat(64),
+            agentTextRunId: rootId,
+            name: "tools",
+          });
+        await expect(write("9".repeat(64))).resolves.toBe(false);
+        await expect(write("1".repeat(64))).resolves.toBe(true);
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          prDescriptionSha256: "2".repeat(64),
+        });
+        // The run's own (default repository) hash is untouched.
+        await expect(db.codingRun.findUniqueOrThrow({ where: { runId: rootId } })).resolves.toMatchObject({
+          prDescriptionSha256: null,
+        });
+      } finally {
+        await drop([rootId]);
+      }
+    });
+  });
 });

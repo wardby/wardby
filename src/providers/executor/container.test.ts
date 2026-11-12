@@ -46,7 +46,7 @@ import type {
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
-import { countWorkspaceEntries } from "../vcs/git.js";
+import { countWorkspaceEntries, GitCommandError, redactGitOutput } from "../vcs/git.js";
 import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
 import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
@@ -66,6 +66,7 @@ import {
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
+  type ExtraPublishRecord,
   type RunRepositorySnapshot,
   type ProvisioningClaim,
   storedTests,
@@ -198,7 +199,9 @@ function gateWith(
 }
 
 class FakeStore implements ContainerExecutionStore {
-  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord }> = [];
+  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord; extras?: ExtraPublishRecord[] }> = [];
+  /** Every completePartially input (a run with several repositories, some published and some failed). */
+  partials: Array<Parameters<ContainerExecutionStore["completePartially"]>[1]> = [];
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
@@ -299,16 +302,35 @@ class FakeStore implements ContainerExecutionStore {
     return "requeued";
   }
 
+  /** Every argument count complete was called with, in order. */
+  completeArity: number[] = [];
   async complete(
     runId: string,
     status: "succeeded" | "budget_exhausted",
     result: never,
     record?: CodingRunRecord,
+    extras?: ExtraPublishRecord[],
   ): Promise<void> {
+    this.completeArity.push(arguments.length);
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
     this.run.result = structuredClone(result);
-    this.completions.push({ status, result: structuredClone(result), record: structuredClone(record) });
+    this.completions.push({
+      status,
+      result: structuredClone(result),
+      record: structuredClone(record),
+      extras: structuredClone(extras),
+    });
+  }
+
+  async completePartially(
+    runId: string,
+    input: Parameters<ContainerExecutionStore["completePartially"]>[1],
+  ): Promise<void> {
+    if (runId !== this.run.runId || !["pending", "running"].includes(this.run.status)) return;
+    this.run.status = "failed";
+    this.run.result = structuredClone(input.mainResult);
+    this.partials.push(structuredClone(input));
   }
 
   async terminate(
@@ -402,9 +424,12 @@ class FakeJobs implements WorkspaceJobLauncher {
   }
   /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
-  async materializeWorkspace(): Promise<void> {
+  /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
+  materializedNames: Array<string | undefined> = [];
+  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<void> {
     this.materializations += 1;
-    this.events.push("materialize");
+    this.materializedNames.push(name);
+    this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
   }
 }
 
@@ -435,6 +460,14 @@ class FakeVcs implements VcsProvider {
   finalizeEmpty = false;
   /** The description outcome finalize reports on a pull request, when set. */
   finalizeDescription?: DescriptionWriteOutcome;
+  /** Every finalizeChanges call, by slot name (undefined for the default workspace). */
+  finalizeCalls: Array<{ slot?: string; details?: FinalizeChangesDetails }> = [];
+  /** Per slot: finalize reports an empty diff. */
+  emptySlots = new Set<string>();
+  /** Per slot: finalize throws this. */
+  slotErrors = new Map<string, Error>();
+  /** Per slot: the pull request number finalize opens (default 7). */
+  slotNumbers = new Map<string, number>();
   /** The target-branch merge prepare reports on a continuation's workspace, when set. */
   targetMerge?: PreparedWorkspace["targetMerge"];
   /** The no-push description refresh; tests that need it assign it. */
@@ -520,7 +553,32 @@ class FakeVcs implements VcsProvider {
   ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
-    this.events.push("finalize");
+    this.finalizeCalls.push({ slot: workspace.slot?.name, details: structuredClone(details) });
+    const slot = workspace.slot?.name;
+    this.events.push(slot === undefined ? "finalize" : `finalize:${slot}`);
+    if (slot !== undefined) {
+      const error = this.slotErrors.get(slot);
+      if (error) throw error;
+      if (this.emptySlots.has(slot)) {
+        return {
+          outcome: "no_changes",
+          repository: workspace.repository,
+          baseRef: workspace.baseRef,
+          baseCommit: "c".repeat(40),
+        };
+      }
+      const number = this.slotNumbers.get(slot) ?? 7;
+      return {
+        outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        baseCommit: "c".repeat(40),
+        headRef: workspace.headRef,
+        commitSha: "d".repeat(40),
+        pullRequestNumber: number,
+        pullRequestUrl: `https://github.com/${workspace.repository}/pull/${number}`,
+      };
+    }
     if (this.finalizeEmpty) {
       return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
     }
@@ -5591,6 +5649,246 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
     await created.executor.start("run-1");
     expect("repositories" in created.jobs.specs[0]).toBe(false);
+  });
+
+  describe("publishing each repository", () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    function workerOutput(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "changes_ready",
+        summary: "Fixed it.",
+        tests: [{ command: "npm test", outcome: "passed" }],
+        ...overrides,
+      });
+    }
+    async function multi(rows: RunRepositorySnapshot[], output: Record<string, unknown> = {}, run = {}) {
+      const created = await harness({ repositories: rows, ...run }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput(output) };
+      return created;
+    }
+    const extrasOf = (created: Awaited<ReturnType<typeof harness>>) => created.store.completions[0]?.extras;
+
+    it("(a) publishes the default repository first, then each changed extra with its own description", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", title: "tools-fix", description: "Tools PR." }],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      const [main, tools] = created.vcs.finalizeCalls;
+      expect(main.details?.summary).toBe("Fixed it.");
+      expect(tools.details?.summary).toBe("Tools PR.");
+      expect(tools.details?.tag).toBe("tools-fix");
+      expect(tools.details?.related?.entries).toEqual([
+        { repository: "openai/example", number: 42, mergeOrder: 1 },
+        { repository: "openai/tools", self: true, mergeOrder: 2 },
+      ]);
+      expect(created.events.indexOf("finalize")).toBeLessThan(created.events.indexOf("finalize:tools"));
+      expect(created.store.completions).toHaveLength(1);
+      expect(created.store.completions[0].status).toBe("succeeded");
+      expect(created.store.completions[0].result).toMatchObject({ pullRequestNumber: 42, summary: "Fixed it." });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({
+          id: "row-tools",
+          name: "tools",
+          pullRequestNumber: 7,
+          baseSha: "c".repeat(40),
+          resultBranch: null,
+          result: expect.objectContaining({
+            outcome: "pull_request_opened",
+            repository: "openai/tools",
+            baseRef: "develop",
+            pullRequestNumber: 7,
+            summary: "Tools PR.",
+            tag: "tools-fix",
+          }),
+        }),
+      ]);
+    });
+
+    it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "no_changes" });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "no_changes" });
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+    });
+
+    it("(c) numbers the run's pull requests after the inherited order, an explicit order winning", async () => {
+      const numbered = await multi([writeRow("tools")]);
+      await numbered.executor.start("run-1");
+      expect(numbered.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(numbered)?.[0].mergeOrder).toBe(2);
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      await inherited.executor.start("run-1");
+      // The default repository keeps its own order; the next one comes after the inherited one.
+      expect(inherited.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(inherited)?.[0].mergeOrder).toBe(5);
+
+      const explicit = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 5 }],
+      });
+      await explicit.executor.start("run-1");
+      expect(explicit.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(explicit)?.[0].mergeOrder).toBe(5);
+    });
+
+    it("(d) ends partially_published when an extra fails after the default published", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })]);
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.completions).toEqual([]);
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.partials).toHaveLength(1);
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe(
+        "partially_published: workspace: published; tools: failed(workspace); docs: published",
+      );
+      expect(partial.error).not.toContain("vcs_head_ref_conflict");
+      expect(partial.audit.failureCategory).toBe("partially_published");
+      expect(partial.audit.diagnosticId).toMatch(/^coding_diag_/);
+      // The rest were still tried; what published stays recorded.
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      expect(partial.mainResult).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+      expect(partial.extras.map((extra) => extra.name)).toEqual(["docs"]);
+      expect(reasonLogged("vcs_head_ref_conflict")).toBe(true);
+      expect(created.observer.events.at(-2)).toMatchObject({ stage: "terminal", outcome: "failed" });
+    });
+
+    it("(d) fails the run with the failure itself when nothing published", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.finalizeEmpty = true;
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.partials).toEqual([]);
+      expect(terminationError(created)).toMatch(/^coding_failure_workspace:coding_diag_/);
+    });
+
+    it("(e) keeps a token in a failed push out of Run.error and the logs", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.slotErrors.set(
+        "tools",
+        new GitCommandError(128, redactGitOutput(`remote: rejected https://x-access-token:${FAKE}@github.com`, [FAKE])),
+      );
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe("partially_published: workspace: published; tools: failed(workspace)");
+      expect(JSON.stringify(created.store.partials)).not.toContain(FAKE);
+      expect(JSON.stringify(logged)).not.toContain(FAKE);
+      expect(reasonLogged("git_command_failed")).toBe(true);
+    });
+
+    it("(f) a budget stop keeps each writable repository's changes, recording the kept extras on their rows", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.emptySlots.add("docs");
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      const tools = created.vcs.finalizeCalls[1].details;
+      expect(tools?.summary).toBe(budgetStoppedSummary("Fixed it.", undefined));
+      expect(created.store.completions[0].status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({ name: "tools", pullRequestNumber: 7, mergeOrder: 2 }),
+      ]);
+    });
+
+    it("(f) a budget stop whose extra fails to push still keeps the others", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([]);
+    });
+
+    it("(g) never collects or finalizes a read repository", async () => {
+      const created = await multi([readRow("base"), writeRow("tools", { position: 2 })]);
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+    });
+
+    it("re-authorizes each extra by name right before its push, refusing only that one", async () => {
+      const gate = allowAll();
+      const created = await harness(
+        { repositories: [writeRow("tools"), writeRow("docs", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: gate as never },
+      );
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      created.jobs.onLaunch = () => {
+        gate.authorizeUse.mockImplementation(async (input: unknown) =>
+          (input as { repository: string }).repository === "openai/tools"
+            ? { ok: false, reason: "not_authorized" }
+            : { ok: true },
+        );
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(repo_access); docs: published",
+      );
+    });
+
+    it("refuses to push a writable row stored without its branch", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.jobs.onLaunch = () => {
+        created.store.run.repositories[0].headRef = null;
+      };
+      await created.executor.start("run-1");
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(preflight)",
+      );
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
+
+    it("caps the entries of every collected repository together", async () => {
+      const counted: string[][] = [];
+      const created = await harness({ repositories: [writeRow("tools")] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+        countEntries: async (paths) => {
+          counted.push(paths);
+          // The first count is at prepare time; the job then "writes" 3 entries into each repository.
+          if (counted.length === 1) return;
+          for (const path of paths) for (let i = 0; i < 3; i++) await writeFile(join(path, `file-${i}.txt`), "x");
+          return countWorkspaceEntries(paths, 5);
+        },
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      await created.executor.start("run-1");
+      expect(counted).toHaveLength(2);
+      expect(counted[1]).toEqual([counted[0][0], created.vcs.slotPaths.get("tools")]);
+      expect(created.store.run.status).toBe("failed");
+      expect(reasonLogged("vcs_workspace_entry_limit")).toBe(true);
+      expect(created.vcs.finalizeCalls).toEqual([]);
+    });
+
+    it("(h) a single-repository run completes exactly as before, with no extras", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // runId, status, result and record: never a fifth (extras) argument.
+      expect(created.store.completeArity).toEqual([4]);
+      expect(created.store.completions[0].extras).toBeUndefined();
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
   });
 });
 

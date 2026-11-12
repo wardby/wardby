@@ -66,6 +66,7 @@ const SELF_DEFECT_WAIT = { waitMs: 2_000 };
 export type ReconcilerDb = Pick<
   PrismaClient,
   | "run"
+  | "codingRunRepository"
   | "runHook"
   | "runHostCheck"
   | "runBudgetEvent"

@@ -67,6 +67,7 @@ export type HostEventDb = Pick<
   | "runHostCheck"
   | "runHostStatus"
   | "codingRun"
+  | "codingRunRepository"
   | "registryFetch"
   | "registryAuditRecord"
   | "task"

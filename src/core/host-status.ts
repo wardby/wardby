@@ -434,6 +434,30 @@ export async function collectPackageAudit(
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
 export type RunOutcomeDb = Pick<PrismaClient, "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord">;
 
+/**
+ * A top-level coding run's own results (its default repository's, then its extra repositories'), or
+ * null for any other run. Best effort: a read failure reports none.
+ */
+async function ownCodingRun(
+  db: RunOutcomeDb,
+  runId: string,
+): Promise<{ result: unknown; repositories: Array<{ result: unknown }> } | null> {
+  try {
+    const own = await db.run.findUnique({
+      where: { id: runId },
+      select: {
+        parentRunId: true,
+        codingRun: {
+          select: { result: true, repositories: { select: { result: true }, orderBy: { position: "asc" } } },
+        },
+      },
+    });
+    return own && own.parentRunId === null ? (own.codingRun ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
 export async function collectRunOutcome(
   db: RunOutcomeDb,
@@ -452,16 +476,32 @@ export async function collectRunOutcome(
       id: true,
       status: true,
       error: true,
-      codingRun: { select: { result: true, failureCategory: true, services: true, packageAuditMode: true } },
+      codingRun: {
+        select: {
+          result: true,
+          failureCategory: true,
+          services: true,
+          packageAuditMode: true,
+          repositories: { select: { result: true }, orderBy: { position: "asc" } },
+        },
+      },
     },
     orderBy: { startedAt: "asc" },
   });
-  const pullRequests = children
-    .map((c) => {
-      const pr = pullRequestOutcome(c.codingRun?.result);
-      return pr ? { ...pr, runId: c.id } : null;
-    })
-    .filter((pr): pr is PullRequestOutcome & { runId: string } => pr !== null);
+  // A coding run's pull requests: its default repository's, then each extra repository's (#537).
+  const pullRequestsOf = (
+    runId: string,
+    codingRun: { result: unknown; repositories?: Array<{ result: unknown }> } | null | undefined,
+  ): Array<PullRequestOutcome & { runId: string }> =>
+    [codingRun?.result, ...(codingRun?.repositories ?? []).map((row) => row.result)].flatMap((result) => {
+      const pr = pullRequestOutcome(result);
+      return pr ? [{ ...pr, runId }] : [];
+    });
+  const pullRequests = [
+    // A top-level coding run (a scheduled run, a fix round) lists its own pull requests first.
+    ...pullRequestsOf(run.id, await ownCodingRun(db, run.id)),
+    ...children.flatMap((c) => pullRequestsOf(c.id, c.codingRun)),
+  ];
   const failedChildren = children
     .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
     .map((c) => ({

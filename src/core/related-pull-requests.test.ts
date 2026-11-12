@@ -43,6 +43,7 @@ function db(passes: Row[][], issueRows: unknown[] = [], continuedBy: Record<stri
       $queryRaw: queryRaw,
       issuePullRequest: { findMany: vi.fn(async () => issueRows) },
       codingRun: { findMany: continuations },
+      codingRunRepository: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
     } as unknown as RelatedPullRequestsDb,
     queryRaw,
     continuations,

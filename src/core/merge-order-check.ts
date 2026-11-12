@@ -28,7 +28,12 @@ import type {
 } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
 import { maybeMarkReady, type MarkReadyDb } from "./mark-ready.js";
-import { collectRelatedPullRequests, runTreeRoot, type RelatedPullRequestsDb } from "./related-pull-requests.js";
+import {
+  collectRelatedPullRequests,
+  markerRecordedFor,
+  runTreeRoot,
+  type RelatedPullRequestsDb,
+} from "./related-pull-requests.js";
 
 const moduleLog = logger.child({ module: "merge-order-check" });
 
@@ -262,12 +267,8 @@ export async function syncMergeOrderChecks(
         else if (memberHost?.pullRequestOrigin) origin = await memberHost.pullRequestOrigin(pr.repository, pr.number);
         else throw new Error("no_host_for_repository");
         let headSha: string | undefined;
-        if (origin.markerRunId) {
-          const opener = await deps.db.codingRun.findUnique({
-            where: { runId: origin.markerRunId },
-            select: { repository: true },
-          });
-          if (opener && opener.repository.toLowerCase() === pr.repository) headSha = origin.headSha;
+        if (origin.markerRunId && (await markerRecordedFor(deps.db, origin.markerRunId, pr.repository))) {
+          headSha = origin.headSha;
         }
         members.push({ member: { ...base, state: originState(origin) }, known: true, ...(headSha ? { headSha } : {}) });
       } catch (err) {

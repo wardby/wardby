@@ -812,6 +812,82 @@ describe("collectRunOutcome", () => {
   });
 });
 
+describe("collectRunOutcome with several repositories (#537)", () => {
+  const opened = (repository: string, n: number) => ({
+    outcome: "pull_request_opened",
+    repository,
+    pullRequestNumber: n,
+    pullRequestUrl: `https://github.com/${repository}/pull/${n}`,
+  });
+  const pr = (repository: string, n: number, runId: string) => ({
+    outcome: "pull_request_opened",
+    repository,
+    pullRequestNumber: n,
+    pullRequestUrl: `https://github.com/${repository}/pull/${n}`,
+    codeProvider: "github",
+    runId,
+  });
+
+  it("lists a child's extra repositories' pull requests after its own, each with the child's run id", async () => {
+    const database = {
+      run: {
+        findUnique: vi.fn(async () => ({ parentRunId: null, codingRun: null })),
+        findMany: vi.fn(async () => [
+          {
+            id: "c1",
+            status: "succeeded",
+            error: null,
+            codingRun: {
+              result: opened("o/app", 4),
+              failureCategory: null,
+              services: [],
+              repositories: [{ result: opened("o/tools", 7) }, { result: null }, { result: opened("o/docs", 9) }],
+            },
+          },
+          {
+            id: "c2",
+            status: "succeeded",
+            error: null,
+            codingRun: { result: opened("o/web", 2), failureCategory: null, services: [], repositories: [] },
+          },
+        ]),
+      },
+    } as never;
+    const out = await collectRunOutcome(database, { id: "lead", status: "succeeded", finalText: null });
+    expect(out.pullRequests).toEqual([
+      pr("o/app", 4, "c1"),
+      pr("o/tools", 7, "c1"),
+      pr("o/docs", 9, "c1"),
+      pr("o/web", 2, "c2"),
+    ]);
+  });
+
+  it("lists a top-level coding run's own pull requests: its default repository's, then its rows'", async () => {
+    const findUnique = vi.fn(async () => ({
+      parentRunId: null,
+      codingRun: { result: opened("o/app", 4), repositories: [{ result: opened("o/tools", 7) }] },
+    }));
+    const database = { run: { findUnique, findMany: vi.fn(async () => []) } } as never;
+    const out = await collectRunOutcome(database, { id: "r1", status: "failed", finalText: null });
+    expect(out.pullRequests).toEqual([pr("o/app", 4, "r1"), pr("o/tools", 7, "r1")]);
+    expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "r1" } }));
+  });
+
+  it("never lists a delegated coding run's own pull requests as its outcome (its lead lists them)", async () => {
+    const database = {
+      run: {
+        findUnique: vi.fn(async () => ({
+          parentRunId: "lead",
+          codingRun: { result: opened("o/app", 4), repositories: [] },
+        })),
+        findMany: vi.fn(async () => []),
+      },
+    } as never;
+    const out = await collectRunOutcome(database, { id: "c1", status: "succeeded", finalText: null });
+    expect(out.pullRequests).toEqual([]);
+  });
+});
+
 describe("package audit mode in the outcome", () => {
   const child = (id: string, status: string, packageAuditMode: string | null, result: unknown = null) => ({
     id,

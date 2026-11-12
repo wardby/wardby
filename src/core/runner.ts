@@ -463,6 +463,7 @@ export function nativeChildResult(
 export type RunnerDb = Pick<
   PrismaClient,
   | "agent"
+  | "codingRunRepository"
   | "runHook"
   | "run"
   | "agentTool"
