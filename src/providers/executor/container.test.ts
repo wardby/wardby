@@ -4142,6 +4142,45 @@ describe("ContainerExecutor", () => {
     expect(beatsDuringLaunch).toBeGreaterThan(0);
   });
 
+  // Reproduces the run-swept-while-cloning case: claimProvisioning sets heartbeatAt once, and a clone
+  // that outlives HEARTBEAT_TIMEOUT_MS let recover() abandon the run as coding_ambiguous_provisioning.
+  it("beats the heartbeat while a slow workspace is prepared", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
+    let beatsDuringPrepare = 0;
+    const inner = created.vcs.prepareWorkspace.bind(created.vcs);
+    created.vcs.prepareWorkspace = async (input) => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beatsDuringPrepare = created.store.heartbeats - before;
+      return inner(input);
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringPrepare).toBeGreaterThan(0);
+  });
+
+  it("beats the heartbeat while the input is written", async () => {
+    // A continuation: writeInput reads the stored PR description baseline from the store, a step that runs
+    // inside writeInput and nowhere else (prepareWorkspace has already returned by then).
+    const created = await harness(
+      { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      undefined,
+      { heartbeatIntervalMs: 5 },
+    );
+    let beatsDuringInput = 0;
+    let calls = 0;
+    created.store.pullRequestDescriptionBaseline = async () => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      // Later calls (finishing the run) are outside writeInput; keep the beats seen by the first.
+      if (calls++ === 0) beatsDuringInput = created.store.heartbeats - before;
+      return { recordedSha256: null, previousAgentText: "Previous body", agentTextRunId: "root-run" };
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringInput).toBeGreaterThan(0);
+  });
+
   it("stops beating once the launch returns, leaving the poll loop in charge", async () => {
     const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
     await created.executor.start("run-1");

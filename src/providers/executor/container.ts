@@ -1362,16 +1362,21 @@ export class ContainerExecutor implements Executor {
       }
       // A launched run (recovered after a restart) is in flight: a transient
       // host error is retried once before it is stopped.
-      await this.authorizeRepository(run, { inFlight: Boolean(handle) });
-      try {
-        workspace = await this.options.vcs.recoverWorkspace(prepared);
-        if (!workspace && handle) throw new Error("coding_workspace_lost");
-        if (!workspace) workspace = await this.options.vcs.prepareWorkspace(prepared);
-        this.emit({ stage: "prepared", runId });
-      } catch (error) {
-        if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
-        throw error;
-      }
+      // A slow clone (large repository, cold host) outlives HEARTBEAT_TIMEOUT_MS just as a launch can.
+      const toPrepare = run;
+      workspace = await this.whileHeartbeating(runId, async () => {
+        await this.authorizeRepository(toPrepare, { inFlight: Boolean(handle) });
+        try {
+          const found = await this.options.vcs.recoverWorkspace(prepared);
+          if (!found && handle) throw new Error("coding_workspace_lost");
+          const ready = found ?? (await this.options.vcs.prepareWorkspace(prepared));
+          this.emit({ stage: "prepared", runId });
+          return ready;
+        } catch (error) {
+          if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
+          throw error;
+        }
+      });
       await this.options.vcs.notifyContinuationStarted?.(workspace, { agentName: run.agentName });
 
       if (!handle) {
@@ -1407,7 +1412,10 @@ export class ContainerExecutor implements Executor {
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
         if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
-        const inputArtifact = await this.writeInput(run, deadlineAt, workspace);
+        const [inputRun, inputWorkspace] = [run, workspace];
+        const inputArtifact = await this.whileHeartbeating(runId, () =>
+          this.writeInput(inputRun, deadlineAt, inputWorkspace),
+        );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
         const spec = this.jobSpec(run, inputArtifact, { mcpTools: Boolean(mcpToken) });
