@@ -5101,6 +5101,7 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       id: `row-${overrides.name}`,
       position: 1,
       access: "read",
+      accessKnown: true,
       provider: "github",
       repository: `openai/${overrides.name}`,
       requestedRef: "main",
@@ -5275,6 +5276,81 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(created.vcs.prepared).toBe(0);
       expect(created.vcs.copyInputs).toEqual([]);
     }
+  });
+
+  it("refuses a row with an unknown access, never treating it as read, before any clone", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      { repositories: [readRow("base", { accessKnown: false })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_preflight:coding_diag_/);
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(gate.authorizeUse.mock.calls.map(([input]) => (input as { repository: string }).repository)).not.toContain(
+      "openai/base",
+    );
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+  });
+
+  it("refuses a writable row stored on another branch than the run's, before any clone", async () => {
+    const created = await harness(
+      { repositories: [writeRow("tools", { headRef: "wardby/run-other" })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+  });
+
+  it("re-authorizes one row by name with `only`, leaving the others untouched", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      {
+        repositories: [
+          readRow("base", { linkExists: false }),
+          writeRow("tools"),
+          writeRow("docs", { accessKnown: false }),
+        ],
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    const run = await created.store.load("run-1");
+    const authorizeExtras = (
+      created.executor as unknown as {
+        authorizeExtras(run: ContainerRunSnapshot, opts: { inFlight: boolean; only?: string }): Promise<void>;
+      }
+    ).authorizeExtras.bind(created.executor);
+    // Only tools is checked: base's missing link and docs' unknown access are not looked at.
+    await authorizeExtras(run!, { inFlight: true, only: "tools" });
+    expect(gate.authorizeUse).toHaveBeenCalledTimes(1);
+    expect(gate.authorizeUse.mock.calls[0][0]).toMatchObject({
+      repository: "openai/tools",
+      required: "write",
+      retryTransient: true,
+    });
+    // The named row itself is still refused when its link is gone or the gate denies it.
+    await expect(authorizeExtras(run!, { inFlight: true, only: "base" })).rejects.toThrow("repo_access_not_authorized");
+    gate.authorizeUse.mockResolvedValueOnce({ ok: false, reason: "github_account_not_allowed" });
+    await expect(authorizeExtras(run!, { inFlight: true, only: "tools" })).rejects.toThrow(
+      "repo_access_github_account_not_allowed",
+    );
+    // A name that matches no row checks nothing.
+    gate.authorizeUse.mockClear();
+    await authorizeExtras(run!, { inFlight: true, only: "missing" });
+    expect(gate.authorizeUse).not.toHaveBeenCalled();
   });
 
   it("names a continuation's writable extras by the root's branch: continued when it exists, created when not", async () => {

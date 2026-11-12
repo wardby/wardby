@@ -227,6 +227,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
           position: 1,
           name: "base",
           access: "read",
+          accessKnown: true,
           repository: "openai/base",
           resolvedSha: sha,
           baseRef: null,
@@ -251,6 +252,25 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       ]);
       // A root run has no earlier branches: nothing continues.
       expect((await store.load(rootId))?.repositories.map((r) => r.continuesBranch)).toEqual([false, false, false]);
+      // This run's own published rows never count: only the root or an earlier continuation made a
+      // branch, so a reload after this run publishes docs still creates docs' branch off its base.
+      await db.codingRunRepository.updateMany({
+        where: { runId, name: "docs" },
+        data: { resultBranch: `wardby/run-${rootId}`, pullRequestNumber: 9 },
+      });
+      expect((await store.load(runId))?.repositories.map((r) => [r.name, r.continuesBranch])).toEqual([
+        ["base", false],
+        ["tools", true],
+        ["docs", false],
+      ]);
+      // A stored access that is neither read nor write is flagged, so the executor refuses the row.
+      await db.codingRunRepository.updateMany({ where: { runId, name: "base" }, data: { access: "admin" } });
+      expect((await store.load(runId))?.repositories.map((r) => [r.name, r.accessKnown, r.linkExists])).toEqual([
+        ["base", false, false],
+        ["tools", true, true],
+        ["docs", true, true],
+      ]);
+      await db.codingRunRepository.updateMany({ where: { runId, name: "base" }, data: { access: "read" } });
       // A link whose access changed, or that gained a trigger, or that is gone, no longer authorizes its row.
       await db.agentRepository.update({ where: { id: tools.id }, data: { access: "read" } });
       await db.agentRepository.update({ where: { id: docs.id }, data: { triggers: ["mention"] } });

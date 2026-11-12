@@ -323,6 +323,8 @@ export interface RunRepositorySnapshot {
   position: number;
   name: string;
   access: "read" | "write";
+  /** False when the stored access is neither "read" nor "write": such a row is refused, never treated as read. */
+  accessKnown: boolean;
   provider: string;
   repository: string;
   requestedRef: string | null;
@@ -692,7 +694,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   /**
    * The run's extra repositories (#537), each with whether its link is still a coding-set link of
    * the agent (same id, same access, no triggers) and, for a continuation, whether a writable row's
-   * branch already exists from the root or an earlier continuation of the same tree.
+   * branch already exists from the root or an earlier continuation of the same tree (never this run
+   * itself: once it publishes, its own rows carry a branch too, and a reload must not change how it
+   * names a branch it created off its base).
    */
   private async loadRepositories(
     runId: string,
@@ -713,6 +717,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ? await this.db.codingRunRepository.findMany({
           where: {
             codingRun: { OR: [{ runId: rootId }, { rootCodingRunId: rootId }] },
+            runId: { not: runId },
             OR: [{ pullRequestNumber: { not: null } }, { resultBranch: { not: null } }],
           },
           select: { name: true },
@@ -725,6 +730,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         position: r.position,
         name: r.name,
         access: r.access === "write" ? "write" : "read",
+        accessKnown: r.access === "read" || r.access === "write",
         provider: r.provider,
         repository: r.repository,
         requestedRef: r.requestedRef,
@@ -1323,6 +1329,17 @@ class PreflightError extends Error {}
 /** An extra repository row with no resolved commit (or a writable one without its refs): refused before any clone. */
 export const CODING_REPOSITORY_UNRESOLVED_ERROR = "coding_repository_unresolved";
 
+/**
+ * A stored row the executor cannot trust is refused (fail closed): an access that is neither read nor
+ * write, or a writable row on another branch than the run's, which is the one it would be pushed to.
+ */
+function assertRowWellFormed(run: ContainerRunSnapshot, extra: RunRepositorySnapshot): void {
+  if (!extra.accessKnown) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+  if (extra.access === "write" && extra.headRef !== null && extra.headRef !== run.headRef) {
+    throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+  }
+}
+
 /** A refusal by repository authorization; its message is the failure category's prefix (repo_access_*). */
 class RepoAccessError extends PreflightError {}
 
@@ -1754,6 +1771,7 @@ export class ContainerExecutor implements Executor {
     for (const extra of run.repositories) {
       // `only` scopes the check to one row by name: one row's denial must not fail every publish.
       if (opts.only !== undefined && extra.name !== opts.only) continue;
+      assertRowWellFormed(run, extra);
       if (!extra.linkExists) throw new RepoAccessError("repo_access_not_authorized");
       const decision = await this.options.repoAccess.authorizeUse({
         ownerId: run.ownerId,
@@ -1779,6 +1797,7 @@ export class ContainerExecutor implements Executor {
     run: ContainerRunSnapshot,
     extra: RunRepositorySnapshot,
   ): { kind: "read"; input: ReadOnlyCopyInput } | { kind: "write"; input: VcsPrepareInput } {
+    assertRowWellFormed(run, extra);
     if (!extra.resolvedSha) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
     if (extra.access === "read") {
       return {
