@@ -1,10 +1,9 @@
 /**
- * The comment dialog for documents: the floating 💬 Comment button, the
- * composer and thread popover (with the ⋯ menu and @mention list), margin
- * badges and the threads panel. Shared look with designs via styles.css.
+ * The comment dialog, one for documents and designs: the composer and thread
+ * popover (with the ⋯ menu and @mention list) and the threads panel. What is
+ * commented on (highlights or pins, the gesture that starts a comment, margin
+ * badges) is the anchoring surface's (surface.ts): text-surface.ts for documents.
  */
-import type { Editor } from "@tiptap/core";
-import { anchorForRange, docText, rangeForAnchor, type TextAnchor } from "./anchors.js";
 import { ApiError, errorMessage, type Api, type DocumentPayload, type ThreadView, type Viewer } from "./api.js";
 import {
   candidateFrom,
@@ -14,11 +13,10 @@ import {
   mentionQuery,
   previewText,
   relativeTime,
-  stackBadges,
   type MentionCandidate,
 } from "./comments.js";
 import { append, clear, h, placeAt, renderBody, trapFocus } from "./dom.js";
-import { getHighlights, setHighlights, type Highlight } from "./editor.js";
+import type { AnchorSurface, DraftStart } from "./surface.js";
 
 const RANK: Record<string, number> = { none: 0, read: 1, comment: 2, write: 3, owner: 4 };
 export const atLeast = (access: string, need: string) => (RANK[access] ?? 0) >= RANK[need];
@@ -30,7 +28,6 @@ const FILTERS: [Filter, string][] = [
   ["sent", "Sent to agent"],
   ["mine", "Mine"],
 ];
-const BADGE_GAP = 24;
 const POLL_MS = 15_000;
 /** Shown in the composer while a guest changes their name. */
 export const GUEST_RENAME_NOTE = "Earlier comments stay under your old name.";
@@ -46,15 +43,14 @@ const SEND_AFTER_CREATE = new Set([
 
 export interface CommentsHost {
   api: Api;
-  editor: Editor;
+  /** What is commented on: marks, the gesture that starts a comment, where a popover opens. */
+  surface: AnchorSurface;
   shareToken?: string;
   /** Elements the dialog draws into. */
   stage: HTMLElement;
   page: HTMLElement;
-  margin: HTMLElement;
   panel: HTMLElement;
   count: HTMLElement;
-  bubble: HTMLButtonElement;
   /** Called when the viewer changes (guest registration). */
   onViewer(viewer: Viewer): void;
   /** Leaves an earlier version shown in the Edits tray and returns to the latest, so a thread can be positioned. */
@@ -65,8 +61,8 @@ interface Pop {
   el: HTMLElement;
   kind: "draft" | "thread";
   threadId?: string;
-  anchor?: TextAnchor;
-  quote: string;
+  /** The draft's anchor and quote (drafts only). */
+  start?: DraftStart;
   editing?: string;
   confirmDelete?: string;
   changingName?: boolean;
@@ -101,6 +97,15 @@ export class CommentsUI {
     this.wire();
   }
 
+  private get surface(): AnchorSurface {
+    return this.host.surface;
+  }
+
+  /** A comment body as one line of plain text, with mentions named (badge and pin tooltips). */
+  preview(body: string): string {
+    return previewText(body, this.names);
+  }
+
   // ---- permissions ----------------------------------------------------------
 
   /** Comment access: a member or guest with comment, or a visitor on a comment link (who registers first). */
@@ -131,7 +136,6 @@ export class CommentsUI {
     this.threads = payload.threads;
     for (const g of payload.mentionedGuests ?? []) this.names.set(`guest:${g.guestId}`, `${g.name} (guest)`);
     for (const id of [...this.checked]) if (!this.threads.some((t) => t.id === id)) this.checked.delete(id);
-    this.refreshHighlights();
     this.render();
   }
 
@@ -165,55 +169,30 @@ export class CommentsUI {
     }, POLL_MS);
   }
 
-  // ---- highlights -------------------------------------------------------------
+  // ---- marks -------------------------------------------------------------------
 
-  /** Highlights for open threads: kept where edits mapped them, otherwise located from the anchor. */
-  refreshHighlights(): void {
-    const editor = this.host.editor;
-    const current = new Map(getHighlights(editor).map((r) => [r.id, r]));
-    let dt: ReturnType<typeof docText> | null = null;
-    const ranges: Highlight[] = [];
-    for (const t of this.threads) {
-      if (t.status !== "open") continue;
-      const kept = current.get(t.id);
-      if (kept) {
-        ranges.push(kept);
-        continue;
-      }
-      dt ??= docText(editor.state.doc);
-      const r = rangeForAnchor(dt, t.anchor);
-      if (r) ranges.push({ id: t.id, ...r });
-    }
-    const draft = current.get("draft");
-    if (draft && this.pop?.kind === "draft") ranges.push(draft);
-    setHighlights(editor, { ranges, active: this.pop?.kind === "draft" ? "draft" : this.selected });
+  /** Tells the surface what to mark: the threads, the draft, the active one, and whether a comment can start. */
+  private mark(): void {
+    const draft = this.pop?.kind === "draft" ? (this.pop.start?.anchor ?? null) : null;
+    this.surface.mark({
+      threads: this.threads,
+      draft,
+      active: this.pop?.kind === "draft" ? "draft" : this.selected,
+      canStart: !this.pop && this.canComment && !this.suspended,
+    });
     this.scheduleLayout();
-  }
-
-  private rangeOf(id: string): { from: number; to: number } | null {
-    return getHighlights(this.host.editor).find((r) => r.id === id) ?? null;
   }
 
   // ---- wiring -----------------------------------------------------------------
 
   private wire(): void {
-    const { editor, bubble, stage } = this.host;
-    bubble.addEventListener("mousedown", (e) => e.preventDefault());
-    bubble.addEventListener("click", () => this.startComment());
-    editor.on("selectionUpdate", () => this.updateBubble());
-    editor.on("update", () => this.scheduleLayout());
-    editor.on("blur", () => setTimeout(() => this.updateBubble(), 120));
-    document.addEventListener("selectionchange", () => this.updateBubble());
-    stage.addEventListener("scroll", () => this.scheduleLayout(), { passive: true });
-    addEventListener("resize", () => this.scheduleLayout());
-    new ResizeObserver(() => this.scheduleLayout()).observe(this.host.page);
-
-    editor.view.dom.addEventListener("click", (e) => {
-      const mark = (e.target as Element).closest?.<HTMLElement>("[data-comment-id]");
-      const id = mark?.dataset.commentId;
-      if (!id || id === "draft" || !this.selectionRange().empty) return;
-      const t = this.threads.find((x) => x.id === id);
-      if (t) this.openThread(t);
+    this.surface.connect({
+      activate: (id) => {
+        const t = this.threads.find((x) => x.id === id);
+        if (t) this.openThread(t);
+      },
+      start: () => this.startComment(),
+      layout: () => this.scheduleLayout(),
     });
 
     document.addEventListener("mousedown", (e) => {
@@ -231,12 +210,6 @@ export class CommentsUI {
   }
 
   private onKey(e: KeyboardEvent): void {
-    // ⌘⌥M (Ctrl+Alt+M elsewhere); e.code, because Option changes e.key on macOS.
-    if (e.code === "KeyM" && e.altKey && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      this.startComment();
-      return;
-    }
     const target = e.target as HTMLElement;
     const typing = !!target.closest?.("textarea, input, [contenteditable=true]");
     if (e.key === "Escape" && this.pop) {
@@ -246,67 +219,31 @@ export class CommentsUI {
       else this.closePop();
       return;
     }
-    if (typing || this.suspended || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === "j" || e.key === "k") {
+    if (this.suspended) return;
+    if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "j" || e.key === "k")) {
       const list = this.visible();
       if (list.length === 0) return;
       e.preventDefault();
       const i = list.findIndex((t) => t.id === this.selected);
       const n = i < 0 ? 0 : e.key === "j" ? (i + 1) % list.length : (i - 1 + list.length) % list.length;
       this.reveal(list[n]);
-    }
-  }
-
-  // ---- selection and the floating button ----------------------------------------
-
-  /** The selection in the editor; read from the DOM too, so read-only pages work the same. */
-  private selectionRange(): { from: number; to: number; empty: boolean } {
-    const { view, state } = this.host.editor;
-    const { from, to, empty } = state.selection;
-    if (!empty) return { from, to, empty };
-    const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return { from, to, empty: true };
-    const r = sel.getRangeAt(0);
-    if (!view.dom.contains(r.startContainer) || !view.dom.contains(r.endContainer)) return { from, to, empty: true };
-    try {
-      const a = view.posAtDOM(r.startContainer, r.startOffset);
-      const b = view.posAtDOM(r.endContainer, r.endOffset);
-      return { from: Math.min(a, b), to: Math.max(a, b), empty: a === b };
-    } catch {
-      return { from, to, empty: true };
-    }
-  }
-
-  private updateBubble(): void {
-    const { bubble, editor } = this.host;
-    const r = this.selectionRange();
-    if (r.empty || this.pop || !this.canComment || this.suspended) {
-      bubble.hidden = true;
       return;
     }
-    const a = editor.view.coordsAtPos(r.from);
-    const b = editor.view.coordsAtPos(r.to);
-    bubble.hidden = false;
-    placeAt(
-      bubble,
-      Math.max(12, (a.left + b.right) / 2 - bubble.offsetWidth / 2),
-      Math.max(8, Math.min(a.top, b.top) - bubble.offsetHeight - 8),
-    );
+    // Keys the surface owns, after the dialog's own.
+    if (this.surface.key?.(e, typing)) e.preventDefault();
   }
+
+  // ---- starting a comment ----------------------------------------------------------
 
   startComment(): void {
     if (!this.canComment || this.suspended) return;
-    const r = this.selectionRange();
-    if (r.empty) return;
-    const made = anchorForRange(docText(this.host.editor.state.doc), r.from, r.to);
-    if (!made) {
-      this.flashPanel("Select some words to comment on (up to 500 characters).");
+    const made = this.surface.draft();
+    if (made === null) return;
+    if (typeof made === "string") {
+      this.flashPanel(made);
       return;
     }
-    this.host.bubble.hidden = true;
-    const ranges = getHighlights(this.host.editor).filter((x) => x.id !== "draft");
-    setHighlights(this.host.editor, { ranges: [...ranges, { id: "draft", ...made.range }], active: "draft" });
-    this.openPop({ kind: "draft", anchor: made.anchor, quote: made.anchor.quote });
+    this.openPop({ kind: "draft", start: made });
   }
 
   // ---- popover ------------------------------------------------------------------
@@ -314,47 +251,37 @@ export class CommentsUI {
   private openThread(t: ThreadView): void {
     // The editor shows an earlier version while suspended: the thread's highlight is not there.
     if (this.suspended) this.host.returnToLatest?.();
-    this.openPop({ kind: "thread", threadId: t.id, quote: t.anchor.quote });
+    this.openPop({ kind: "thread", threadId: t.id });
   }
 
-  private openPop(init: Pick<Pop, "kind" | "threadId" | "anchor" | "quote">): void {
+  private openPop(init: Pick<Pop, "kind" | "threadId" | "start">): void {
     const returnFocus = this.pop?.returnFocus ?? document.activeElement;
     if (this.pop) {
-      const wasDraft = this.pop.kind === "draft";
       this.pop.el.remove();
       this.pop = null;
-      if (wasDraft && init.kind !== "draft") this.dropDraft();
     }
     const el = h("div", { class: "cpop", role: "dialog", aria: { modal: "false", label: "Comment" } });
     el.addEventListener("keydown", (e) => trapFocus(el, e));
     this.pop = { el, ...init, picked: [], returnFocus };
     this.selected = init.kind === "thread" ? (init.threadId ?? null) : null;
+    // The draft (or the thread, made active) is marked before the popover is placed at it.
+    this.mark();
     document.body.appendChild(el);
     this.renderPop();
     this.positionPop();
     const focus =
       el.querySelector<HTMLElement>("input[data-name], textarea") ?? el.querySelector<HTMLElement>("button");
     focus?.focus();
-    if (init.kind === "thread") setHighlights(this.host.editor, { active: this.selected });
     this.renderPanel();
-    this.scheduleLayout();
-  }
-
-  private dropDraft(): void {
-    setHighlights(this.host.editor, {
-      ranges: getHighlights(this.host.editor).filter((x) => x.id !== "draft"),
-      active: this.selected,
-    });
   }
 
   closePop(): void {
     if (!this.pop) return;
-    const { el, kind, returnFocus } = this.pop;
+    const { el, returnFocus } = this.pop;
     el.remove();
     this.pop = null;
     this.selected = null;
-    if (kind === "draft") this.dropDraft();
-    else setHighlights(this.host.editor, { active: null });
+    this.mark();
     if (returnFocus instanceof HTMLElement && returnFocus.isConnected) returnFocus.focus();
     this.renderPanel();
     this.scheduleLayout();
@@ -367,15 +294,13 @@ export class CommentsUI {
   private positionPop(): void {
     if (!this.pop) return;
     const id = this.pop.kind === "draft" ? "draft" : this.pop.threadId!;
-    const r = this.rangeOf(id);
+    const at = this.surface.point(id);
     const el = this.pop.el;
     let x: number;
     let y: number;
-    if (r) {
-      const start = this.host.editor.view.coordsAtPos(r.from);
-      const end = this.host.editor.view.coordsAtPos(r.to);
-      x = start.left;
-      y = end.bottom + 8;
+    if (at) {
+      x = at.x;
+      y = at.y;
     } else {
       // Outdated or resolved: beside the panel.
       const p = this.host.panel.getBoundingClientRect();
@@ -441,7 +366,7 @@ export class CommentsUI {
           "div",
           { class: "quote" },
           isDraft ? "New comment on " : `#${t!.number} on `,
-          h("b", {}, `“${pop.quote.slice(0, 60)}${pop.quote.length > 60 ? "…" : ""}”`),
+          h("b", {}, clip(this.surface.label(isDraft ? pop.start! : t!), 60)),
         ),
         status ? h("span", { class: `status ${status[0]}` }, status[1]) : null,
         menuItems.length
@@ -824,14 +749,15 @@ export class CommentsUI {
     const send = pop.el.querySelector<HTMLInputElement>("input[data-send]")?.checked === true && this.canSend;
     const before = new Set(this.threads.map((t) => t.id));
     try {
-      const r = await this.host.api.createThread(pop.anchor!, body, send);
+      const r = await this.host.api.createThread(pop.start!.anchor, body, send);
       await this.afterCreate(r.threadId, undefined);
     } catch (err) {
       if (send && err instanceof ApiError && SEND_AFTER_CREATE.has(err.code)) {
         // The thread was stored; only the send failed. Show it with the reason.
         await this.reload().catch(() => undefined);
+        const label = this.surface.label(pop.start!);
         const created = this.threads.find(
-          (t) => !before.has(t.id) && t.anchor.quote === pop.anchor!.quote && t.comments[0]?.mine,
+          (t) => !before.has(t.id) && this.surface.label(t) === label && t.comments[0]?.mine,
         );
         if (created) return this.afterCreate(created.id, errorMessage(err));
       }
@@ -840,11 +766,7 @@ export class CommentsUI {
   }
 
   private async afterCreate(threadId: string, error: string | undefined): Promise<void> {
-    const draft = this.rangeOf("draft");
-    // The new thread takes the draft's range (no flicker while the anchor is located again).
-    const ranges = getHighlights(this.host.editor).filter((x) => x.id !== "draft");
-    if (draft) ranges.push({ ...draft, id: threadId });
-    setHighlights(this.host.editor, { ranges });
+    // The draft's mark stays until the reload: the surface hands it to the new thread (no flicker).
     if (this.pop) {
       this.pop.el.remove();
       this.pop = null;
@@ -867,7 +789,9 @@ export class CommentsUI {
       if (act === "resolve" || act === "reopen") {
         await this.host.api.setStatus(t.id, act === "resolve" ? "resolved" : "open");
         if (act === "resolve") {
-          setHighlights(this.host.editor, { ranges: getHighlights(this.host.editor).filter((x) => x.id !== t.id) });
+          // Unmarked at once, before the reload.
+          this.threads = this.threads.map((x) => (x.id === t.id ? { ...x, status: "resolved" } : x));
+          this.mark();
         }
         await this.reload();
         if (act === "resolve") return this.closePop();
@@ -946,24 +870,18 @@ export class CommentsUI {
     );
   }
 
-  /** Scrolls a thread's highlight into view and opens it. */
+  /** Brings a thread's anchor into view and opens it. */
   reveal(t: ThreadView): void {
-    const r = this.rangeOf(t.id);
-    if (r) {
-      const top = this.host.editor.view.coordsAtPos(r.from).top;
-      const stage = this.host.stage;
-      stage.scrollTop += top - stage.getBoundingClientRect().top - 120;
-    }
+    this.surface.reveal(t);
     this.openThread(t);
   }
 
-  /** Hides the comment button and popover while an earlier version is shown; layout resumes after. */
+  /** Hides the surface's marks and start affordance and the popover while an earlier version is shown; layout resumes after. */
   suspend(on: boolean): void {
     this.suspended = on;
-    if (on) {
-      this.closePop();
-      this.host.bubble.hidden = true;
-    } else this.scheduleLayout();
+    if (on) this.closePop();
+    this.surface.suspend?.(on);
+    this.mark();
   }
 
   /** Opens a thread by its number (the Edits tray's "for thread #N"). */
@@ -980,6 +898,7 @@ export class CommentsUI {
   }
 
   render(): void {
+    this.mark();
     this.renderPanel();
     if (this.pop) {
       this.renderPop();
@@ -1053,7 +972,7 @@ export class CommentsUI {
     for (const t of list) {
       const first = t.comments[0];
       const last = t.comments[t.comments.length - 1];
-      const located = t.status === "open" && !!this.rangeOf(t.id);
+      const located = t.status === "open" && !!this.surface.point(t.id);
       const row = h(
         "div",
         {
@@ -1087,7 +1006,7 @@ export class CommentsUI {
               })
             : null,
           h("span", { class: "n" }, String(t.number)),
-          `“${t.anchor.quote.slice(0, 40)}${t.anchor.quote.length > 40 ? "…" : ""}”`,
+          clip(this.surface.label(t), 40),
         ),
         h("div", { class: "t" }, first ? previewText(first.body, this.names) : ""),
         h(
@@ -1127,39 +1046,19 @@ export class CommentsUI {
   }
 
   private layout(): void {
-    const { margin, page, editor } = this.host;
-    const top = page.getBoundingClientRect().top;
-    clear(margin);
-    const items: { t: ThreadView; y: number }[] = [];
-    for (const t of this.threads) {
-      if (t.status !== "open") continue;
-      const r = this.rangeOf(t.id);
-      if (!r) continue;
-      items.push({ t, y: editor.view.coordsAtPos(r.from).top - top });
-    }
-    const ys = stackBadges(
-      items.map((i) => i.y),
-      BADGE_GAP,
-    );
-    items.forEach(({ t }, i) => {
-      const b = h(
-        "button",
-        {
-          type: "button",
-          class: `mbadge${this.selected === t.id ? " on" : ""}`,
-          title: previewText(t.comments[0]?.body ?? "", this.names),
-          aria: { label: `Thread ${t.number}, ${t.comments.length} message${t.comments.length === 1 ? "" : "s"}` },
-          onClick: () => this.openThread(t),
-        },
-        h("span", {}, String(t.number)),
-        h("small", {}, String(t.comments.length)),
-      );
-      b.style.top = `${Math.round(ys[i])}px`;
-      margin.append(b);
-    });
     if (this.pop) this.positionPop();
-    this.updateBubble();
   }
+}
+
+/**
+ * A label cut to `max` characters of its text; a quoted label (“…”) keeps its closing quote, so a
+ * document's quote reads “first words…”.
+ */
+function clip(label: string, max: number): string {
+  const quoted = label.startsWith("“") && label.endsWith("”");
+  const text = quoted ? label.slice(1, -1) : label;
+  if (text.length <= max) return label;
+  return quoted ? `“${text.slice(0, max)}…”` : `${text.slice(0, max)}…`;
 }
 
 const AVATARS = 6;

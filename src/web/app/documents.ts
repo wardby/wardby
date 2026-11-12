@@ -20,9 +20,10 @@ import {
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { EditsTray } from "./edits-ui.js";
-import { createEditor, setHighlights } from "./editor.js";
+import { createEditor } from "./editor.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
+import { TextSurface } from "./text-surface.js";
 
 const SAVE_DELAY_MS = 1500;
 
@@ -57,10 +58,11 @@ async function main(): Promise<void> {
     }
     return fatal(root, errorMessage(err));
   }
-  mount(root, boot, api, payload);
+  if (payload.version.format !== "markdown") return fatal(root, "This page shows documents only. Reload to try again.");
+  mount(root, boot, api, payload, payload.version.markdown);
 }
 
-function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPayload): void {
+function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPayload, markdown: string): void {
   let viewer: Viewer = payload.me;
   let baseNumber = payload.version.number;
   const canWrite = viewer.kind === "member" && atLeast(viewer.access, "write");
@@ -144,9 +146,9 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   document.body.append(bubble);
 
   // ---- editor ----
-  const editor = createEditor(editorEl, payload.version.markdown, canWrite);
+  const editor = createEditor(editorEl, markdown, canWrite);
   // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
-  const lossless = isLosslessRoundTrip(payload.version.markdown, editor.getMarkdown());
+  const lossless = isLosslessRoundTrip(markdown, editor.getMarkdown());
   const editable = canWrite && lossless;
   let lossyLocked = false;
   const lockLossy = () => {
@@ -223,17 +225,19 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   };
 
   let startLive: () => void = () => undefined;
+  // Badge tooltips name mentioned people as the dialog does.
+  const surface: TextSurface = new TextSurface(editor, { page, margin, bubble, stage }, (body): string =>
+    comments.preview(body),
+  );
   const comments = new CommentsUI(
     {
       api,
-      editor,
+      surface,
       shareToken: boot.shareToken,
       stage,
       page,
-      margin,
       panel,
       count,
-      bubble,
       onViewer: (v) => {
         viewer = v;
         renderViewer();
@@ -341,6 +345,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   // ---- live updates ----
   /** Shows a newer version in place, keeping the scroll position and (where it still fits) the selection. */
   const loadVersion = (next: DocumentPayload) => {
+    if (next.version.format !== "markdown") return;
     const scroll = stage.scrollTop;
     const { from, to } = editor.state.selection;
     editor
@@ -359,7 +364,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     version.textContent = `v${baseNumber}`;
     if (!isLosslessRoundTrip(next.version.markdown, editor.getMarkdown())) lockLossy();
     // Re-anchor every thread against the new text.
-    setHighlights(editor, { ranges: [] });
+    surface.reset();
     comments.apply(next);
   };
 

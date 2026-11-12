@@ -5,8 +5,14 @@
  * carries the share token, so a member gets the link's access per request.
  * Errors surface as fixed codes only (the server never sends other text).
  */
+import type { ElementAnchor } from "../../core/documents/element-anchors.js";
+import type { VersionWarning } from "../../core/documents/warnings.js";
 import type { TextAnchor } from "./anchors.js";
 import type { VersionItem } from "./history.js";
+
+export type { ElementAnchor, TextAnchor };
+/** A thread's anchor: words in a document's text, or an element on a design board. */
+export type Anchor = TextAnchor | ElementAnchor;
 
 export interface Viewer {
   kind: "member" | "guest" | "anonymous";
@@ -36,7 +42,7 @@ export interface ThreadView {
   id: string;
   number: number;
   status: string;
-  anchor: TextAnchor;
+  anchor: Anchor;
   sentAt: string | null;
   comments: CommentView[];
 }
@@ -50,12 +56,17 @@ export interface DocumentPayload {
     path?: string | null;
     canSend: boolean;
   };
-  version: { number: number; markdown: string; createdAt: string };
+  version: PayloadVersion;
   me: Viewer;
   threads: ThreadView[];
   /** Names for @[guest:id] mentions in these threads (this document's own guests only). */
   mentionedGuests?: { guestId: string; name: string }[];
 }
+
+/** The current version: a document's Markdown, or a design's board files, by `format`. */
+export type PayloadVersion = { number: number; createdAt: string; warnings?: VersionWarning[] } & (
+  { format: "markdown"; markdown: string } | { format: "boards-v1"; files: Record<string, string> }
+);
 
 /** One /mentions entry: a member (principalId) or a guest who commented on this document (guestId). */
 export interface MentionEntry {
@@ -140,7 +151,7 @@ export class Api {
     return this.request("PUT", this.doc("/content"), { markdown, baseNumber });
   }
 
-  createThread(anchor: TextAnchor, body: string, sendToAgent: boolean): Promise<{ threadId: string; number: number }> {
+  createThread(anchor: Anchor, body: string, sendToAgent: boolean): Promise<{ threadId: string; number: number }> {
     return this.request("POST", this.doc("/threads"), { anchor, body, ...(sendToAgent ? { sendToAgent: true } : {}) });
   }
 
