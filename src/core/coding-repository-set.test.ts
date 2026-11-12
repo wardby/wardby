@@ -119,6 +119,23 @@ describe("resolveRepositorySetRefs", () => {
       ["upstream", "main", "d".repeat(40)],
     ]);
   });
+  it.each(["../secrets", "/etc/upstream-sync", "a/../../b"])(
+    "refuses a ref file path outside the repository (%s) without reading it",
+    async (refFromFile) => {
+      const readFile = vi.fn(async () => `${"c".repeat(40)}\n`);
+      const resolveRef = vi.fn(async () => "d".repeat(40));
+      const err = await resolveRepositorySetRefs(
+        planned.map((row) => (row.name === "base" ? { ...row, refFromFile } : row)),
+        { workspace: { repository: "your-org/your-fork", baseRef: "main" }, readFile, resolveRef },
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RepositoryRefUnreadableError);
+      expect((err as Error).message).toBe(
+        'repository_ref_unreadable: the ref file for link "base" is not a repository-relative file path.',
+      );
+      expect(readFile).not.toHaveBeenCalled();
+      expect(resolveRef).not.toHaveBeenCalled();
+    },
+  );
   it("refuses an unreadable ref file naming the link and path, never its content (secrets rule)", async () => {
     const secret = "ghs_FAKEtoken0123456789abcdefABCDEF";
     const err = await resolveRepositorySetRefs(planned, {

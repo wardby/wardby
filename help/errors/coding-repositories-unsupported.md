@@ -27,6 +27,8 @@ Callers see it like the other repository-set refusals:
   `"error_description": "coding_repositories_unsupported"`.
 - A lead's `delegate_to_<name>` call receives
   `{ "error": "coding_repositories_unsupported", "message": … }`.
+- A scheduled run, which has no caller to answer, is recorded as `refused`
+  with this message in `list_runs`, and the schedule moves on to its next time.
 
 ## What to do
 

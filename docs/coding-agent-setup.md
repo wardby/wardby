@@ -198,7 +198,11 @@ repository's** base branch when the run is dispatched and holds one trimmed
 line of at most 255 bytes: a branch, a tag or a 40-hex commit SHA. A missing,
 empty, too long or invalid file, or a ref that does not exist, refuses the run
 before anything is created with `repository_ref_unreadable`. The message names
-the link and the file's path and never the file's content. See
+the link and the file's path and never the file's content. A scheduled run has
+no caller to answer, so this refusal, like `repository_set_too_large` and
+`coding_repositories_unsupported`, is recorded as a `refused` run with the same
+message in `list_runs`, and the schedule moves on to its next time instead of
+retrying. See
 [Repository ref could not be read](../help/errors/repository-ref-unreadable.md).
 
 **The default set.** A link with `inDefaultSet: true` is in every run of the

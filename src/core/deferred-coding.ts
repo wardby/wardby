@@ -5,7 +5,11 @@ import { parseAllowedServiceNames, type ResolvedCodingService } from "../coding/
 import { servicesInstructionNote } from "../coding/services/note.js";
 import { knowledgeSection } from "../knowledge/note.js";
 import type { Executor } from "../providers/executor/types.js";
-import { RepositoryRefUnreadableError, type PlannedRunRepository } from "./coding-repository-set.js";
+import {
+  RepositoryRefUnreadableError,
+  RepositorySetRefusedError,
+  type PlannedRunRepository,
+} from "./coding-repository-set.js";
 import {
   authorizeRunRepositories,
   readKnowledgeIndexAt,
@@ -70,13 +74,17 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
       linkId: r.linkId,
       baseRef: r.baseRef,
     }));
-    const denied = await authorizeRunRepositories(db, executor, run.agentId, run.agent.ownerId, planned);
-    if (denied) return refuse(denied);
+    // A set or ref refusal (an executor without extra-repository support included) refuses the run,
+    // as dispatch does; its message never carries a ref file's content.
     let resolved;
     try {
+      const denied = await authorizeRunRepositories(db, executor, run.agentId, run.agent.ownerId, planned);
+      if (denied) return refuse(denied);
       resolved = await resolveExtrasWith(executor, planned, { repository: coding.repository, baseRef: coding.baseRef });
     } catch (err) {
-      if (err instanceof RepositoryRefUnreadableError) return refuse(err.message);
+      if (err instanceof RepositoryRefUnreadableError || err instanceof RepositorySetRefusedError) {
+        return refuse(err.message);
+      }
       throw err;
     }
     for (const row of resolved) {

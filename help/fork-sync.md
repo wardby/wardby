@@ -52,7 +52,7 @@ A fork sync run holds three copies of code with no git history:
    `/repos/base` and `/repos/upstream`, merge each three ways into the fork's
    file, resolve conflicts without leaving markers, write `upstream`'s full
    commit SHA into `upstream-sync`, and run the tests. The run's task text carries
-   with one line per extra repository giving its full commit
+   one line per extra repository giving its full commit
    (`Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`),
    so the agent copies the value from there. Never let it write a branch such
    as `main`: the next run would read `base` at the same commit as `upstream`,

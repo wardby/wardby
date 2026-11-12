@@ -319,6 +319,23 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
         expect.objectContaining({ path: "upstream-sync" }),
       );
     });
+
+    it.each([
+      ["cannot authorize extra repositories", "authorizeCodingRepository"],
+      ["cannot resolve their refs", "resolveCodingRepositoryRef"],
+    ] as const)("refuses the run, not fails it, when the executor %s", async (_label, missing) => {
+      const run = await runWithRepositories();
+      const { executor } = repositoryExecutor(`${"c".repeat(40)}\n`);
+      delete executor[missing];
+
+      await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(false);
+
+      expect(await runOf(run.id)).toMatchObject({
+        status: "refused",
+        error: "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+      });
+      expect((await codingRunOf(run.id)).workerImage).toBeNull();
+    });
   });
 
   it("writes the coding run once when two starts race", async () => {

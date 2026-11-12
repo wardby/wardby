@@ -89,7 +89,10 @@ repositories are not recreated on your machine.
 
 ## Failures
 
-Name, set and ref refusals happen at dispatch, before a run exists:
+Name, set and ref refusals happen at dispatch, before a run exists. A scheduled
+run has no caller to answer, so its set or ref refusal is recorded as a
+`refused` run with the same message, and the schedule moves on to its next
+time.
 
 - [`repository_name_taken`](errors/repository-name-taken.md) and
   [`repository_name_invalid`](errors/repository-name-invalid.md) at link time.

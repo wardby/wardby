@@ -50,6 +50,7 @@ import {
 import {
   CODING_SET_LINK_FILTER,
   planRepositorySet,
+  RepositoryRefUnreadableError,
   RepositorySetRefusedError,
   resolveRepositorySetRefs,
   type PlannedRunRepository,
@@ -915,31 +916,46 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       : undefined;
   // The run's extra repositories (#537): planned from the agent's links, each authorized, then each
   // ref resolved to a commit, all before the transaction (network calls). A set or ref refusal
-  // propagates: nothing has been written. An access denial refuses the run in the transaction below.
+  // propagates to a waiting caller: nothing has been written. A scheduled run has no caller waiting,
+  // so its set or ref refusal commits as a refused run below instead, like an access denial: the
+  // schedule advances rather than the scheduler retrying, and calling the host, on every tick. Its
+  // error is the refusal's own message, which never carries a ref file's content.
   // A continuation takes its root's rows instead, and a deferred run resolves them when it starts.
+  const setRefusalOf = (err: unknown): string | undefined =>
+    options.trigger === "scheduled" &&
+    (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError)
+      ? err.message
+      : undefined;
   let previewPlan: PlannedRunRepository[] | undefined;
   let resolvedExtras: ResolvedRunRepository[] = [];
   let extrasRefusal: string | undefined;
   if (!deferCoding && preview?.codingProfile && previewTarget && options.continuesCodingRunId === undefined) {
-    previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile.baseRef);
-    extrasRefusal = await authorizeRunRepositories(
-      options.db,
-      options.executor,
-      options.agentId,
-      preview.ownerId ?? null,
-      previewPlan,
-    );
-    if (!extrasRefusal) {
-      resolvedExtras = await resolveExtrasWith(options.executor, previewPlan, {
-        repository: previewTarget.repository,
-        baseRef: options.codingBaseRef ?? previewTarget.baseRef,
-      });
+    try {
+      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile.baseRef);
+      extrasRefusal = await authorizeRunRepositories(
+        options.db,
+        options.executor,
+        options.agentId,
+        preview.ownerId ?? null,
+        previewPlan,
+      );
+      if (!extrasRefusal) {
+        resolvedExtras = await resolveExtrasWith(options.executor, previewPlan, {
+          repository: previewTarget.repository,
+          baseRef: options.codingBaseRef ?? previewTarget.baseRef,
+        });
+      }
+    } catch (err) {
+      extrasRefusal = setRefusalOf(err);
+      if (extrasRefusal === undefined) throw err;
     }
   }
   // Only an agent allowed some service reads the repository's declaration; any
   // other coding agent never calls the host for it and gets no services.
+  // A run the set already refuses reads neither.
   const declarationRead =
     !deferCoding &&
+    !extrasRefusal &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
     previewTarget &&
@@ -949,6 +965,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // The knowledge note's input: the repository's bundle index at the run's base (a network call).
   const knowledgeIndex =
     !deferCoding &&
+    !extrasRefusal &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
     previewTarget &&
@@ -988,6 +1005,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         let servicesRefusal: string | undefined;
         let target: CodingRepositoryTarget | undefined;
         let inTxPlan: PlannedRunRepository[] = [];
+        let inTxSetRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           // An unknown coding provider is a broken profile, not a catalog state: still thrown.
@@ -996,8 +1014,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           target = await codingTarget(tx, options, agent.codingProfile);
           if (options.continuesCodingRunId === undefined) {
             // Planned again inside the transaction: a link changed since the preview refuses the dispatch.
-            inTxPlan = await planExtras(tx, options, target, agent.codingProfile.baseRef);
-            if (!deferCoding && planKey(inTxPlan) !== planKey(previewPlan ?? [])) {
+            // A scheduled run's set refusal commits as a refused run (see the preview above).
+            try {
+              inTxPlan = await planExtras(tx, options, target, agent.codingProfile.baseRef);
+            } catch (err) {
+              inTxSetRefusal = setRefusalOf(err);
+              if (inTxSetRefusal === undefined) throw err;
+            }
+            if (!deferCoding && !inTxSetRefusal && planKey(inTxPlan) !== planKey(previewPlan ?? [])) {
               throw new Error("The coding agent's repository links changed during dispatch; try again.");
             }
           }
@@ -1032,11 +1056,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!modelFailure && !servicesRefusal && !extrasRefusal) {
+          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal) {
             codingBudget = await reserveCodingBudget(tx, agent, now, options);
           }
         }
-        const refusal = modelFailure ? undefined : (servicesRefusal ?? extrasRefusal ?? codingBudget?.refusal);
+        const refusal = modelFailure
+          ? undefined
+          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? codingBudget?.refusal);
 
         const run = await tx.run.create({
           data: {

@@ -3,6 +3,7 @@
  * Refusals never echo a caller- or model-written value; they list link names (owner-set).
  */
 import type { Prisma } from "#prisma";
+import { isSafeRepoPath } from "../coding/local-git.js";
 import { CodingReadRefSchema, COMMIT_SHA } from "../coding/protocol.js";
 
 export const MAX_REF_FILE_BYTES = 255;
@@ -28,8 +29,8 @@ export class RepositorySetRefusedError extends Error {
   }
 }
 
-type RefReason = "missing" | "empty" | "too_long" | "invalid" | "unavailable" | "ref_not_found";
-const FILE_REASON_TEXT: Record<Exclude<RefReason, "ref_not_found">, string> = {
+type RefReason = "missing" | "empty" | "too_long" | "invalid" | "unavailable" | "ref_not_found" | "path_invalid";
+const FILE_REASON_TEXT: Record<Exclude<RefReason, "ref_not_found" | "path_invalid">, string> = {
   missing: "does not exist at the default repository's base branch",
   empty: "is empty",
   too_long: `is longer than ${MAX_REF_FILE_BYTES} bytes`,
@@ -40,6 +41,8 @@ const FILE_REASON_TEXT: Record<Exclude<RefReason, "ref_not_found">, string> = {
 function refUnreadableMessage(linkName: string, reason: RefReason, where: { path?: string; ref?: string }): string {
   // A ref that came from a file is reported by the file's path only: never the file's content or the
   // value it resolved to (spec §1, secrets rule). A link's own ref is owner-set configuration.
+  // A path outside the repository is not echoed either: it was never a valid ref file path.
+  if (reason === "path_invalid") return `the ref file for link "${linkName}" is not a repository-relative file path.`;
   if (reason === "ref_not_found") {
     return where.path !== undefined
       ? `the ref file ${where.path} for link "${linkName}" names a ref that does not exist.`
@@ -170,6 +173,8 @@ export async function resolveRepositorySetRefs(
   for (const row of planned) {
     let ref = row.requestedRef;
     if (row.refFromFile !== null) {
+      // link_repository refuses such a path; checked again here so no host is ever asked for one.
+      if (!isSafeRepoPath(row.refFromFile)) throw new RepositoryRefUnreadableError(row.name, "path_invalid", {});
       let text: string | null;
       try {
         text = await deps.readFile({ ...deps.workspace, path: row.refFromFile, maxBytes: REF_FILE_READ_BYTES });

@@ -13,7 +13,8 @@ appliesTo: ">=0.10.0"
 `CODING_MAX_RUN_REPOSITORIES` (default 5). The count includes the default
 repository, which is at `/workspace`, plus every extra at `/repos/<name>`.
 
-It is raised in two places, and no run is started:
+It is raised in two places, and no run is started (except a scheduled run, see
+below):
 
 - `link_repository` with `inDefaultSet: true`, when the default set would
   exceed the limit;
@@ -23,6 +24,10 @@ It is raised in two places, and no run is started:
   default set that grew past a lowered limit.
 
 A write link to the default repository itself does not count as an extra.
+
+A scheduled run has no caller to answer, so the refusal is recorded instead:
+the run shows in `list_runs` as `refused` with this message, and the schedule
+moves on to its next time.
 
 ## What to do
 

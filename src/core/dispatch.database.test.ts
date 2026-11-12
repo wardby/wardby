@@ -12,6 +12,7 @@ import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
 import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { createRepoAccessGate } from "./repo-access.js";
+import { claimDueRun, findDueCandidates } from "./scheduler.js";
 
 const BASE_SHA = "c".repeat(40);
 const MAIN_SHA = "d".repeat(40);
@@ -458,5 +459,158 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     ]);
     expect(spies.authorizeCodingRepository).not.toHaveBeenCalled();
     expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stored ref file path outside the repository at dispatch, without reading it", async () => {
+    const { agentId, base } = await codingAgent();
+    // Link-time validation refuses this; a row written some other way is refused here too.
+    await db.agentRepository.update({ where: { id: base.id }, data: { refFromFile: "../secrets" } });
+    const { executor, spies } = fakeExecutor();
+    const attempt = dispatchRun({ db, executor, agentId, codingTask: "sync" });
+    await expect(attempt).rejects.toBeInstanceOf(RepositoryRefUnreadableError);
+    await expect(attempt).rejects.toThrow(
+      'repository_ref_unreadable: the ref file for link "base" is not a repository-relative file path.',
+    );
+    expect(spies.readCodingRepositoryFile).not.toHaveBeenCalledWith(expect.objectContaining({ path: "../secrets" }));
+    expect(await runsOf(agentId)).toEqual([]);
+  });
+
+  describe("a scheduled dispatch (no caller waiting for the error)", () => {
+    const NOW = new Date("2026-09-05T12:16:00.000Z");
+    const WINDOW = new Date("2026-09-05T12:15:00.000Z");
+
+    async function scheduledAgent(): Promise<string> {
+      const { agentId } = await codingAgent();
+      await db.agent.update({
+        where: { id: agentId },
+        data: { schedule: "*/15 * * * *", timezone: "UTC", scheduleEnabled: true },
+      });
+      return agentId;
+    }
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      // Other suites count enabled schedules in this shared database (and a live scheduler would fire them).
+      await db.agent.updateMany({ where: { id: { startsWith: PREFIX } }, data: { scheduleEnabled: false } });
+    });
+
+    it("commits a missing ref file as one refused run and advances the schedule, so the next tick does not retry", async () => {
+      const agentId = await scheduledAgent();
+      const { executor, spies } = fakeExecutor(null);
+
+      const runId = await claimDueRun(db, executor, agentId, NOW);
+
+      expect(runId).not.toBeNull();
+      const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+      expect(run).toMatchObject({
+        status: "refused",
+        trigger: "scheduled",
+        finishedAt: NOW,
+        error:
+          'repository_ref_unreadable: the ref file upstream-sync for link "base" does not exist at the default repository\'s base branch.',
+      });
+      expect(run?.codingRun).toBeNull();
+      expect(await rowsOf(runId!)).toEqual([]);
+      expect(executor.start).not.toHaveBeenCalled();
+      expect((await db.agent.findUnique({ where: { id: agentId } }))?.lastScheduledAt).toEqual(WINDOW);
+
+      expect(spies.readCodingRepositoryFile).toHaveBeenCalledTimes(1);
+      // The next tick (10 s later, same window) finds the agent not due, so it never claims it or
+      // calls the host again; a claim that raced past that check still creates nothing.
+      const nextTick = new Date(NOW.getTime() + 10_000);
+      expect((await findDueCandidates(db, nextTick)).map((a) => a.id)).not.toContain(agentId);
+      expect(await claimDueRun(db, executor, agentId, nextTick)).toBeNull();
+      expect(await runsOf(agentId)).toHaveLength(1);
+    });
+
+    it("commits an over-limit default set as a refused run and advances the schedule", async () => {
+      const agentId = await scheduledAgent();
+      vi.stubEnv("CODING_MAX_RUN_REPOSITORIES", "2");
+      const { executor, spies } = fakeExecutor();
+
+      const runId = await claimDueRun(db, executor, agentId, NOW);
+
+      const run = await db.run.findUnique({ where: { id: runId! } });
+      expect(run).toMatchObject({ status: "refused", trigger: "scheduled" });
+      expect(run?.error).toMatch(/^repository_set_too_large: this run would have 3 repositories; the limit is 2/);
+      expect(spies.readCodingRepositoryFile).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: "upstream-sync" }),
+      );
+      expect((await db.agent.findUnique({ where: { id: agentId } }))?.lastScheduledAt).toEqual(WINDOW);
+      expect(await claimDueRun(db, executor, agentId, NOW)).toBeNull();
+    });
+
+    it("commits an over-limit default set as a refused run when the dispatch is deferred too", async () => {
+      const agentId = await scheduledAgent();
+      vi.stubEnv("CODING_MAX_RUN_REPOSITORIES", "2");
+      const { executor } = fakeExecutor();
+      const deferred: Executor = { ...executor, defersCodingResolution: true };
+
+      const runId = await claimDueRun(db, deferred, agentId, NOW);
+
+      const run = await db.run.findUnique({ where: { id: runId! } });
+      expect(run).toMatchObject({ status: "refused", trigger: "scheduled" });
+      expect(run?.error).toMatch(/^repository_set_too_large: /);
+      expect((await db.agent.findUnique({ where: { id: agentId } }))?.lastScheduledAt).toEqual(WINDOW);
+    });
+
+    it("commits an executor without extra-repository support as a refused run", async () => {
+      const agentId = await scheduledAgent();
+      const bare: Executor = { start: vi.fn(async () => {}), async stop() {} };
+
+      const runId = await claimDueRun(db, bare, agentId, NOW);
+
+      const run = await db.run.findUnique({ where: { id: runId! } });
+      expect(run).toMatchObject({
+        status: "refused",
+        error: "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+      });
+      expect((await db.agent.findUnique({ where: { id: agentId } }))?.lastScheduledAt).toEqual(WINDOW);
+    });
+
+    it.each([FAKE_TOKEN, "sk-fake-secret-0123456789"])(
+      "never writes the ref file's content (%s) to the refused run or the logs",
+      async (secret) => {
+        const agentId = await scheduledAgent();
+        // A valid branch name that does not exist: the fake resolves it to null.
+        const { executor } = fakeExecutor(`${secret}\n`);
+        const logged: string[] = [];
+        setLogLineFilter((line) => {
+          logged.push(line);
+          return line;
+        });
+        for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+          vi.spyOn(console, method).mockImplementation(
+            (...args: unknown[]) => void logged.push(args.map(String).join(" ")),
+          );
+        }
+        let runId: string | null;
+        try {
+          runId = await claimDueRun(db, executor, agentId, NOW);
+        } finally {
+          setLogLineFilter((line) => line);
+        }
+
+        const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+        expect(run).toMatchObject({
+          status: "refused",
+          error:
+            'repository_ref_unreadable: the ref file upstream-sync for link "base" names a ref that does not exist.',
+        });
+        const events = await db.runBudgetEvent.findMany({ where: { runId: runId! } });
+        const seen = [JSON.stringify(run), JSON.stringify(events), ...logged].join("\n");
+        expect(seen).not.toContain(secret);
+      },
+    );
+
+    it("still refuses a manual dispatch synchronously, with no run", async () => {
+      const agentId = await scheduledAgent();
+      const { executor } = fakeExecutor(null);
+      await expect(dispatchRun({ db, executor, agentId, codingTask: "sync" })).rejects.toBeInstanceOf(
+        RepositoryRefUnreadableError,
+      );
+      expect(await runsOf(agentId)).toEqual([]);
+      expect((await db.agent.findUnique({ where: { id: agentId } }))?.lastScheduledAt).toBeNull();
+    });
   });
 });

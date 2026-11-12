@@ -470,6 +470,24 @@ describe("repository tools", () => {
         await client.close();
       });
 
+      it.each(["../secrets", "a/../b", "/etc/upstream-sync", "./upstream-sync", "a//b"])(
+        "refuses a ref file path outside the repository (%s) at link time",
+        async (fromFile) => {
+          const { mcp } = setup(agents(), "p1");
+          const client = await connectClient(mcp);
+          const result = await call(client, {
+            repository: "upstream-org/upstream",
+            access: "read",
+            name: "base",
+            ref: { fromFile },
+          });
+          expect(errorText(result as never)).toBe("ref.fromFile must be a repository-relative file path.");
+          const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+          expect((parseText(listed as never) as { repositories: unknown[] }).repositories).toHaveLength(0);
+          await client.close();
+        },
+      );
+
       it("allows one write link per repository", async () => {
         const { mcp } = setup(agents(), "p1");
         const client = await connectClient(mcp);
