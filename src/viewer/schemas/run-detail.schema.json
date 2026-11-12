@@ -620,6 +620,80 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "repositories": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "access": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write"
+                        ]
+                      },
+                      "repository": {
+                        "type": "string"
+                      },
+                      "requestedRef": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "resolvedSha": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "pullRequestNumber": {
+                        "anyOf": [
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "pullRequestUrl": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "resultBranch": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "outcome": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "access",
+                      "repository",
+                      "requestedRef",
+                      "resolvedSha",
+                      "pullRequestNumber",
+                      "pullRequestUrl",
+                      "resultBranch",
+                      "outcome"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "Every repository of a multi-repository coding run, in order; empty for a single-repository run. Absent from servers older than the release that added it."
                 }
               },
               "required": [
@@ -629,7 +703,8 @@
                 "headRef",
                 "queuedAt",
                 "failureCategory",
-                "services"
+                "services",
+                "repositories"
               ],
               "additionalProperties": false
             },

@@ -184,6 +184,23 @@ export const RunDetailSchema = GraphRunSchema.extend({
           envNames: z.array(z.string()),
         }),
       ),
+      repositories: z
+        .array(
+          z.object({
+            name: z.string(),
+            access: z.enum(["read", "write"]),
+            repository: z.string(),
+            requestedRef: z.string().nullable(),
+            resolvedSha: z.string().nullable(),
+            pullRequestNumber: z.number().int().nullable(),
+            pullRequestUrl: z.string().nullable(),
+            resultBranch: z.string().nullable(),
+            outcome: z.string().nullable(),
+          }),
+        )
+        .describe(
+          "Every repository of a multi-repository coding run, in order; empty for a single-repository run. Absent from servers older than the release that added it.",
+        ),
     })
     .nullable(),
 });

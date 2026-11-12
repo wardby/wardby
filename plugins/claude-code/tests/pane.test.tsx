@@ -2930,3 +2930,80 @@ for (const [version, base] of [
     expect(polled).toBe(true);
   });
 }
+
+test("a run over several repositories shows one pull request line each and lists the extras under Continue locally", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  on("session.cwd", () => ({ value: "/home/me/code/wardby" }));
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run")
+      return reply({
+        id: "r1",
+        status: "succeeded",
+        codingResult: {
+          outcome: "pull_request_opened",
+          repository: "your-org/api",
+          pullRequestUrl: "https://github.com/your-org/api/pull/9",
+        },
+        repositories: [
+          {
+            name: "api",
+            access: "write",
+            repository: "your-org/api",
+            requestedRef: "main",
+            resolvedSha: null,
+            pullRequestNumber: 9,
+            pullRequestUrl: "https://github.com/your-org/api/pull/9",
+            resultBranch: "wardby/run-r1",
+            outcome: "pull_request_opened",
+          },
+          {
+            name: "tools",
+            access: "write",
+            repository: "your-org/tools",
+            requestedRef: "main",
+            resolvedSha: null,
+            pullRequestNumber: 4,
+            pullRequestUrl: "https://github.com/your-org/tools/pull/4",
+            resultBranch: "wardby/run-r1",
+            outcome: "pull_request_opened",
+          },
+          {
+            name: "upstream",
+            access: "read",
+            repository: "upstream-org/upstream",
+            requestedRef: "v1",
+            resolvedSha: "a".repeat(40),
+            pullRequestNumber: null,
+            pullRequestUrl: null,
+            resultBranch: null,
+            outcome: null,
+          },
+        ],
+      });
+    return reply({});
+  });
+
+  await $.session.start({ cwd: "/home/me/code/wardby", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await openRun(ui, "desktop", "r1");
+  await clock.settle();
+  expect((await ui.find({ type: "Link", text: /^Pull request #9 in your-org\/api$/ }))?.props.href).toBe(
+    "https://github.com/your-org/api/pull/9",
+  );
+  expect((await ui.find({ type: "Link", text: /^Pull request #4 in your-org\/tools$/ }))?.props.href).toBe(
+    "https://github.com/your-org/tools/pull/4",
+  );
+  // Continue locally: the default repository is the folder asked for; each extra gets its branch or commit.
+  expect(await ui.find({ type: "Text", text: "your-org/tools wardby/run-r1" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "git clone https://github.com/your-org/tools.git" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "upstream-org/upstream @ aaaaaaa" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "git clone https://github.com/upstream-org/upstream.git" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: /your-org\/api wardby/ })).toBeUndefined();
+});

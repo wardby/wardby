@@ -90,7 +90,11 @@ run label; it is `null` otherwise, and once the server has retired the worker.
 `declaredServices` lists the services (name and version) a coding run was
 started with; `services` holds their recorded readiness. A finished run can
 declare a service that has no readiness record, for example a run from before
-the server recorded service status.
+the server recorded service status. `coding.repositories` lists every
+repository of a coding run over several, in order, each with its `name`,
+`access` (`read` or `write`), `repository`, `requestedRef`, `resolvedSha`,
+`pullRequestNumber`, `pullRequestUrl`, `resultBranch` and `outcome` (`null`
+where a value does not apply); it is empty for a single-repository run.
 
 A Jira trigger and a Jira comment outcome carry `url`: the issue's page on the
 site in `WARDBY_JIRA_SITE_URL`, and for the comment the same page opened at

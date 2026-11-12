@@ -23,6 +23,18 @@ export type RunRow = {
 /** The long text fields get_run may send as a first page, the rest through get_run_text (servers with get_run_text). */
 export type TextField = "request" | "taskOverride" | "finalText" | "error";
 
+/** One repository of a coding run over several (get_run's repositories); nothing but names, refs, commits and PR links. */
+export type RunRepository = {
+  name: string;
+  access: "read" | "write";
+  repository: string;
+  requestedRef: string | null;
+  resolvedSha: string | null;
+  pullRequestNumber: number | null;
+  pullRequestUrl: string | null;
+  resultBranch: string | null;
+};
+
 export type RunDetail = {
   id: string;
   request: string | null;
@@ -40,6 +52,8 @@ export type RunDetail = {
   repository: string | null;
   pullRequestUrl: string | null;
   resultBranch: string | null;
+  /** Every repository of a multi-repository run, in order; empty for a single-repository run or an older server. */
+  repositories: RunRepository[];
   services: string[];
   /** Each service's start-up state by name (pending, probing, ready, failed), from serviceReadiness. */
   serviceStates: Record<string, string>;
