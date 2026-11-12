@@ -99,6 +99,27 @@ describe.skipIf(!process.env.DATABASE_URL)("design service (database)", () => {
     expect(await db.documentFile.count({ where: { documentId: id } })).toBe(10);
   });
 
+  it("a stale publisher fails before storing any text", async () => {
+    const { id } = await createDocument(db, cipher, {
+      kind: "design",
+      ownerId: owner.id,
+      title: "Coffee",
+      files: coffee(),
+      via: "mcp",
+    });
+    const before = await db.documentContent.count({ where: { documentId: id } });
+    const changed = coffee();
+    changed["boards/menu.html"] = changed["boards/menu.html"].replace("</main>", "<p>Stale edit</p></main>");
+    await expect(
+      publishVersion(db, cipher, { documentId: id, files: changed, via: "editor", expectedNumber: 7 }),
+    ).rejects.toThrow("document_version_conflict");
+    expect(await db.documentContent.count({ where: { documentId: id } })).toBe(before);
+    // The publish the stale one lost to still works.
+    expect(
+      (await publishVersion(db, cipher, { documentId: id, files: changed, via: "editor", expectedNumber: 1 })).number,
+    ).toBe(2);
+  });
+
   it("redacts the agent's secret values in board files, including entity-encoded and escaped ones", async () => {
     const files = coffee();
     files["boards/home.html"] = files["boards/home.html"].replace(

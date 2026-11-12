@@ -139,6 +139,15 @@ export async function publishVersion(
   // A design's text goes in before the transaction too (idempotent per document), so the transaction
   // only writes the version, its file rows and thread statuses.
   const files = prepared.content.format === "boards-v1" ? prepared.content.files : null;
+  if (files && input.expectedNumber !== undefined) {
+    // A stale publisher fails here, before it stores text no version will use. The check in the
+    // transaction below still decides; this one only bounds the orphan text a conflict leaves.
+    const last = await db.documentVersion.aggregate({
+      where: { documentId: input.documentId },
+      _max: { number: true },
+    });
+    if ((last._max.number ?? 0) !== input.expectedNumber) throw new Error("document_version_conflict");
+  }
   if (files) await storeDocumentContent(db, input.documentId, files);
   const published = await withSerializableRetry(
     () =>

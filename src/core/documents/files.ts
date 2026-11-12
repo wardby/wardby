@@ -27,8 +27,11 @@ export async function storeDocumentContent(
 ): Promise<void> {
   const unique = new Map(entriesOf(files).map((e) => [e.hash, e.text]));
   if (unique.size === 0) return;
+  // Inserted in hash order, so two concurrent publishes sharing text take the unique-index locks in
+  // the same order and wait for each other instead of deadlocking (40P01 is outside the retry).
+  const rows = [...unique].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   await db.documentContent.createMany({
-    data: [...unique].map(([hash, text]) => ({ documentId, hash, text, size: Buffer.byteLength(text, "utf8") })),
+    data: rows.map(([hash, text]) => ({ documentId, hash, text, size: Buffer.byteLength(text, "utf8") })),
     skipDuplicates: true,
   });
 }
