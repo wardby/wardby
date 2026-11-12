@@ -40,6 +40,7 @@ import { requireDocumentAccess, type Viewer } from "./access.js";
 import { assertDocumentAgentOverride, validDocumentBaseRef, validDocumentPath } from "./agent-link.js";
 import { listThreads, postAgentReply } from "./comments.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
+import { notifyDocumentChange } from "./events.js";
 import { publishVersion } from "./service.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 
@@ -308,6 +309,8 @@ export async function sendThreadsToAgent(
   }
   if (!dispatched) throw new Error("document_send_failed");
   const { run } = dispatched;
+  // The threads are marked sent (committed with the run).
+  await notifyDocumentChange(db, doc.id, "thread");
   // Refused or failed at dispatch: the run is already over, so the threads get their reply now.
   if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
   return { runId: run.id, status: run.status };
@@ -397,10 +400,11 @@ export async function onDocumentRunFinished(
       const body = entry?.reply ?? AGENT_NO_REPLY;
       await reply(t, edit.kind === "failed" ? `${body}\n\n${EDIT_NOT_APPLIED_NOTE}` : body);
       if (entry?.resolved && edit.kind !== "failed") {
-        await db.commentThread.updateMany({
+        const resolved = await db.commentThread.updateMany({
           where: { id: t.id, status: { in: ["open", "outdated"] } },
           data: { status: "resolved", resolvedById: null },
         });
+        if (resolved.count > 0) await notifyDocumentChange(db, t.documentId, "thread");
       }
     }
   } catch (err) {

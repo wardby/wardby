@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Document, DocumentShareLink, PrismaClient } from "#prisma";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import { principalNames } from "./comments.js";
+import { notifyDocumentChange } from "./events.js";
 import { validateGuestName } from "./names.js";
 
 export type SharePermission = "view" | "comment";
@@ -182,4 +183,6 @@ export async function revokeShareLink(db: ShareDb, input: { shareLinkId: string;
       where: { OR: [{ shareLinkId: link.id }, { guest: { shareLinkId: link.id } }] },
     });
   });
+  // Open streams of the link's guests end at their next heartbeat; members on the page refetch their access.
+  await notifyDocumentChange(db, link.documentId, "share");
 }

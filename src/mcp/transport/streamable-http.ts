@@ -313,6 +313,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     close: () =>
       new Promise((resolve, reject) => {
         opts.viewer?.closeStreams();
+        opts.web?.events?.closeStreams();
         const cut = setTimeout(() => {
           const now = Date.now();
           const requests = [...open.values()].map((r) => ({

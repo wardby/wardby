@@ -11,6 +11,7 @@ import { parseTextAnchor } from "./anchors.js";
 import type { TextAnchor } from "./anchors.js";
 import { MAX_COMMENT_CHARS } from "./limits.js";
 import { parseMentions } from "./mentions.js";
+import { notifyDocumentChange } from "./events.js";
 import { displayNameFor } from "./names.js";
 import { profileNames } from "./profiles.js";
 import { redactForDocumentAgent } from "./redact.js";
@@ -112,6 +113,7 @@ export async function createThread(
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     ),
   );
+  await notifyDocumentChange(db, doc.id, "thread");
   return { ...created, mentionsWithoutAccess: await mentionsWithoutAccess(db, doc.id, input.body) };
 }
 
@@ -127,6 +129,7 @@ export async function reply(
   if (thread.status !== "open") throw new Error("comment_thread_closed");
   const body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
   const c = await db.comment.create({ data: { threadId: thread.id, body, ...authorFields(input.viewer) } });
+  await notifyDocumentChange(db, doc.id, "comment");
   return { commentId: c.id, mentionsWithoutAccess: await mentionsWithoutAccess(db, doc.id, input.body) };
 }
 
@@ -157,6 +160,7 @@ export async function setThreadStatus(
       resolvedById: input.status === "resolved" && input.viewer.kind === "principal" ? input.viewer.principalId : null,
     },
   });
+  await notifyDocumentChange(db, thread.documentId, "thread");
 }
 
 async function ownComment(db: CommentDb, commentId: string, viewer: Viewer) {
@@ -179,11 +183,13 @@ export async function editComment(
   const { c, doc } = await ownComment(db, input.commentId, input.viewer);
   const body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
   await db.comment.update({ where: { id: c.id }, data: { body, editedAt: new Date() } });
+  await notifyDocumentChange(db, doc.id, "comment");
 }
 
 export async function deleteComment(db: CommentDb, input: { commentId: string; viewer: Viewer }): Promise<void> {
-  const { c } = await ownComment(db, input.commentId, input.viewer);
+  const { c, doc } = await ownComment(db, input.commentId, input.viewer);
   await db.comment.update({ where: { id: c.id }, data: { deletedAt: new Date() } });
+  await notifyDocumentChange(db, doc.id, "comment");
 }
 
 export async function listThreads(
@@ -276,6 +282,8 @@ export async function postAgentReply(
   const body = cutUntrustedText(redactSecrets(input.body, input.secretValues), MAX_COMMENT_CHARS).text;
   const c = await db.comment.create({
     data: { threadId: input.threadId, runId: input.runId, viaId: input.viaId, body },
+    select: { id: true, thread: { select: { documentId: true } } },
   });
+  await notifyDocumentChange(db, c.thread.documentId, "comment");
   return { commentId: c.id };
 }

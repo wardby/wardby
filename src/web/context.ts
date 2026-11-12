@@ -3,9 +3,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../core/secret-guard.js";
 import type { Viewer } from "../core/documents/access.js";
-import { validateSessionLink } from "../core/documents/share-links.js";
+import { resolveShareToken, validateSessionLink } from "../core/documents/share-links.js";
 import { logger } from "../core/logger.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
+import type { DocumentStreams } from "./events.js";
 import type { OidcLogin } from "./oidc-login.js";
 import type { GuestRateLimits } from "./rate-limits.js";
 import {
@@ -43,6 +44,8 @@ export interface WebDeps {
   /** Where the browser bundle and manifest.json live; default dist/web-assets. */
   assetsRoot?: string;
   sendThreads?: SendThreads;
+  /** Live document events (GET /d/api/<id>/events); absent = that path answers 404. */
+  events?: DocumentStreams;
   /** Counts guest registrations and comments; default: the Postgres limiter (rate-limits.ts). */
   rateLimiter?: RateLimiter;
   /** Tests only: lower or raise individual guest limits; operators always get GUEST_RATE_LIMITS. */
@@ -76,9 +79,13 @@ export const cookieOptions = (deps: WebDeps): WebCookieOptions => webCookieOptio
  * session's share link (R9a): a revoked or expired link, or a guest that no
  * longer belongs to it, makes the session count as absent.
  */
-export async function resolveContext(req: IncomingMessage, deps: WebDeps): Promise<WebContext> {
+export async function resolveContext(
+  req: IncomingMessage,
+  deps: WebDeps,
+  read: { touch?: boolean } = {},
+): Promise<WebContext> {
   const options = cookieOptions(deps);
-  const session = await readWebSession(deps.db, req.headers.cookie, options);
+  const session = await readWebSession(deps.db, req.headers.cookie, options, read);
   if (!session) return { kind: "none" };
   const csrf = webSessionCsrf(req.headers.cookie, options);
   if (!csrf) return { kind: "none" };
@@ -115,6 +122,26 @@ export async function resolveContext(req: IncomingMessage, deps: WebDeps): Promi
     // A member's session is principal-only: link elevation is per request (x-wardby-share).
     viewer: { kind: "principal", principalId: session.principalId },
   };
+}
+
+/** The header the /s/<token> page sends the share token in. */
+export const SHARE_HEADER = "x-wardby-share";
+
+/**
+ * The viewer for a request with a live session. A member's access is raised
+ * per request by a live share link sent in `x-wardby-share` (accessTo applies
+ * it only on that link's own document); a dead or unknown token leaves the
+ * member's own access. Guests are bound to their session's link.
+ */
+export async function requestViewer(
+  req: IncomingMessage,
+  deps: WebDeps,
+  ctx: Exclude<WebContext, { kind: "none" }>,
+): Promise<Viewer> {
+  const shareToken = req.headers[SHARE_HEADER];
+  if (ctx.kind !== "member" || typeof shareToken !== "string") return ctx.viewer;
+  const resolved = await resolveShareToken(deps.db, shareToken);
+  return resolved ? { ...ctx.viewer, shareLinkId: resolved.link.id } : ctx.viewer;
 }
 
 /** Appends a Set-Cookie value to those already set on the response. */

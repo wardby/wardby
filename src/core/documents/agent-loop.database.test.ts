@@ -28,6 +28,7 @@ import {
   versionConflictReply,
 } from "./agent-loop.js";
 import { createThread, listThreads, setThreadStatus } from "./comments.js";
+import { createDocumentEventBus, type DocumentEvent } from "./events.js";
 import { createDocument, publishVersion } from "./service.js";
 
 const SECRET = "s3cret-agentloop-789";
@@ -313,6 +314,41 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await onDocumentRunFinished(db, deps, runId);
     expect(await db.comment.count({ where: { runId } })).toBe(2);
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
+  });
+
+  it("tells live pages about the send, the agent's version, its replies and the threads it resolved", async () => {
+    const bus = createDocumentEventBus({ connectionString: process.env.DATABASE_URL! });
+    const seen: DocumentEvent[] = [];
+    const live = new Promise<void>((resolve) => bus.onState((up) => up && resolve()));
+    bus.subscribe((e) => seen.push(e));
+    try {
+      await live;
+      const docId = await linkedDoc();
+      const t1 = await thread(docId, "hello", "Warmer");
+      const { runId } = await sendThreadsToAgent(db, deps, {
+        documentId: docId,
+        viewer: asWriter(),
+        threadIds: [t1.threadId],
+      });
+      const replies = [{ thread: t1.number, reply: "Done.", resolved: true }];
+      const sha = await finish(
+        runId,
+        "succeeded",
+        `ok\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``,
+      );
+      files.set(`${sha}:${path}`, "hello warm world\n\nsecond para");
+      await onDocumentRunFinished(db, deps, runId);
+      await vi.waitFor(() => expect(seen.filter((e) => e.documentId === docId).length).toBeGreaterThanOrEqual(5));
+      expect(seen.filter((e) => e.documentId === docId).map((e) => e.kind)).toEqual([
+        "thread", // created
+        "thread", // sent
+        "version", // the agent's edit
+        "comment", // its reply
+        "thread", // resolved
+      ]);
+    } finally {
+      await bus.close();
+    }
   });
 
   it("publishes agent Markdown prose unchanged: Bearer wording and short secret values are not redacted", async () => {

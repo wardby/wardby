@@ -86,24 +86,30 @@ export function webSessionCsrf(cookieHeader: string | undefined, options: WebCoo
   return token ? csrfFor(token) : null;
 }
 
-/** The live session for this Cookie header, or null (missing, unknown, expired or idle). */
+/**
+ * The live session for this Cookie header, or null (missing, unknown, expired
+ * or idle). `touch: false` checks without refreshing lastSeenAt: an open
+ * event stream re-checks its session but is not activity, so it never keeps
+ * an idle session alive.
+ */
 export async function readWebSession(
   db: PrismaClient,
   cookieHeader: string | undefined,
   options: WebCookieOptions = SECURE,
+  read: { touch?: boolean } = {},
 ): Promise<WebSessionView | null> {
   const token = tokenFrom(cookieHeader, options);
   if (!token) return null;
   const tokenHash = sha256(token);
   const now = new Date();
-  // Refresh and liveness check in one statement, so an idle or expired
-  // session can never be revived by a concurrent read.
-  const live = await db.webSession.updateMany({
-    where: { tokenHash, expiresAt: { gt: now }, lastSeenAt: { gt: new Date(now.getTime() - WEB_IDLE_MS) } },
-    data: { lastSeenAt: now },
-  });
-  if (live.count !== 1) return null;
-  const row = await db.webSession.findUnique({ where: { tokenHash } });
+  const liveWhere = { tokenHash, expiresAt: { gt: now }, lastSeenAt: { gt: new Date(now.getTime() - WEB_IDLE_MS) } };
+  if (read.touch !== false) {
+    // Refresh and liveness check in one statement, so an idle or expired
+    // session can never be revived by a concurrent read.
+    const live = await db.webSession.updateMany({ where: liveWhere, data: { lastSeenAt: now } });
+    if (live.count !== 1) return null;
+  }
+  const row = await db.webSession.findFirst({ where: read.touch === false ? liveWhere : { tokenHash } });
   if (!row) return null;
   return {
     id: row.id,

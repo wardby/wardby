@@ -4,6 +4,7 @@ import type { Document, DocumentVersion, PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { locateAnchor, parseTextAnchor } from "./anchors.js";
+import { notifyDocumentChange } from "./events.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { markdownToPlainText } from "./plain-text.js";
 import { redactForDocumentAgent } from "./redact.js";
@@ -90,7 +91,7 @@ export async function publishVersion(
   const plain = markdownToPlainText(markdown);
   const summary =
     input.summary === undefined ? null : await redactForDocumentAgent(db, cipher, doc.agentId, input.summary);
-  return withSerializableRetry(() =>
+  const published = await withSerializableRetry(() =>
     db.$transaction(
       async (tx) => {
         await preferIndexScans(tx);
@@ -142,6 +143,9 @@ export async function publishVersion(
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     ),
   );
+  // After the commit: the editor, MCP and the agent loop all publish here.
+  await notifyDocumentChange(db, input.documentId, "version");
+  return published;
 }
 
 export async function getDocument(

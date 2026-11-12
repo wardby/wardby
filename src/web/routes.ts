@@ -56,7 +56,9 @@ import {
   cookieOptions,
   errorCode,
   isJsonObject,
+  requestViewer,
   resolveContext,
+  SHARE_HEADER,
   sendWebJson,
   type WebContext,
   type WebDeps,
@@ -73,6 +75,7 @@ import {
   readWebSession,
   type WebCookieOptions,
 } from "./session.js";
+import { openDocumentStream } from "./events.js";
 import { DEFAULT_ASSETS_ROOT, readManifest, serveStatic, STATIC_PREFIX } from "./static.js";
 
 export type { WebDeps } from "./context.js";
@@ -84,8 +87,8 @@ const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
 const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions))?$`);
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
+const API_EVENTS = new RegExp(`^/d/api/(${ID})/events$`);
 const WEB_PREFIXES = /^\/(?:d|s|web)\//;
-const SHARE_HEADER = "x-wardby-share";
 const LOGOUT_URL = "/web/logout";
 const PRE_MAX_AGE_SECONDS = 60 * 60;
 const PRE_VALUE = /^[A-Za-z0-9_-]{43}$/;
@@ -138,6 +141,11 @@ export async function handleWebRequest(
   const path = url.pathname;
   if (!WEB_PREFIXES.test(path)) return false;
   const method = req.method ?? "GET";
+  let m: RegExpExecArray | null;
+  if (method === "GET" && (m = API_EVENTS.exec(path))) {
+    await guardJson(res, () => openDocumentStream(req, res, m![1], deps));
+    return true;
+  }
   if (path.startsWith("/d/api/")) {
     await guardJson(res, () => handleApi(req, res, path, method, body, deps));
     return true;
@@ -146,7 +154,6 @@ export async function handleWebRequest(
     await serveStatic(res, path, deps.assetsRoot ?? DEFAULT_ASSETS_ROOT);
     return true;
   }
-  let m: RegExpExecArray | null;
   if (method === "GET" && (m = DOC_PAGE.exec(path))) {
     await guardPage(res, () => documentPage(req, res, m![1], deps));
     return true;
@@ -422,13 +429,7 @@ async function handleApi(
     assertCsrf(req, ctx.session);
     if (method !== "DELETE" && !isJsonObject(body)) throw new Error("expected_json_object");
   }
-  let viewer: Viewer = ctx.viewer;
-  const shareToken = req.headers[SHARE_HEADER];
-  if (ctx.kind === "member" && typeof shareToken === "string") {
-    // Per-request link elevation for a member; accessTo applies it only on the link's own document,
-    // and only while the link is live. A dead or unknown token leaves the member's own access.
-    const resolved = await resolveShareToken(deps.db, shareToken);
-    if (resolved) viewer = { ...ctx.viewer, shareLinkId: resolved.link.id };
-  }
+  // Per-request link elevation for a member (requestViewer).
+  const viewer = await requestViewer(req, deps, ctx);
   return route.run(viewer, false, isJsonObject(body) ? body : {});
 }

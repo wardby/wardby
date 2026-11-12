@@ -29,8 +29,10 @@ import {
   loadSecretConfig,
   loadWebOidcConfig,
 } from "../config/providers.js";
+import { createDocumentStreams } from "../web/events.js";
 import { createOidcLogin } from "../web/oidc-login.js";
 import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
+import { createDocumentEventBus } from "../core/documents/events.js";
 import type { WebDeps } from "../web/routes.js";
 import { prisma } from "../core/db.js";
 import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
@@ -552,6 +554,10 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const viewerBus = process.env.DATABASE_URL
     ? createViewerEventBus({ connectionString: process.env.DATABASE_URL })
     : undefined;
+  // Live document events (GET /d/api/<id>/events), fed by pg_notify from the document services.
+  const documentsBus = process.env.DATABASE_URL
+    ? createDocumentEventBus({ connectionString: process.env.DATABASE_URL })
+    : undefined;
   const viewer = viewerBus
     ? createViewerApi({
         db: prisma,
@@ -572,6 +578,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     canonicalUri: canonicalHref,
     authMode: authProviderKind,
     ...(selfHosted ? { selfHosted } : {}),
+    ...(documentsBus ? { events: createDocumentStreams({ bus: documentsBus }) } : {}),
     // The callers have required write on the document; sendThreadsToAgent checks it again.
     sendThreads: (input) =>
       sendThreadsToAgent(
@@ -626,6 +633,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
       await closeQuietly(viewerBus?.close(), "viewer event bus close");
+      await closeQuietly(documentsBus?.close(), "documents event bus close");
       // Let the runs this instance is executing finish before the executor
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
