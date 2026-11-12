@@ -86,7 +86,10 @@ export interface BoardsEditor {
   /** Whether there are unsaved changes (changed files, or text being typed in the canvas now). */
   dirty(): boolean;
   manifest(): Manifest;
-  /** Replaces everything with a newer version's files, keeping the selected board where it still exists. */
+  /**
+   * Replaces everything with a newer version's files, keeping the selected board where it still exists.
+   * Throws ManifestUnreadableError (nothing changed) when the manifest is not JSON.
+   */
   load(files: Record<string, string>): void;
   addBoard(name: string): string;
   renameBoard(id: string, name: string): void;
@@ -113,9 +116,23 @@ interface BoardState {
   baseline: string | null;
 }
 
+/** Thrown by createBoardsEditor and load() when the version's manifest.json is not JSON. */
+export class ManifestUnreadableError extends Error {
+  constructor() {
+    super("manifest_unreadable");
+    this.name = "ManifestUnreadableError";
+  }
+}
+
 /** The files' manifest, read leniently (the server checked it when the version was stored). */
 function readManifest(text: string | undefined): Manifest {
-  const raw = JSON.parse(text ?? "{}") as { title?: unknown; boards?: unknown };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text ?? "{}");
+  } catch {
+    throw new ManifestUnreadableError();
+  }
+  const raw = (parsed && typeof parsed === "object" ? parsed : {}) as { title?: unknown; boards?: unknown };
   const boards = Array.isArray(raw.boards) ? (raw.boards as Partial<BoardEntry>[]) : [];
   return {
     title: typeof raw.title === "string" ? raw.title : "",
@@ -136,6 +153,8 @@ export function createBoardsEditor(opts: {
   files: Record<string, string>;
   editable: boolean;
 }): BoardsEditor {
+  // Read first: an unreadable manifest throws before GrapesJS is mounted.
+  let manifest = readManifest(opts.files["manifest.json"]);
   const editor = grapesjs.init({
     container: opts.container,
     height: "100%",
@@ -162,7 +181,6 @@ export function createBoardsEditor(opts: {
     noticeOnUnload: false,
   });
 
-  let manifest = readManifest(opts.files["manifest.json"]);
   let savedManifest = serializeManifest(manifest);
   /** Board paths that exist in the last saved version (a deleted one is sent as null). */
   let savedPaths = new Set<string>();
@@ -176,6 +194,7 @@ export function createBoardsEditor(opts: {
     if (!loading) for (const cb of changeListeners) cb();
   };
 
+  /** Throws ManifestUnreadableError, before changing anything, when the manifest is not JSON. */
   const reset = (files: Record<string, string>) => {
     manifest = readManifest(files["manifest.json"]);
     savedManifest = serializeManifest(manifest);
@@ -217,6 +236,34 @@ export function createBoardsEditor(opts: {
     st.textContent = state.parts.baseCss;
   };
 
+  /**
+   * Imports the base CSS, then merges the edits layer over it. The edits layer is the editor's whole
+   * CSS from the last save, so it repeats every base rule GrapesJS imported: `Css.addRules` reuses the
+   * rule with the same selectors, state and media and replaces its style, where importing the two as
+   * one stylesheet would keep both copies and the next save would write the base rules twice. At-rules
+   * with no selector (@font-face, @page) are never reused by GrapesJS, so exact repeats of those are
+   * dropped here.
+   */
+  const setBoardStyle = (baseCss: string, editsCss: string | null) => {
+    editor.setStyle(baseCss);
+    if (!editsCss) return;
+    const css = editor.Css;
+    const before = new Set(css.getAll().models);
+    const seen = new Set(
+      css
+        .getAll()
+        .models.filter((r) => r.get("singleAtRule"))
+        .map((r) => r.toCSS()),
+    );
+    for (const rule of css.addRules(editsCss)) {
+      // A base rule the edits were merged into stays.
+      if (before.has(rule) || !rule.get("singleAtRule")) continue;
+      const text = rule.toCSS();
+      if (seen.has(text)) css.remove(rule);
+      else seen.add(text);
+    }
+  };
+
   /** Puts board `id` in the canvas: from its pending text if it has one, otherwise as stored. */
   const loadBoard = (id: string) => {
     const state = boards.get(id);
@@ -228,7 +275,7 @@ export function createBoardsEditor(opts: {
     try {
       current = id;
       editor.setComponents(parts.bodyHtml);
-      editor.setStyle(`${state.parts.baseCss}\n${parts.editsCss ?? ""}`);
+      setBoardStyle(state.parts.baseCss, parts.editsCss);
       const root = wrapper();
       if (root) {
         root.setAttributes({ ...parts.bodyAttrs });
@@ -336,15 +383,16 @@ export function createBoardsEditor(opts: {
       loadBoard(next);
     },
     addBoard(name) {
+      const trimmed = name.trim().slice(0, 80);
       const id = boardIdFor(
-        name,
+        trimmed,
         manifest.boards.map((b) => b.id),
       );
       const first = manifest.boards[0];
       const firstState = first ? boards.get(first.id) : undefined;
       const firstParts = first && first.id === current ? parseBoardFile(serializeLive()) : firstState?.parts;
-      const text = newBoardFile(firstParts ?? null, name);
-      manifest.boards.push({ id, name: name.trim() || id, file: boardPath(id), width: first?.width ?? 1280 });
+      const text = newBoardFile(firstParts ?? null, trimmed);
+      manifest.boards.push({ id, name: trimmed || id, file: boardPath(id), width: first?.width ?? 1280 });
       boards.set(id, { parts: parseBoardFile(text), pending: text, baseline: null });
       stash();
       loadBoard(id);

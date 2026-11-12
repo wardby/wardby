@@ -137,6 +137,76 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await cb.close();
   }, 90_000);
 
+  it("keeps the edits layer one copy of the base rules across save cycles, and checks each saved version", async () => {
+    const start = files();
+    // An at-rule with no selector (GrapesJS never merges those) next to the coffee base rules.
+    start["boards/home.html"] = start["boards/home.html"].replace(
+      "<style>",
+      '<style>\n  @font-face{font-family:"Local Serif";src:local("Georgia");}',
+    );
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: start, access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    const sent: Record<string, string | null>[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "PUT")
+        sent.push((JSON.parse(r.postData() ?? "{}") as { files: Record<string, string | null> }).files);
+    });
+    await page.goto(`${server.origin}/d/${documentId}`);
+    // The boards list is disabled while the first fidelity pass switches boards, then enabled again.
+    await page.waitForSelector(".boards li .pick:disabled", { timeout: 20_000 });
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    expect(await page.locator(".boards li .pick:disabled").count()).toBe(0);
+    const fidelity = async (n: number) => {
+      const v = await server.db.documentVersion.findFirst({
+        where: { documentId, number: n },
+        select: { warnings: true },
+      });
+      return ((v?.warnings as Array<{ kind: string; board: string }> | null) ?? []).filter(
+        (w) => w.kind === "fidelity",
+      );
+    };
+    await expect.poll(async () => (await fidelity(1)).length, { timeout: 20_000 }).toBe(4);
+    const pick = (name: string) => page.locator(".boards li", { hasText: name }).locator(".pick");
+    const edits = (text: string) => /<style data-wardby-edits>([\s\S]*?)<\/style>/.exec(text)?.[1] ?? "";
+    const sizes: number[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type(` e${i}`);
+      await page.locator(".topbar .crumbs").click();
+      await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain(`v${i + 1}`);
+      const home = sent[sent.length - 1]["boards/home.html"]!;
+      expect(home.match(/@font-face/g)).toHaveLength(2); // once in the base layer, once in the edits
+      expect(edits(home).match(/--cream:/g)).toHaveLength(1);
+      sizes.push(edits(home).length);
+      // Switch away and back: Home reloads from the version just saved.
+      await pick("Menu").click();
+      await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");
+      await pick("Home").click();
+      await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Home");
+    }
+    expect(sent).toHaveLength(3);
+    // The edits layer does not grow by a copy of the base each cycle (the base is several KB).
+    expect(Math.abs(sizes[1] - sizes[0])).toBeLessThan(64);
+    expect(Math.abs(sizes[2] - sizes[1])).toBeLessThan(64);
+    // The writer's own last version gets its fidelity entries once the editor is idle: Home measured
+    // again, the boards no save touched carried from v1.
+    await expect.poll(async () => (await fidelity(4)).length, { timeout: 20_000 }).toBe(4);
+    const v1 = await fidelity(1);
+    const v4 = await fidelity(4);
+    for (const id of ["menu", "about", "visit"]) {
+      expect(v4.find((w) => w.board === id)).toEqual(v1.find((w) => w.board === id));
+    }
+    expect(await page.locator(".boards li.on .name").textContent()).toBe("Home");
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 120_000);
+
   it("adds, renames, moves and deletes boards, saving the manifest", async () => {
     const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
     const context = await browser.newContext();
@@ -181,6 +251,14 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       "visit:Visit",
     ]);
     expect(await page.locator(".boards li .name").allTextContents()).toEqual(["Home", "Menu", "Hours", "Visit"]);
+    // A new board's name is cut to 80 characters, as a rename is (even past the input's maxlength).
+    await page.getByRole("button", { name: "+ Board" }).click();
+    await page.locator("dialog input").evaluate((el) => el.removeAttribute("maxlength"));
+    await page.locator("dialog input").fill("N".repeat(100));
+    await page.locator("dialog").getByRole("button", { name: "Add board" }).click();
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v4");
+    const added = JSON.parse(sent[sent.length - 1]["manifest.json"]!) as { boards: { name: string }[] };
+    expect(added.boards[added.boards.length - 1].name).toBe("N".repeat(80));
     expect(seen.violations).toEqual([]);
     expect(seen.errors).toEqual([]);
     await context.close();

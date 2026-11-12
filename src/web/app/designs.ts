@@ -12,6 +12,7 @@ import "grapesjs/dist/css/grapes.min.css";
 import "./styles.css";
 import "./designs.css";
 import { warningText, type VersionWarning } from "../../core/documents/warnings.js";
+import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
   Api,
   ApiError,
@@ -22,7 +23,7 @@ import {
   type ThreadView,
   type Viewer,
 } from "./api.js";
-import { createBoardsEditor, type BoardsEditor, type DeviceId } from "./boards-editor.js";
+import { createBoardsEditor, ManifestUnreadableError, type BoardsEditor, type DeviceId } from "./boards-editor.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { measureFidelity } from "./fidelity.js";
@@ -30,6 +31,8 @@ import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, v
 import type { AnchorSurface, DraftStart } from "./surface.js";
 
 const SAVE_DELAY_MS = 1500;
+/** After a writer's own save, the new version's fidelity check waits for this long with no edits. */
+const FIDELITY_IDLE_MS = 3000;
 const DEVICE_IDS: DeviceId[] = ["Desktop", "Tablet", "Phone"];
 
 declare global {
@@ -37,6 +40,9 @@ declare global {
     __WARDBY__?: unknown;
   }
 }
+
+/** Fixed text: the manifest's own content never reaches the page. */
+const MANIFEST_UNREADABLE = "This design's list of boards can't be read. Reload to try again.";
 
 function fatal(root: HTMLElement, message: string): void {
   clear(root);
@@ -261,12 +267,18 @@ function mount(
   );
 
   // ---- editor ----
-  const boards: BoardsEditor = createBoardsEditor({
-    container: canvasEl,
-    panels: { layers: layersPanel, styles: stylesPanel, selectors: selectorsPanel, traits: traitsPanel },
-    files,
-    editable: canWrite,
-  });
+  let boards: BoardsEditor;
+  try {
+    boards = createBoardsEditor({
+      container: canvasEl,
+      panels: { layers: layersPanel, styles: stylesPanel, selectors: selectorsPanel, traits: traitsPanel },
+      files,
+      editable: canWrite,
+    });
+  } catch (err) {
+    if (err instanceof ManifestUnreadableError) return fatal(root, MANIFEST_UNREADABLE);
+    throw err;
+  }
   const boardName = (id: string) => boards.manifest().boards.find((b) => b.id === id)?.name ?? id;
 
   deviceButtons.forEach((btn, i) =>
@@ -294,11 +306,15 @@ function mount(
 
   // ---- the boards list ----
   let threads: ThreadView[] = [];
+  /** The fidelity pass switches boards: saves, live reloads and the boards list wait until it is done. */
+  let measuring = false;
   const closeMenus = () => {
     for (const m of Array.from(boardsList.querySelectorAll<HTMLElement>(".bmenu"))) m.hidden = true;
   };
   const renderBoards = () => {
     clear(boardsList);
+    boardsList.setAttribute("aria-busy", String(measuring));
+    addBoardBtn.disabled = measuring;
     const list = boards.manifest().boards;
     list.forEach((b, i) => {
       const n = threads.filter(
@@ -307,11 +323,13 @@ function mount(
       const on = b.id === boards.currentBoard();
       const pick = h(
         "button",
-        { type: "button", class: "pick", aria: { current: String(on) } },
+        { type: "button", class: "pick", disabled: measuring, aria: { current: String(on) } },
         h("span", { class: "name" }, b.name),
         n ? h("span", { class: "bcount", title: `${n} open comment${n === 1 ? "" : "s"}` }, `💬 ${n}`) : null,
       );
-      pick.addEventListener("click", () => boards.selectBoard(b.id));
+      pick.addEventListener("click", () => {
+        if (!measuring) boards.selectBoard(b.id);
+      });
       const li = h("li", { class: on ? "on" : "", data: { board: b.id } }, pick);
       if (canWrite) {
         const menu = h("div", { class: "bmenu", role: "menu", hidden: true });
@@ -355,10 +373,16 @@ function mount(
         );
         const more = h(
           "button",
-          { type: "button", class: "more", aria: { label: `Board ${b.name}: actions`, haspopup: "menu" } },
+          {
+            type: "button",
+            class: "more",
+            disabled: measuring,
+            aria: { label: `Board ${b.name}: actions`, haspopup: "menu" },
+          },
           "⋯",
         );
         more.addEventListener("click", () => {
+          if (measuring) return;
           const show = menu.hidden;
           closeMenus();
           menu.hidden = !show;
@@ -373,6 +397,7 @@ function mount(
   });
   boards.onBoard(() => renderBoards());
   addBoardBtn.addEventListener("click", () => {
+    if (measuring) return;
     void askDialog({ title: "New board", value: "", ok: "Add board" }).then((name) => {
       if (name) boards.addBoard(name);
     });
@@ -460,8 +485,6 @@ function mount(
   let saving = false;
   let conflict = false;
   let pendingRefresh = false;
-  /** The fidelity pass switches boards: saves and live reloads wait until it is done. */
-  let measuring = false;
 
   const showSave = (text: string, reload = false) => {
     clear(saveState);
@@ -500,6 +523,8 @@ function mount(
     const changed = boards.changedFiles();
     if (Object.keys(changed).length === 0) {
       showSave("Saved");
+      // An editor event with nothing to save (a board switch) still ends a quiet spell: start another.
+      if (afterSave) scheduleFidelity();
       return;
     }
     saving = true;
@@ -507,12 +532,14 @@ function mount(
     try {
       const r = await api.saveFiles(changed, baseNumber);
       boards.markSaved(changed);
+      noteSaved(changed);
       baseNumber = r.version.number;
       version.textContent = `design · v${baseNumber}`;
       saveBanner.hidden = true;
       showSave(dirty() ? "Unsaved changes" : "Saved");
       // The server re-anchored the threads against the new version; the warnings are the new version's.
       await refreshPayload();
+      if (!dirty()) scheduleFidelity();
     } catch (err) {
       if (err instanceof ApiError && err.code === "document_version_conflict") {
         conflict = true;
@@ -538,30 +565,50 @@ function mount(
   boards.onChange(() => {
     renderBoards();
     if (!canWrite || conflict || measuring) return;
+    clearTimeout(fidelityTimer);
     showSave("Unsaved changes");
     schedule();
   });
 
   // ---- fidelity: writers, once per version (the server keeps the first report) ----
+  type FidelityEntry = { board: string; mismatches: number; samples: string[] };
+  const fidelityOf = (ws: VersionWarning[]): FidelityEntry[] =>
+    ws.flatMap((w) =>
+      w.kind === "fidelity" ? [{ board: w.board, mismatches: w.mismatches, samples: [...w.samples] }] : [],
+    );
   const nextFrame = (win: Window) => new Promise<void>((r) => win.requestAnimationFrame(() => r()));
-  const runFidelity = async (forVersion: number): Promise<void> => {
-    if (!canWrite || warnings.some((w) => w.kind === "fidelity")) return;
+  /**
+   * Measures every board of version `forVersion` and reports them once. Boards in `carried` keep the
+   * result they had (their text is unchanged since it was measured); the board in the canvas is
+   * measured first and in place, so a check after a save on that board switches nothing.
+   */
+  const runFidelity = async (forVersion: number, carried = new Map<string, FidelityEntry>()): Promise<void> => {
+    if (!canWrite || measuring || warnings.some((w) => w.kind === "fidelity")) return;
     measuring = true;
+    renderBoards();
     const start = boards.currentBoard();
-    const results: { board: string; mismatches: number; samples: string[] }[] = [];
+    const results: FidelityEntry[] = [];
     try {
-      for (const b of boards.manifest().boards) {
+      const list = boards.manifest().boards;
+      const order = [...list.filter((b) => b.id === start), ...list.filter((b) => b.id !== start)];
+      for (const b of order) {
+        const kept = carried.get(b.id);
+        if (kept) {
+          results.push(kept);
+          continue;
+        }
         boards.selectBoard(b.id);
-        const doc = boards.canvasDocument();
         const win = boards.canvasWindow();
         const base = boards.baseStyle();
-        if (!doc?.body || !win || !base) continue;
+        const board = boards.root();
+        if (!board || !win || !base) continue;
         await nextFrame(win);
-        results.push({ board: b.id, ...measureFidelity(doc, win, base) });
+        results.push({ board: b.id, ...measureFidelity(board, win, base) });
       }
     } finally {
       boards.selectBoard(start);
       measuring = false;
+      renderBoards();
     }
     if (results.length && forVersion === baseNumber) {
       await api.fidelity(forVersion, results).catch(() => undefined);
@@ -570,11 +617,54 @@ function mount(
     if (dirty()) schedule();
   };
 
+  /**
+   * A writer's own save makes a version with no fidelity entries. Once the editor is idle the new
+   * version is checked: boards the saves since the last measured version did not touch keep their
+   * entries, the others are measured. Saves in a row add up until one is followed by a quiet spell.
+   */
+  let afterSave: { prior: FidelityEntry[]; changed: Set<string> } | null = null;
+  let fidelityTimer: ReturnType<typeof setTimeout> | undefined;
+  const noteSaved = (files: Record<string, string | null>) => {
+    const prior = afterSave?.prior ?? fidelityOf(warnings);
+    const changed = new Set(afterSave?.changed ?? []);
+    for (const path of Object.keys(files)) {
+      const id = /^boards\/(.+)\.html$/.exec(path)?.[1];
+      if (id && BOARD_ID.test(id)) changed.add(id);
+    }
+    afterSave = { prior, changed };
+  };
+  const scheduleFidelity = () => {
+    clearTimeout(fidelityTimer);
+    fidelityTimer = setTimeout(() => void fidelityAfterSave(), FIDELITY_IDLE_MS);
+  };
+  const fidelityAfterSave = async (): Promise<void> => {
+    if (!afterSave || conflict) return;
+    // Busy or still editing: try again after the next quiet spell (a pending save re-arms it too).
+    if (saving || measuring || boards.editor.getEditing()) return scheduleFidelity();
+    if (dirty()) return;
+    const { prior, changed } = afterSave;
+    afterSave = null;
+    const carried = new Map(prior.filter((e) => !changed.has(e.board)).map((e) => [e.board, e]));
+    // With no earlier entries every board is measured (carried is empty).
+    await runFidelity(baseNumber, carried);
+  };
+
   // ---- live updates ----
   /** Shows a newer version in place, keeping the selected board and device. */
   const loadVersion = (next: DocumentPayload) => {
     if (next.version.format !== "boards-v1") return;
-    boards.load(next.version.files);
+    // Someone else's version: the earlier saves' entries say nothing about it.
+    afterSave = null;
+    clearTimeout(fidelityTimer);
+    try {
+      boards.load(next.version.files);
+    } catch (err) {
+      if (err instanceof ManifestUnreadableError) {
+        conflict = true; // nothing more is saved from this page
+        return fatal(root, MANIFEST_UNREADABLE);
+      }
+      throw err;
+    }
     baseNumber = next.version.number;
     version.textContent = `design · v${baseNumber}`;
     warnings = next.version.warnings ?? [];

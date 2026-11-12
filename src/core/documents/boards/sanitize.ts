@@ -203,6 +203,12 @@ function onAttribute(node: DomElement, data: AttributeHookEvent): void {
   if (!s) return;
   const name = data.attrName.toLowerCase();
   const value = data.attrValue.trim();
+  if (/^data-gjs-/.test(name)) {
+    // GrapesJS reads data-gjs-* as component properties (type, editable, name into its UI), so a
+    // stored board never carries them; this runs for every element (the body keeps only class, id, style).
+    data.keepAttr = false;
+    return;
+  }
   if (name.startsWith("on")) {
     s.removed.handlers += 1;
     data.keepAttr = false;

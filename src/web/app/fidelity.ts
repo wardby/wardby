@@ -55,17 +55,26 @@ export function fidelityDiff(before: Snapshot[], after: Snapshot[]): FidelityRes
   return { mismatches: seen.size, samples };
 }
 
-const keyOf = (el: Element) => `${el.tagName.toLowerCase()}${el.classList[0] ? `.${el.classList[0]}` : ""}`;
+/** tag.firstClass, ignoring the classes GrapesJS adds while editing (gjs-selected, gjs-hovered, ...). */
+export const selectorKey = (el: Element): string => {
+  const cls = Array.from(el.classList).find((c) => !c.startsWith("gjs-"));
+  return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+};
 
-export function measureFidelity(doc: Document, win: Window, base: HTMLStyleElement): FidelityResult {
-  const els = [
-    doc.body,
-    ...Array.from(doc.body.querySelectorAll("*")).filter((e) => !["STYLE", "SCRIPT"].includes(e.tagName)),
-  ];
+/** The board's elements: `root` (the GrapesJS wrapper) and what is under it, never the editor's own nodes. */
+export function measuredElements(root: Element): Element[] {
+  return [root, ...Array.from(root.querySelectorAll("*"))].filter((e) => !["STYLE", "SCRIPT"].includes(e.tagName));
+}
+
+export function measureFidelity(root: Element, win: Window, base: HTMLStyleElement): FidelityResult {
+  const els = measuredElements(root);
   const snap = (): Snapshot[] =>
     els.map((el) => {
       const cs = win.getComputedStyle(el);
-      return { key: keyOf(el), styles: Object.fromEntries(FIDELITY_PROPS.map((p) => [p, cs.getPropertyValue(p)])) };
+      return {
+        key: selectorKey(el),
+        styles: Object.fromEntries(FIDELITY_PROPS.map((p) => [p, cs.getPropertyValue(p)])),
+      };
     });
   const before = snap();
   base.disabled = true;

@@ -155,6 +155,31 @@ describe("sanitizeFragment", () => {
   });
 });
 
+describe("sanitizeBoard drops GrapesJS data-gjs-* attributes (T13-1)", () => {
+  it("removes data-gjs-* in any case, with markup values, on the body and nested elements", () => {
+    const out = sanitizeBoard(
+      "<!doctype html><html><head><title>x</title></head>" +
+        '<body data-gjs-type="text" DATA-GJS-EDITABLE="true" class="c">' +
+        '<div data-gjs-name="<img src=x onerror=1>" data-keep="1"><p DATA-GJS-EDITABLE="true" ' +
+        'Data-Gjs-Removable="false">y<span data-gjs-type="link">z</span></p></div></body></html>',
+    );
+    expect(out.problems).toEqual([]);
+    expect(out.html).not.toMatch(/data-gjs-/i);
+    expect(out.html).not.toContain("onerror");
+    expect(out.html).toContain('data-keep="1"');
+    expect(out.html).toContain('<body class="c">');
+    const doc = new JSDOM(out.html).window.document;
+    for (const el of Array.from(doc.querySelectorAll("*"))) {
+      for (const a of Array.from(el.attributes)) expect(a.name.toLowerCase().startsWith("data-gjs-")).toBe(false);
+    }
+  });
+
+  it("removes data-gjs-* from fragments too", () => {
+    const out = sanitizeFragment('<p data-gjs-name="<b>x</b>" DATA-GJS-TYPE="t">y</p>', { images: "drop" });
+    expect(JSON.stringify(out)).not.toMatch(/data-gjs-/i);
+  });
+});
+
 describe("sanitizeBoard containers and the body", () => {
   it("does not hoist style elements from noscript or template, and drops a body style with problems", () => {
     const out = sanitizeBoard(
