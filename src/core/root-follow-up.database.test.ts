@@ -11,6 +11,8 @@ import type { Executor } from "../providers/executor/types.js";
 import { createPrismaClient } from "./db.js";
 import { mentionDeclinedBody, routeHostEvent, type HostEvent } from "./host-events.js";
 import type { RepoAccessGate } from "./repo-access.js";
+import { startReviewFixRound } from "./review-fix.js";
+import { rootFollowUpInFlight } from "./run-pull-request.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run (database)", () => {
   const db = createPrismaClient();
@@ -19,6 +21,7 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
   const owner = id("owner");
   const builder = id("builder");
   const responder = id("responder");
+  const reviewer = id("reviewer");
   const FORK = `your-org/fork-${suffix}`;
   const TOOLS = `your-org/tools-${suffix}`;
 
@@ -45,6 +48,14 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
       return { url: "https://x/c", id: "1" };
     }),
     editComment: vi.fn(async () => undefined),
+    addLabel: vi.fn(async () => undefined),
+    pullRequestOrigin: vi.fn(async () => ({
+      headSha: "a".repeat(40),
+      isFork: false,
+      state: "open",
+      labels: [],
+      markerRunId: id("root"),
+    })),
   } as unknown as CodeReviewHost;
   const repoAccess = {
     authorizeUse: vi.fn(async () => ({ ok: true })),
@@ -69,7 +80,7 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
 
   beforeAll(async () => {
     await db.principal.create({ data: { id: owner, subject: owner } });
-    for (const a of [builder, responder]) {
+    for (const a of [builder, responder, reviewer]) {
       await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
     }
     for (const repository of [FORK, TOOLS]) {
@@ -80,7 +91,7 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
           repository,
           name: `github:${repository}`,
           access: "write",
-          triggers: ["mention"],
+          triggers: ["mention", "review_fix"],
           authorizedVia: "host_permission",
         },
       });
@@ -119,9 +130,9 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
   });
 
   afterAll(async () => {
-    await db.run.deleteMany({ where: { agentId: { in: [builder, responder] } } });
+    await db.run.deleteMany({ where: { agentId: { in: [builder, responder, reviewer] } } });
     await db.agentRepository.deleteMany({ where: { agentId: responder } });
-    await db.agent.deleteMany({ where: { id: { in: [builder, responder] } } });
+    await db.agent.deleteMany({ where: { id: { in: [builder, responder, reviewer] } } });
     await db.principal.deleteMany({ where: { id: owner } });
     await db.$disconnect();
   });
@@ -145,5 +156,28 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
       await db.run.update({ where: { id: started[0] }, data: { status: "succeeded", finishedAt: new Date() } });
     }
     expect(await db.run.count({ where: { agentId: responder } })).toBe(3);
+  });
+
+  it("a review still running on the root's pull request does not hold back a fix round", async () => {
+    // A review run carries its check (RunHostCheck), never a status comment (RunHostStatus), so it
+    // is not a follow-up of the root: the round its CHANGES_REQUESTED review asks for starts.
+    const review = id("review");
+    await db.run.create({ data: { id: review, agentId: reviewer, status: "running", trigger: "host_event" } });
+    await db.runHostCheck.create({
+      data: { runId: review, provider: "github", repository: FORK, checkId: "1", headSha: "a".repeat(40), prNumber: 7 },
+    });
+    expect(await rootFollowUpInFlight(db, id("root"))).toBe(false);
+
+    const round = await startReviewFixRound(
+      { provider: "github", repository: FORK, prNumber: 7, headSha: "a".repeat(40), reviewBody: "Fix the bug." },
+      deps,
+    );
+    expect(round).toMatchObject({ kind: "dispatched", round: 1 });
+    // The round's own run is the root's follow-up now: a further one waits for it.
+    expect(await rootFollowUpInFlight(db, id("root"))).toBe(true);
+    await db.run.updateMany({
+      where: { id: { in: [review, (round as { runId: string }).runId] } },
+      data: { status: "succeeded", finishedAt: new Date() },
+    });
   });
 });

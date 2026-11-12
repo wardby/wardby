@@ -786,10 +786,15 @@ async function budgetDraftDecision(
   try {
     const origin = await read();
     if (origin.draft !== true || !origin.markerRunId) return review;
-    const runId = await pushingRunInFlight(deps.db, { markerRunId: origin.markerRunId, repository });
+    const runId = await pushingRunInFlight(deps.db, {
+      markerRunId: origin.markerRunId,
+      provider: host.provider,
+      repository,
+    });
     if (runId) return { kind: "wait", runId: await pushingRunHold(deps.db, runId) };
     const stopped = await headStoppedAtBudget(deps.db, {
       markerRunId: origin.markerRunId,
+      provider: host.provider,
       repository,
       prNumber,
       headSha,
@@ -1344,6 +1349,7 @@ async function deferUntilRequest(
     if (!leadRunId && origin.draft === true) {
       const pushing = await pushingRunInFlight(deps.db, {
         markerRunId: origin.markerRunId,
+        provider: key.provider,
         repository: key.repository,
       });
       leadRunId = pushing && (await pushingRunHold(deps.db, pushing));

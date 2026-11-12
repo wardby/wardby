@@ -515,5 +515,43 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
       expect(verdicts()).toEqual([`${repoE} completed/success`, `${repoF} in_progress`]);
       expect(summaryFor(repoF)).toContain(`[${repoE}#50](https://github.com/${repoE}/pull/50)`);
     });
+
+    it("finds a pull request a continuation recorded on its own row: the row keeps the root row's merge order", async () => {
+      // A follow-up continued xc and replaced F#3 with F#4. Its rows are copied from xc's at dispatch
+      // (the real copy); its publish recorded F#4 on its own `tools` row without an order of its own.
+      const { copyRootRepositoryRows } = await vi.importActual<typeof import("./dispatch.js")>("./dispatch.js");
+      await run(id("xcc"), "succeeded");
+      await db.codingRun.create({
+        data: {
+          runId: id("xcc"),
+          task: "t",
+          repository: repoE,
+          baseRef: "main",
+          headRef: `wardby/run-${id("xc")}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 900,
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+          rootCodingRunId: id("xc"),
+          result: { ...full("no_changes", repoE, 50), pullRequestNumber: undefined, pullRequestUrl: undefined },
+        },
+      });
+      await copyRootRepositoryRows(db, id("xc"), id("xcc"));
+      expect(
+        await db.codingRunRepository.findUniqueOrThrow({
+          where: { runId_name: { runId: id("xcc"), name: "tools" } },
+          select: { mergeOrder: true, pullRequestNumber: true },
+        }),
+      ).toEqual({ mergeOrder: 2, pullRequestNumber: null });
+      await db.codingRunRepository.update({
+        where: { runId_name: { runId: id("xcc"), name: "tools" } },
+        data: { pullRequestNumber: 4, result: full("pull_request_opened", repoF, 4) },
+      });
+      prs.set(`${repoF}#4`, { state: "open", headSha: NEW_SHA, markerRunId: id("xcc") });
+
+      await syncMergeOrderChecksForPullRequest({ db, hosts: deps.hosts }, { repository: repoF, number: 4 });
+      expect(posted.some((p) => p.repository === repoF && p.input.headSha === NEW_SHA)).toBe(true);
+    });
   });
 });

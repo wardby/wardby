@@ -2421,17 +2421,25 @@ describe("a draft whose last push stopped at its budget", () => {
     result: unknown;
     run: { status: string };
   }
+  /** A full CodingRunResult (resolveRunPullRequest reads only a valid one). */
+  const openedResult = (repository: string, number: number, commitSha = SHA) => ({
+    schemaVersion: 1,
+    outcome: "pull_request_opened",
+    repository,
+    baseRef: "main",
+    headRef: "wardby/run-coder",
+    pullRequestNumber: number,
+    pullRequestUrl: `https://github.com/${repository}/pull/${number}`,
+    commitSha,
+    summary: "Did the work.",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
   const stoppedRoot: RootRow = {
     runId: "coder",
     repository: REPO,
     rootCodingRunId: null,
-    result: {
-      outcome: "pull_request_opened",
-      repository: REPO,
-      pullRequestNumber: 7,
-      pullRequestUrl: `https://github.com/${REPO}/pull/7`,
-      commitSha: SHA,
-    },
+    result: openedResult(REPO, 7),
     run: { status: "budget_exhausted" },
   };
   function setup(opts: { draft?: boolean; links?: Parameters<typeof deps>[0]; head?: string; root?: RootRow } = {}) {
@@ -2512,6 +2520,65 @@ describe("a draft whose last push stopped at its budget", () => {
   it("reviews as usual when the last pusher finished its work", async () => {
     const { d } = setup({ root: { ...stoppedRoot, run: { status: "succeeded" } } });
     await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1", "run-a2"], followUps: [] });
+  });
+
+  describe("a draft in one of the run's writable extra repositories (#537)", () => {
+    const TOOLS = "chfields/tools";
+    /**
+     * The root opened REPO#7 (default) and TOOLS#7 (its `tools` row, the same number); a
+     * continuation `cont` pushed TOOLS#7 last, at SHA, and stopped at its budget.
+     */
+    const withTools = (ctx: ReturnType<typeof setup>) => {
+      Object.assign(ctx.d.db, {
+        codingRunRepository: {
+          findMany: vi.fn(async ({ where }: { where: { name?: string; pullRequestNumber?: unknown } }) => {
+            if (where.name === "tools") {
+              return [
+                {
+                  runId: "cont",
+                  result: openedResult(TOOLS, 7),
+                  codingRun: { run: { status: "budget_exhausted" } },
+                },
+              ];
+            }
+            if (where.pullRequestNumber !== undefined) {
+              return [{ name: "tools", provider: "github", repository: TOOLS, pullRequestNumber: 7 }];
+            }
+            return [{ provider: "github", repository: TOOLS }];
+          }),
+        },
+      });
+      return ctx;
+    };
+    const finishedRoot = { ...stoppedRoot, run: { status: "succeeded" } };
+
+    it("skips the extra's budget-stopped draft with a neutral check, and still reviews the default's #7", async () => {
+      const { d, h } = withTools(setup({ links: [reviewers[0]], root: finishedRoot }));
+      await expect(routeHostEvent({ ...pr, repository: TOOLS }, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(h.completeCheck).toHaveBeenCalledWith(TOOLS, {
+        checkId: "c1",
+        conclusion: "neutral",
+        title: TITLE,
+        summary: SUMMARY,
+      });
+
+      const other = withTools(setup({ links: [reviewers[0]], root: finishedRoot }));
+      await expect(routeHostEvent(pr, other.d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      expect(other.h.completeCheck).not.toHaveBeenCalled();
+    });
+
+    it("waits for the root while it may still be pushing to the extra's draft", async () => {
+      const { d, h, db } = withTools(
+        setup({ links: [reviewers[0]], root: { ...stoppedRoot, result: null, run: { status: "running" } } }),
+      );
+      await expect(routeHostEvent({ ...pr, repository: TOOLS }, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(h.startCheck).not.toHaveBeenCalled();
+      expect(db.deferredReview.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ repository: TOOLS, prNumber: 7, reason: "request", leadRunId: "coder" })],
+        skipDuplicates: true,
+      });
+    });
   });
 
   const ciEvent: HostEvent = {

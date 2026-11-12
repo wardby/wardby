@@ -836,7 +836,13 @@ export function resolveExtrasWith(
   return resolveRepositorySetRefs(plan, { workspace, readFile, resolveRef });
 }
 
-/** A continuation's rows: its root's, as they are (D5); never re-resolved. */
+/**
+ * A continuation's rows: its root's, as they are (D5); never re-resolved. Each keeps its root row's
+ * merge order (#537), so a pull request the continuation records on its own row (a replacement)
+ * is still an ordered member of the set (orderedSeeds) when its publish sets no order of its own.
+ * Its outcome (result, pullRequestNumber, markedReadyAt and the description columns) is its own to
+ * record: a row names only a pull request its own run published.
+ */
 export async function copyRootRepositoryRows(
   tx: Pick<DispatchTx, "codingRunRepository">,
   rootRunId: string,
@@ -859,6 +865,7 @@ export async function copyRootRepositoryRows(
       linkId: r.linkId,
       baseRef: r.baseRef,
       headRef: r.headRef,
+      mergeOrder: r.mergeOrder,
     })),
   });
 }

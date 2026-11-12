@@ -7,10 +7,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RunStatus } from "#prisma";
-import { lastPusher, lastPushStoppedAtBudget } from "./budget-stopped-head.js";
+import { headStoppedAtBudget, lastPusher, lastPushStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { createPrismaClient } from "./db.js";
 
-describe.skipIf(!process.env.DATABASE_URL)("lastPushStoppedAtBudget for an extra repository (database)", () => {
+describe.skipIf(!process.env.DATABASE_URL)("budget-stopped heads for an extra repository (database)", () => {
   const db = createPrismaClient();
   const suffix = randomUUID().slice(0, 8);
   const id = (name: string) => `bsh-${name}-${suffix}`;
@@ -112,6 +112,9 @@ describe.skipIf(!process.env.DATABASE_URL)("lastPushStoppedAtBudget for an extra
       status: "budget_exhausted",
       root: id("twin"),
     });
+    // busy: finished root, with a continuation still running (it may be pushing to any repository of the set).
+    await codingRun(id("busy"), { result: result("pull_request_opened", FORK, 9), status: "succeeded" });
+    await codingRun(id("busyCont"), { result: result("no_changes", FORK), status: "running", root: id("busy") });
   });
 
   afterAll(async () => {
@@ -132,5 +135,42 @@ describe.skipIf(!process.env.DATABASE_URL)("lastPushStoppedAtBudget for an extra
     const root = await rootOf(id("twin"));
     expect(await lastPushStoppedAtBudget(db, root, 7)).toBe(false);
     expect(await lastPushStoppedAtBudget(db, root, 7, "tools")).toBe(true);
+  });
+
+  const stopped = (markerRunId: string, repository: string, prNumber: number, sha: string) =>
+    headStoppedAtBudget(db, { markerRunId, provider: "github", repository, prNumber, headSha: sha.repeat(40) });
+
+  it("skips the extra's draft whose head is a budget-stopped continuation's push, through either marker", async () => {
+    expect(await stopped(id("root"), TOOLS, 3, "c")).toBe(true);
+    expect(await stopped(id("cont"), TOOLS, 3, "c")).toBe(true);
+    // A later commit (a person's) is reviewed; the default's PR 7 was pushed by the finished root.
+    expect(await stopped(id("root"), TOOLS, 3, "f")).toBe(false);
+    expect(await stopped(id("root"), FORK, 7, "a")).toBe(false);
+    // A number the run never recorded in that repository, or another provider, is reviewed as usual.
+    expect(await stopped(id("root"), TOOLS, 4, "c")).toBe(false);
+    expect(
+      await headStoppedAtBudget(db, {
+        markerRunId: id("root"),
+        provider: "bitbucket",
+        repository: TOOLS,
+        prNumber: 3,
+        headSha: "c".repeat(40),
+      }),
+    ).toBe(false);
+  });
+
+  it("tells the extra's draft from the default's when both are number 7", async () => {
+    expect(await stopped(id("twin"), TOOLS, 7, "a")).toBe(true);
+    expect(await stopped(id("twin"), FORK, 7, "a")).toBe(false);
+  });
+
+  it("waits for a continuation still running on the extra's pull request, as on the default's", async () => {
+    const inFlight = (repository: string, provider = "github") =>
+      pushingRunInFlight(db, { markerRunId: id("busy"), provider, repository });
+    expect(await inFlight(TOOLS)).toBe(id("busyCont"));
+    expect(await inFlight(FORK)).toBe(id("busyCont"));
+    expect(await inFlight("your-org/other")).toBeNull();
+    expect(await inFlight(TOOLS, "bitbucket")).toBeNull();
+    expect(await pushingRunInFlight(db, { markerRunId: id("root"), provider: "github", repository: TOOLS })).toBeNull();
   });
 });

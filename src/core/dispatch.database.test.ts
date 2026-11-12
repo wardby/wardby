@@ -314,11 +314,29 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
         baseRef: "main",
         headRef: `wardby/run-${runId}`,
         pullRequestNumber: toolsPr,
+        mergeOrder: 2,
         result: opened(tools, toolsPr),
       },
     });
     return { runId, tools };
   }
+
+  it("copies the root row's merge order onto a continuation's row; the pull request is the continuation's own to record", async () => {
+    const { agentId } = await codingAgent();
+    const { runId } = await rootWithTools(agentId, "opened");
+    const continuation = await dispatchRun({
+      db,
+      executor: fakeExecutor().executor,
+      agentId,
+      codingTask: "again",
+      continuesCodingRunId: runId,
+    });
+    const tools = await db.codingRunRepository.findUniqueOrThrow({
+      where: { runId_name: { runId: continuation!.run.id, name: "tools" } },
+      select: { mergeOrder: true, pullRequestNumber: true, result: true, markedReadyAt: true },
+    });
+    expect(tools).toEqual({ mergeOrder: 2, pullRequestNumber: null, result: null, markedReadyAt: null });
+  });
 
   it("continues a root from one of its writable extras' pull requests (checkContinuation)", async () => {
     const { agentId } = await codingAgent();

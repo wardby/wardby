@@ -5,12 +5,19 @@ const ROOT_SHA = "a".repeat(40);
 const LATER_SHA = "b".repeat(40);
 const CONT_SHA = "c".repeat(40);
 
+/** A full CodingRunResult (resolveRunPullRequest reads only a valid one). */
 const opened = (commitSha: string, pullRequestNumber = 7) => ({
+  schemaVersion: 1,
   outcome: "pull_request_opened",
   repository: "acme/web",
+  baseRef: "main",
+  headRef: "wardby/run-root",
   pullRequestNumber,
   pullRequestUrl: `https://github.com/acme/web/pull/${pullRequestNumber}`,
   commitSha,
+  summary: "Did the work.",
+  tests: [],
+  usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
 });
 const updated = (commitSha: string) => ({ ...opened(commitSha), outcome: "pull_request_updated" });
 
@@ -26,8 +33,10 @@ function db(
   rows: Row[],
   continuations: Array<{ result: unknown; run: { status: string } | null }> = [],
   inFlight: { runId: string } | null = null,
+  extraRows: Array<{ provider: string; repository: string }> = [],
 ) {
   return {
+    codingRunRepository: { findMany: vi.fn(async (_args: unknown) => extraRows) },
     codingRun: {
       findFirst: vi.fn(async (_args: unknown) => inFlight),
       findUnique: vi.fn(
@@ -54,6 +63,7 @@ const check = (
 ) =>
   headStoppedAtBudget(d as never, {
     markerRunId: "markerRunId" in over ? over.markerRunId : "root",
+    provider: "github",
     repository: over.repository ?? "ACME/Web",
     prNumber: over.prNumber ?? 7,
     headSha,
@@ -141,7 +151,7 @@ describe("lastPusher", () => {
 
 describe("pushingRunInFlight", () => {
   const inFlight = (d: ReturnType<typeof db>, markerRunId: string | null = "root", repository = "acme/web") =>
-    pushingRunInFlight(d as never, { markerRunId, repository });
+    pushingRunInFlight(d as never, { markerRunId, provider: "github", repository });
 
   it("is the root while it is pending or running", async () => {
     for (const status of ["pending", "running"]) {
@@ -165,5 +175,19 @@ describe("pushingRunInFlight", () => {
     expect(await inFlight(db([root()]))).toBeNull();
     expect(await inFlight(db([root()]), null)).toBeNull();
     expect(await inFlight(db([root({ run: { status: "running" } })]), "root", "acme/other")).toBeNull();
+  });
+
+  it("covers a pull request in one of the root's writable extra repositories, on the same provider", async () => {
+    const extra = [{ provider: "github", repository: "acme/tools" }];
+    const d = db([root({ run: { status: "running" } })], [], null, extra);
+    expect(await inFlight(d, "root", "ACME/Tools")).toBe("root");
+    expect(d.codingRunRepository.findMany).toHaveBeenCalledWith({
+      where: { runId: "root", access: "write" },
+      select: { provider: true, repository: true },
+    });
+    const elsewhere = [{ provider: "bitbucket", repository: "acme/tools" }];
+    expect(
+      await inFlight(db([root({ run: { status: "running" } })], [], null, elsewhere), "root", "acme/tools"),
+    ).toBeNull();
   });
 });
