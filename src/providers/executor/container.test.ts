@@ -424,6 +424,9 @@ class FakeVcs implements VcsProvider {
   /** Names of the slots and copies removed one by one. */
   cleanedSlots: string[] = [];
   cleanedCopies: string[] = [];
+  /** Every writable extra's and read-only copy's workspacePath as prepared, by name (kept after cleanup). */
+  slotPaths = new Map<string, string>();
+  copyPaths = new Map<string, string>();
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
@@ -477,6 +480,7 @@ class FakeVcs implements VcsProvider {
       };
       await mkdir(slot.workspacePath, { recursive: true });
       this.slots.set(input.slot.name, slot);
+      this.slotPaths.set(input.slot.name, slot.workspacePath);
       return slot;
     }
     this.lastPrepareInput = input;
@@ -501,6 +505,7 @@ class FakeVcs implements VcsProvider {
     const copy = { ...input, workspacePath: join(this.root, input.runId, "repos", input.name, "workspace") };
     await mkdir(copy.workspacePath, { recursive: true });
     this.copies.set(input.name, copy);
+    this.copyPaths.set(input.name, copy.workspacePath);
     return copy;
   }
   async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
@@ -5508,6 +5513,47 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     expect(created.store.run.status).toBe("failed");
     expect(reasonLogged("coding_workspace_lost")).toBe(true);
     expectNothingLeft(created);
+  });
+
+  // Secrets row 4 (JobSpec): a run's repositories reach the launcher as name, access and path only.
+  it.each([
+    ["codex", {}, undefined],
+    [
+      "claude-code",
+      { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+    ],
+  ])("gives a %s job each extra at its prepared path and nothing else of the row", async (_label, run, claude) => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { ...run, repositories: [writeRow("tools", { position: 1 }), readRow("base", { position: 2 })] },
+      IMAGE,
+      undefined,
+      claude,
+      { repoAccess: allowAll() as never },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let held: string | undefined;
+    created.jobs.onLaunch = () => void created.capabilities.get("run-1").then((value) => (held = value));
+    await created.executor.start("run-1");
+    expect(held).toBe(FAKE);
+    const spec = created.jobs.specs[0];
+    expect(spec.repositories).toEqual([
+      { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      { name: "base", access: "read", hostPath: created.vcs.copyPaths.get("base") },
+    ]);
+    for (const entry of spec.repositories!) expect(Object.keys(entry).sort()).toEqual(["access", "hostPath", "name"]);
+    expect(JSON.stringify(spec.repositories)).not.toContain(FAKE);
+    expect(JSON.stringify(spec)).not.toContain(FAKE);
+    // The capacity probe, asked before anything is prepared, lists none.
+    expect(created.jobs.capacityChecks.every((probe) => probe.repositories === undefined)).toBe(true);
+  });
+
+  it("gives a job without extras no repositories key at all", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    await created.executor.start("run-1");
+    expect("repositories" in created.jobs.specs[0]).toBe(false);
   });
 });
 

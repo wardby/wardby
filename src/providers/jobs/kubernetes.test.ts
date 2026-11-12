@@ -2425,3 +2425,101 @@ describe("KubernetesJobLauncher quota refusal", () => {
     expect(hint).toContain("KUBERNETES_RESOURCE_QUOTA");
   });
 });
+
+describe("Kubernetes extra repositories (#537)", () => {
+  async function repoHarness() {
+    const h = await harness("run-k8s-repos");
+    for (const name of ["base", "tools"]) {
+      await mkdir(join(h.workspaceRoot, h.spec.runId, "repos", name, "workspace"), { recursive: true });
+    }
+    const spec: JobSpec = {
+      ...h.spec,
+      repositories: [
+        { name: "base", access: "read", hostPath: join(h.workspaceRoot, h.spec.runId, "repos", "base", "workspace") },
+        {
+          name: "tools",
+          access: "write",
+          hostPath: join(h.workspaceRoot, h.spec.runId, "repos", "tools", "workspace"),
+        },
+      ],
+    };
+    return { ...h, spec };
+  }
+
+  it("streams each extra from its host path into its own storage folder, after the workspace", async () => {
+    const h = await repoHarness();
+    const archived: string[] = [];
+    const destinations: string[] = [];
+    const launcher = new KubernetesJobLauncher({
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: (directory) => {
+        archived.push(directory);
+        return { stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) };
+      },
+    });
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => {
+      if (call.command[0] === "tar" && call.command.includes("-xf")) destinations.push(call.command[2]);
+      return original(call);
+    };
+    await launcher.launch(h.spec);
+    const runRoot = join(h.workspaceRoot, h.spec.runId);
+    expect(archived.slice(0, 3)).toEqual([
+      join(runRoot, "workspace"),
+      join(runRoot, "repos", "base", "workspace"),
+      join(runRoot, "repos", "tools", "workspace"),
+    ]);
+    expect(destinations.slice(0, 3)).toEqual([
+      "/run/wardby/storage/workspace",
+      "/run/wardby/storage/repos/base",
+      "/run/wardby/storage/repos/tools",
+    ]);
+  });
+
+  it("refuses a host path outside the run's own repos/<name>/workspace before creating anything", async () => {
+    const h = await repoHarness();
+    const bad: JobSpec = {
+      ...h.spec,
+      repositories: [
+        { name: "tools", access: "write", hostPath: join(h.workspaceRoot, "other", "repos", "tools", "workspace") },
+      ],
+    };
+    await expect(h.launcher.launch(bad)).rejects.toThrow("kubernetes_workspace_path_invalid");
+    expect([...h.api.objects.keys()].some((key) => key.startsWith("pod/"))).toBe(false);
+  });
+
+  it("collects a writable extra from its storage folder, and never a read one", async () => {
+    const h = await repoHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    let archiveCommand: string[] = [];
+    h.api.onExec = async ({ command, stdout }) => {
+      if (command[0] === "tar" && command.includes("-cf")) {
+        archiveCommand = command;
+        const pack = tar.pack();
+        pack.entry({ name: "./tool.txt" }, "changed");
+        pack.finalize();
+        (pack as unknown as Readable).pipe(stdout as PassThrough);
+        await new Promise((r) => (stdout as PassThrough).once("finish", r));
+      } else stdout?.end();
+      return 0;
+    };
+    const runRoot = join(h.workspaceRoot, h.spec.runId);
+    const tools = join(runRoot, "repos", "tools", "workspace");
+    await h.launcher.materializeWorkspace(handle, tools, "tools");
+    expect(archiveCommand.slice(0, 3)).toEqual(["tar", "-C", "/run/wardby/storage/repos/tools"]);
+    expect(await readFile(join(tools, "tool.txt"), "utf8")).toBe("changed");
+    archiveCommand = [];
+    await expect(
+      h.launcher.materializeWorkspace(handle, join(runRoot, "repos", "base", "workspace"), "base"),
+    ).rejects.toThrow("kubernetes_workspace_destination_invalid");
+    await expect(h.launcher.materializeWorkspace(handle, join(runRoot, "workspace"), "tools")).rejects.toThrow(
+      "kubernetes_workspace_destination_invalid",
+    );
+    expect(archiveCommand).toEqual([]);
+  });
+});

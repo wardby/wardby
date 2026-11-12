@@ -22,6 +22,7 @@ import {
   parseWorkerDiagnosticLine,
 } from "./docker.js";
 import { buildDockerIsolationPlan, NETWORK_KEEPER_SCRIPT, WORKER_PATHS } from "./docker-isolation.js";
+import { storageInitScript } from "./storage-init.js";
 import { dockerServiceContainerName, serviceMemoryMib, serviceTmpfsOptions } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { ServiceStateUpdate } from "./service-state.js";
@@ -116,7 +117,7 @@ function labels(args: readonly string[]): Record<string, string> {
 class NoopTransfer implements DockerArtifactTransfer {
   materializations = 0;
   exclusions: CollectExclusions[] = [];
-  async seedDirectory(): Promise<void> {}
+  async seedDirectory(_source: string, _container: string, _destination: string): Promise<void> {}
   async seedInput(): Promise<void> {}
   async materializeDirectory(
     _container: string,
@@ -127,6 +128,24 @@ class NoopTransfer implements DockerArtifactTransfer {
   ): Promise<void> {
     this.materializations += 1;
     this.exclusions.push(exclusions);
+  }
+}
+
+class RecordingTransfer extends NoopTransfer {
+  seeds: Array<{ source: string; destination: string }> = [];
+  sources: Array<{ source: string; destination: string }> = [];
+  override async seedDirectory(source: string, _container: string, destination: string): Promise<void> {
+    this.seeds.push({ source, destination });
+  }
+  override async materializeDirectory(
+    container: string,
+    source: string,
+    destination: string,
+    maxBytes: number,
+    exclusions: CollectExclusions,
+  ): Promise<void> {
+    this.sources.push({ source, destination });
+    await super.materializeDirectory(container, source, destination, maxBytes, exclusions);
   }
 }
 
@@ -346,6 +365,7 @@ class FakeDocker implements DockerCommandRunner {
           ]
         : [
             [WORKER_PATHS.workspace, true, "workspace"],
+            ...this.repositoryMounts(),
             [WORKER_PATHS.input, false, "input"],
             [WORKER_PATHS.output, true, "output"],
           ];
@@ -426,6 +446,7 @@ class FakeDocker implements DockerCommandRunner {
   protected toolInspection(): object {
     const mounts = [
       [WORKER_PATHS.workspace, true, "workspace"],
+      ...this.repositoryMounts(),
       [WORKER_PATHS.tool, true, "tool"],
     ];
     const memoryMb = Math.min(512, Math.max(128, Math.floor(this.job.limits.memoryMb / 3)));
@@ -488,6 +509,11 @@ class FakeDocker implements DockerCommandRunner {
     };
   }
 
+  /** Each extra repository's mount, as Docker reports one it was asked for. */
+  private repositoryMounts(): Array<[string, boolean, string]> {
+    return (this.job.repositories ?? []).map((r) => [`/repos/${r.name}`, r.access === "write", `repos/${r.name}`]);
+  }
+
   protected ok(): DockerCommandResult {
     return { stdout: "", stderr: "" };
   }
@@ -504,6 +530,13 @@ async function harness(
   const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
   temporaryRoots.push(root);
   const job = { ...spec(runId), ...override };
+  // "<ws>" in a repository's host path stands for this harness's workspace root.
+  if (job.repositories) {
+    job.repositories = job.repositories.map((r) => ({
+      ...r,
+      hostPath: r.hostPath.replace("<ws>", join(root, "workspaces")),
+    }));
+  }
   const runRoot = join(root, "workspaces", runId);
   await Promise.all([
     mkdir(join(runRoot, "workspace"), { recursive: true }),
@@ -1665,5 +1698,92 @@ describe("NodeDockerCommandRunner timeouts", () => {
     const started = Date.now();
     await expect(runner.run(["5"], { timeoutMs: 100 })).rejects.toThrow(/^docker_command_failed:/);
     expect(Date.now() - started).toBeLessThan(4_000);
+  });
+});
+
+describe("Docker extra repositories (#537)", () => {
+  const repositories: JobSpec["repositories"] = [
+    { name: "base", access: "read", hostPath: "<ws>/docker-repos/repos/base/workspace" },
+    { name: "tools", access: "write", hostPath: "<ws>/docker-repos/repos/tools/workspace" },
+  ];
+
+  async function repoHarness(override: Partial<JobSpec> = {}) {
+    const transfer = new RecordingTransfer();
+    const created = await harness("docker-repos", { repositories, ...override }, { transfer });
+    return { ...created, transfer };
+  }
+
+  it.each([
+    ["codex", {}],
+    ["claude-code", { provider: "claude-code" as const, toolImage, limits: claudeLimits }],
+  ])("creates and seeds each extra's storage folder for a %s run", async (_label, override) => {
+    const { launcher, docker, transfer, spec: job, root } = await repoHarness(override);
+    await launcher.launch(job);
+    const keeper = docker.plan.names.keeperContainer;
+    const init = docker.calls.findIndex(
+      (call) =>
+        call.args.join("\0") ===
+        [
+          "container",
+          "exec",
+          keeper,
+          "node",
+          "-e",
+          storageInitScript("/run/wardby/storage", ["repos/base", "repos/tools"]),
+        ].join("\0"),
+    );
+    expect(init).toBeGreaterThanOrEqual(0);
+    const workspaces = join(root, "workspaces");
+    expect(transfer.seeds).toEqual([
+      { source: join(workspaces, "docker-repos", "workspace"), destination: "/run/wardby/storage/workspace" },
+      { source: join(workspaces, "docker-repos", "git"), destination: "/run/wardby/storage/git" },
+      {
+        source: join(workspaces, "docker-repos", "repos", "base", "workspace"),
+        destination: "/run/wardby/storage/repos/base",
+      },
+      {
+        source: join(workspaces, "docker-repos", "repos", "tools", "workspace"),
+        destination: "/run/wardby/storage/repos/tools",
+      },
+    ]);
+  });
+
+  it("never runs the storage script for a run without repositories", async () => {
+    const { launcher, docker, spec: job } = await harness("docker-no-repos");
+    await launcher.launch(job);
+    expect(docker.calls.some((call) => call.args[1] === "exec" && call.args.includes("-e"))).toBe(false);
+  });
+
+  it("refuses a host path outside the run's own repos/<name>/workspace before seeding", async () => {
+    const transfer = new RecordingTransfer();
+    const { launcher, spec: job } = await harness(
+      "docker-repos",
+      { repositories: [{ name: "tools", access: "write", hostPath: "<ws>/other-run/repos/tools/workspace" }] },
+      { transfer },
+    );
+    await expect(launcher.launch(job)).rejects.toThrow("docker_workspace_path_invalid");
+    expect(transfer.seeds).toEqual([]);
+  });
+
+  it("collects a writable extra from its own storage folder, and never a read one", async () => {
+    const { launcher, docker, transfer, spec: job, root } = await repoHarness();
+    const handle = await launcher.launch(job);
+    docker.finish();
+    const runRoot = join(root, "workspaces", "docker-repos");
+    await launcher.materializeWorkspace(handle, join(runRoot, "repos", "tools", "workspace"), "tools");
+    expect(transfer.sources).toEqual([
+      { source: "/run/wardby/storage/repos/tools", destination: join(runRoot, "repos", "tools", "workspace") },
+    ]);
+    await expect(
+      launcher.materializeWorkspace(handle, join(runRoot, "repos", "base", "workspace"), "base"),
+    ).rejects.toThrow("docker_workspace_destination_invalid");
+    await expect(
+      launcher.materializeWorkspace(handle, join(runRoot, "repos", "tools", "workspace"), "missing"),
+    ).rejects.toThrow("docker_workspace_destination_invalid");
+    // A writable name with another destination (the default workspace) is refused too.
+    await expect(launcher.materializeWorkspace(handle, join(runRoot, "workspace"), "tools")).rejects.toThrow(
+      "docker_workspace_destination_invalid",
+    );
+    expect(transfer.sources).toHaveLength(1);
   });
 });

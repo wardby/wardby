@@ -85,11 +85,13 @@ import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   JobCapacityError,
   type JobHandle,
+  type JobRepositoryMount,
   type JobResult,
   type JobSpec,
   type JobStatus,
   type WorkspaceJobLauncher,
 } from "./types.js";
+import { expectedRepositoryHostPath } from "./storage-init.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 import {
   collectExclusions,
@@ -296,6 +298,8 @@ interface RunRecord {
   result?: JobResult;
   /** Collection exclusions from the spec; absent on records from before they existed. */
   collectExclude?: CollectExclusions;
+  /** The spec's writable extra repositories by name, the only ones ever collected; absent for a run with none. */
+  writableRepositories?: string[];
 }
 
 export interface KubernetesClusterInfo {
@@ -696,6 +700,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   async launch(spec: JobSpec): Promise<JobHandle> {
     try {
       validateKubernetesSpec(spec);
+      // Before any side effect: every extra's files must be in this run's own repos/<name>.
+      for (const r of spec.repositories ?? []) this.repositoryHostPath(spec.runId, r);
     } catch (error) {
       // The thrown error already carries the real reason (e.g.
       // "kubernetes_isolation_unsupported:image-not-registry-digest") and is rethrown unchanged;
@@ -726,6 +732,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       deadlineAt: createdAt + spec.timeoutSec * 1000,
       phase: "provisioning",
       collectExclude: spec.collectExclude ?? collectExclusions([]),
+      ...(spec.repositories?.some((r) => r.access === "write")
+        ? { writableRepositories: spec.repositories.filter((r) => r.access === "write").map((r) => r.name) }
+        : {}),
     };
     if (existing) {
       // Replaces the requeued record; a conflict means another replica got there first.
@@ -815,20 +824,31 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     return structuredClone(result);
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string): Promise<void> {
+  async materializeWorkspace(handle: JobHandle, destination: string, name?: string): Promise<void> {
     const names = this.namesFor(handle);
     const found = names && (await this.readRecord(names));
     if (!names || !found) throw new Error("job_not_found");
     const record = await this.refresh(names, found.record);
     if (record.phase !== "succeeded") throw new Error("job_not_succeeded");
-    const expected = resolve(this.workspaceRoot, record.runId, "workspace");
-    if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
+    let expected: string | undefined;
+    let source = WORKSPACE_STORAGE;
+    if (name === undefined) {
+      expected = resolve(this.workspaceRoot, record.runId, "workspace");
+    } else {
+      // Only a writable extra of the launched spec is ever collected; a read one never leaves the pod.
+      if (!record.writableRepositories?.includes(name)) throw new Error("kubernetes_workspace_destination_invalid");
+      expected = expectedRepositoryHostPath(this.workspaceRoot, record.runId, name);
+      source = `${STORAGE_ROOT}/repos/${name}`;
+    }
+    if (!expected || resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
       throw new Error("kubernetes_workspace_destination_invalid");
     }
+    const target = expected;
     const maxBytes = record.diskMb * 1024 * 1024;
-    await replaceDirectoryFromStaging(expected, maxBytes, "kubernetes_workspace_destination_invalid", (staging) =>
+    await replaceDirectoryFromStaging(target, maxBytes, "kubernetes_workspace_destination_invalid", (staging) =>
       this.extractWorkspace(
         names,
+        source,
         staging,
         maxBytes,
         this.transferBudgetMs(record),
@@ -1077,6 +1097,15 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
 
     const budget = this.transferBudgetMs(record);
     await this.seedDirectory(names, this.runWorkspace(spec.runId), WORKSPACE_STORAGE, budget);
+    // Each extra from the VCS's prepared folder (the spec's hostPath), into the repos/<name> storage-init made.
+    for (const r of spec.repositories ?? []) {
+      await this.seedDirectory(
+        names,
+        this.repositoryHostPath(spec.runId, r),
+        `${STORAGE_ROOT}/repos/${r.name}`,
+        budget,
+      );
+    }
     await this.seedInput(names, spec.inputArtifact, budget);
     // Never open the gate for a run that was stopped (or otherwise finished) while it was being seeded.
     const current = await this.readRecord(names);
@@ -1183,6 +1212,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       }
       await this.sleep(READY_POLL_MS);
     }
+  }
+
+  /** A spec's extra repository host path, refused unless it is the run's own repos/<name>/workspace. */
+  private repositoryHostPath(runId: string, entry: JobRepositoryMount): string {
+    const expected = expectedRepositoryHostPath(this.workspaceRoot, runId, entry.name);
+    if (!expected || resolve(entry.hostPath) !== expected) throw new Error("kubernetes_workspace_path_invalid");
+    return expected;
   }
 
   private runWorkspace(runId: string): string {
@@ -1338,7 +1374,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Streams the keeper's workspace through the strict extractor into `staging`.
+   * Streams a keeper folder (`source`: the workspace, or a writable extra's repos/<name>) through the
+   * strict extractor into `staging`.
    * The transfer is bounded by `timeoutMs` (see transferBudgetMs): on expiry the
    * extraction is aborted. On any failure the output stream this method created
    * is destroyed, since the exec's own timeout does not end it. Excluded dependency
@@ -1346,6 +1383,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    */
   private async extractWorkspace(
     names: RunNames,
+    source: string,
     staging: string,
     maxBytes: number,
     timeoutMs: number,
@@ -1370,7 +1408,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         this.namespace,
         names.pod,
         KEEPER_CONTAINER,
-        ["tar", "-C", WORKSPACE_STORAGE, ...tarExcludeArgs(exclusions), "-cf", "-", "."],
+        ["tar", "-C", source, ...tarExcludeArgs(exclusions), "-cf", "-", "."],
         { stdout: output, timeoutMs },
       )
       .then((exitCode) => {

@@ -114,6 +114,7 @@ import {
 import {
   JobCapacityError,
   type JobHandle,
+  type JobRepositoryMount,
   type JobResourceLimits,
   type JobSpec,
   type WorkspaceJobLauncher,
@@ -351,6 +352,26 @@ export interface RunWorkspaces {
 
 function isRunWorkspaces(value: PreparedWorkspace | RunWorkspaces | null | undefined): value is RunWorkspaces {
   return Boolean(value && "main" in value && "writable" in value);
+}
+
+/**
+ * A job's extra repositories, in the run's order, each at the path the VCS prepared it at (a
+ * writable extra's workspace, or a read row's copy). Only name, access and that path: nothing else
+ * of the row (and no credential) reaches the launcher. Throws coding_workspace_lost for a row with
+ * no prepared folder.
+ */
+function jobRepositories(
+  rows: readonly RunRepositorySnapshot[],
+  workspaces: RunWorkspaces | null,
+): JobRepositoryMount[] {
+  return rows.map((row) => {
+    const prepared =
+      row.access === "read"
+        ? workspaces?.readOnly.find((copy) => copy.name === row.name)
+        : workspaces?.writable.get(row.name);
+    if (!prepared) throw new Error("coding_workspace_lost");
+    return { name: row.name, access: row.access, hostPath: prepared.workspacePath };
+  });
 }
 
 /** How many extra repositories are prepared at once. */
@@ -1589,7 +1610,7 @@ export class ContainerExecutor implements Executor {
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        const spec = this.jobSpec(run, inputArtifact, { mcpTools: Boolean(mcpToken) });
+        const spec = this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) });
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         planned = this.options.jobs.plannedHandle?.(spec);
@@ -2964,14 +2985,27 @@ export class ContainerExecutor implements Executor {
   private async fitsCluster(run: ContainerRunSnapshot): Promise<boolean> {
     const { jobs, store } = this.options;
     if (!jobs.hasCapacityFor || !store.markQueued) return true;
-    const fits = await jobs.hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT)).catch(() => true);
+    // Asked before any workspace is prepared: the probe counts resources, which repositories don't change.
+    const fits = await jobs
+      .hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }))
+      .catch(() => true);
     if (fits) return true;
     await store.markQueued(run.runId);
     this.emit({ stage: "queued", runId: run.runId });
     return false;
   }
 
-  private jobSpec(run: ContainerRunSnapshot, inputArtifact: string, options: { mcpTools?: boolean } = {}): JobSpec {
+  /**
+   * The run's job. `workspaces` holds its prepared extras (null for a run with none): each extra's
+   * host path is the VCS's own workspacePath for it, never rebuilt here. Only a capacity probe, asked
+   * before anything is prepared, goes without them, and its spec then lists no repositories.
+   */
+  private jobSpec(
+    run: ContainerRunSnapshot,
+    inputArtifact: string,
+    workspaces: RunWorkspaces | null,
+    options: { mcpTools?: boolean; capacityProbe?: boolean } = {},
+  ): JobSpec {
     const provider = run.provider === "claude-code" ? "claude-code" : "codex";
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
@@ -3018,6 +3052,9 @@ export class ContainerExecutor implements Executor {
       labels: {},
       collectExclude: normalizeCollectExclusions(run.collectExclude),
       ...(services.length > 0 ? { services } : {}),
+      ...(run.repositories.length > 0 && !options.capacityProbe
+        ? { repositories: jobRepositories(run.repositories, workspaces) }
+        : {}),
     };
   }
 
