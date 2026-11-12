@@ -452,7 +452,11 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
       return { write: false, shareReadable: id, run: (v) => getExportFile(res, deps, id, v, url.searchParams) };
     }
     if (sub === "exports" && method === "POST") {
-      return { write: true, run: (v, _a, b) => postExport(res, deps, id, v, b) };
+      // Share-readable only so an anonymous link reader reaches requestRenderedExport, which
+      // refuses them (403 export_sign_in_required) before any write. assertSameOrigin still runs;
+      // CSRF tokens need a session, and this path for an anonymous viewer can only refuse, never
+      // change state. A writer with a session still needs the session and CSRF token below.
+      return { write: true, shareReadable: id, run: (v, _a, b) => postExport(res, deps, id, v, b) };
     }
     if (sub === "frames" && method === "GET") {
       return { write: false, shareReadable: id, run: (v) => getFrames(res, deps, id, v, url.searchParams) };
@@ -481,7 +485,7 @@ async function handleApi(
         const permission = resolved.link.permission === "comment" ? "comment" : "view";
         // An anonymous reader: the link decides access; no guest id, so nothing is "mine".
         const viewer: Viewer = { kind: "guest", guestId: "", shareLinkId: resolved.link.id, permission };
-        return route.run(viewer, true, {});
+        return route.run(viewer, true, isJsonObject(body) ? body : {});
       }
     }
     throw new Error("web_session_required");

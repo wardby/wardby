@@ -101,7 +101,7 @@ export async function getDocumentJson(
       ...(member ? { repository: document.repository, path: document.path } : {}),
       canSend: atLeast("document", me.access, "write") && linked,
       // Whether PNG/PDF export is available (a renderer is configured).
-      ...(design ? { canRender: deps.exports?.renderer != null } : {}),
+      canRender: deps.exports?.renderer != null,
     },
     version: {
       number: version.number,

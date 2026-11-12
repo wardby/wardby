@@ -151,6 +151,8 @@ export async function requestRenderedExport(
   }
   // An anonymous share-link reader (no guest session) cannot ask for a rendered file.
   if (input.viewer.kind === "guest" && input.viewer.guestId === "") throw new Error("export_sign_in_required");
+  // No renderer configured: refuse now (503), before the rate limit counts it or a row exists.
+  if (!deps.renderer) throw new Error("export_renderer_unavailable");
   try {
     await (deps.rateLimiter ?? documentHourlyLimiter(db)).check(EXPORT_RATE_BUCKET, doc.id, EXPORTS_PER_DOCUMENT_HOUR);
   } catch (err) {
@@ -171,8 +173,8 @@ export async function requestRenderedExport(
 }
 
 async function fail(db: PrismaClient, exportId: string, code: string): Promise<void> {
-  await db.documentExport.update({
-    where: { id: exportId },
+  await db.documentExport.updateMany({
+    where: { id: exportId, status: "running" },
     data: { status: "failed", errorCode: code, finishedAt: new Date() },
   });
 }
@@ -217,13 +219,17 @@ export async function runExport(deps: ExportDeps, exportId: string): Promise<voi
         }
       } else {
         if (content.format !== "markdown") throw new Error("export_failed");
-        const html = markdownPrintFile(doc.title, markdownToSafeHtml(content.markdown).html);
+        const safe = markdownToSafeHtml(content.markdown);
+        // Count only: never the dropped references themselves.
+        if (safe.droppedImages > 0) log.info({ exportId, droppedImages: safe.droppedImages }, "export left out images");
+        const html = markdownPrintFile(doc.title, safe.html);
         bytes = await deps.renderer.pdf({ boards: [{ html, width: MARKDOWN_PDF_WIDTH }] });
         mime = "application/pdf";
       }
       if (bytes.length > MAX_EXPORT_BYTES) throw new Error("export_too_large");
-      await db.documentExport.update({
-        where: { id: exportId },
+      // Only a still-running job completes: a swept or deleted row is never resurrected.
+      await db.documentExport.updateMany({
+        where: { id: exportId, status: "running" },
         data: { status: "done", mime, data: new Uint8Array(bytes), size: bytes.length, finishedAt: new Date() },
       });
     } catch (err) {

@@ -89,9 +89,13 @@ export async function postExport(
   const format = body.format;
   if (format !== "png" && format !== "pdf") invalid();
   const board = boardOf(body.board);
+  // A JSON integer only (as the MCP schema): "3" is refused.
+  if (body.versionNumber !== undefined && !Number.isInteger(body.versionNumber)) invalid();
   const versionNumber = versionOf(body.versionNumber as number | undefined);
-  if (!deps.exports) throw new Error("export_renderer_unavailable");
-  const { exportId } = await requestRenderedExport(deps.exports, {
+  // Without a configured service the request still passes the access and format checks first,
+  // then is refused as export_renderer_unavailable.
+  const exportDeps = deps.exports ?? { db: deps.db, renderer: null };
+  const { exportId } = await requestRenderedExport(exportDeps, {
     documentId,
     viewer,
     format: format as RenderedExportFormat,
@@ -100,7 +104,7 @@ export async function postExport(
   });
   sendWebJson(res, 202, { exportId });
   // After the 202 is written; runExport never throws.
-  void runExport(deps.exports, exportId);
+  void runExport(exportDeps, exportId);
 }
 
 export async function getExportStatus(

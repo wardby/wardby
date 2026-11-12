@@ -1,7 +1,6 @@
 // The exported prototype in a real browser (ruling D5): a board link inside a sandboxed srcdoc frame
 // changes the top page's fragment, and the switcher shows that board. Skipped without a local browser.
-// Opened from disk (file:), Chromium refuses a navigation started by the sandboxed frame's opaque origin
-// to a file: URL, so the in-board link is checked over http; the switcher's own links work from disk.
+// The frame sandbox keeps allow-same-origin (ruling T9-1) so the in-board link works from disk too.
 import { existsSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -42,6 +41,22 @@ describe.skipIf(!existsSync(chromium.executablePath()))("prototype export in a b
     } finally {
       await browser.close();
       server.close();
+    }
+  }, 60_000);
+
+  it("follows #board links in a board when opened from disk", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "proto-"));
+    const path = join(dir, "p.html");
+    await writeFile(path, file());
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(pathToFileURL(path).href);
+      await page.frameLocator("iframe").locator("#go").click();
+      await expect.poll(() => page.evaluate("location.hash")).toBe("#board-menu");
+      await expect.poll(() => page.frameLocator("iframe").locator("#m").textContent()).toBe("Menu board");
+    } finally {
+      await browser.close();
     }
   }, 60_000);
 

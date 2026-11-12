@@ -1302,11 +1302,11 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(body.document.canRender).toBe(false);
       // A Markdown document carries its format and warnings too.
       const doc = (await (await call(`/d/api/${docId}`, { jar })).json()) as {
-        document: { kind: string };
+        document: { kind: string; canRender: boolean };
         version: { format: string; warnings: unknown[]; markdown: string };
       };
       expect(doc.document.kind).toBe("document");
-      expect(doc.document).not.toHaveProperty("canRender");
+      expect(doc.document.canRender).toBe(false);
       expect(doc.version).toMatchObject({ format: "markdown", warnings: [], markdown: expect.any(String) });
     });
 
@@ -1733,9 +1733,20 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         headers: { "x-wardby-share": link.token },
       });
       expect(res.status).toBe(200);
+      // Without the share header: no session, no access.
       expect((await call(`/d/api/${exportDesignId}/exports`, { method: "POST", body: { format: "pdf" } })).status).toBe(
         401,
       );
+      // With it: refused as export_sign_in_required, before anything is written.
+      const before = await db.documentExport.count({ where: { documentId: exportDesignId } });
+      const post = await call(`/d/api/${exportDesignId}/exports`, {
+        method: "POST",
+        body: { format: "pdf" },
+        headers: { "x-wardby-share": link.token },
+      });
+      expect(post.status).toBe(403);
+      expect(await post.json()).toEqual({ error: "export_sign_in_required" });
+      expect(await db.documentExport.count({ where: { documentId: exportDesignId } })).toBe(before);
     });
 
     it("runs a PNG and a PDF job for the requester, and a Markdown PDF", async () => {
@@ -1750,7 +1761,12 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         expect(bad.status).toBe(403);
         const post = (body: unknown, id = exportDesignId) =>
           callAt(base, `/d/api/${id}/exports`, { method: "POST", jar: m.jar, csrf: m.csrf, body });
-        for (const body of [{ format: "gif" }, { format: "png" }, { format: "pdf", versionNumber: "x" }]) {
+        for (const body of [
+          { format: "gif" },
+          { format: "png" },
+          { format: "pdf", versionNumber: "x" },
+          { format: "pdf", versionNumber: "1" },
+        ]) {
           expect((await post(body)).status).toBe(400);
         }
         const res = await post({ format: "png", board: "home" });
@@ -1789,18 +1805,16 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       await withServer({ exports: exportDeps() }, async (base) => expect(await canRender(base)).toBe(true));
       await withServer({ exports: exportDeps({ renderer: null }) }, async (base) => {
         expect(await canRender(base)).toBe(false);
+        const before = await db.documentExport.count({ where: { documentId: exportDesignId } });
         const res = await callAt(base, `/d/api/${exportDesignId}/exports`, {
           method: "POST",
           jar,
           csrf,
           body: { format: "pdf" },
         });
-        const { exportId } = (await res.json()) as { exportId: string };
-        expect(await waitDone(base, exportId, jar)).toEqual({
-          status: "failed",
-          errorCode: "export_renderer_unavailable",
-        });
-        expect((await callAt(base, `/d/api/exports/${exportId}/file`, { jar })).status).toBe(404);
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: "export_renderer_unavailable" });
+        expect(await db.documentExport.count({ where: { documentId: exportDesignId } })).toBe(before);
       });
       await withServer({}, async (base) => {
         const res = await callAt(base, `/d/api/${exportDesignId}/exports`, {
@@ -1811,6 +1825,14 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         });
         expect(res.status).toBe(503);
         expect(await res.json()).toEqual({ error: "export_renderer_unavailable" });
+        // The access check comes first: a document the caller cannot read is not found.
+        const other = await callAt(base, `/d/api/${docId}x/exports`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { format: "pdf" },
+        });
+        expect(other.status).not.toBe(503);
       });
     });
   });

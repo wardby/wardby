@@ -24,7 +24,9 @@ describe("prototype export", () => {
     expect(doc.querySelector('meta[http-equiv="Content-Security-Policy"]')!.getAttribute("content")).toContain(
       `'sha256-${hash}'`,
     );
-    expect(doc.querySelector("iframe")!.getAttribute("sandbox")).toBe("allow-top-navigation-by-user-activation");
+    expect(doc.querySelector("iframe")!.getAttribute("sandbox")).toBe(
+      "allow-same-origin allow-top-navigation-by-user-activation",
+    );
   });
   it("slugs titles to safe file names", () => {
     expect(exportSlug("Little Fern Coffee!")).toBe("little-fern-coffee");

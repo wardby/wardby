@@ -1,8 +1,10 @@
 /**
  * The whole-prototype export (spec "Export"): one HTML file with a board switcher and working
  * links. The switcher is the only script, allowed by its hash in the file's own CSP; the boards
- * travel as inert JSON and render in srcdoc frames sandboxed without scripts or same-origin
- * access (links rewritten by frames.ts, ruling D5). The boards were redacted when stored, so
+ * travel as inert JSON and render in srcdoc frames sandboxed without scripts (links rewritten by
+ * frames.ts, ruling D5). The frame keeps allow-same-origin only so a board link can move the top
+ * page's fragment when the file is opened from disk (Chromium refuses that navigation from an
+ * opaque origin); the page CSP and the absence of allow-scripts keep boards inert (ruling T9-1). The boards were redacted when stored, so
  * this file holds no secret value (a test with a fake value proves it).
  */
 import { createHash } from "node:crypto";
@@ -43,7 +45,7 @@ export function prototypeFile(input: {
     "nav a{color:#1b1f27;text-decoration:none;border:1px solid #d6dae1;border-radius:6px;padding:3px 9px}" +
     "nav a.on{background:#1b1f27;color:#fff}iframe{display:block;margin:16px auto;height:calc(100vh - 80px);max-width:100%;border:0;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.1)}</style>" +
     `</head><body><nav id="nav" aria-label="Boards"></nav>` +
-    `<iframe id="f" title="Board" sandbox="allow-top-navigation-by-user-activation"></iframe>` +
+    `<iframe id="f" title="Board" sandbox="allow-same-origin allow-top-navigation-by-user-activation"></iframe>` +
     `<script type="application/json" id="boards">${scriptJson(input.boards)}</script>` +
     `<script>${SWITCHER_SCRIPT}</script></body></html>\n`
   );

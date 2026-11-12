@@ -243,10 +243,9 @@ and PDF (image and embedded-resource results).
 
 HTML files carry no script except the prototype's switcher, which the file's
 own Content-Security-Policy allows by hash; boards sit in sandboxed frames.
-Chromium does not let a sandboxed frame navigate the page to a `file:` URL, so
-open a prototype from disk and use its board switcher; links inside a board
-need the file served over `http(s)`. PNG and PDF need the server's renderer; without one the job fails with
-`export_renderer_unavailable`. A rendered export is kept for one hour and can be
+PNG and PDF need the server's renderer; without one the request is refused with
+`export_renderer_unavailable` (HTTP 503) and nothing is queued. A Markdown PDF
+leaves out images that are not embedded as `data:` URLs. A rendered export is kept for one hour and can be
 read only by whoever asked for it. Anonymous share-link readers can download HTML
 exports but need to sign in or register as a guest to ask for PNG or PDF. The
 stored content was redacted against the linked agent's secret values when it was

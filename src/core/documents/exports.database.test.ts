@@ -221,10 +221,20 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
       const id = await run({ documentId: designId, viewer: ownerV, format: "png", board: "home" }, d);
       return exportStatus(db, { exportId: id, viewer: ownerV });
     };
-    expect(await codeOf(full({ renderer: null }))).toMatchObject({
-      status: "failed",
-      errorCode: "export_renderer_unavailable",
-    });
+    // No renderer: refused when asked (503), after access and format checks, before any row.
+    const rows = await db.documentExport.count();
+    await expect(
+      requestRenderedExport(full({ renderer: null }), {
+        documentId: designId,
+        viewer: ownerV,
+        format: "png",
+        board: "home",
+      }),
+    ).rejects.toThrow("export_renderer_unavailable");
+    await expect(
+      requestRenderedExport(full({ renderer: null }), { documentId: designId, viewer: ownerV, format: "png" }),
+    ).rejects.toThrow("export_format_unsupported");
+    expect(await db.documentExport.count()).toBe(rows);
     const boom = { ...fake, png: async () => Promise.reject(new Error(`boom ${SECRET}`)) };
     expect(await codeOf(full({ renderer: boom }))).toMatchObject({ status: "failed", errorCode: "export_failed" });
     const big = { ...fake, png: async () => Buffer.alloc(MAX_EXPORT_BYTES + 1024 * 1024) };
@@ -251,6 +261,33 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
     expect(await exportStatus(db, { exportId: bad, viewer: ownerV })).toMatchObject({
       status: "failed",
       errorCode: "export_renderer_unavailable",
+    });
+  });
+
+  it("does not resurrect a job that was swept or deleted while rendering", async () => {
+    const d = full();
+    const { exportId } = await requestRenderedExport(d, { documentId: designId, viewer: ownerV, format: "pdf" });
+    const slow = {
+      ...fake,
+      pdf: async () => {
+        await db.documentExport.delete({ where: { id: exportId } });
+        return Buffer.from("PDF");
+      },
+    };
+    await expect(runExport({ ...d, renderer: slow }, exportId)).resolves.toBeUndefined();
+    expect(await db.documentExport.findUnique({ where: { id: exportId } })).toBeNull();
+    const second = await requestRenderedExport(d, { documentId: designId, viewer: ownerV, format: "pdf" });
+    const swept = {
+      ...fake,
+      pdf: async () => {
+        await sweepExports(db, new Date(Date.now() + 2 * EXPORT_STALE_MS));
+        return Buffer.from("PDF");
+      },
+    };
+    await runExport({ ...d, renderer: swept }, second.exportId);
+    expect(await exportStatus(db, { exportId: second.exportId, viewer: ownerV })).toMatchObject({
+      status: "failed",
+      errorCode: "export_failed",
     });
   });
 
