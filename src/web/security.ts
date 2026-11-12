@@ -8,11 +8,19 @@ export interface WebRequest {
 
 const NONCE = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
-/** Headers for every document page: strict CSP with a per-request script nonce, no inline styles. */
-export function pageHeaders(nonce: string): Record<string, string> {
+/**
+ * Headers for every document page: strict CSP with a per-request script nonce. A design page
+ * (boardStyles) also allows inline <style> and data: fonts: GrapesJS renders each board's CSS in
+ * <style> elements inside its canvas, its icon font is inlined, and the canvas and srcdoc frames
+ * inherit this policy, so no script can run there either way. A document page keeps no inline
+ * styles. Never 'unsafe-eval', never inline scripts.
+ */
+export function pageHeaders(nonce: string, opts: { boardStyles?: boolean } = {}): Record<string, string> {
   if (!NONCE.test(nonce)) throw new Error("invalid nonce");
+  const style = opts.boardStyles ? "style-src 'self' 'unsafe-inline'" : "style-src 'self'";
+  const font = opts.boardStyles ? "font-src 'self' data:" : "font-src 'self'";
   return {
-    "content-security-policy": `default-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    "content-security-policy": `default-src 'none'; script-src 'self' 'nonce-${nonce}'; ${style}; img-src 'self' data:; connect-src 'self'; ${font}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",

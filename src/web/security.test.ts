@@ -20,6 +20,30 @@ describe("pageHeaders", () => {
     expect(JSON.stringify(h)).not.toContain("unsafe-inline");
   });
 
+  it("is unchanged for a document page when boardStyles is off", () => {
+    expect(pageHeaders("abc123", {})).toEqual(pageHeaders("abc123"));
+    expect(pageHeaders("abc123", { boardStyles: false })).toEqual(pageHeaders("abc123"));
+  });
+
+  it("allows inline styles and data: fonts on a design page, never inline or eval'd scripts", () => {
+    const h = pageHeaders("abc123", { boardStyles: true });
+    const csp = h["content-security-policy"];
+    expect(csp).toBe(
+      "default-src 'none'; script-src 'self' 'nonce-abc123'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    const directives = new Map(
+      csp.split(";").map((d) => {
+        const [name, ...values] = d.trim().split(/\s+/);
+        return [name, values] as const;
+      }),
+    );
+    expect(directives.get("script-src")).toEqual(["'self'", "'nonce-abc123'"]);
+    expect(csp).not.toContain("unsafe-eval");
+    const { "content-security-policy": _a, ...rest } = h;
+    const { "content-security-policy": _b, ...plain } = pageHeaders("abc123");
+    expect(rest).toEqual(plain);
+  });
+
   it("refuses a nonce that could break out of the policy", () => {
     expect(() => pageHeaders("a'; script-src *")).toThrow();
     expect(() => pageHeaders("")).toThrow();

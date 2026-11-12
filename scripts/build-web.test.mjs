@@ -1,5 +1,6 @@
 // Builds both browser bundles into a temp dir: four outputs, the licence banner on each script,
 // and every npm package esbuild bundled is named in NOTICE.
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,5 +25,17 @@ describe("scripts/build-web.mjs", () => {
     expect(designs).toContain("BSD 3-Clause");
     const documents = await readFile(join(outDir, manifest["documents.js"]), "utf8");
     expect(documents).not.toContain("grapesjs.com"); // GrapesJS only in the designs bundle
+    // Subresource Integrity: integrity.json beside the manifest, keyed like it, sha384 of each output's bytes.
+    const integrity = JSON.parse(await readFile(join(outDir, "integrity.json"), "utf8"));
+    expect(Object.keys(integrity).sort()).toEqual(Object.keys(manifest).sort());
+    for (const [key, file] of Object.entries(manifest)) {
+      const digest = createHash("sha384")
+        .update(await readFile(join(outDir, file)))
+        .digest("base64");
+      expect(integrity[key]).toBe(`sha384-${digest}`);
+    }
+    // The manifest itself stays exactly the four file names (static.ts serves only those).
+    const onDisk = JSON.parse(await readFile(join(outDir, "manifest.json"), "utf8"));
+    expect(onDisk).toEqual(manifest);
   }, 120_000);
 });

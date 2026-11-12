@@ -2,10 +2,12 @@
 // Bundles the browser apps (src/web/app/documents.ts and designs.ts, and the
 // stylesheets they import) with esbuild into dist/web-assets/: minified IIFE
 // JavaScript and CSS with content-hashed names, plus manifest.json mapping the
-// logical names to the hashed ones. The server (src/web/static.ts) serves only
+// logical names to the hashed ones, and integrity.json mapping the same logical
+// names to each file's Subresource Integrity digest (sha384, base64). The server (src/web/static.ts) serves only
 // the files the manifest lists. Run by `npm run build` (npm run build:web).
 // The bundled packages' licence notices (NOTICE's third-party section) head the
 // JavaScript as a /*! */ comment, and any legal comments in the packages are kept.
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +73,16 @@ export async function buildWeb({ outDir = join(repoRoot, "dist", "web-assets") }
     }
   }
   await writeFile(join(outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  return { manifest, packages: bundledPackages(result.metafile) };
+  // A separate file: manifest.json must stay a map of file names only (static.ts readManifest).
+  const integrity = {};
+  for (const [key, file] of Object.entries(manifest)) {
+    const digest = createHash("sha384")
+      .update(await readFile(join(outDir, file)))
+      .digest("base64");
+    integrity[key] = `sha384-${digest}`;
+  }
+  await writeFile(join(outDir, "integrity.json"), `${JSON.stringify(integrity, null, 2)}\n`);
+  return { manifest, integrity, packages: bundledPackages(result.metafile) };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

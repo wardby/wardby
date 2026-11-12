@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../core/secret-guard.js";
 import type { Viewer } from "../core/documents/access.js";
+import { BoardFormatError } from "../core/documents/boards/errors.js";
 import { resolveShareToken, validateSessionLink } from "../core/documents/share-links.js";
 import { logger } from "../core/logger.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
@@ -171,6 +172,8 @@ export class WebError extends Error {}
  */
 const STATUS = {
   invalid_request: 400,
+  board_format_invalid: 400,
+  document_format_mismatch: 400,
   comment_anchor_invalid: 400,
   comment_too_long: 400,
   document_not_agent_linked: 400,
@@ -195,6 +198,7 @@ const STATUS = {
   comment_thread_closed: 409,
   comment_thread_already_sent: 409,
   document_too_large: 413,
+  board_too_large: 413,
   document_too_large_for_agent: 413,
   expected_json_object: 415,
   document_send_not_available: 501,
@@ -205,11 +209,25 @@ const STATUS = {
   document_send_failed: 503,
 } satisfies Record<string, number>;
 
-/** The code and status for an error. Unknown errors are logged by name only (their text may carry user content). */
+/** At most this many board-format problems go in a response. */
+const MAX_PROBLEMS = 50;
+
+/**
+ * The code and status for an error. Unknown errors are logged by name only (their text may carry user content).
+ * A BoardFormatError also carries its `problems`: our own fixed text plus board ids and counts (format.ts),
+ * never a path, URL or file text.
+ */
 export function errorCode(
   err: unknown,
   fallback?: keyof typeof STATUS,
-): { code: string; status: number; requestId?: string } {
+): { code: string; status: number; requestId?: string; problems?: string[] } {
+  if (err instanceof BoardFormatError) {
+    return {
+      code: "board_format_invalid",
+      status: STATUS.board_format_invalid,
+      problems: err.problems.slice(0, MAX_PROBLEMS),
+    };
+  }
   if (err instanceof RateLimitError) return { code: "web_rate_limited", status: STATUS.web_rate_limited };
   const message = err instanceof Error ? err.message : "";
   if (Object.hasOwn(STATUS, message)) return { code: message, status: (STATUS as Record<string, number>)[message] };

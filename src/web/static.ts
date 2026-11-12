@@ -56,6 +56,30 @@ export async function readManifest(root: string): Promise<AssetManifest | null> 
   }
 }
 
+/** A Subresource Integrity value: sha384, base64 (48 bytes, so 64 characters, no padding). */
+const SRI = /^sha384-[A-Za-z0-9+/]{64}$/;
+
+/**
+ * `integrity.json` (written beside the manifest by scripts/build-web.mjs): logical bundle names
+ * to sha384 SRI values. Null when it is missing, not JSON, or any value is not a sha384 digest;
+ * the caller then serves the page without integrity attributes. Never served itself (it is not a
+ * manifest value).
+ */
+export async function readIntegrity(root: string): Promise<Record<string, string> | null> {
+  try {
+    const value: unknown = JSON.parse(await readFile(join(root, "integrity.json"), "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (typeof v !== "string" || !SRI.test(v)) return null;
+      out[k] = v;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Serves `/web/static/<name>` when the manifest names `<name>`; otherwise
  * answers 404. The name is matched as an exact string against the manifest's

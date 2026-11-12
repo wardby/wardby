@@ -2,8 +2,8 @@ import type { IncomingMessage } from "node:http";
 
 export const HTTP_LIMITS = {
   json: 1024 * 1024,
-  /** /d/api/: a document version is up to 1 MiB of Markdown, plus JSON escaping. */
-  documentJson: 2 * 1024 * 1024,
+  /** /d/api/: a document version is up to 1 MiB of Markdown and a design's changed files up to 2 MiB, plus JSON escaping. */
+  documentJson: 3 * 1024 * 1024,
   auth: 64 * 1024,
   requestMs: 15_000,
   headersMs: 10_000,

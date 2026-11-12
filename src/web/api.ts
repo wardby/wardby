@@ -2,10 +2,12 @@
  * The document JSON API under /d/api/. Every handler takes an already
  * resolved viewer; the router has checked Origin and CSRF for writes.
  *
- * Output: document titles, Markdown and comment bodies are returned as raw
- * strings (the page renders them with textContent). They were redacted
- * against the document agent's secret values when stored (service.ts,
- * comments.ts), so no new secret path opens here. Names only: no email of
+ * Output: document titles, Markdown, design files and comment bodies are
+ * returned as raw strings (the page renders text with textContent, boards only
+ * in sandboxed srcdoc frames). They were redacted against the document agent's
+ * secret values when stored (service.ts, comments.ts), and fidelity samples
+ * when they are recorded (fidelity.ts), so no new secret path opens here:
+ * /frames only rewrites links in stored boards (frames.ts). Names only: no email of
  * any viewer, member or guest is ever part of a response.
  */
 import type { ServerResponse } from "node:http";
@@ -24,7 +26,13 @@ import {
   setThreadStatus,
 } from "../core/documents/comments.js";
 import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
+import { BOARD_ID } from "../core/documents/boards/ids.js";
+import { frameHtml } from "../core/documents/boards/frames.js";
+import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js";
+import { recordFidelity, type FidelityBoard } from "../core/documents/fidelity.js";
+import { loadContent } from "../core/documents/files.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
+import type { VersionWarning } from "../core/documents/warnings.js";
 import { getVersion, listVersions, MAX_VERSIONS_PAGE, restoreVersion } from "../core/documents/versions.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
 import type { PageViewer } from "./page.js";
@@ -81,19 +89,25 @@ export async function getDocumentJson(
     threads.flatMap((t) => t.comments.map((c) => c.body)),
   );
   const member = viewer.kind === "principal";
+  const design = document.kind === "design";
+  const linked = !!document.repository && !!document.path && (!design || !!document.baseRef);
   sendWebJson(res, 200, {
     document: {
       id: document.id,
+      kind: design ? "design" : "document",
       title: document.title,
       updatedAt: document.updatedAt,
       // Where a linked document lives is for members only.
       ...(member ? { repository: document.repository, path: document.path } : {}),
-      canSend: atLeast("document", me.access, "write") && !!document.repository && !!document.path,
+      canSend: atLeast("document", me.access, "write") && linked,
+      // Whether PNG/PDF export is available (the renderer; wired in a later step).
+      ...(design ? { canRender: false } : {}),
     },
     version: {
       number: version.number,
       format: content.format,
       ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
+      warnings: storedWarnings(version.warnings),
       createdAt: version.createdAt,
     },
     me,
@@ -102,6 +116,34 @@ export async function getDocumentJson(
   });
 }
 
+/** A version's stored warnings (always an array). */
+function storedWarnings(value: unknown): VersionWarning[] {
+  return Array.isArray(value) ? (value as VersionWarning[]) : [];
+}
+
+/** A design save names at most this many files (a design has at most 50 boards plus manifest and brand). */
+const MAX_SAVE_FILES = 60;
+const MAX_PATH_LENGTH = 200;
+
+/** `files` of a design save: path → new text, or null to delete. Anything else is invalid_request. */
+function changedFiles(value: unknown): Map<string, string | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_SAVE_FILES) invalid();
+  const out = new Map<string, string | null>();
+  for (const [path, text] of entries) {
+    if (path.length === 0 || path.length > MAX_PATH_LENGTH) invalid();
+    if (text !== null && typeof text !== "string") invalid();
+    out.set(path, text as string | null);
+  }
+  return out;
+}
+
+/**
+ * Saves the editor's content. A document sends its whole Markdown; a design sends only changed files
+ * (`null` deletes one, omitted ones stay as in `baseNumber`), merged here over `baseNumber`'s files.
+ * Either way `baseNumber` must still be the latest (document_version_conflict otherwise).
+ */
 export async function putContent(
   res: ServerResponse,
   deps: WebDeps,
@@ -109,19 +151,121 @@ export async function putContent(
   viewer: Viewer,
   body: Record<string, unknown>,
 ): Promise<void> {
-  const markdown = str(body, "markdown");
   const baseNumber = body.baseNumber;
   if (typeof baseNumber !== "number" || !Number.isInteger(baseNumber) || baseNumber < 1) invalid();
+  const expectedNumber = baseNumber as number;
   await requireDocumentAccess(deps.db, documentId, viewer, "write");
   if (viewer.kind !== "principal") throw new Error("document_access_denied");
+  const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { kind: true } });
+  if (!doc) throw new Error("document_not_found");
+  let content: { markdown: string } | { files: Record<string, string> };
+  if (doc.kind === "design") {
+    if (body.markdown !== undefined) throw new Error("document_format_mismatch");
+    const changed = changedFiles(body.files);
+    const current = await getDocument(deps.db, documentId);
+    if (current.version.number !== expectedNumber) throw new Error("document_version_conflict");
+    if (current.content.format !== "boards-v1") throw new Error("document_format_mismatch");
+    // A Map, then Object.fromEntries: own data properties only, so no path can reach a prototype.
+    const merged = new Map(Object.entries(current.content.files));
+    for (const [path, text] of changed) {
+      if (text === null) merged.delete(path);
+      else merged.set(path, text);
+    }
+    content = { files: Object.fromEntries(merged) };
+  } else {
+    if (body.files !== undefined) throw new Error("document_format_mismatch");
+    content = { markdown: str(body, "markdown") };
+  }
   const v = await publishVersion(deps.db, deps.cipher, {
     documentId,
-    markdown,
+    ...content,
     via: "editor",
     createdById: viewer.principalId,
-    expectedNumber: baseNumber as number,
+    expectedNumber,
   });
-  sendWebJson(res, 200, { version: { number: v.number }, reanchored: v.reanchored });
+  sendWebJson(res, 200, { version: { number: v.number }, reanchored: v.reanchored, warnings: v.warnings });
+}
+
+const MAX_FIDELITY_SAMPLES = 6;
+const MAX_SAMPLE_LENGTH = 160;
+const MAX_MISMATCHES = 10_000;
+const MAX_FIDELITY_BOARDS = 50;
+
+/** The fidelity report's boards, checked field by field; anything else is invalid_request. */
+function fidelityBoards(value: unknown): FidelityBoard[] {
+  if (!Array.isArray(value) || value.length > MAX_FIDELITY_BOARDS) invalid();
+  const seen = new Set<string>();
+  return (value as unknown[]).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) invalid();
+    const { board, mismatches, samples } = item as Record<string, unknown>;
+    if (typeof board !== "string" || !BOARD_ID.test(board) || seen.has(board)) invalid();
+    seen.add(board as string);
+    if (typeof mismatches !== "number" || !Number.isInteger(mismatches) || mismatches < 0) invalid();
+    if ((mismatches as number) > MAX_MISMATCHES) invalid();
+    if (!Array.isArray(samples) || samples.length > MAX_FIDELITY_SAMPLES) invalid();
+    for (const s of samples as unknown[]) if (typeof s !== "string" || s.length > MAX_SAMPLE_LENGTH) invalid();
+    return { board: board as string, mismatches: mismatches as number, samples: [...(samples as string[])] };
+  });
+}
+
+/** The page's fidelity check for one design version: stored once (fidelity.ts); 204. Needs write. */
+export async function postFidelity(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const number = body.versionNumber;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1) invalid();
+  const boards = fidelityBoards(body.boards);
+  await requireDocumentAccess(deps.db, documentId, viewer, "write");
+  await recordFidelity(deps.db, deps.cipher, { documentId, number: number as number, boards });
+  res.writeHead(204, { "cache-control": "no-store", "referrer-policy": "no-referrer" }).end();
+}
+
+/**
+ * A design version's boards as sandboxed-frame HTML (frames.ts): `mode` play (board links go to the
+ * parent page's fragment) or overview (no links); `version` defaults to the current one. Read access.
+ */
+export async function getFrames(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  params: URLSearchParams,
+): Promise<void> {
+  const mode = params.get("mode");
+  if (mode !== "play" && mode !== "overview") invalid();
+  const number = intParam(params, "version", Number.MAX_SAFE_INTEGER);
+  await requireDocumentAccess(deps.db, documentId, viewer, "read");
+  const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { kind: true } });
+  if (!doc) throw new Error("document_not_found");
+  if (doc.kind !== "design") throw new Error("document_format_mismatch");
+  let content;
+  if (number === undefined) {
+    content = (await getDocument(deps.db, documentId)).content;
+  } else {
+    const v = await deps.db.documentVersion.findUnique({
+      where: { documentId_number: { documentId, number } },
+      select: { id: true, format: true, markdown: true },
+    });
+    if (!v) throw new Error("document_version_not_found");
+    content = await loadContent(deps.db, v);
+  }
+  if (content.format !== "boards-v1") throw new Error("document_format_mismatch");
+  const files = content.files;
+  const manifest = parseManifest(files[MANIFEST_PATH] ?? "");
+  const ids = new Set(manifest.boards.map((b) => b.id));
+  const boards = manifest.boards
+    .filter((b) => typeof files[b.file] === "string")
+    .map((b) => ({
+      id: b.id,
+      name: b.name,
+      width: b.width,
+      html: frameHtml(files[b.file], mode as "play" | "overview", ids),
+    }));
+  sendWebJson(res, 200, { boards });
 }
 
 export async function postThread(

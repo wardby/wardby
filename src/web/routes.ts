@@ -42,10 +42,12 @@ import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
 import {
   describeViewer,
   getDocumentJson,
+  getFrames,
   getMentions,
   getVersionJson,
   listVersionsJson,
   patchComment,
+  postFidelity,
   postReply,
   postSend,
   postStatus,
@@ -79,7 +81,7 @@ import {
   type WebCookieOptions,
 } from "./session.js";
 import { openDocumentStream } from "./events.js";
-import { DEFAULT_ASSETS_ROOT, readManifest, serveStatic, STATIC_PREFIX } from "./static.js";
+import { DEFAULT_ASSETS_ROOT, readIntegrity, readManifest, serveStatic, STATIC_PREFIX } from "./static.js";
 
 export type { WebDeps } from "./context.js";
 
@@ -87,7 +89,7 @@ const ID = "[A-Za-z0-9_-]{1,64}";
 const DOC_PAGE = new RegExp(`^/d/(${ID})$`);
 const SHARE_PAGE = /^\/s\/([A-Za-z0-9_-]{1,200})$/;
 const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
-const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions))?$`);
+const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames))?$`);
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
 const API_VERSIONS = new RegExp(`^/d/api/(${ID})/versions(?:/([1-9][0-9]{0,8})(/restore)?)?$`);
@@ -194,8 +196,12 @@ async function guardJson(res: ServerResponse, run: () => Promise<void>): Promise
       res.destroy();
       return;
     }
-    const { code, status, requestId } = errorCode(err);
-    sendWebJson(res, status, { error: code, ...(requestId ? { id: requestId } : {}) });
+    const { code, status, requestId, problems } = errorCode(err);
+    sendWebJson(res, status, {
+      error: code,
+      ...(requestId ? { id: requestId } : {}),
+      ...(problems ? { problems } : {}),
+    });
   }
 }
 
@@ -214,26 +220,42 @@ async function guardPage(res: ServerResponse, run: () => Promise<void>, fallback
 
 // ---- pages ----------------------------------------------------------------
 
-async function pageTitle(deps: WebDeps, documentId: string): Promise<string> {
-  const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { title: true } });
+async function pageDocument(deps: WebDeps, documentId: string): Promise<{ title: string; kind: string }> {
+  const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { title: true, kind: true } });
   if (!doc) throw new Error("document_not_found");
-  return doc.title;
+  return doc;
 }
+
+/** The manifest and integrity digests, or web_assets_missing without a manifest. */
+async function pageAssets(deps: WebDeps) {
+  const root = deps.assetsRoot ?? DEFAULT_ASSETS_ROOT;
+  const manifest = await readManifest(root);
+  if (!manifest) throw new Error("web_assets_missing");
+  return { manifest, integrity: await readIntegrity(root) };
+}
+
+/** A design runs the designs bundle (and its CSP); every other document the Markdown editor. */
+const pageKind = (kind: string) =>
+  kind === "design"
+    ? ({ kind: "design", bundle: "designs" } as const)
+    : ({ kind: "document", bundle: "documents" } as const);
 
 async function documentPage(req: IncomingMessage, res: ServerResponse, id: string, deps: WebDeps): Promise<void> {
   const ctx = await resolveContext(req, deps);
   if (ctx.kind === "none") return redirect(res, loginUrl(`/d/${id}`));
   if ((await documentAccess(deps.db, id, ctx.viewer)) === "none") throw new Error("document_not_found");
-  const manifest = await readManifest(deps.assetsRoot ?? DEFAULT_ASSETS_ROOT);
-  if (!manifest) throw new Error("web_assets_missing");
+  const assets = await pageAssets(deps);
+  const doc = await pageDocument(deps, id);
+  const { kind, bundle } = pageKind(doc.kind);
   const bootstrap: PageBootstrap = {
     documentId: id,
+    kind,
     csrf: ctx.csrf,
     viewer: await describeViewer(deps, id, ctx.viewer),
     loginUrl: loginUrl(`/d/${id}`),
     logoutUrl: LOGOUT_URL,
   };
-  sendDocumentPage(res, { title: await pageTitle(deps, id), bootstrap, manifest });
+  sendDocumentPage(res, { title: doc.title, bootstrap, bundle, ...assets });
 }
 
 const linkLevel = (permission: string) =>
@@ -248,8 +270,7 @@ async function sharePage(req: IncomingMessage, res: ServerResponse, token: strin
   // A guest of another link is a stranger here (their session is left alone).
   if (ctx.kind === "guest" && ctx.shareLinkId !== link.id) ctx = { kind: "none" };
 
-  const manifest = await readManifest(deps.assetsRoot ?? DEFAULT_ASSETS_ROOT);
-  if (!manifest) throw new Error("web_assets_missing");
+  const assets = await pageAssets(deps);
   let csrf: string;
   let viewer: PageViewer;
   if (ctx.kind === "none") {
@@ -263,11 +284,14 @@ async function sharePage(req: IncomingMessage, res: ServerResponse, token: strin
     const shown: Viewer = ctx.kind === "member" ? { ...ctx.viewer, shareLinkId: link.id } : ctx.viewer;
     viewer = await describeViewer(deps, document.id, shown);
   }
+  const { kind, bundle } = pageKind(document.kind);
   sendDocumentPage(res, {
     title: document.title,
-    manifest,
+    ...assets,
+    bundle,
     bootstrap: {
       documentId: document.id,
+      kind,
       csrf,
       viewer,
       shareToken: token,
@@ -369,7 +393,7 @@ async function logout(req: IncomingMessage, res: ServerResponse, deps: WebDeps):
 
 type ApiRoute = {
   write: boolean;
-  /** GET /d/api/<id> (and its version history) may also be read with a share token by a visitor without a session. */
+  /** GET /d/api/<id> (its version history and frames) may also be read with a share token by a visitor without a session. */
   shareReadable?: string;
   run(viewer: Viewer, anonymous: boolean, body: Record<string, unknown>): Promise<void>;
 };
@@ -414,6 +438,12 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
     if (sub === "threads" && method === "POST")
       return { write: true, run: (v, _a, b) => postThread(res, deps, id, v, b) };
     if (sub === "send" && method === "POST") return { write: true, run: (v, _a, b) => postSend(res, deps, id, v, b) };
+    if (sub === "fidelity" && method === "POST") {
+      return { write: true, run: (v, _a, b) => postFidelity(res, deps, id, v, b) };
+    }
+    if (sub === "frames" && method === "GET") {
+      return { write: false, shareReadable: id, run: (v) => getFrames(res, deps, id, v, url.searchParams) };
+    }
   }
   return null;
 }

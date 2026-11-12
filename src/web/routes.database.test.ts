@@ -5,10 +5,12 @@ import { request as httpRequest, createServer } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { JSDOM, VirtualConsole } from "jsdom";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../core/db.js";
 import { createDocument } from "../core/documents/service.js";
+import { attachSecret, createSecret } from "../core/secrets.js";
 import { createShareLink, revokeShareLink } from "../core/documents/share-links.js";
 import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
@@ -26,6 +28,48 @@ import type { WebDeps } from "./routes.js";
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
 const JS = "documents-abc123.js";
 const CSS = "documents-abc123.css";
+const DJS = "designs-def456.js";
+const DCSS = "designs-def456.css";
+const ASSET_TEXT: Record<string, string> = {
+  [JS]: "console.log('app');",
+  [CSS]: "body{}",
+  [DJS]: "console.log('designs');",
+  [DCSS]: ".board{}",
+};
+const sri = (text: string) => `sha384-${createHash("sha384").update(text).digest("base64")}`;
+const SECRET = "FAKE-WEB-DESIGN-SECRET-5d21c7";
+/** A second fake value holding the characters HTML escapes: the stored board only ever has its escaped form. */
+const SPECIAL = 'Pa"ss&w<rd99';
+const SPECIAL_HTML = "Pa&quot;ss&amp;w&lt;rd99";
+const readCoffee = (p: string) =>
+  readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+const coffee = (): Record<string, string> => ({
+  "manifest.json": readCoffee("manifest.json"),
+  ...Object.fromEntries(
+    ["home", "menu", "about", "visit"].map((id) => [`boards/${id}.html`, readCoffee(`boards/${id}.html`)]),
+  ),
+});
+/** Every string a reader gets from a JSON response once decoded: each JSON string, and inside HTML its text and attributes. */
+function decodedStrings(text: string): string[] {
+  const out = [text];
+  const strings: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") strings.push(v);
+    else if (v && typeof v === "object") Object.values(v).forEach(walk);
+  };
+  walk(JSON.parse(text));
+  for (const s of strings) {
+    out.push(s);
+    if (!s.includes("<")) continue;
+    const dom = new JSDOM(s, { virtualConsole: new VirtualConsole() });
+    const doc = dom.window.document;
+    out.push(doc.documentElement.textContent ?? "");
+    for (const el of Array.from(doc.querySelectorAll("*")))
+      for (const a of Array.from(el.attributes)) out.push(a.value);
+    dom.window.close();
+  }
+  return out;
+}
 const OWNER_EMAIL = "olive.owner@example.com";
 const GUEST_EMAIL = "gus.guest@example.com";
 const DEV = { secure: false };
@@ -205,10 +249,21 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       },
     });
     assets = await mkdtemp(join(tmpdir(), "wardby-web-assets-"));
-    await writeFile(join(assets, JS), "console.log('app');");
-    await writeFile(join(assets, CSS), "body{}");
+    for (const [name, text] of Object.entries(ASSET_TEXT)) await writeFile(join(assets, name), text);
     await writeFile(join(assets, "not-listed.js"), "secret()");
-    await writeFile(join(assets, "manifest.json"), JSON.stringify({ "documents.js": JS, "documents.css": CSS }));
+    await writeFile(
+      join(assets, "manifest.json"),
+      JSON.stringify({ "documents.js": JS, "documents.css": CSS, "designs.js": DJS, "designs.css": DCSS }),
+    );
+    await writeFile(
+      join(assets, "integrity.json"),
+      JSON.stringify({
+        "documents.js": sri(ASSET_TEXT[JS]),
+        "documents.css": sri(ASSET_TEXT[CSS]),
+        "designs.js": sri(ASSET_TEXT[DJS]),
+        "designs.css": sri(ASSET_TEXT[DCSS]),
+      }),
+    );
     handle = await startServer();
   });
   afterAll(async () => {
@@ -242,14 +297,24 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       const nonce = /<script nonce="([^"]+)">/.exec(html)![1];
       expect(csp).toContain(`'nonce-${nonce}'`);
       expect(html).toContain('<div id="app"></div>');
-      expect(html).toContain(`<script src="/web/static/${JS}"></script>`);
-      expect(html).toContain(`<link rel="stylesheet" href="/web/static/${CSS}">`);
+      expect(html).toContain(
+        `<script src="/web/static/${JS}" integrity="${sri(ASSET_TEXT[JS])}" crossorigin="anonymous"></script>`,
+      );
+      expect(html).toContain(
+        `<link rel="stylesheet" href="/web/static/${CSS}" integrity="${sri(ASSET_TEXT[CSS])}" crossorigin="anonymous">`,
+      );
+      expect(html).not.toContain(DJS);
+      // A document page keeps the phase 1 policy exactly.
+      expect(csp).toBe(
+        `default-src 'none'; script-src 'self' 'nonce-${/'nonce-([^']+)'/.exec(csp)![1]}'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+      );
       // The untrusted title is escaped in the <title> and never raw anywhere.
       expect(html).not.toContain("<script>alert(1)</script>");
       expect(html).toContain("Plan &lt;script&gt;alert(1)&lt;/script&gt;");
       const boot = bootstrapOf(html);
       expect(boot).toMatchObject({
         documentId: docId,
+        kind: "document",
         csrf,
         viewer: { kind: "member", name: "Mel Member", access: "write" },
         loginUrl: `/web/login?returnTo=${encodeURIComponent(`/d/${docId}`)}`,
@@ -276,6 +341,40 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         expect(await res.text()).toContain("web_assets_missing");
       } finally {
         await rename(join(assets, "manifest.off"), join(assets, "manifest.json"));
+      }
+    });
+
+    it("puts integrity values on the bundle tags that match the served bytes", async () => {
+      const { jar } = await session(member.id);
+      const html = await (await call(`/d/${docId}`, { jar })).text();
+      const tags = [...html.matchAll(/(?:src|href)="\/web\/static\/([^"]+)" integrity="(sha384-[^"]+)"/g)];
+      expect(tags.length).toBe(2);
+      for (const [, file, integrity] of tags) {
+        const served = Buffer.from(await (await call(`/web/static/${file}`)).arrayBuffer());
+        expect(integrity).toBe(`sha384-${createHash("sha384").update(served).digest("base64")}`);
+      }
+    });
+
+    it("serves the page without integrity attributes, and logs one warning, when integrity.json is missing or malformed", async () => {
+      const { jar } = await session(member.id);
+      const original = readFileSync(join(assets, "integrity.json"), "utf8");
+      try {
+        for (const text of [null, "{not json", JSON.stringify({ "documents.js": "sha256-abc", "documents.css": 5 })]) {
+          if (text === null) await rm(join(assets, "integrity.json"));
+          else await writeFile(join(assets, "integrity.json"), text);
+          const before = logged.length;
+          const res = await call(`/d/${docId}`, { jar });
+          expect(res.status).toBe(200);
+          const html = await res.text();
+          expect(html).toContain(`<script src="/web/static/${JS}"></script>`);
+          expect(html).not.toContain("integrity=");
+          const warnings = logged.slice(before).filter((l) => l.includes("web asset integrity"));
+          expect(warnings.length).toBe(1);
+          expect(warnings[0]).not.toContain("not json");
+          expect(warnings[0]).not.toContain("sha256-abc");
+        }
+      } finally {
+        await writeFile(join(assets, "integrity.json"), original);
       }
     });
   });
@@ -503,7 +602,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect((await call(`/d/api/${docId}/versions`, { headers: { "x-wardby-share": link.token } })).status).toBe(401);
     });
 
-    it("accepts a document body over 1 MiB on /d/api/ but refuses one over 2 MiB with 413", async () => {
+    it("accepts a document body over 1 MiB on /d/api/ but refuses one over 3 MiB with 413", async () => {
       const { jar, csrf } = await session(member.id);
       const big = await call(`/d/api/${docId}/content`, {
         method: "PUT",
@@ -517,12 +616,12 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       const huge = await declaredLengthStatus(
         port,
         `/d/api/${docId}/content`,
-        2 * 1024 * 1024 + 1,
+        3 * 1024 * 1024 + 1,
         `Origin: ${origin}\r\nCookie: ${jar.header()}\r\nx-wardby-csrf: ${csrf}\r\n`,
       );
       expect(huge.split("\r\n")[0]).toBe("HTTP/1.1 413 Payload Too Large");
       expect(huge).toContain('{"error":"payload_too_large"}');
-      // Other paths keep their own limits: 2 MiB is not accepted on /web/.
+      // Other paths keep their own limits: 100 KB is not accepted on /web/.
       const elsewhere = await declaredLengthStatus(port, "/web/logout", 100 * 1024, `Origin: ${origin}\r\n`);
       expect(elsewhere.split("\r\n")[0]).toBe("HTTP/1.1 413 Payload Too Large");
     });
@@ -1088,6 +1187,429 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         await db.document.update({ where: { id: docId }, data: { agentId: null, repository: null, path: null } });
         await db.codingAgentProfile.deleteMany({ where: { agentId: agent.id } });
         await db.agent.delete({ where: { id: agent.id } });
+      }
+    });
+  });
+
+  describe("designs", () => {
+    const agentId = `web-design-agent-${s}`;
+    const secretNames = [`WEB_DESIGN_KEY_${s.slice(0, 8)}`, `WEB_DESIGN_SPECIAL_${s.slice(0, 8)}`];
+    let commenter: Principal;
+    let designId: string;
+
+    beforeAll(async () => {
+      commenter = await db.principal.create({ data: { subject: `web-commenter-${s}` } });
+      designId = (
+        await createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "Coffee", files: coffee() })
+      ).id;
+      for (const [principal, level] of [
+        [member, "write"],
+        [commenter, "comment"],
+      ] as const) {
+        await db.resourceGrant.create({
+          data: {
+            resourceType: "document",
+            resourceId: designId,
+            granteeKind: "principal",
+            granteePrincipalId: principal.id,
+            granteeKey: `principal:${principal.id}`,
+            level,
+          },
+        });
+      }
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner.id },
+      });
+      await createSecret(secretNames[0], SECRET, owner.id, cipher, db);
+      await attachSecret(agentId, secretNames[0], owner.id, db);
+      await createSecret(secretNames[1], SPECIAL, owner.id, cipher, db);
+      await attachSecret(agentId, secretNames[1], owner.id, db);
+    });
+    afterAll(async () => {
+      await db.webSession.deleteMany({ where: { principalId: commenter.id } });
+      await db.document.deleteMany({ where: { agentId } });
+      await db.agentSecret.deleteMany({ where: { agentId } });
+      await db.secret.deleteMany({ where: { name: { in: secretNames } } });
+      await db.agent.deleteMany({ where: { id: agentId } });
+      await db.resourceGrant.deleteMany({ where: { granteePrincipalId: commenter.id } });
+      await db.principal.deleteMany({ where: { id: commenter.id } });
+    });
+
+    const currentNumber = async (id: string, jar: Jar) =>
+      ((await (await call(`/d/api/${id}`, { jar })).json()) as { version: { number: number } }).version.number;
+    const fileHashes = async (id: string, number: number) => {
+      const v = await db.documentVersion.findUniqueOrThrow({
+        where: { documentId_number: { documentId: id, number } },
+        select: { files: { select: { path: true, hash: true } } },
+      });
+      return Object.fromEntries(v.files.map((f) => [f.path, f.hash]));
+    };
+
+    it("serves the design page with the designs bundle and the board-style CSP", async () => {
+      const { jar } = await session(member.id);
+      const res = await call(`/d/${designId}`, { jar });
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain(
+        `<script src="/web/static/${DJS}" integrity="${sri(ASSET_TEXT[DJS])}" crossorigin="anonymous"></script>`,
+      );
+      expect(html).toContain(
+        `<link rel="stylesheet" href="/web/static/${DCSS}" integrity="${sri(ASSET_TEXT[DCSS])}" crossorigin="anonymous">`,
+      );
+      expect(html).not.toContain(JS);
+      const csp = res.headers.get("content-security-policy")!;
+      expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+      expect(csp).toContain("font-src 'self' data:");
+      expect(csp).toContain("connect-src 'self'");
+      expect(csp).toContain("img-src 'self' data:");
+      expect(csp).toContain("form-action 'self'");
+      expect(/script-src ([^;]*)/.exec(csp)![1]).not.toContain("unsafe");
+      expect(csp).not.toContain("unsafe-eval");
+      expect(bootstrapOf(html)).toMatchObject({ documentId: designId, kind: "design" });
+      // The share page of a design is a design page too.
+      const link = await createShareLink(db, {
+        documentId: designId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      const share = await call(`/s/${link.token}`);
+      expect(share.status).toBe(200);
+      expect(share.headers.get("content-security-policy")).toContain("style-src 'self' 'unsafe-inline'");
+      const shareHtml = await share.text();
+      expect(shareHtml).toContain(DJS);
+      expect(bootstrapOf(shareHtml)).toMatchObject({ kind: "design" });
+    });
+
+    it("returns a design's files, format, warnings and canRender", async () => {
+      const { jar } = await session(member.id);
+      const res = await call(`/d/api/${designId}`, { jar });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        document: { kind: string; canSend: boolean; canRender: boolean };
+        version: { format: string; files: Record<string, string>; warnings: unknown[]; markdown?: string };
+      };
+      expect(body.document.kind).toBe("design");
+      expect(body.document.canSend).toBe(false);
+      expect(body.version.format).toBe("boards-v1");
+      expect(body.version.files["boards/home.html"]).toContain("<html");
+      expect(body.version.markdown).toBeUndefined();
+      expect(Array.isArray(body.version.warnings)).toBe(true);
+      expect(body.document.canRender).toBe(false);
+      // A Markdown document carries its format and warnings too.
+      const doc = (await (await call(`/d/api/${docId}`, { jar })).json()) as {
+        document: { kind: string };
+        version: { format: string; warnings: unknown[]; markdown: string };
+      };
+      expect(doc.document.kind).toBe("document");
+      expect(doc.document).not.toHaveProperty("canRender");
+      expect(doc.version).toMatchObject({ format: "markdown", warnings: [], markdown: expect.any(String) });
+    });
+
+    it("saves changed files over the base version; conflicts, format problems and commenters are refused", async () => {
+      const { jar, csrf } = await session(member.id);
+      const base = await currentNumber(designId, jar);
+      const before = await fileHashes(designId, base);
+      const menu = coffee()["boards/menu.html"].replace("</body>", "<p>edited</p></body>");
+      const ok = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { files: { "boards/menu.html": menu }, baseNumber: base },
+      });
+      expect(ok.status).toBe(200);
+      const saved = (await ok.json()) as { version: { number: number }; reanchored: unknown; warnings: unknown[] };
+      expect(saved.version.number).toBe(base + 1);
+      expect(saved.reanchored).toMatchObject({ kept: expect.any(Number), outdated: expect.any(Number) });
+      expect(Array.isArray(saved.warnings)).toBe(true);
+      const after = await fileHashes(designId, base + 1);
+      expect(after["boards/menu.html"]).not.toBe(before["boards/menu.html"]);
+      for (const p of ["manifest.json", "boards/home.html", "boards/about.html", "boards/visit.html"]) {
+        expect(after[p]).toBe(before[p]);
+      }
+
+      const stale = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { files: { "boards/menu.html": menu }, baseNumber: base },
+      });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ error: "document_version_conflict" });
+
+      const external = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: {
+          files: { "boards/home.html": menu.replace("<p>edited</p>", '<img src="https://x.example/a.png">') },
+          baseNumber: base + 1,
+        },
+      });
+      expect(external.status).toBe(400);
+      const refused = (await external.json()) as { error: string; problems: string[] };
+      expect(refused.error).toBe("board_format_invalid");
+      expect(refused.problems.length).toBeGreaterThan(0);
+      expect(refused.problems.join(" ")).toContain("board home");
+      expect(refused.problems.join(" ")).not.toContain("x.example");
+
+      // null deletes a file: removing a board the manifest still lists is a format problem.
+      const missing = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { files: { "boards/about.html": null }, baseNumber: base + 1 },
+      });
+      expect(missing.status).toBe(400);
+      expect(((await missing.json()) as { error: string }).error).toBe("board_format_invalid");
+
+      for (const bad of [
+        { files: { "boards/menu.html": 5 }, baseNumber: base + 1 },
+        { files: ["x"], baseNumber: base + 1 },
+        { files: Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`f${i}`, "x"])), baseNumber: base + 1 },
+      ]) {
+        const r = await call(`/d/api/${designId}/content`, { method: "PUT", jar, csrf, body: bad });
+        expect(r.status).toBe(400);
+        expect(await r.json()).toEqual({ error: "invalid_request" });
+      }
+      // Markdown for a design and files for a document are format mismatches.
+      const md = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { markdown: "x", baseNumber: base + 1 },
+      });
+      expect(md.status).toBe(400);
+      expect(await md.json()).toEqual({ error: "document_format_mismatch" });
+      const docBase = await currentNumber(docId, jar);
+      const filesForDoc = await call(`/d/api/${docId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { files: { "a.md": "x" }, baseNumber: docBase },
+      });
+      expect(filesForDoc.status).toBe(400);
+      expect(await filesForDoc.json()).toEqual({ error: "document_format_mismatch" });
+
+      // A guest with comment access cannot save.
+      const link = await createShareLink(db, {
+        documentId: designId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "comment",
+      });
+      const guestJar = new Jar();
+      const page = await call(`/s/${link.token}`, { jar: guestJar });
+      guestJar.take(page);
+      const pre = bootstrapOf(await page.text()).csrf as string;
+      const reg = await call(`/s/${link.token}/guest`, {
+        method: "POST",
+        jar: guestJar,
+        csrf: pre,
+        body: { name: "Gail Guest" },
+      });
+      expect(reg.status).toBe(200);
+      guestJar.take(reg);
+      const guestCsrf = ((await reg.json()) as { csrf: string }).csrf;
+      const guestPut = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar: guestJar,
+        csrf: guestCsrf,
+        body: { files: { "boards/menu.html": menu }, baseNumber: base + 1 },
+      });
+      expect(guestPut.status).toBe(403);
+      expect(await guestPut.json()).toEqual({ error: "document_access_denied" });
+      expect(await currentNumber(designId, jar)).toBe(base + 1);
+    });
+
+    it("stores fidelity warnings once per version, from a writer only", async () => {
+      const { jar, csrf } = await session(member.id);
+      const n = await currentNumber(designId, jar);
+      const warningsOf = async () =>
+        (
+          (await (await call(`/d/api/${designId}`, { jar })).json()) as {
+            version: { warnings: Array<{ kind: string; board?: string; mismatches?: number; samples?: string[] }> };
+          }
+        ).version.warnings;
+      const nonFidelity = (await warningsOf()).filter((w) => w.kind !== "fidelity");
+      const c = await session(commenter.id);
+      const byCommenter = await call(`/d/api/${designId}/fidelity`, {
+        method: "POST",
+        jar: c.jar,
+        csrf: c.csrf,
+        body: { versionNumber: n, boards: [{ board: "home", mismatches: 1, samples: [] }] },
+      });
+      expect(byCommenter.status).toBe(403);
+      expect(await byCommenter.json()).toEqual({ error: "document_access_denied" });
+
+      for (const bad of [
+        { versionNumber: 0, boards: [] },
+        { versionNumber: n, boards: [{ board: "Home!", mismatches: 1, samples: [] }] },
+        { versionNumber: n, boards: [{ board: "home", mismatches: 10_001, samples: [] }] },
+        { versionNumber: n, boards: [{ board: "home", mismatches: 1.5, samples: [] }] },
+        { versionNumber: n, boards: [{ board: "home", mismatches: 1, samples: ["x".repeat(161)] }] },
+        { versionNumber: n, boards: [{ board: "home", mismatches: 1, samples: Array(7).fill("x") }] },
+        { versionNumber: n, boards: [{ board: "home", mismatches: 1, samples: [5] }] },
+        {
+          versionNumber: n,
+          boards: Array.from({ length: 51 }, (_, i) => ({ board: `b${i}`, mismatches: 0, samples: [] })),
+        },
+        {
+          versionNumber: n,
+          boards: [
+            { board: "home", mismatches: 0, samples: [] },
+            { board: "home", mismatches: 1, samples: [] },
+          ],
+        },
+      ]) {
+        const r = await call(`/d/api/${designId}/fidelity`, { method: "POST", jar, csrf, body: bad });
+        expect(r.status, JSON.stringify(bad).slice(0, 80)).toBe(400);
+        expect(await r.json()).toEqual({ error: "invalid_request" });
+      }
+      const missingVersion = await call(`/d/api/${designId}/fidelity`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: { versionNumber: n + 50, boards: [] },
+      });
+      expect(missingVersion.status).toBe(404);
+
+      const first = await call(`/d/api/${designId}/fidelity`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: {
+          versionNumber: n,
+          boards: [
+            { board: "home", mismatches: 0, samples: [] },
+            { board: "menu", mismatches: 2, samples: [".hero background-color: red / blue"] },
+            { board: "nope", mismatches: 3, samples: [] },
+          ],
+        },
+      });
+      expect(first.status).toBe(204);
+      expect(await first.text()).toBe("");
+      const stored = await warningsOf();
+      expect(stored.filter((w) => w.kind !== "fidelity")).toEqual(nonFidelity);
+      expect(stored.filter((w) => w.kind === "fidelity")).toEqual([
+        { kind: "fidelity", board: "home", mismatches: 0, samples: [] },
+        { kind: "fidelity", board: "menu", mismatches: 2, samples: [".hero background-color: red / blue"] },
+      ]);
+      const hashBefore = (
+        await db.documentVersion.findUniqueOrThrow({
+          where: { documentId_number: { documentId: designId, number: n } },
+          select: { contentHash: true },
+        })
+      ).contentHash;
+      const second = await call(`/d/api/${designId}/fidelity`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: { versionNumber: n, boards: [{ board: "home", mismatches: 9, samples: ["other"] }] },
+      });
+      expect(second.status).toBe(204);
+      expect(await warningsOf()).toEqual(stored);
+      const v = await db.documentVersion.findUniqueOrThrow({
+        where: { documentId_number: { documentId: designId, number: n } },
+        select: { contentHash: true },
+      });
+      expect(v.contentHash).toBe(hashBefore);
+
+      // A Markdown document has no boards to measure.
+      const onDoc = await call(`/d/api/${docId}/fidelity`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: { versionNumber: 1, boards: [] },
+      });
+      expect(onDoc.status).toBe(400);
+      expect(await onDoc.json()).toEqual({ error: "document_format_mismatch" });
+    });
+
+    it("serves frames to an anonymous share-link reader, with links rewritten per mode", async () => {
+      const link = await createShareLink(db, {
+        documentId: designId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      const headers = { "x-wardby-share": link.token };
+      const play = await call(`/d/api/${designId}/frames?mode=play`, { headers });
+      expect(play.status).toBe(200);
+      const body = (await play.json()) as { boards: Array<{ id: string; name: string; width: number; html: string }> };
+      expect(body.boards.map((b) => b.id)).toEqual(["home", "menu", "about", "visit"]);
+      expect(body.boards[0]).toMatchObject({ name: "Home", width: 1280 });
+      const home = new JSDOM(body.boards[0].html, { virtualConsole: new VirtualConsole() }).window.document;
+      const hrefs = Array.from(home.querySelectorAll("a[href]")).map((a) => [
+        a.getAttribute("href"),
+        a.getAttribute("target"),
+      ]);
+      expect(hrefs.length).toBeGreaterThan(0);
+      for (const [href, target] of hrefs) {
+        expect(href).toMatch(/^#board-(home|menu|about|visit)$/);
+        expect(target).toBe("_top");
+      }
+      const overview = (await (
+        await call(`/d/api/${designId}/frames?mode=overview&version=1`, { headers })
+      ).json()) as {
+        boards: Array<{ html: string }>;
+      };
+      for (const b of overview.boards) expect(b.html).not.toMatch(/<a[^>]*\shref=/);
+
+      const other = await call(`/d/api/${designId}/frames?mode=other`, { headers });
+      expect(other.status).toBe(400);
+      expect(await other.json()).toEqual({ error: "invalid_request" });
+      expect((await call(`/d/api/${designId}/frames?mode=play&version=99`, { headers })).status).toBe(404);
+      expect((await call(`/d/api/${designId}/frames?mode=play`)).status).toBe(401);
+      const { jar } = await session(member.id);
+      const onDoc = await call(`/d/api/${docId}/frames?mode=play`, { jar });
+      expect(onDoc.status).toBe(400);
+      expect(await onDoc.json()).toEqual({ error: "document_format_mismatch" });
+    });
+
+    it("never returns the agent's secret values, raw or decoded, from the design API, frames or fidelity samples", async () => {
+      const files = coffee();
+      files["boards/home.html"] = files["boards/home.html"].replace(
+        "</body>",
+        `<p>key ${SECRET}</p><p>dash ${SECRET.replace("-", "&#45;")}</p>` +
+          `<p title="${SPECIAL_HTML}" class="sp">t ${SPECIAL_HTML}</p>` +
+          `<a href="#board:menu" title="${SECRET}">m</a></body>`,
+      );
+      for (const text of Object.values(files)) expect(text).not.toContain(SPECIAL);
+      const id = (
+        await createDocument(db, cipher, {
+          kind: "design",
+          ownerId: owner.id,
+          title: `Secret ${SECRET}`,
+          files,
+          agentId,
+        })
+      ).id;
+      const { jar, csrf } = await session(owner.id);
+      const fidelity = await call(`/d/api/${id}/fidelity`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: {
+          versionNumber: 1,
+          boards: [{ board: "home", mismatches: 2, samples: [`.a content: ${SECRET}`, `.b title: ${SPECIAL}`] }],
+        },
+      });
+      expect(fidelity.status).toBe(204);
+      const responses = [
+        await (await call(`/d/api/${id}`, { jar })).text(),
+        await (await call(`/d/api/${id}/frames?mode=play`, { jar })).text(),
+        await (await call(`/d/api/${id}/frames?mode=overview`, { jar })).text(),
+        await (await call(`/d/api/${id}/versions/1`, { jar })).text(),
+      ];
+      const api = JSON.parse(responses[0]) as { version: { warnings: Array<{ kind: string; samples?: string[] }> } };
+      expect(api.version.warnings.find((w) => w.kind === "fidelity")?.samples).toEqual([
+        ".a content: [REDACTED]",
+        ".b title: [REDACTED]",
+      ]);
+      expect(responses[1]).toContain("[REDACTED]");
+      for (const text of responses) {
+        for (const decoded of decodedStrings(text)) {
+          expect(decoded).not.toContain(SECRET);
+          expect(decoded).not.toContain(SPECIAL);
+        }
       }
     });
   });
