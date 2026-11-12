@@ -17,8 +17,9 @@ PDF/PNG export, version compare or repository export yet.
   follow it across versions. If the text is deleted, the thread is marked
   outdated.
 - Replies, resolve and reopen, edit and delete your own comments, and
-  `@`-mentions (stored and highlighted; Wardby sends no notification in this
-  phase).
+  `@`-mentions between members (stored and highlighted; Wardby sends no
+  notification in this phase). Share-link guests get no list of people to
+  mention.
 - Links to share a document with people who have no account.
 - Send open threads to a coding agent that edits a file in a repository.
 

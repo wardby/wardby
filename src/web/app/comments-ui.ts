@@ -129,7 +129,8 @@ export class CommentsUI {
   }
 
   async loadMentions(): Promise<void> {
-    if (this.viewer.kind === "anonymous" || !this.canComment) return;
+    // Mentions are member to member: guests get no @-list (the server sends them none).
+    if (this.viewer.kind !== "member" || !this.canComment) return;
     try {
       const r = await this.host.api.mentions();
       this.candidates = r.candidates;
@@ -587,7 +588,10 @@ export class CommentsUI {
     const editing = pop.editing ? t?.comments.find((c) => c.id === pop.editing) : undefined;
     const ta = h("textarea", {
       aria: { label: isDraft ? "Comment" : editing ? "Edit comment" : "Reply" },
-      attrs: { placeholder: isDraft ? "Add a comment… (@ to mention)" : "Reply… (@ to mention)", maxlength: "10000" },
+      attrs: {
+        placeholder: (isDraft ? "Add a comment…" : "Reply…") + (this.viewer.kind === "member" ? " (@ to mention)" : ""),
+        maxlength: "10000",
+      },
       onKeyDown: (e) => this.composerKey(e, ta),
       onInput: () => this.mentionCheck(ta),
     });
@@ -693,7 +697,7 @@ export class CommentsUI {
 
   private mentionCheck(ta: HTMLTextAreaElement): void {
     const pop = this.pop;
-    if (!pop) return;
+    if (!pop || this.viewer.kind !== "member") return;
     const q = mentionQuery(ta.value, ta.selectionStart);
     const list = q
       ? this.candidates.filter((c) => c.name.toLowerCase().includes(q.query.toLowerCase())).slice(0, 8)

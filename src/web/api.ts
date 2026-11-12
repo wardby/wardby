@@ -194,7 +194,8 @@ export async function getMentions(
 ): Promise<void> {
   // mentionCandidates has no access check of its own: only commenters may list members.
   await requireDocumentAccess(deps.db, documentId, viewer, "comment");
-  const candidates = await mentionCandidates(deps.db, documentId);
+  // Mentions are member to member: a share-link guest never sees the member directory.
+  const candidates = viewer.kind === "guest" ? [] : await mentionCandidates(deps.db, documentId);
   sendWebJson(res, 200, { candidates: candidates.map((c) => ({ principalId: c.principalId, name: c.name })) });
 }
 

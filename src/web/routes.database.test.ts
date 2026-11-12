@@ -551,6 +551,25 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       });
       expect(w.status).toBe(403);
       expect(await w.json()).toEqual({ error: "document_access_denied" });
+      // A guest never sees the member directory: no mention candidates, even with an everyone grant.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: docId,
+          granteeKind: "everyone",
+          granteeKey: "everyone",
+          level: "comment",
+        },
+      });
+      try {
+        const mentions = await call(`/d/api/${docId}/mentions`, { jar });
+        expect(mentions.status).toBe(200);
+        expect(await mentions.json()).toEqual({ candidates: [] });
+      } finally {
+        await db.resourceGrant.deleteMany({
+          where: { resourceType: "document", resourceId: docId, granteeKind: "everyone" },
+        });
+      }
 
       // The guest page now renders as the guest.
       const again = await call(`/s/${link.token}`, { jar });

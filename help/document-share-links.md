@@ -13,7 +13,7 @@ appliesTo: ">=0.10.0"
 
 ## What a guest can do
 
-Opening the link, a guest enters a display name (1-40 characters; not containing "agent" or "via"; not the name of a member or another guest on that document) and an optional email. They can read the current version and, with a `comment` link, start threads and reply (30 comments an hour per guest; a link accepts 20 registrations an hour). They cannot edit, see other versions, send to an agent or share.
+Opening the link, a guest enters a display name (1-40 characters; not containing "agent" or "via"; not the name of a member or another guest on that document) and an optional email. They can read the current version and, with a `comment` link, start threads and reply (30 comments an hour per guest; a link accepts 20 registrations an hour). They cannot edit, see other versions, send to an agent, share, or list members to @-mention.
 
 ## Risks
 
