@@ -2,8 +2,7 @@
 import type { PrismaClient } from "#prisma";
 import type { RunDetail } from "./api-schema.js";
 import { loadGraphRuns, type IssueSites } from "./graph.js";
-import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
-import { publicCodingRunResult } from "../coding/protocol.js";
+import { RUN_REPOSITORY_SELECT, publicRunRepository } from "../coding/run-repositories.js";
 import { requestForReader } from "../core/run-request.js";
 import { RUN_TEXT_FIRST_PAGE_CHARS, textPiece } from "../mcp/tools/run-pages.js";
 
@@ -73,19 +72,7 @@ export async function loadRunDetail(
             queuedAt: true,
             failureCategory: true,
             services: true,
-            repositories: {
-              orderBy: { position: "asc" },
-              select: {
-                name: true,
-                access: true,
-                repository: true,
-                requestedRef: true,
-                resolvedSha: true,
-                pullRequestNumber: true,
-                resultBranch: true,
-                result: true,
-              },
-            },
+            repositories: { orderBy: { position: "asc" }, select: RUN_REPOSITORY_SELECT },
           },
         },
       },
@@ -138,20 +125,7 @@ export async function loadRunDetail(
           queuedAt: coding.queuedAt ? coding.queuedAt.toISOString() : null,
           failureCategory: coding.failureCategory,
           services: serviceDetails(coding.services),
-          repositories: coding.repositories.map((r) => ({
-            name: r.name,
-            access: r.access === "write" ? ("write" as const) : ("read" as const),
-            repository: r.repository,
-            requestedRef: r.requestedRef ?? null,
-            resolvedSha: r.resolvedSha ?? null,
-            pullRequestNumber: r.pullRequestNumber ?? null,
-            pullRequestUrl:
-              r.pullRequestNumber != null
-                ? pullRequestWebUrl(codeProviderOf(r.repository), r.repository, r.pullRequestNumber)
-                : null,
-            resultBranch: r.resultBranch ?? null,
-            outcome: publicCodingRunResult(r.result)?.outcome ?? null,
-          })),
+          repositories: coding.repositories.map(publicRunRepository),
         }
       : null,
   };

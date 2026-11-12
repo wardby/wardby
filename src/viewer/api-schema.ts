@@ -199,7 +199,7 @@ export const RunDetailSchema = GraphRunSchema.extend({
           }),
         )
         .describe(
-          "Every repository of a multi-repository coding run, in order; empty for a single-repository run. Absent from servers older than the release that added it.",
+          "The other repositories of a multi-repository coding run, in order (the default repository is `repository` above, with its pull request in `result`); empty for a single-repository run. Absent from servers older than the release that added it.",
         ),
     })
     .nullable(),

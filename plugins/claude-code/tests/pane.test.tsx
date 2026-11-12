@@ -2951,17 +2951,6 @@ test("a run over several repositories shows one pull request line each and lists
         },
         repositories: [
           {
-            name: "api",
-            access: "write",
-            repository: "your-org/api",
-            requestedRef: "main",
-            resolvedSha: null,
-            pullRequestNumber: 9,
-            pullRequestUrl: "https://github.com/your-org/api/pull/9",
-            resultBranch: "wardby/run-r1",
-            outcome: "pull_request_opened",
-          },
-          {
             name: "tools",
             access: "write",
             repository: "your-org/tools",

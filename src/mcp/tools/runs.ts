@@ -6,7 +6,7 @@ import { McpError } from "../errors.js";
 import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
 import { loadJiraConfig } from "../../config/providers.js";
 import { findReadableRun } from "./run-access.js";
-import { codeProviderOf, pullRequestWebUrl } from "../../coding/code-host.js";
+import { RUN_REPOSITORY_SELECT, publicRunRepository } from "../../coding/run-repositories.js";
 import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
@@ -311,7 +311,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       `${ACROSS_AGENTS_TASK_CHARS}) has the rest. Default limit ${ACROSS_AGENTS_DEFAULT_LIMIT}, at most ${ACROSS_AGENTS_MAX_LIMIT}. ` +
       "You see all runs of agents you own and only the runs you triggered on others. " +
       "active: true keeps pending and running runs; since (ISO time) keeps runs that started or finished then or later, " +
-      "plus any still pending or running. query keeps runs whose id, agent name, status, trigger, repository (any of the run's) or " +
+      "plus any still pending or running. query keeps runs whose id, agent name, status, trigger, repository (the default or any other of the run's) or " +
       "branch contains the text (case ignored; task and request texts are not searched), over all dates unless since is given. " +
       "all: true (no agentId) lists every run in the deployment (admins only, admin:view). " +
       "Pages are newest first (startedAt, then id): for the next page, pass before: the last row's id, with or without " +
@@ -326,7 +326,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         since: { type: "string", description: "ISO date or time" },
         query: {
           type: "string",
-          description: `Text to find in the run's id, agent name, status, trigger, repository (any of the run's) or branch (at most ${RUN_QUERY_MAX_CHARS} characters)`,
+          description: `Text to find in the run's id, agent name, status, trigger, repository (the default or any other of the run's) or branch (at most ${RUN_QUERY_MAX_CHARS} characters)`,
         },
         all: { type: "boolean" },
         limit: { type: "number" },
@@ -396,7 +396,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
       "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two. " +
       "lastStep is the newest step; get_run_steps lists them all. A coding run over several repositories also has " +
-      "repositories (name, access, repository, requestedRef, resolvedSha, pullRequestNumber, pullRequestUrl, resultBranch, outcome; null when absent), alongside codingResult for the default repository. A coding run has packageCount (packages the registry " +
+      "repositories, the run's other repositories in order (name, access, repository, requestedRef, resolvedSha, pullRequestNumber, pullRequestUrl, resultBranch, outcome; null when absent); the default repository is in codingResult, not in this list. A coding run has packageCount (packages the registry " +
       "served it), packagePlan and packageRefusals; use get_run_packages for the packages themselves. request, " +
       `taskOverride, finalText and error come whole up to ${RUN_TEXT_FIRST_PAGE_CHARS} characters. A longer one comes ` +
       `as its first ${RUN_TEXT_FIRST_PAGE_CHARS} characters, a first page, not a cut: <field>More ({ next, total }) ` +
@@ -432,37 +432,15 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         include: { reviews: { orderBy: { createdAt: "asc" } } },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
-      // Every repository of a multi-repository run, in order (absent for a single-repository run).
+      // The run's extra repositories, in order (absent for a single-repository run).
       const repositoryRows = codingRun
         ? await ctx.db.codingRunRepository.findMany({
             where: { runId: run.id },
             orderBy: { position: "asc" },
-            select: {
-              name: true,
-              access: true,
-              repository: true,
-              requestedRef: true,
-              resolvedSha: true,
-              pullRequestNumber: true,
-              resultBranch: true,
-              result: true,
-            },
+            select: RUN_REPOSITORY_SELECT,
           })
         : [];
-      const repositories = repositoryRows.map((r) => ({
-        name: r.name,
-        access: r.access,
-        repository: r.repository,
-        requestedRef: r.requestedRef ?? null,
-        resolvedSha: r.resolvedSha ?? null,
-        pullRequestNumber: r.pullRequestNumber ?? null,
-        pullRequestUrl:
-          r.pullRequestNumber != null
-            ? pullRequestWebUrl(codeProviderOf(r.repository), r.repository, r.pullRequestNumber)
-            : null,
-        resultBranch: r.resultBranch ?? null,
-        outcome: publicCodingRunResult(r.result)?.outcome ?? null,
-      }));
+      const repositories = repositoryRows.map(publicRunRepository);
       // A pending coding run with queuedAt is waiting for a concurrency slot
       // (CODING_MAX_CONCURRENT), not stuck.
       const codingQueuedAt =

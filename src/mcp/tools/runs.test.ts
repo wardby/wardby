@@ -531,9 +531,9 @@ describe("run observability tools", () => {
             result: null,
             repositories: [
               {
-                name: "app",
+                name: "tools",
                 access: "write",
-                repository: "your-org/app",
+                repository: "your-org/tools",
                 requestedRef: "main",
                 resolvedSha: null,
                 pullRequestNumber: 12,
@@ -541,9 +541,9 @@ describe("run observability tools", () => {
                 result: {
                   schemaVersion: 1,
                   outcome: "no_changes",
-                  repository: "your-org/app",
+                  repository: "your-org/tools",
                   baseRef: "main",
-                  summary: "done",
+                  summary: "done sk-fake-secret-value-123",
                   tests: [],
                   usage: { tokensIn: 1, tokensOut: 2, costUsd: 0.01 },
                 },
@@ -572,13 +572,13 @@ describe("run observability tools", () => {
     const multi = parseText((await client.callTool({ name: "get_run", arguments: { runId: "multi" } })) as never);
     expect((multi as { repositories: unknown }).repositories).toEqual([
       {
-        name: "app",
+        name: "tools",
         access: "write",
-        repository: "your-org/app",
+        repository: "your-org/tools",
         requestedRef: "main",
         resolvedSha: null,
         pullRequestNumber: 12,
-        pullRequestUrl: "https://github.com/your-org/app/pull/12",
+        pullRequestUrl: "https://github.com/your-org/tools/pull/12",
         resultBranch: "wardby/run-multi",
         outcome: "no_changes",
       },
@@ -594,6 +594,7 @@ describe("run observability tools", () => {
         outcome: null,
       },
     ]);
+    expect(JSON.stringify(multi)).not.toContain("sk-fake-secret-value-123");
     const single = parseText((await client.callTool({ name: "get_run", arguments: { runId: "single" } })) as never);
     expect(single).not.toHaveProperty("repositories");
     await client.close();

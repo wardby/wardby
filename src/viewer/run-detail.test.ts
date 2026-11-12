@@ -22,7 +22,7 @@ function fakeDb(repositories: unknown[]): PrismaClient {
         codingRun: {
           request: null,
           provider: "codex",
-          repository: "your-org/app",
+          repository: "your-org/tools",
           baseRef: "main",
           headRef: "wardby/run-r1",
           queuedAt: null,
@@ -38,13 +38,13 @@ function fakeDb(repositories: unknown[]): PrismaClient {
 }
 
 describe("loadRunDetail coding.repositories", () => {
-  it("lists each repository with its pull request, and nothing else from the stored result", async () => {
+  it("lists each extra repository with its pull request, and nothing else from the stored result", async () => {
     const detail = await loadRunDetail(
       fakeDb([
         {
-          name: "app",
+          name: "tools",
           access: "write",
-          repository: "your-org/app",
+          repository: "your-org/tools",
           requestedRef: "main",
           resolvedSha: null,
           pullRequestNumber: 12,
@@ -52,7 +52,7 @@ describe("loadRunDetail coding.repositories", () => {
           result: {
             schemaVersion: 1,
             outcome: "no_changes",
-            repository: "your-org/app",
+            repository: "your-org/tools",
             baseRef: "main",
             summary: `leaked ${FAKE_SECRET}`,
             tests: [],
@@ -74,13 +74,13 @@ describe("loadRunDetail coding.repositories", () => {
     );
     expect(detail?.coding?.repositories).toEqual([
       {
-        name: "app",
+        name: "tools",
         access: "write",
-        repository: "your-org/app",
+        repository: "your-org/tools",
         requestedRef: "main",
         resolvedSha: null,
         pullRequestNumber: 12,
-        pullRequestUrl: "https://github.com/your-org/app/pull/12",
+        pullRequestUrl: "https://github.com/your-org/tools/pull/12",
         resultBranch: "wardby/run-r1",
         outcome: "no_changes",
       },
