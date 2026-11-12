@@ -63,7 +63,7 @@ import {
 } from "./context.js";
 import { clearLoginStateCookie } from "./oidc-login.js";
 import { sendDocumentPage, sendErrorPage, type PageBootstrap, type PageViewer } from "./page.js";
-import { clientAddress, GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
+import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
 import { isSafeReturnTo } from "./return-to.js";
 import { assertCsrf, assertSameOrigin } from "./security.js";
 import {
@@ -283,7 +283,8 @@ async function registerGuestRoute(
   if (resolved.link.permission !== "comment") throw new Error("document_access_denied");
   const limits = { ...GUEST_RATE_LIMITS, ...deps.guestLimits };
   const limiter = deps.rateLimiter ?? webRateLimiter(deps.db);
-  await limiter.check(WEB_RATE_BUCKETS.registrationPerAddress, clientAddress(req), limits.registrationsPerAddress);
+  // No per-address limit: Wardby has no trusted client-address source, and behind a proxy or load balancer
+  // every guest shares the proxy's address, so one would throttle all guests together.
   await limiter.check(WEB_RATE_BUCKETS.registrationPerLink, resolved.link.id, limits.registrationsPerLink);
   const name = body.name;
   const email = body.email;

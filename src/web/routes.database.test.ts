@@ -16,7 +16,7 @@ import { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { IdentityService } from "../mcp/auth/self-hosted/credentials.js";
 import { setLogLineFilter } from "../core/logger.js";
 import type { OidcLogin } from "./oidc-login.js";
-import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, WEB_RATE_WINDOW_MS, webRateKeyHasher } from "./rate-limits.js";
+import { GUEST_RATE_LIMITS, WEB_RATE_WINDOW_MS } from "./rate-limits.js";
 import { createWebSession } from "./session.js";
 import type { WebDeps } from "./routes.js";
 
@@ -170,17 +170,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       body: init.body === undefined ? undefined : typeof init.body === "string" ? init.body : JSON.stringify(init.body),
     });
 
-  /** Clears this window's per-address guest registration counts for loopback (tests all come from it). */
-  const clearAddressCounts = async () => {
-    const window = Math.floor(Date.now() / WEB_RATE_WINDOW_MS);
-    const keys = ["127.0.0.1", "::ffff:127.0.0.1", "::1"].map((a) =>
-      webRateKeyHasher.hash(`${WEB_RATE_BUCKETS.registrationPerAddress}:${a}:${window}`),
-    );
-    await db.authRateLimit.deleteMany({ where: { key: { in: keys } } });
-  };
-
   beforeAll(async () => {
-    await clearAddressCounts();
     setLogLineFilter((line) => {
       logged.push(line);
       return line;
@@ -732,34 +722,15 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
     it("ships the documented hourly guest limits", () => {
       expect(GUEST_RATE_LIMITS).toEqual({
         registrationsPerLink: 20,
-        registrationsPerAddress: 10,
         commentsPerGuest: 30,
       });
       expect(WEB_RATE_WINDOW_MS).toBe(60 * 60 * 1000);
     });
 
-    it("answers 429 web_rate_limited past the per-address registration limit, and creates no guest", async () => {
-      await clearAddressCounts();
-      const link = await commentLink();
-      await withServer({ guestLimits: { registrationsPerAddress: 2, registrationsPerLink: 100 } }, async (base) => {
-        expect((await registerAt(base, link.token, "Ana")).res.status).toBe(200);
-        expect((await registerAt(base, link.token, "Ben")).res.status).toBe(200);
-        const third = (await registerAt(base, link.token, "Cy")).res;
-        expect(third.status).toBe(429);
-        expect(await third.json()).toEqual({ error: "web_rate_limited" });
-        // The address limit spans links.
-        const other = await commentLink();
-        expect((await registerAt(base, other.token, "Dee")).res.status).toBe(429);
-      });
-      expect(await db.documentGuest.count({ where: { shareLinkId: link.id } })).toBe(2);
-      await clearAddressCounts();
-    });
-
     it("answers 429 web_rate_limited past the per-link registration limit; other links are unaffected", async () => {
-      await clearAddressCounts();
       const link = await commentLink();
       const other = await commentLink();
-      await withServer({ guestLimits: { registrationsPerAddress: 100, registrationsPerLink: 2 } }, async (base) => {
+      await withServer({ guestLimits: { registrationsPerLink: 2 } }, async (base) => {
         expect((await registerAt(base, link.token, "Eve")).res.status).toBe(200);
         expect((await registerAt(base, link.token, "Fay")).res.status).toBe(200);
         const third = (await registerAt(base, link.token, "Gil")).res;
@@ -768,11 +739,9 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         expect((await registerAt(base, other.token, "Hal")).res.status).toBe(200);
       });
       expect(await db.documentGuest.count({ where: { shareLinkId: link.id } })).toBe(2);
-      await clearAddressCounts();
     });
 
     it("limits a guest's threads and replies together, and never limits members", async () => {
-      await clearAddressCounts();
       const link = await commentLink();
       await withServer({ guestLimits: { commentsPerGuest: 2 } }, async (base) => {
         const { res, jar } = await registerAt(base, link.token, "Ida");
@@ -820,11 +789,9 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
           expect(res2.status).toBe(201);
         }
       });
-      await clearAddressCounts();
     });
 
     it("refuses a new thread with sendToAgent from a viewer below write (403), and stores nothing", async () => {
-      await clearAddressCounts();
       const link = await commentLink();
       const sends: unknown[] = [];
       const sendThreads = async (input: unknown) => {
@@ -878,7 +845,6 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       });
       expect(unwired.status).toBe(501);
       expect(await db.comment.count({ where: { body: "unwired send" } })).toBe(0);
-      await clearAddressCounts();
     });
   });
 
