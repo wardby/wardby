@@ -99,11 +99,14 @@ export interface OAuthSecretMeta {
   expiresAt: string | null;
   status: "connected" | "reauth_required";
   connectedAt: string;
-  /** A fixed code, never provider text. `expired`: past expiresAt with no refresh token. */
+  /**
+   * A fixed code, never provider text. `expired`: past expiresAt with no refresh token. `rejected`:
+   * the resource refused (401) the access token before its expiry, and there is no refresh token.
+   */
   reauthReason?: ReauthReason;
 }
 
-type ReauthReason = "invalid_grant" | "invalid_client" | "expired";
+type ReauthReason = "invalid_grant" | "invalid_client" | "expired" | "rejected";
 
 /** The `oauth` JSON of a Secret: what is not secret about the connection. */
 export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
@@ -119,7 +122,7 @@ export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
     expiresAt: z.string().nullable(),
     status: z.enum(["connected", "reauth_required"]),
     connectedAt: z.string(),
-    reauthReason: z.enum(["invalid_grant", "invalid_client", "expired"]).optional(),
+    reauthReason: z.enum(["invalid_grant", "invalid_client", "expired", "rejected"]).optional(),
   })
   .strict();
 
@@ -510,13 +513,18 @@ async function storedPayload(cipher: Pick<SecretCipher, "decrypt">, ciphertext: 
   return parsed.data;
 }
 
+/** The caller saw the stored access token refused (a 401) and asks for a new one. */
+function isForced(payload: OAuthSecretPayload, opts: OAuthResolveOptions): boolean {
+  return opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill;
+}
+
 function wantsRefresh(
   meta: OAuthSecretMeta,
   payload: OAuthSecretPayload,
   opts: OAuthResolveOptions,
   now: Date,
 ): boolean {
-  if (opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill) return true;
+  if (isForced(payload, opts)) return true;
   return meta.expiresAt !== null && Date.parse(meta.expiresAt) - now.getTime() <= REFRESH_EARLY_MS;
 }
 
@@ -529,9 +537,10 @@ function isExpired(meta: OAuthSecretMeta, now: Date): boolean {
  * The OAuth secret's current tokens. When the access token is due (expires within 60 s) or is the
  * one `forceRefreshIfStill` names, it is refreshed first, under a row lock, so concurrent callers
  * spend a refresh token once. A provider that refuses the grant or the client marks the secret
- * reauth_required, and so does an access token past its expiry with no refresh token; one inside
- * the early window with no refresh token is sent as is. Every error is an OAuthSecretFlowError with
- * a fixed message and no cause.
+ * reauth_required, and so does an access token past its expiry with no refresh token (`expired`) or
+ * one the resource refused with no refresh token to replace it (`rejected`, a forced refresh); one
+ * inside the early window with no refresh token is sent as is. Every error is an
+ * OAuthSecretFlowError with a fixed message and no cause.
  */
 export async function currentOAuthPayload(
   db: Pick<PrismaClient, "$transaction" | "secret">,
@@ -543,7 +552,7 @@ export async function currentOAuthPayload(
   const meta = connectedMeta(row.oauth, row.name);
   const payload = await storedPayload(cipher, row.ciphertext);
   if (!wantsRefresh(meta, payload, opts, now)) return payload;
-  if (!payload.refreshToken && !isExpired(meta, now)) return payload;
+  if (!payload.refreshToken && !isExpired(meta, now) && !isForced(payload, opts)) return payload;
   return refreshLocked(db, cipher, row, opts, now);
 }
 
@@ -604,6 +613,8 @@ async function refreshLocked(
   now: Date,
 ): Promise<OAuthSecretPayload> {
   let outcome: LockedOutcome;
+  // Set once the provider has answered with new tokens: a failure after that loses a rotation.
+  let rotated = false;
   const clock = opts.clock ?? (() => performance.now());
   // Measured from before the transaction starts, so the budget errs short, never long.
   const startedAt = clock();
@@ -622,7 +633,10 @@ async function refreshLocked(
         // Another caller may have refreshed while this one waited for the lock.
         if (!wantsRefresh(meta, payload, opts, now)) return { kind: "current", payload };
         if (!payload.refreshToken) {
-          return isExpired(meta, now) ? markReauth(tx, row, locked[0], meta, "expired") : { kind: "current", payload };
+          if (isExpired(meta, now)) return markReauth(tx, row, locked[0], meta, "expired");
+          // The resource refused the token, and there is nothing to replace it with.
+          if (isForced(payload, opts)) return markReauth(tx, row, locked[0], meta, "rejected");
+          return { kind: "current", payload };
         }
         // The request gets what is left of the transaction less a margin to commit what it returns,
         // so a rotated refresh token is never spent by a request whose result can't be stored.
@@ -652,6 +666,7 @@ async function refreshLocked(
             ? refreshUnavailable()
             : new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
         }
+        rotated = true;
         const next: OAuthSecretPayload = {
           accessToken: tokens.accessToken,
           // A provider that doesn't rotate leaves refresh_token out: the old one stays good.
@@ -672,6 +687,12 @@ async function refreshLocked(
       { timeout: REFRESH_TRANSACTION_TIMEOUT_MS },
     );
   } catch (err) {
+    if (rotated) {
+      // The provider refreshed, but the new tokens were not stored (encrypt or commit failed): a
+      // rotating provider may have spent the stored refresh token. The caller's error is unchanged.
+      log.warn({ secretId: row.id, reason: "rotated_unsaved" }, "OAuth secret refresh failed");
+      throw err instanceof OAuthSecretFlowError ? err : refreshUnavailable();
+    }
     if (err instanceof OAuthSecretFlowError) {
       if (err.reason !== "reauth_required")
         log.warn({ secretId: row.id, reason: err.reason }, "OAuth secret refresh failed");

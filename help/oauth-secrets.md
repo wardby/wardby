@@ -31,7 +31,7 @@ Wardby refreshes the token when the secret is used within 60 seconds of its expi
 or gets an unusable answer changes nothing; try again
 ([`secret_oauth_refresh_unavailable`](errors/secret-oauth-refresh-unavailable.md),
 [`secret_oauth_refresh_failed`](errors/secret-oauth-refresh-failed.md)). When the provider refuses the refresh
-token or client, the secret's `status` in `list_secrets` becomes `reauth_required` (with a `reauthReason`) and
+token or client, or the service refuses (401) an access token that has no refresh token, the secret's `status` in `list_secrets` becomes `reauth_required` (with a `reauthReason`) and
 uses fail with [`secret_reauth_required`](errors/secret-reauth-required.md). To reconnect, repeat the connect
 steps under the **same name**; attachments and MCP servers keep working. `list_secrets` shows `status`
 (`connected` or `reauth_required`) and never a token.

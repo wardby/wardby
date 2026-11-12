@@ -145,7 +145,7 @@ export function redactForServer(text: string, values: string[]): string {
 export function redactError(error: unknown, values: string[]): Error {
   const message = redactForServer(error instanceof Error ? error.message : "The MCP server call failed.", values);
   if (error instanceof McpClientError) return new McpClientError(error.code, message);
-  if (error instanceof McpServerInputError) return new McpServerInputError(message);
+  if (error instanceof McpServerInputError) return new McpServerInputError(message, error.retryable);
   // Its message is fixed and carries no value: keep it (and its ids) as it is.
   if (error instanceof McpCredentialsUnavailableError) return error;
   const out = new Error(message);
@@ -161,7 +161,7 @@ const STORED_SECRET_SELECT = { id: true, name: true, ciphertext: true, broker: t
  * Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list
  * the URL's host (McpServerInputError otherwise). A stored value that can't be decrypted throws
  * McpCredentialsUnavailableError. An OAuth secret that needs connecting again, or whose refresh
- * failed, throws McpServerInputError with the fixed OAuth message.
+ * failed, throws McpServerInputError with the fixed OAuth message, `retryable` when trying again may work.
  *
  * `values` is live: an OAuth secret's resolve and refresh re-read the stored row through
  * decryptEntry (so the newest token is always sent) and add what they return to `values` before
@@ -212,8 +212,8 @@ export async function loadServerSecrets(
       // The cipher's error is dropped: it is not an input problem, and its text is not ours to pass on.
       if (!isOAuth || (err instanceof OAuthSecretFlowError && err.reason === "cipher_failed"))
         throw new McpCredentialsUnavailableError(server.id, server.name, name);
-      // Its message is fixed (reconnect, or try again) and names only the secret.
-      if (err instanceof OAuthSecretFlowError) throw new McpServerInputError(err.message);
+      // Its message is fixed (reconnect, or try again) and names only the secret; `retryable` says which.
+      if (err instanceof OAuthSecretFlowError) throw new McpServerInputError(err.message, err.retryable);
       throw err;
     }
     addValues(entry);

@@ -13,6 +13,10 @@ appliesTo: ">=0.9.11"
 
 The message is `secret_oauth_refresh_unavailable: the OAuth provider could not be reached to refresh the token; try again`. The provider timed out, returned a server error, or rate limited the refresh; or the refresh could not take its turn because another request held the secret for too long, or the store failed. The stored token is unchanged.
 
+If the provider did issue new tokens but Wardby could not store them, the server log records the reason `rotated_unsaved`. A provider that rotates refresh tokens may then refuse the stored one, and the secret becomes `reauth_required` on its next refresh; connect it again if so.
+
+A user an MCP server is shared with does not see this message: their call fails with "The MCP server's credentials could not be refreshed just now; try again shortly."
+
 ## What to do
 
 1. Try the call again.

@@ -4,7 +4,11 @@
  */
 
 export class McpServerInputError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Trying the same call again may work (an OAuth refresh the provider or the lock could not serve). */
+    readonly retryable = false,
+  ) {
     super(message);
     this.name = "McpServerInputError";
   }

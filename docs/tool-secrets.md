@@ -129,12 +129,16 @@ Provider requirements:
   brokered request to the service gets a 401. Refresh tokens that rotate are
   stored as they change.
 - **When it cannot refresh.** If the provider refuses the grant or the client
-  (`invalid_grant`, `invalid_client`), or the token is past its expiry with no
-  refresh token (`expired`), the secret becomes `reauth_required` and uses of
+  (`invalid_grant`, `invalid_client`), the token is past its expiry with no
+  refresh token (`expired`), or the service refuses the token with a 401 before
+  its expiry and there is no refresh token (`rejected`), the secret becomes `reauth_required` and uses of
   it fail with [`secret_reauth_required`](../help/errors/secret-reauth-required.md).
   A provider that is only unreachable or answers badly leaves the secret as it
   was; see [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)
   and [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md).
+  If the provider issued new tokens but Wardby could not store them, the log
+  records the reason `rotated_unsaved`: a provider that rotates refresh tokens
+  may then refuse the stored one, and the secret will need connecting again.
 - **Reconnect** by running the connect steps again under the **same name**. The
   secret is updated in place, so attachments and MCP servers that use it keep
   working.
@@ -163,7 +167,10 @@ Provider requirements:
   credentials otherwise can't be used), a user the server is shared with sees only
   "The MCP server's credentials can't be used; ask its owner to check it." They
   never see the owner's secret name or `secret_reauth_required`; only the owner
-  sees the specific error and can reconnect.
+  sees the specific error and can reconnect. When the refresh only failed for
+  now (the provider could not be reached, or another request held the secret
+  too long), they see "The MCP server's credentials could not be refreshed just
+  now; try again shortly." instead.
 
 To use an OAuth secret with a remote MCP server, see
 [OAuth-only servers](mcp-servers.md#oauth-only-servers).

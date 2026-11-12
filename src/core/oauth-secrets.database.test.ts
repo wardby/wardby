@@ -20,7 +20,13 @@ import {
   startOAuthSecretConnect,
 } from "./oauth-secrets.js";
 import { loadServerSecrets, redactForServer } from "./mcp-servers.js";
-import { handleMcpTool, loadMcpToolPins, mcpNamedSecretValues, SHARED_CREDENTIALS_MESSAGE } from "./mcp-tools.js";
+import {
+  handleMcpTool,
+  loadMcpToolPins,
+  mcpNamedSecretValues,
+  SHARED_CREDENTIALS_MESSAGE,
+  SHARED_CREDENTIALS_RETRY_MESSAGE,
+} from "./mcp-tools.js";
 import { loadAgentSecretValues } from "./secret-guard.js";
 import { fulfillSecretElicitation } from "../mcp/tools/secret-elicitation.js";
 import { createSecret, deleteSecret, listSecrets, setSecretBroker } from "./secrets.js";
@@ -940,6 +946,176 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(after.ciphertext).toBe(before.ciphertext);
       expect(metaOf(after.oauth).status).toBe("connected");
     });
+
+    it("logs rotated_unsaved when the provider refreshed but the new tokens could not be encrypted", async () => {
+      const { read } = await connected("rotated", 30);
+      const before = await read();
+      const failing = { ...cipher, encrypt: async () => Promise.reject(new Error("kms said fake-access-2")) };
+      const error = await decryptEntry(db, failing, before, { options: OPTS }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(SECRET_OAUTH_CIPHER_FAILED);
+      expect((error as { retryable?: boolean }).retryable).toBe(true);
+      expect((error as Error).cause).toBeUndefined();
+      expect(fake.tokenRequests).toBe(1);
+      expect(logText()).toContain("rotated_unsaved");
+      expect(logText()).toContain(before.id);
+      expect(logText()).not.toContain("cipher_failed");
+      expect(logText()).not.toContain("fake-");
+      const after = await read();
+      expect(after.ciphertext).toBe(before.ciphertext);
+      expect(metaOf(after.oauth).status).toBe("connected");
+    });
+
+    /** An MCP server on the resource's host, owned by a new owner and shared (use) with a guest. */
+    async function sharedServer(name: string, secretName: string) {
+      const ownerId = await owner();
+      const guestId = await owner();
+      await connectAs(ownerId, secretName);
+      // Brokered secrets go only over https: the MCP side is a stand-in on the resource's host.
+      const mcpUrl = `https://${HOST}/mcp`;
+      const server = await db.mcpServer.create({
+        data: {
+          ownerId,
+          name,
+          url: mcpUrl,
+          secretNames: [secretName],
+          toolSnapshot: [{ name: "echo", description: "Echo.", inputSchema: { type: "object" } }],
+        },
+      });
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "mcp_server",
+          resourceId: server.id,
+          granteeKind: "principal",
+          granteePrincipalId: guestId,
+          granteeKey: `principal:${guestId}`,
+          level: "use",
+          source: "owner",
+          grantedById: ownerId,
+        },
+      });
+      const ownAgent = await agentOf(ownerId);
+      const guestAgent = await agentOf(guestId);
+      for (const [agentId, by] of [
+        [ownAgent, ownerId],
+        [guestAgent, guestId],
+      ]) {
+        await db.agentMcpServer.create({
+          data: { agentId, serverId: server.id, allowedTools: ["echo"], attachedById: by },
+        });
+      }
+      const call = async (agentId: string, fetchImpl: typeof safeFetch) => {
+        const pin = (await loadMcpToolPins(db, agentId)).find((p) => p.toolName === "echo");
+        if (!pin) throw new Error("no pin");
+        const log = { info: vi.fn(), warn: vi.fn() };
+        const out = await handleMcpTool(pin, "{}", {
+          db,
+          cipher,
+          agentId,
+          runId: `run-${randomUUID()}`,
+          signal: new AbortController().signal,
+          fetchImpl,
+          log: log as never,
+        });
+        return { out, parsed: JSON.parse(out) as { error?: string; message?: string }, log };
+      };
+      return { ownerId, mcpUrl, ownAgent, guestAgent, call };
+    }
+
+    it("marks a token the resource rejects (401) with no refresh token reauth_required (rejected), before expiry", async () => {
+      const { ownerId, mcpUrl, ownAgent, call } = await sharedServer("rj", "rejected");
+      const current = await row(ownerId, "rejected");
+      await withoutRefreshToken(current.id, current.oauth, 3600_000);
+      const changesBefore = await db.secretBrokerChange.count({ where: { secretId: current.id } });
+      logged.mockClear();
+      const mcp = fakeMcpServer(() => textResult("never"), { status: 401 });
+      const fetchImpl: typeof safeFetch = async (url, init, options) => {
+        if (url !== mcpUrl) throw new Error("unexpected request");
+        return mcp.impl(url, init, options);
+      };
+      const { out, parsed, log } = await call(ownAgent, fetchImpl);
+      expect(parsed).toEqual({ error: "mcp_server_error", message: SECRET_REAUTH_REQUIRED("rejected") });
+      expect(parsed.message).toMatch(/^secret_reauth_required:/);
+      expect(fake.tokenRequests).toBe(0);
+      // One request with the rejected token, then no retry: nothing new to send.
+      expect(mcp.seen).toHaveLength(1);
+      const after = await row(ownerId, "rejected");
+      expect(metaOf(after.oauth)).toMatchObject({ status: "reauth_required", reauthReason: "rejected" });
+      expect(Date.parse(metaOf(after.oauth).expiresAt!)).toBeGreaterThan(Date.now());
+      expect(await db.secretBrokerChange.count({ where: { secretId: current.id } })).toBe(changesBefore + 1);
+      const change = await db.secretBrokerChange.findFirstOrThrow({
+        where: { secretId: current.id },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(change).toMatchObject({ ownerId, secretName: "rejected", actorId: ownerId });
+      expect(change.before).toMatchObject({ oauthStatus: "connected" });
+      expect(change.after).toMatchObject({ oauthStatus: "reauth_required" });
+      expect(logged.mock.calls).toContainEqual([
+        { secretId: current.id, reason: "rejected" },
+        "OAuth secret needs connecting again",
+      ]);
+      const everything = [out, logText(), JSON.stringify(log.info.mock.calls), JSON.stringify(log.warn.mock.calls)];
+      for (const text of everything) expect(text).not.toContain("fake-access");
+      // Once marked, it is not sent again.
+      await expect(decryptEntry(db, cipher, after, { options: OPTS })).rejects.toThrow(
+        SECRET_REAUTH_REQUIRED("rejected"),
+      );
+    });
+
+    it("a forced refresh for a token no longer stored leaves a secret with no refresh token connected", async () => {
+      const { read } = await connected("rejected-stale");
+      const current = await read();
+      await withoutRefreshToken(current.id, current.oauth, 3600_000);
+      const entry = await decryptEntry(db, cipher, await read(), {
+        options: OPTS,
+        forceRefreshIfStill: "fake-access-1",
+      });
+      expect(entry.value).toBe("fake-access-norefresh");
+      expect(metaOf((await read()).oauth).status).toBe("connected");
+    });
+
+    for (const when of ["load", "mid-call"] as const) {
+      it(`a retryable refresh failure at ${when} gives a grantee the try-again message; the owner the specific one`, async () => {
+        const name = `retry-${when}`;
+        const { ownerId, mcpUrl, ownAgent, guestAgent, call } = await sharedServer(`rt-${when}`, name);
+        const mcp = fakeMcpServer(() => textResult("never"));
+        // Due, with an https token endpoint the handler's refresh (no fetch-policy override) will call.
+        const makeDue = async () => {
+          const current = await row(ownerId, name);
+          const oauth = {
+            ...metaOf(current.oauth),
+            tokenEndpoint: `https://${HOST}/token`,
+            expiresAt: new Date(Date.now() + 30_000).toISOString(),
+          };
+          await db.secret.update({ where: { id: current.id }, data: { oauth } });
+        };
+        // The token endpoint answers 503 (with token text in its body); the MCP side is the stand-in.
+        const fetchImpl: typeof safeFetch = async (url, init, options) => {
+          if (url.endsWith("/token")) {
+            return {
+              ok: false,
+              status: 503,
+              statusText: "",
+              url,
+              headers: { "content-type": "application/json" },
+              bodyBase64: Buffer.from(JSON.stringify({ error: "fake-refresh-1" })).toString("base64"),
+            };
+          }
+          if (url !== mcpUrl) throw new Error("unexpected request");
+          if (when === "mid-call" && init?.body?.includes('"initialize"')) await makeDue();
+          return mcp.impl(url, init, options);
+        };
+        if (when === "load") await makeDue();
+        const guest = await call(guestAgent, fetchImpl);
+        expect(guest.parsed).toEqual({ error: "mcp_server_error", message: SHARED_CREDENTIALS_RETRY_MESSAGE });
+        expect(guest.out).not.toContain(name);
+        expect(guest.out).not.toContain("fake-");
+        if (when === "load") await makeDue();
+        const own = await call(ownAgent, fetchImpl);
+        expect(own.parsed).toEqual({ error: "mcp_server_error", message: SECRET_OAUTH_REFRESH_UNAVAILABLE });
+        expect(metaOf((await row(ownerId, name)).oauth).status).toBe("connected");
+        expect(logText()).not.toContain("fake-");
+      });
+    }
 
     it("a grantee whose call hits reauth mid-call gets the shared message; the owner gets the specific one", async () => {
       const ownerId = await owner();

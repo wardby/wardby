@@ -53,6 +53,14 @@ export const DEFAULT_MCP_CALL_TIMEOUT_MS = 30_000;
 
 /** What a grantee's run sees when the server owner's credentials can't be loaded. */
 export const SHARED_CREDENTIALS_MESSAGE = "The MCP server's credentials can't be used; ask its owner to check it.";
+/** A grantee's message when the owner's OAuth secret could not be refreshed just now (retryable). */
+export const SHARED_CREDENTIALS_RETRY_MESSAGE =
+  "The MCP server's credentials could not be refreshed just now; try again shortly.";
+
+/** What a grantee sees for an input error about the owner's server: no secret names, only whether to retry. */
+function sharedInputMessage(err: McpServerInputError): string {
+  return err.retryable ? SHARED_CREDENTIALS_RETRY_MESSAGE : SHARED_CREDENTIALS_MESSAGE;
+}
 
 /**
  * A Codex coding agent runs shell commands that can read the run's MCP token, so it may use only tools
@@ -286,7 +294,7 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
       }
       // The detail names the server owner's secrets and speaks to that owner: a grantee's run gets neither.
       if (err instanceof McpServerInputError && shared) {
-        return fail("mcp_server_error", SHARED_CREDENTIALS_MESSAGE);
+        return fail("mcp_server_error", sharedInputMessage(err));
       }
       throw err;
     }
@@ -339,8 +347,7 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     const message = redactForServer(err instanceof Error ? err.message : "The MCP server call failed.", values);
     if (err instanceof McpClientError) return fail(err.code, message);
     // Mid-call (an OAuth secret's refresh, say), the same rule as at load: the detail is the owner's.
-    if (err instanceof McpServerInputError)
-      return fail("mcp_server_error", shared ? SHARED_CREDENTIALS_MESSAGE : message);
+    if (err instanceof McpServerInputError) return fail("mcp_server_error", shared ? sharedInputMessage(err) : message);
     return fail("mcp_server_unreachable", "The MCP server could not be reached.");
   }
 }
