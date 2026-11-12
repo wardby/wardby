@@ -26,7 +26,11 @@ import {
   loadJiraConfig,
   loadGitHubVcsConfig,
   loadBlobStoreConfig,
+  loadSecretConfig,
+  loadWebOidcConfig,
 } from "../config/providers.js";
+import { createOidcLogin } from "../web/oidc-login.js";
+import type { WebDeps } from "../web/routes.js";
 import { prisma } from "../core/db.js";
 import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
 import { createDbSecretWriteGuard } from "../core/secret-guard.js";
@@ -553,6 +557,31 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         issueSites: jiraConfig ? { jira: jiraConfig.siteUrl } : {},
       })
     : undefined;
+  // The document pages (/d/, /s/, /web/). Delegating mode signs browsers in
+  // with OIDC against AUTH_ISSUER; self-hosted mode bridges its own login.
+  const webOidc = loadWebOidcConfig();
+  const web: WebDeps = {
+    db: prisma,
+    cipher: providers.secrets,
+    canonicalUri: canonicalHref,
+    authMode: authProviderKind,
+    ...(selfHosted ? { selfHosted } : {}),
+    ...(authProviderKind === "delegating"
+      ? {
+          oidc: createOidcLogin({
+            issuer: authConfig.issuer,
+            jwksUri: authConfig.jwksUri,
+            clientId: webOidc.clientId,
+            clientSecret: webOidc.clientSecret,
+            scopes: webOidc.scopes,
+            canonicalUri: canonicalHref,
+            appKey: loadSecretConfig().appKey,
+            fetchOptions: providers.sandboxFetchOptions,
+            fetchImpl: providers.sandboxFetch,
+          }),
+        }
+      : {}),
+  };
   const http = await startHttpServer({
     mcp,
     config: {
@@ -568,6 +597,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     oauthCallback,
     viewer,
     blobs,
+    web,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {

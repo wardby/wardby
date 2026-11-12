@@ -5,6 +5,7 @@ import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 import { logger } from "../../../core/logger.js";
 import { PAGE_STYLE } from "../../shared/page-style.js";
 import { selfHostedCookieNames } from "./cookies.js";
+import { isSafeReturnTo } from "../../../web/return-to.js";
 
 const authLog = logger.child({ module: "self-hosted-oauth" });
 
@@ -185,6 +186,8 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       }
       if (req.method === "GET" && url.pathname === "/login") {
         const interaction = url.searchParams.get("interaction") ?? "";
+        // A document page asking to come back after sign-in (/web/login): only a safe /d/ or /s/ path.
+        const back = url.searchParams.get("return") ?? "";
         const nonce = provider.credentials.create("rvb").token;
         const challenge = await provider.sessions.challenge("login", null, nonce + ":" + interaction);
         res.setHeader("set-cookie", cookie(loginName, nonce, "Strict", 600));
@@ -193,6 +196,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           '<h1>Sign in to wardby</h1><form method="post" action="/login">' +
             hidden("interaction", interaction) +
             hidden("csrf", challenge) +
+            (!interaction && isSafeReturnTo(back) ? hidden("return", back) : "") +
             '<label>Login key<input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',
         );
         return true;
@@ -225,7 +229,16 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           cookie(sessionName, session, "Lax", 30 * 86400),
           cookie(loginName, "", "Strict", 0),
         ]);
-        redirect(res, interaction ? "/consent?interaction=" + encodeURIComponent(interaction) : "/logout", req);
+        const back = p.get("return") ?? "";
+        redirect(
+          res,
+          interaction
+            ? "/consent?interaction=" + encodeURIComponent(interaction)
+            : isSafeReturnTo(back)
+              ? back
+              : "/logout",
+          req,
+        );
         return true;
       }
       if (req.method === "GET" && url.pathname === "/consent") {

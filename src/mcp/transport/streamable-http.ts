@@ -22,6 +22,7 @@ import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "../to
 import type { BlobStore } from "../../providers/storage/types.js";
 import { logger } from "../../core/logger.js";
 import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
+import { handleWebRequest, type WebDeps } from "../../web/routes.js";
 
 const httpLog = logger.child({ module: "streamable-http" });
 
@@ -55,6 +56,8 @@ export interface StartHttpServerOptions {
   viewer?: ViewerApi;
   /** The blob store run transcripts are served from (get_run_transcript links); absent = they answer 503. */
   blobs?: BlobStore;
+  /** The document pages, share links, browser sign-in and document JSON API; absent = /d/, /s/ and /web/ answer 404. */
+  web?: WebDeps;
   /** How long close() lets open requests finish before cutting them (default CLOSE_GRACE_MS). */
   closeGraceMs?: number;
 }
@@ -72,6 +75,11 @@ export function sendJson(
   res
     .writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers })
     .end(JSON.stringify(body));
+}
+
+/** The request path as it may be logged: share-link tokens (a credential) are masked. */
+export function loggablePath(rawUrl: string | undefined): string {
+  return (rawUrl ?? "").split("?")[0].replace(/^\/s\/[^/]+/, "/s/[token]");
 }
 
 export async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServerHandle> {
@@ -92,7 +100,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
   // Requests still being answered, so a close that has to cut them can say which they were.
   const open = new Map<ServerResponse, { method: string; path: string; startedAt: number }>();
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: false }, (req, res) => {
-    open.set(res, { method: req.method ?? "", path: (req.url ?? "").split("?")[0], startedAt: Date.now() });
+    open.set(res, { method: req.method ?? "", path: loggablePath(req.url), startedAt: Date.now() });
     res.once("close", () => open.delete(res));
     void route(req, res).catch((err: unknown) => {
       if (res.headersSent) {
@@ -145,8 +153,9 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         req.headers["content-length"] ||
         req.headers["transfer-encoding"];
       if (hasBody) {
-        const limit =
-          url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") || url.pathname.startsWith("/hosts/")
+        const limit = url.pathname.startsWith("/d/api/")
+          ? HTTP_LIMITS.documentJson
+          : url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") || url.pathname.startsWith("/hosts/")
             ? HTTP_LIMITS.json
             : HTTP_LIMITS.auth;
         const raw = await readBody(req, limit, controller.signal);
@@ -279,6 +288,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       await nodeHandler(req, res, body);
       return;
     }
+    if (opts.web && (await handleWebRequest(req, res, url, body, opts.web))) return;
     sendJson(res, 404, { error: "not_found" });
   }
   server.requestTimeout = HTTP_LIMITS.requestMs;

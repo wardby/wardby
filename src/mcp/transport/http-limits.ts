@@ -1,6 +1,13 @@
 import type { IncomingMessage } from "node:http";
 
-export const HTTP_LIMITS = { json: 1024 * 1024, auth: 64 * 1024, requestMs: 15_000, headersMs: 10_000 };
+export const HTTP_LIMITS = {
+  json: 1024 * 1024,
+  /** /d/api/: a document version is up to 1 MiB of Markdown, plus JSON escaping. */
+  documentJson: 2 * 1024 * 1024,
+  auth: 64 * 1024,
+  requestMs: 15_000,
+  headersMs: 10_000,
+};
 export class HttpBoundaryError extends Error {
   constructor(
     public readonly status: number,
