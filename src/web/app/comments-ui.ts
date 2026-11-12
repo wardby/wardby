@@ -31,6 +31,8 @@ const FILTERS: [Filter, string][] = [
 ];
 const BADGE_GAP = 24;
 const POLL_MS = 15_000;
+/** Shown in the composer while a guest changes their name. */
+export const GUEST_RENAME_NOTE = "Earlier comments stay under your old name.";
 /** Codes postThread returns after the thread was created, when only the send to the agent failed. */
 const SEND_AFTER_CREATE = new Set([
   "comment_thread_already_sent",
@@ -614,6 +616,10 @@ export class CommentsUI {
           }),
         ),
       );
+      // "change" registers a new guest; the old name stays on what was already posted.
+      if (pop.changingName && this.viewer.kind === "guest") {
+        identity.push(h("div", { class: "as" }, GUEST_RENAME_NOTE));
+      }
     } else if (this.viewer.kind === "guest") {
       identity.push(
         h(
