@@ -1604,9 +1604,9 @@ export class ContainerExecutor implements Executor {
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
         if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
-        const [inputRun, inputWorkspace] = [run, workspace];
+        const [inputRun, inputWorkspaces] = [run, workspaces ?? { main: workspace, writable: new Map(), readOnly: [] }];
         const inputArtifact = await this.whileHeartbeating(runId, () =>
-          this.writeInput(inputRun, deadlineAt, inputWorkspace),
+          this.writeInput(inputRun, deadlineAt, inputWorkspaces),
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
@@ -3064,7 +3064,8 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspace: PreparedWorkspace): Promise<string> {
+  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspaces: RunWorkspaces): Promise<string> {
+    const workspace = workspaces.main;
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
@@ -3141,6 +3142,18 @@ export class ContainerExecutor implements Executor {
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
         ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
+        // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
+        ...(run.repositories.length > 0
+          ? {
+              repositories: run.repositories.map((r) => ({
+                name: r.name,
+                path: `/repos/${r.name}`,
+                access: r.access,
+                repository: r.repository,
+                commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+              })),
+            }
+          : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

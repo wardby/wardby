@@ -475,6 +475,7 @@ class FakeVcs implements VcsProvider {
       const slot = {
         ...this.makeWorkspace(input),
         id: `vcs-${input.runId}:${input.slot.name}`,
+        baseCommit: "b".repeat(40),
         workspacePath: join(this.root, input.runId, "repos", input.slot.name, "workspace"),
         gitMetadataPath: join(this.root, input.runId, "repos", input.slot.name, "git"),
       };
@@ -5548,6 +5549,42 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     expect(JSON.stringify(spec)).not.toContain(FAKE);
     // The capacity probe, asked before anything is prepared, lists none.
     expect(created.jobs.capacityChecks.every((probe) => probe.repositories === undefined)).toBe(true);
+  });
+
+  it("writes the extras into input.json with the commit each was prepared at, and no secret", async () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+      IMAGE,
+      undefined,
+      undefined,
+      {
+        repoAccess: allowAll() as never,
+      },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect((JSON.parse(text) as { repositories: unknown }).repositories).toEqual([
+      { name: "base", path: "/repos/base", access: "read", repository: "openai/base", commit: SHA_A },
+      { name: "tools", path: "/repos/tools", access: "write", repository: "openai/tools", commit: "b".repeat(40) },
+    ]);
+    expect(text).not.toContain(FAKE);
+  });
+
+  it("leaves repositories out of input.json for a single-repository run", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect(text).not.toBe("");
+    expect("repositories" in (JSON.parse(text) as object)).toBe(false);
   });
 
   it("gives a job without extras no repositories key at all", async () => {

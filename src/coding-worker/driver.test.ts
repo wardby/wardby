@@ -7,7 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
-import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
+import { repositoriesTaskNote, workerTaskNote } from "./task-note.js";
+import {
+  CODING_OUTPUT_JSON_SCHEMA,
+  codingOutputJsonSchema,
+  runCodingWorker,
+  WORKER_SECURITY_INSTRUCTIONS,
+} from "./driver.js";
 import type { DependencyCacheModule, WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
 import {
   BUDGET_MEASURE_TIMEOUT_MS,
@@ -821,5 +827,88 @@ describe("CODING_OUTPUT_JSON_SCHEMA", () => {
     expect(CODING_OUTPUT_JSON_SCHEMA.required).toEqual(Object.keys(CODING_OUTPUT_JSON_SCHEMA.properties));
     expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag).toMatchObject({ type: ["string", "null"] });
     expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag.description).toContain("32 characters");
+  });
+});
+
+describe("several repositories (#537)", () => {
+  const repositories = [
+    {
+      name: "base",
+      path: "/repos/base",
+      access: "read" as const,
+      repository: "upstream-org/upstream",
+      commit: "a".repeat(40),
+    },
+    {
+      name: "tools",
+      path: "/repos/tools",
+      access: "write" as const,
+      repository: "your-org/tools",
+      commit: "b".repeat(40),
+    },
+  ];
+
+  it("lists every folder and whether it is read-only", () => {
+    expect(repositoriesTaskNote(repositories)).toBe(
+      'This run has more than one repository. /workspace is the default repository (pullRequests name: "workspace").\n' +
+        "- /repos/base: upstream-org/upstream at aaaaaaa, read-only\n" +
+        "- /repos/tools: your-org/tools at bbbbbbb, writable\n" +
+        "None of them has Git history. Wardby opens one pull request per writable repository you change; describe each in pullRequests (name, description, optional title and mergeOrder 1-99). A changed repository without an entry gets your summary.",
+    );
+    expect(repositoriesTaskNote(undefined)).toBeUndefined();
+    expect(workerTaskNote(undefined, repositories).startsWith("This run has more than one repository.")).toBe(true);
+    expect(workerTaskNote(undefined)).toBe(workerTaskNote(undefined, undefined));
+  });
+
+  async function run(taskInput: CodingTaskInput) {
+    const seen: { prompt?: string; options?: { outputSchema?: unknown } } = {};
+    await runCodingWorker({
+      input: taskInput,
+      workspace: await tempWorkspace(),
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: () => ({
+        startThread: () => ({
+          async runStreamed(prompt: string, options?: { outputSchema?: unknown }) {
+            seen.prompt = prompt;
+            seen.options = options;
+            return { events: events([{ type: "turn.completed" }]) };
+          },
+        }),
+      }),
+    }).catch(() => undefined);
+    return seen;
+  }
+
+  it("asks for nullable pullRequests and names the folders, only with repositories", async () => {
+    const multi = await run({ ...input, repositories });
+    const schema = multi.options!.outputSchema as typeof CODING_OUTPUT_JSON_SCHEMA & {
+      properties: Record<string, unknown>;
+    };
+    expect(schema.properties.pullRequests).toEqual({
+      type: ["array", "null"],
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          title: { type: ["string", "null"] },
+          description: { type: "string" },
+          mergeOrder: { type: ["integer", "null"], minimum: 1, maximum: 99 },
+        },
+        required: ["name", "title", "description", "mergeOrder"],
+        additionalProperties: false,
+      },
+    });
+    expect(schema.required).toContain("pullRequests");
+    expect(schema.required).toEqual(Object.keys(schema.properties));
+    expect(multi.prompt).toContain(repositoriesTaskNote(repositories));
+
+    const single = await run(input);
+    expect(single.options!.outputSchema).toBe(CODING_OUTPUT_JSON_SCHEMA);
+    expect(codingOutputJsonSchema(false)).toBe(CODING_OUTPUT_JSON_SCHEMA);
+    expect(single.prompt).toBe(
+      `Complete this software-engineering task in the current workspace.\n\nTask:\n${input.task}\n\n${workerTaskNote(undefined)}\n\nThe final JSON runId must be ${input.runId}.`,
+    );
   });
 });

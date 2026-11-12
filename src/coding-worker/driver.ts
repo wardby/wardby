@@ -70,6 +70,32 @@ export const CODING_OUTPUT_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The output schema for a run; a run with extra repositories also describes each pull request (strict mode: nullable, never omitted). */
+export function codingOutputJsonSchema(multi: boolean) {
+  if (!multi) return CODING_OUTPUT_JSON_SCHEMA;
+  return {
+    ...CODING_OUTPUT_JSON_SCHEMA,
+    properties: {
+      ...CODING_OUTPUT_JSON_SCHEMA.properties,
+      pullRequests: {
+        type: ["array", "null"],
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            title: { type: ["string", "null"] },
+            description: { type: "string" },
+            mergeOrder: { type: ["integer", "null"], minimum: 1, maximum: 99 },
+          },
+          required: ["name", "title", "description", "mergeOrder"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: [...CODING_OUTPUT_JSON_SCHEMA.required, "pullRequests"],
+  };
+}
+
 const SAFE_ACTIVITY_KINDS = new Set([
   "agent_message",
   "reasoning",
@@ -292,9 +318,9 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     webSearchMode: "disabled",
     approvalPolicy: "never",
   });
-  const note = workerTaskNote(dependencyCache);
+  const note = workerTaskNote(dependencyCache, options.input.repositories);
   const streamed = await thread.runStreamed(boundedPrompt(options.input.task, options.input.runId, note), {
-    outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+    outputSchema: codingOutputJsonSchema(Boolean(options.input.repositories)),
     signal: options.signal,
   });
   let finalJson: string | undefined;
