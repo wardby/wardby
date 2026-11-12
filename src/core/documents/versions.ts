@@ -19,6 +19,7 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import { principalNames } from "./comments.js";
 import { publishVersion, type PublishVia } from "./service.js";
+import { markdownOf } from "./content.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
 
@@ -131,10 +132,10 @@ export async function getVersion(
   await requireDocumentAccess(db, input.documentId, input.viewer, "read");
   const v = await db.documentVersion.findUnique({
     where: { documentId_number: { documentId: input.documentId, number: input.number } },
-    select: { number: true, markdown: true, createdAt: true },
+    select: { number: true, format: true, markdown: true, createdAt: true },
   });
   if (!v) throw new Error("document_version_not_found");
-  return v;
+  return { number: v.number, markdown: markdownOf(v), createdAt: v.createdAt };
 }
 
 /**
@@ -152,7 +153,7 @@ export async function restoreVersion(
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
   const v = await db.documentVersion.findUnique({
     where: { documentId_number: { documentId: input.documentId, number: input.number } },
-    select: { markdown: true },
+    select: { format: true, markdown: true },
   });
   if (!v) throw new Error("document_version_not_found");
   const latest = await db.documentVersion.aggregate({
@@ -163,7 +164,7 @@ export async function restoreVersion(
   if (input.number === input.baseNumber) throw new Error("document_version_is_latest");
   const out = await publishVersion(db, cipher, {
     documentId: input.documentId,
-    markdown: v.markdown,
+    markdown: markdownOf(v),
     via: input.via,
     createdById: input.viewer.principalId,
     summary: restoredSummary(input.number),

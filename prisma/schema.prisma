@@ -2255,7 +2255,7 @@ model HostProviderTrustedAccount {
 
 model Document {
   id               String              @id @default(cuid())
-  /// "document" in phase 1; "design" later
+  /// "document" | "design"
   kind             String              @default("document")
   title            String
   ownerId          String
@@ -2264,7 +2264,7 @@ model Document {
   agent            Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
   /// e.g. "owner/repo" or "local:/abs/path"; with path, enables send-to-agent
   repository       String?
-  /// repo-relative Markdown path
+  /// repo-relative Markdown file (documents) or design directory (designs)
   path             String?
   baseRef          String?
   currentVersionId String?             @unique
@@ -2274,6 +2274,8 @@ model Document {
   currentVersion   DocumentVersion?    @relation("CurrentVersion", fields: [currentVersionId], references: [id])
   threads          CommentThread[]
   shareLinks       DocumentShareLink[]
+  contents         DocumentContent[]
+  exports          DocumentExport[]
 
   @@index([ownerId])
   @@index([agentId])
@@ -2284,9 +2286,14 @@ model DocumentVersion {
   documentId  String
   document    Document  @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
   number      Int
-  /// <= 1 MiB (checked in code)
-  markdown    String
-  /// sha256 hex of markdown
+  /// "markdown" | "boards-v1"
+  format      String    @default("markdown")
+  /// Markdown versions only (<= 1 MiB, checked in code); design versions keep their files in DocumentFile
+  markdown    String?
+  /// kind check, sanitiser, size and fidelity warnings (src/core/documents/warnings.ts)
+  warnings    Json?
+  files       DocumentFile[]
+  /// sha256 hex of the content (see src/core/documents/content.ts)
   contentHash String
   /// "editor" | "agent" | "mcp" | "import"
   via         String
@@ -2297,6 +2304,61 @@ model DocumentVersion {
   currentOf   Document? @relation("CurrentVersion")
 
   @@unique([documentId, number])
+}
+
+/// A design file's text, stored once per document and content hash.
+model DocumentContent {
+  documentId String
+  document   Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// sha256 hex of text
+  hash       String
+  text       String
+  size       Int
+  createdAt  DateTime       @default(now())
+  files      DocumentFile[]
+
+  @@id([documentId, hash])
+}
+
+/// A file of a design version (manifest.json, boards/<id>.html, brand.md).
+model DocumentFile {
+  versionId  String
+  version    DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  path       String
+  documentId String
+  hash       String
+  content    DocumentContent @relation(fields: [documentId, hash], references: [documentId, hash], onDelete: NoAction)
+  mime       String
+
+  @@id([versionId, path])
+  @@index([documentId, hash])
+}
+
+/// A PNG or PDF export job; rows and bytes are deleted an hour after they were requested.
+model DocumentExport {
+  id            String    @id @default(cuid())
+  documentId    String
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versionId     String
+  /// "png" | "pdf"
+  format        String
+  /// png: the board id
+  board         String?
+  /// queued | running | done | failed
+  status        String    @default("queued")
+  errorCode     String?
+  requestedById String?
+  guestId       String?
+  mime          String?
+  /// <= 20 MiB
+  data          Bytes?
+  size          Int?
+  createdAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([documentId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 model CommentThread {

@@ -43,6 +43,7 @@ import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { notifyDocumentChange } from "./events.js";
 import { publishVersion } from "./service.js";
 import { redactExactSecretValues } from "../secret-spans.js";
+import { markdownOf } from "./content.js";
 
 const log = logger.child({ module: "documents-agent-loop" });
 
@@ -244,18 +245,19 @@ export async function sendThreadsToAgent(
   const version = doc.currentVersionId
     ? await db.documentVersion.findUnique({
         where: { id: doc.currentVersionId },
-        select: { number: true, markdown: true },
+        select: { number: true, format: true, markdown: true },
       })
     : null;
   if (!version) throw new Error("document_not_found");
-  if (version.markdown.length > MAX_SEND_MARKDOWN_CHARS) throw new Error("document_too_large_for_agent");
+  const markdown = markdownOf(version);
+  if (markdown.length > MAX_SEND_MARKDOWN_CHARS) throw new Error("document_too_large_for_agent");
 
   const idSet = new Set(ids);
   const threads = (await listThreads(db, { documentId: doc.id, viewer: input.viewer, filter: "open" })).filter((t) =>
     idSet.has(t.id),
   );
   if (threads.length !== ids.length) throw new Error("comment_thread_closed");
-  const task = buildTask({ path, baseRef }, version, threads, agent.systemPrompt);
+  const task = buildTask({ path, baseRef }, { number: version.number, markdown }, threads, agent.systemPrompt);
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
