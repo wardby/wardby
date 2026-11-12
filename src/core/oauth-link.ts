@@ -67,12 +67,21 @@ export interface OAuthLinkAdapter<Ctx, Result> {
    * `context` is the stored JSON as read back, not yet validated.
    */
   redirectUri?(context: unknown): string | undefined;
+  /**
+   * Which callback may complete this request: the web callback route, or the loopback complete route
+   * the owner's CLI calls. Absent, or for an adapter without the hook: web only. `context` is the
+   * stored JSON as read back, not yet validated.
+   */
+  callbackKind?(context: unknown): OAuthCallbackKind;
   /** A fixed code for why `complete` failed, safe to log (never the error's own text). Omit to log none. */
   safeReason?(err: unknown): string;
   /** Shown on the callback page: what was signed in to, never a token. */
   /** `signedInAs` is the provider's account name; an adapter that has none leaves it out. */
   describe(result: Result): { signedInAs?: string; target: string; tool: string };
 }
+
+/** Where a provider's redirect lands: the server's own callback page, or a CLI on the owner's machine. */
+export type OAuthCallbackKind = "web" | "loopback";
 
 export type OAuthLinkDb = Pick<PrismaClient, "oAuthLinkRequest" | "$transaction">;
 
@@ -145,25 +154,45 @@ export async function completeOAuthCallback(input: {
    * per-request URI (`adapter.redirectUri(context)`) takes precedence when it names one.
    */
   redirectUri: string | ((purpose: string) => string);
+  /** Which route is completing: only requests whose adapter names this kind are accepted (default web). */
+  callbackKind?: OAuthCallbackKind;
+  /**
+   * A route's own check of the request, e.g. that it belongs to the caller. A request it refuses is
+   * "invalid" and is left as it was, so its owner can still complete it.
+   */
+  accept?: (request: { principalId: string; purpose: string; context: unknown }) => boolean;
   now?: Date;
 }): Promise<OAuthCallbackOutcome> {
   const now = input.now ?? new Date();
   if (!input.state || !input.code || input.state.length > 256 || input.code.length > 256) return { kind: "invalid" };
   if (input.iss != null && input.iss.length > OAUTH_ISS_MAX_LENGTH) return { kind: "invalid" };
   const stateHash = sha256(input.state);
-  // Single use: only the first callback for a live state wins.
-  const { count } = await input.db.oAuthLinkRequest.updateMany({
-    where: { stateHash, callbackAt: null, expiresAt: { gt: now } },
-    data: { callbackAt: now },
-  });
-  if (count !== 1) return { kind: "invalid" };
+  // Every check that can refuse runs before the state is consumed: a state this route may not
+  // complete (another purpose, the other callback kind, or one `accept` refuses) stays usable.
   const request = await input.db.oAuthLinkRequest.findUnique({
     where: { stateHash },
     include: { principal: { select: { subject: true } } },
   });
-  if (!request) return { kind: "invalid" };
+  if (!request || request.callbackAt !== null || request.expiresAt.getTime() <= now.getTime()) {
+    return { kind: "invalid" };
+  }
   const adapter = input.adapters.get(request.purpose);
   if (!adapter) return { kind: "invalid" };
+  const kind = adapter.callbackKind?.(request.context) ?? "web";
+  if (kind !== (input.callbackKind ?? "web")) return { kind: "invalid" };
+  if (
+    input.accept &&
+    !input.accept({ principalId: request.principalId, purpose: request.purpose, context: request.context })
+  ) {
+    return { kind: "invalid" };
+  }
+  // Single use: only the first callback for a live state wins. Owner, purpose and context never
+  // change after the request is stored, so what was checked above still holds for the winner.
+  const { count } = await input.db.oAuthLinkRequest.updateMany({
+    where: { id: request.id, stateHash, callbackAt: null, expiresAt: { gt: now } },
+    data: { callbackAt: now },
+  });
+  if (count !== 1) return { kind: "invalid" };
 
   // Everything after the provider has been asked fails closed: the request is
   // spent (its verifier with it) and the route sees `failed`, never a raw error.

@@ -39,7 +39,13 @@ import {
   type OAuthTokens,
 } from "./oauth-client/tokens.js";
 import { logger } from "./logger.js";
-import { confirmOAuthLink, startOAuthLink, type OAuthLinkAdapter, type OAuthLinkDb } from "./oauth-link.js";
+import {
+  confirmOAuthLink,
+  startOAuthLink,
+  type OAuthCallbackKind,
+  type OAuthLinkAdapter,
+  type OAuthLinkDb,
+} from "./oauth-link.js";
 import { parseSecretBrokerConfig, type SecretBrokerConfig } from "./secret-broker-config.js";
 
 export const OAUTH_SECRET_PURPOSE = "oauth-secret";
@@ -172,11 +178,22 @@ const ContextSchema = z
      * Absent on requests started before it was stored; those use the callback's own URI.
      */
     redirectUri: z.string().optional(),
+    /**
+     * Set on a request the owner's CLI started (`/oauth/loopback/start`): only the loopback complete
+     * route may complete it, and the web callback refuses it. Absent: a web request.
+     */
+    callback: z.literal("loopback").optional(),
   })
   .strict();
 
 /** The link request's context for an OAuth secret. Holds no secret value in the clear. */
 export type OAuthSecretContext = z.infer<typeof ContextSchema>;
+
+/** A stored link request's context read back, or undefined when it is not an OAuth secret's context. */
+export function parseOAuthSecretContext(context: unknown): OAuthSecretContext | undefined {
+  const parsed = ContextSchema.safeParse(context);
+  return parsed.success ? parsed.data : undefined;
+}
 
 /** The link request's result: shown on the callback page and carried to the confirm. */
 export interface OAuthSecretResult {
@@ -316,6 +333,11 @@ export async function startOAuthSecretConnect(input: {
    * or a loopback URI the owner's CLI listens on. Stored in the context, so the code exchange uses it too.
    */
   redirectUri: string;
+  /**
+   * Which route completes this request: the web callback (default) or the loopback complete route,
+   * for a sign-in the owner's CLI started. Stored in the context.
+   */
+  callback?: OAuthCallbackKind;
   /** The fetch policy of the MCP server path; tests allow-list their local fake. */
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
@@ -357,6 +379,7 @@ export async function startOAuthSecretConnect(input: {
     ...(client.clientSecret ? { clientSecretCiphertext: await encrypt(input.cipher, client.clientSecret) } : {}),
     ...(input.scope ? { scope: input.scope } : {}),
     redirectUri: input.redirectUri,
+    ...(input.callback === "loopback" ? { callback: "loopback" as const } : {}),
   };
   return startOAuthLink({
     db: input.db,
@@ -383,10 +406,10 @@ export function oauthSecretAdapter(
         ...(context.scope ? { scope: context.scope } : {}),
       }),
     // The URI this request's authorize URL carried; an invalid context is refused by `complete` itself.
-    redirectUri: (context) => {
-      const parsed = ContextSchema.safeParse(context);
-      return parsed.success ? parsed.data.redirectUri : undefined;
-    },
+    redirectUri: (context) => parseOAuthSecretContext(context)?.redirectUri,
+    // A loopback-started request belongs to the loopback route; anything else (an invalid context
+    // included, which `complete` then refuses) to the web callback.
+    callbackKind: (context) => (parseOAuthSecretContext(context)?.callback === "loopback" ? "loopback" : "web"),
     complete: async ({ code, codeVerifier, redirectUri, context, iss }) => {
       const ctx = parseContext(context);
       // RFC 9207: when the provider names the issuer, it must be the one discovered.

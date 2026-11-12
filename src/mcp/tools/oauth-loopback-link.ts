@@ -1,7 +1,7 @@
 /**
  * The loopback link `create_secret` returns for `oauth.callback: "loopback"`: a short-lived signed
  * capability (the MCP server's requestState codec, so HMAC + expiry, as get_run_transcript's link)
- * naming one principal, one secret name and what to connect. `wardby secret connect <link>` runs on
+ * naming one principal, one secret name and what to connect. `wardby secret connect -` (the link pasted on stdin) runs on
  * the owner's machine, catches the provider's redirect on 127.0.0.1 and hands the code to wardby.
  *
  * The link is `<origin>/oauth/loopback#<token>`: the token sits in the URL fragment, so pasting the
@@ -13,10 +13,17 @@ import type { RunTranscriptLinkAudience } from "./run-transcript-download.js";
 
 /** The path of the link (never requested: the token is in its fragment). */
 export const OAUTH_LOOPBACK_LINK_PATH = "/oauth/loopback";
+/** The route the CLI calls to start a sign-in (Bearer link; JSON `{ redirectUri }`). */
+export const OAUTH_LOOPBACK_START_PATH = "/oauth/loopback/start";
+/** The route the CLI calls with what the provider's redirect carried (Bearer link; JSON `{ code, state, iss? }`). */
+export const OAUTH_LOOPBACK_COMPLETE_PATH = "/oauth/loopback/complete";
 /** How long a loopback link works: the requestState codec's own TTL. */
 export const OAUTH_LOOPBACK_LINK_TTL_MS = 10 * 60_000;
-/** The command `create_secret` hands out; the link follows as one single-quoted argument. */
-export const OAUTH_LOOPBACK_COMMAND = "npx @wardby/cli@latest secret connect";
+/**
+ * The command `create_secret` hands out. It reads the link from stdin (prompting for it), so the link
+ * never sits on a command line, in shell history or in the process list.
+ */
+export const OAUTH_LOOPBACK_COMMAND = "npx @wardby/cli@latest secret connect -";
 
 /**
  * Which host minted the link and is the only one that accepts it, as transcript links: a stdio
@@ -71,12 +78,6 @@ export async function mintOAuthLoopbackLink(
   return `${new URL(origin).origin}${OAUTH_LOOPBACK_LINK_PATH}#${await mint(payload)}`;
 }
 
-/** The single-quoted shell command for a link (a link never contains a quote). */
-export function oauthLoopbackCommand(link: string): string {
-  if (link.includes("'")) throw new Error("oauth loopback link: unexpected character");
-  return `${OAUTH_LOOPBACK_COMMAND} '${link}'`;
-}
-
 export type OAuthLoopbackLinkRefusal = "link_invalid";
 
 /**
@@ -119,4 +120,34 @@ export function parseOAuthLoopbackLink(link: string): { origin: string; token: s
   const token = url.hash.slice(1);
   if (token === "") return null;
   return { origin: url.origin, token };
+}
+
+/** The only loopback redirect URI form accepted: `http://127.0.0.1:<port>/callback`, no other part. */
+const LOOPBACK_REDIRECT_URI = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{3,4})\/callback$/;
+
+/**
+ * Whether `value` is a redirect URI the CLI's listener may use: exactly `http://127.0.0.1:<port>/callback`
+ * with a port in 1024-65535. Checked on the raw string, so no URL normalisation can widen it: no other
+ * host or scheme, no userinfo, path, query or fragment.
+ */
+export function isOAuthLoopbackRedirectUri(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = LOOPBACK_REDIRECT_URI.exec(value);
+  if (!match) return false;
+  const port = Number(match[1]);
+  return port >= 1024 && port <= 65535;
+}
+
+/** Longest bearer token read from an Authorization header; anything longer is no token. */
+const BEARER_MAX_LENGTH = 8192;
+
+/**
+ * The token of an `Authorization: Bearer <token>` header (scheme case-insensitive, one token, no
+ * spaces), or null. Never logs or echoes the header.
+ */
+export function bearerToken(header: string | string[] | undefined): string | null {
+  if (typeof header !== "string") return null;
+  const match = /^Bearer ([^\s]+)$/i.exec(header);
+  if (!match || match[1].length > BEARER_MAX_LENGTH) return null;
+  return match[1];
 }

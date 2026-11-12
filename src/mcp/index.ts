@@ -93,6 +93,7 @@ import { registerSecretsTools, type SecretElicitationUrlBuilder, type SecretsToo
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
+import { oauthLoopbackStdioRoutes } from "./tools/oauth-loopback-routes.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
 import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { registerRunStepsTool } from "./tools/run-steps.js";
@@ -389,6 +390,15 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           db: prisma,
           blobs,
         }),
+      // `wardby secret connect` (create_secret's loopback links): Bearer routes on this same host.
+      ...oauthLoopbackStdioRoutes({
+        verify: (t) => mcp.verifyRequestState(t),
+        audience: "stdio",
+        db: prisma,
+        cipher: providers.secrets,
+        options: providers.sandboxFetchOptions,
+        fetchImpl: providers.sandboxFetch,
+      }),
     });
     registerAllTools(mcp, {
       secretElicitationUrl: (token) => linkHost.urlFor(STDIO_SECRET_PATH, token),
@@ -567,6 +577,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     selfHosted,
     hostEvents,
     oauthCallback,
+    oauthLoopback: {
+      db: prisma,
+      cipher: providers.secrets,
+      options: providers.sandboxFetchOptions,
+      fetchImpl: providers.sandboxFetch,
+    },
     viewer,
     blobs,
   });

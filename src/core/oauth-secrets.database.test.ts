@@ -14,6 +14,7 @@ import {
   oauthBroker,
   OAuthSecretMetaSchema,
   oauthSecretAdapter,
+  parseOAuthSecretContext,
   SECRET_NOT_OAUTH,
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
@@ -101,7 +102,7 @@ let fake: FakeOAuthServer;
 async function callback(
   callbackUrl: string,
   adapter: OAuthLinkAdapter<unknown, unknown>,
-  extra: { iss?: string; state?: string } = {},
+  extra: { iss?: string; state?: string; callbackKind?: "web" | "loopback" } = {},
 ) {
   const cb = new URL(callbackUrl);
   return completeOAuthCallback({
@@ -112,6 +113,7 @@ async function callback(
     code: cb.searchParams.get("code"),
     iss: extra.iss,
     redirectUri: REDIRECT,
+    ...(extra.callbackKind ? { callbackKind: extra.callbackKind } : {}),
   });
 }
 
@@ -324,6 +326,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       name: "loopback",
       resource: fake.mcpUrl,
       redirectUri: LOOPBACK,
+      callback: "loopback",
       options: OPTS,
       fetchImpl: rec.impl,
     });
@@ -331,14 +334,17 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(JSON.parse(registration?.body ?? "{}")).toMatchObject({ redirect_uris: [LOOPBACK] });
     expect(new URL(started.authorizeUrl).searchParams.get("redirect_uri")).toBe(LOOPBACK);
     const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
-    expect(request.context).toMatchObject({ redirectUri: LOOPBACK });
+    expect(request.context).toMatchObject({ redirectUri: LOOPBACK, callback: "loopback" });
 
     const callbackUrl = await fake.approve(started.authorizeUrl);
     expect(callbackUrl.startsWith(`${LOOPBACK}?`)).toBe(true);
+    const adapter = oauthSecretAdapter(cipher, OPTS, rec.impl) as OAuthLinkAdapter<unknown, unknown>;
+    // A loopback-started request is never completed by the web callback, and that refusal spends nothing.
+    await expect(callback(callbackUrl, adapter)).resolves.toEqual({ kind: "invalid" });
+    expect(rec.requests.some((r) => r.url.endsWith("/token"))).toBe(false);
     // The callback step is given the web URI; the request's own (loopback) URI wins, so the
     // exchange matches what the authorize URL carried (the fake checks redirect_uri).
-    const adapter = oauthSecretAdapter(cipher, OPTS, rec.impl) as OAuthLinkAdapter<unknown, unknown>;
-    const outcome = await callback(callbackUrl, adapter);
+    const outcome = await callback(callbackUrl, adapter, { callbackKind: "loopback" });
     expect(outcome.kind).toBe("confirm");
     const token = rec.requests.find((r) => r.url.endsWith("/token"));
     expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(LOOPBACK);
@@ -353,6 +359,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(outcome.kind).toBe("confirm");
     const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
     expect(request.context).toMatchObject({ redirectUri: REDIRECT });
+    expect(request.context).not.toHaveProperty("callback");
     const token = rec.requests.find((r) => r.url.endsWith("/token"));
     expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(REDIRECT);
   });
@@ -375,6 +382,46 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     const callbackUrl = await fake.approve(started.authorizeUrl);
     const adapter = oauthSecretAdapter(cipher, OPTS) as OAuthLinkAdapter<unknown, unknown>;
     expect((await callback(callbackUrl, adapter)).kind).toBe("confirm");
+  });
+
+  it("a web-started request is never completed by the loopback route", async () => {
+    const ownerId = await owner();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "web-only",
+      resource: fake.mcpUrl,
+      redirectUri: REDIRECT,
+      options: OPTS,
+    });
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    const adapter = oauthSecretAdapter(cipher, OPTS) as OAuthLinkAdapter<unknown, unknown>;
+    await expect(callback(callbackUrl, adapter, { callbackKind: "loopback" })).resolves.toEqual({ kind: "invalid" });
+    expect((await callback(callbackUrl, adapter)).kind).toBe("confirm");
+  });
+
+  it("parseOAuthSecretContext reads a stored context, and undefined for anything else", async () => {
+    const ownerId = await owner();
+    await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "ctx",
+      resource: fake.mcpUrl,
+      redirectUri: "http://127.0.0.1:53112/callback",
+      callback: "loopback",
+      options: OPTS,
+    });
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(parseOAuthSecretContext(request.context)).toMatchObject({
+      ownerId,
+      name: "ctx",
+      callback: "loopback",
+      redirectUri: "http://127.0.0.1:53112/callback",
+    });
+    expect(parseOAuthSecretContext({ label: "x" })).toBeUndefined();
+    expect(parseOAuthSecretContext(null)).toBeUndefined();
   });
 
   it("refuses a replayed callback state", async () => {

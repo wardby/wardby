@@ -44,7 +44,7 @@ const STDIO_ORIGIN = "http://127.0.0.1:4321";
 const NOW = new Date("2026-11-12T10:00:00Z");
 const TEN_MIN = 10 * 60_000;
 const principalIds: string[] = [];
-const COMMAND = /^npx @wardby\/cli@latest secret connect '([^']+)'$/;
+const COMMAND = "npx @wardby/cli@latest secret connect -";
 
 const cipher = {
   keyId: () => "test-key",
@@ -117,8 +117,9 @@ async function connect(p: Principal, opts: { audience?: OAuthLoopbackLinkAudienc
 }
 
 function linkOf(text: string): { link: string; origin: string; token: string } {
-  const body = JSON.parse(text) as { command: string };
-  const link = COMMAND.exec(body.command)?.[1] ?? "";
+  const body = JSON.parse(text) as { command: string; link: string };
+  expect(body.command).toBe(COMMAND);
+  const link = body.link;
   const parsed = parseOAuthLoopbackLink(link);
   if (!parsed) throw new Error("not a loopback link");
   return { link, ...parsed };
@@ -147,7 +148,10 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth.callback lo
     });
     expect(r.isError).toBe(false);
     const body = JSON.parse(r.text) as Record<string, string>;
-    expect(Object.keys(body).sort()).toEqual(["command", "expiresAt", "message", "status"]);
+    expect(Object.keys(body).sort()).toEqual(["command", "expiresAt", "link", "message", "status"]);
+    // LB-2: the link is its own field, pasted when the command asks; never on the command line.
+    expect(body.command).toBe(COMMAND);
+    expect(body.message).toContain("paste the link");
     expect(body.status).toBe("pending");
     expect(body.expiresAt).toBe(new Date(NOW.getTime() + TEN_MIN).toISOString());
     expect(body.message).toContain("confirmationCode");

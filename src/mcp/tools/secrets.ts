@@ -19,23 +19,11 @@ import { mcpServersUsingSecret } from "../../core/mcp-servers.js";
 import {
   finishOAuthSecretConnect,
   OAUTH_SECRET_PURPOSE,
-  OAuthSecretFlowError,
   precheckOAuthSecretConnect,
-  SECRET_NOT_OAUTH,
-  SECRET_OAUTH_CIPHER_FAILED,
-  SECRET_OAUTH_CLIENT_ID_REQUIRED,
-  SECRET_OAUTH_INPUT_TOO_LONG,
-  SECRET_OAUTH_RESOURCE_INVALID,
-  SECRET_OAUTH_DISCOVERY_FAILED,
   SECRET_OAUTH_MANAGED,
-  SECRET_OAUTH_PROVIDER_UNAVAILABLE,
-  SECRET_OAUTH_REFRESH_UNAVAILABLE,
   startOAuthSecretConnect,
 } from "../../core/oauth-secrets.js";
-import { OAuthLinkError } from "../../core/oauth-link.js";
 import { oauthRedirectUri } from "../../core/host-identity-links.js";
-import { OAuthProtocolError } from "../../core/oauth-client/http.js";
-import { Prisma } from "#prisma";
 import { callbackOrigin } from "./host-accounts.js";
 import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -51,10 +39,11 @@ import {
 } from "./secret-elicitation.js";
 import { allowedSecretNames, brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 import { textResult } from "./text-result.js";
+import { describeOAuthSecretError } from "./oauth-secret-errors.js";
 import {
   mintOAuthLoopbackLink,
   OAUTH_LOOPBACK_LINK_TTL_MS,
-  oauthLoopbackCommand,
+  OAUTH_LOOPBACK_COMMAND,
   type OAuthLoopbackLinkAudience,
   type OAuthLoopbackLinkPayload,
 } from "./oauth-loopback-link.js";
@@ -97,43 +86,15 @@ const OAUTH_LOOPBACK_UNAVAILABLE =
   'secret_oauth_loopback_unavailable: this wardby server does not hand out loopback sign-in links; use oauth.callback "web"';
 
 const OAUTH_LOOPBACK_MESSAGE =
-  "Run this command in a terminal on the computer where you use your browser: it opens the sign-in, then prints a confirmation code. " +
+  "Run this command in a terminal on the computer where you use your browser, and paste the link when it asks: " +
+  "it opens the sign-in, then prints a confirmation code. " +
   "Then call create_secret again with the same name and that confirmationCode. " +
-  "The command holds a sign-in link for this secret that works until expiresAt: do not share it.";
+  "The link signs in this secret until expiresAt: do not share it.";
 
-/**
- * Maps the OAuth secret flow's errors to MCP statuses. Every message is a fixed constant or a
- * fixed sentence of our own; provider, Prisma and cipher text is never passed through.
- */
+/** Maps the OAuth secret flow's errors to MCP statuses (describeOAuthSecretError); anything else propagates unchanged. */
 function mapOAuthSecretError(err: unknown): never {
-  if (err instanceof OAuthLinkError) throw new McpError(err.status, err.message);
-  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-    throw new McpError(409, "a secret with this name already exists");
-  }
-  if (err instanceof OAuthProtocolError) {
-    if (err.code === "discovery_failed") throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
-    if (err.code === "provider_unavailable") throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
-    throw new McpError(502, err.message);
-  }
-  if (err instanceof OAuthSecretFlowError) {
-    if (err.reason === "cipher_failed") throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
-    if (err.reason === "refresh_unavailable") throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
-    if (err.reason === "bad_context" || err.reason === "issuer_mismatch") throw new McpError(400, err.message);
-    throw new McpError(502, err.message);
-  }
-  const message = err instanceof Error ? err.message : "";
-  if (message.startsWith("secret_oauth_discovery_failed")) throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
-  if (message.startsWith("secret_oauth_resource_invalid")) throw new McpError(400, SECRET_OAUTH_RESOURCE_INVALID);
-  if (message.startsWith("secret_oauth_input_too_long")) throw new McpError(400, SECRET_OAUTH_INPUT_TOO_LONG);
-  if (message.startsWith("secret_oauth_client_id_required")) throw new McpError(400, SECRET_OAUTH_CLIENT_ID_REQUIRED);
-  if (message.startsWith("secret_oauth_name_taken")) throw new McpError(409, SECRET_NOT_OAUTH);
-  if (message.startsWith("secret_oauth_encryption_failed")) throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
-  if (message.startsWith("secret_oauth_provider_unavailable")) {
-    throw new McpError(503, SECRET_OAUTH_PROVIDER_UNAVAILABLE);
-  }
-  if (message.startsWith("secret_oauth_refresh_unavailable")) {
-    throw new McpError(503, SECRET_OAUTH_REFRESH_UNAVAILABLE);
-  }
+  const described = describeOAuthSecretError(err);
+  if (described) throw new McpError(described.status, described.message);
   throw err;
 }
 
@@ -254,7 +215,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "create_secret",
     scope: "secrets:write",
     description:
-      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. With `oauth.callback: "loopback"` (for providers that only accept a 127.0.0.1 redirect) it returns a command for the user to run in a terminal on their own computer instead; it prints the confirmationCode. See the help article "brokered-secrets".',
+      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. With `oauth.callback: "loopback"` (for providers that only accept a 127.0.0.1 redirect) it returns a command for the user to run in a terminal on their own computer, and a link to paste when the command asks; the command prints the confirmationCode. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {
@@ -340,7 +301,9 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           const link = await mintOAuthLoopbackLink((p) => mcp.mintRequestState(p), await loopback.origin(), payload);
           return textResult({
             status: "pending",
-            command: oauthLoopbackCommand(link),
+            // The link is pasted when the command asks (stdin), never put on its command line.
+            command: OAUTH_LOOPBACK_COMMAND,
+            link,
             expiresAt: new Date(exp).toISOString(),
             message: OAUTH_LOOPBACK_MESSAGE,
           });
