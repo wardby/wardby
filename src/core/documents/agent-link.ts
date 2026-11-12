@@ -60,20 +60,22 @@ export function assertDocumentAgentOverride(principalId: string, agent: CodingOv
 
 /** What assertAgentRepository reads of an agent: its default repository and its linked repositories. */
 export interface AgentRepositoryScope {
-  codingProfile?: { repository: string } | null;
+  codingProfile?: { repository: string; repositoryAuthorizedVia: string | null } | null;
   repositories?: { repository: string; authorizedVia: string | null }[];
 }
 
 /**
  * A document or design may be linked only to a repository the agent is already authorized for:
- * its codingProfile.repository, or an authorized AgentRepository link (authorizedVia set; a null
+ * its codingProfile.repository (repositoryAuthorizedVia set; null is "never authorized"), or an authorized AgentRepository link (authorizedVia set; a null
  * one is "never authorized; use is refused"). `repository` is already canonical (hosted: lower-case
  * via validDocumentRepository; local: canonicalLocalRepository). Throws document_repo_link_invalid
  * with fixed text, never naming the repository.
  */
 export function assertAgentRepository(agent: AgentRepositoryScope, repository: string): void {
   const allowed = [
-    ...(agent.codingProfile ? [agent.codingProfile.repository] : []),
+    ...(agent.codingProfile && agent.codingProfile.repositoryAuthorizedVia !== null
+      ? [agent.codingProfile.repository]
+      : []),
     ...(agent.repositories ?? []).filter((r) => r.authorizedVia !== null).map((r) => r.repository),
   ];
   const same = (candidate: string): boolean => {

@@ -309,7 +309,9 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         const row = await ctx.db.agent.findUnique({
           where: { id: input.agentId },
           include: {
-            codingProfile: { select: { allowWebhookTaskOverride: true, repository: true } },
+            codingProfile: {
+              select: { allowWebhookTaskOverride: true, repository: true, repositoryAuthorizedVia: true },
+            },
             repositories: { select: { repository: true, authorizedVia: true } },
           },
         });

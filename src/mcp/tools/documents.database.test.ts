@@ -87,7 +87,14 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
           budgetUsd: 1,
           kind: "coding",
           ownerId: owner.id,
-          codingProfile: { create: { provider: "codex", repository: "acme/docs", protectedPaths: [] } },
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository: "acme/docs",
+              repositoryAuthorizedVia: "admin",
+              protectedPaths: [],
+            },
+          },
         },
       })
     ).id;
@@ -256,6 +263,28 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
         // A link that exists but was never authorized does not count.
         await linkRepo(codingAgentId, "acme/unauthorized", "github", null);
         expect((await call("create_document", { ...doc, repository: "acme/unauthorized" })).isError).toBe(true);
+        expect(reads).toBe(0);
+        // A profile repository that was never authorized does not count either.
+        const unstamped = await db.agent.create({
+          data: {
+            name: `docmcp-unstamped-${Date.now()}`,
+            systemPrompt: "p",
+            model: "gpt-5.6-luna",
+            budgetUsd: 1,
+            kind: "coding",
+            ownerId: owner.id,
+            codingProfile: { create: { provider: "codex", repository: "acme/profile-only", protectedPaths: [] } },
+          },
+        });
+        for (const input of [design, doc]) {
+          const out = await call("create_document", {
+            ...input,
+            agentId: unstamped.id,
+            repository: "acme/profile-only",
+          });
+          expect(out.isError).toBe(true);
+          expect(out.text).toContain("document_repo_link_invalid");
+        }
         expect(reads).toBe(0);
         // The agent's own repositories work, in any letter case.
         expect((await call("create_document", { ...doc, repository: "ACME/Docs" })).isError).toBe(false);
