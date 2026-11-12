@@ -8,7 +8,9 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "./types.js";
@@ -85,6 +87,18 @@ export class RoutingVcsProvider implements VcsProvider {
 
   async cleanup(workspace: PreparedWorkspace): Promise<void> {
     return this.target(workspace.repository).cleanup(workspace);
+  }
+
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    const target = this.target(input.repository);
+    if (!target.prepareReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.prepareReadOnlyCopy(input);
+  }
+
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    const target = this.target(copy.repository);
+    if (!target.cleanupReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.cleanupReadOnlyCopy(copy);
   }
 
   async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {

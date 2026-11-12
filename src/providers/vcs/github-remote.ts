@@ -202,8 +202,10 @@ export class GitHubRemote implements GitRemote {
     // commit onto that branch already updates the PR natively -- which is
     // also why a PR a person has since marked ready for review is accepted
     // (acceptReadyForReview) rather than failing an already-pushed run.
+    // A writable extra in a continuation with no branch yet opens its PR under
+    // the root run's identity too (branchRunId), so later rounds find it.
     const pullRequest = await this.options.github.createOrFindDraftPullRequest({
-      runId: prepared.continuation?.rootRunId ?? prepared.runId,
+      runId: prepared.continuation?.rootRunId ?? prepared.branchRunId ?? prepared.runId,
       ...(prepared.continuation ? { acceptReadyForReview: true } : {}),
       repository: prepared.repository,
       baseRef: prepared.baseRef,
