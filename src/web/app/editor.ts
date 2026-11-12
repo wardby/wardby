@@ -4,11 +4,10 @@
  * page saves holds no comment markup, and they are mapped through every edit.
  */
 import { Editor, Extension } from "@tiptap/core";
-import { TableKit } from "@tiptap/extension-table";
 import { Markdown } from "@tiptap/markdown";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import StarterKit from "@tiptap/starter-kit";
+import { documentExtensions } from "./extensions.js";
 
 export interface Highlight {
   /** A thread id, or "draft" while the composer is open. */
@@ -78,12 +77,7 @@ export function createEditor(element: HTMLElement, markdown: string, editable: b
     // The page's CSP allows no inline <style>; the editor's base styles are in styles.css.
     injectCSS: false,
     editable,
-    extensions: [
-      StarterKit.configure({ link: { openOnClick: false, autolink: true, protocols: ["https", "http", "mailto"] } }),
-      TableKit.configure({ table: { resizable: false } }),
-      Markdown,
-      CommentHighlights,
-    ],
+    extensions: [...documentExtensions(), Markdown, CommentHighlights],
     content: markdown,
     contentType: "markdown",
   });

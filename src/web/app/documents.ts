@@ -17,6 +17,7 @@ import {
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { createEditor } from "./editor.js";
+import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 
 const SAVE_DELAY_MS = 1500;
 
@@ -57,7 +58,7 @@ async function main(): Promise<void> {
 function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPayload): void {
   let viewer: Viewer = payload.me;
   let baseNumber = payload.version.number;
-  const editable = viewer.kind === "member" && atLeast(viewer.access, "write");
+  const canWrite = viewer.kind === "member" && atLeast(viewer.access, "write");
 
   // ---- layout ----
   const title = h("b", { class: "title" }, payload.document.title);
@@ -66,6 +67,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const who = h("span", { class: "who-am-i" });
   const account = h("span", { class: "account" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
+  const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
   const editorEl = h("div", { class: "editor" });
   const margin = h("div", { class: "margin" });
   const page = h("div", { class: "page" }, editorEl, margin);
@@ -74,7 +76,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const count = h("span", { class: "ccount" });
   const side = h("aside", { class: "side", aria: { label: "Comments" } }, h("h2", {}, "Comments ", count), panel);
   const bubble = h("button", { type: "button", class: "bubble", hidden: true }, "💬 Comment");
-  const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !editable });
+  const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !canWrite });
   clear(root);
   append(
     root,
@@ -99,6 +101,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         account,
       ),
       banner,
+      lossyNotice,
       toolbar,
       h("div", { class: "main" }, stage, side),
     ),
@@ -106,7 +109,15 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   document.body.append(bubble);
 
   // ---- editor ----
-  const editor = createEditor(editorEl, payload.version.markdown, editable);
+  const editor = createEditor(editorEl, payload.version.markdown, canWrite);
+  // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
+  const lossless = isLosslessRoundTrip(payload.version.markdown, editor.getMarkdown());
+  const editable = canWrite && lossless;
+  if (!lossless) {
+    lossyNotice.hidden = false;
+    toolbar.hidden = true;
+    editor.setEditable(false, false);
+  }
 
   const tb = (label: string, aria: string, run: () => boolean) =>
     h(
