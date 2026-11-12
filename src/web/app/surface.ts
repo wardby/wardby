@@ -41,12 +41,23 @@ export interface AnchorSurface {
   keysHint(): string;
   /** Brings a thread's anchor into view (designs also switch board). */
   reveal(thread: ThreadView): void;
-  /** The anchor as the threads panel and popover header name it. */
-  label(thread: ThreadView | DraftStart): string;
-  /** The dialog's callbacks: a mark was clicked, the surface's own gesture started a comment, layout moved. */
-  connect(handlers: { activate(id: string): void; start(): void; layout(): void }): void;
+  /**
+   * The anchor as the threads panel and popover header name it. With `max`, the quoted words are cut
+   * to that many characters and the rest of the label (a design's board name) always shows.
+   */
+  label(thread: ThreadView | DraftStart, max?: number): string;
+  /**
+   * The dialog's callbacks: a mark was clicked, the surface's own gesture started a comment, layout
+   * moved, and (optional) located() now answers differently, so the panel is listed again.
+   */
+  connect(handlers: { activate(id: string): void; start(): void; layout(): void; relist?(): void }): void;
   /** Keys the surface owns (designs: C), asked after the dialog's own; true = handled. */
   key?(e: KeyboardEvent, typing: boolean): boolean;
   /** An earlier version is shown: hide the surface's marks and start affordance until resumed. */
   suspend?(on: boolean): void;
+}
+
+/** Words in curly quotes, cut to `max` characters (when given) with the closing quote kept: “first words…”. */
+export function quoteClipped(words: string, max?: number): string {
+  return max !== undefined && words.length > max ? `“${words.slice(0, max)}…”` : `“${words}”`;
 }

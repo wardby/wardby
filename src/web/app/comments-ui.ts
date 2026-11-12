@@ -201,6 +201,7 @@ export class CommentsUI {
       },
       start: () => this.startComment(),
       layout: () => this.scheduleLayout(),
+      relist: () => this.renderPanel(),
     });
 
     document.addEventListener("mousedown", (e) => {
@@ -375,7 +376,7 @@ export class CommentsUI {
           "div",
           { class: "quote" },
           isDraft ? "New comment on " : `#${t!.number} on `,
-          h("b", {}, clip(this.surface.label(isDraft ? pop.start! : t!), 60)),
+          h("b", {}, this.surface.label(isDraft ? pop.start! : t!, 60)),
         ),
         status ? h("span", { class: `status ${status[0]}` }, status[1]) : null,
         menuItems.length
@@ -1016,7 +1017,7 @@ export class CommentsUI {
               })
             : null,
           h("span", { class: "n" }, String(t.number)),
-          clip(this.surface.label(t), 40),
+          this.surface.label(t, 40),
         ),
         h("div", { class: "t" }, first ? previewText(first.body, this.names) : ""),
         h(
@@ -1068,17 +1069,6 @@ function anchorKey(anchor: Anchor): string {
       .sort()
       .map((k) => [k, a[k]]),
   );
-}
-
-/**
- * A label cut to `max` characters of its text; a quoted label (“…”) keeps its closing quote, so a
- * document's quote reads “first words…”.
- */
-function clip(label: string, max: number): string {
-  const quoted = label.startsWith("“") && label.endsWith("”");
-  const text = quoted ? label.slice(1, -1) : label;
-  if (text.length <= max) return label;
-  return quoted ? `“${text.slice(0, max)}…”` : `${text.slice(0, max)}…`;
 }
 
 const AVATARS = 6;

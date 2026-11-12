@@ -219,10 +219,19 @@ export function createBoardsEditor(opts: {
 
   // GrapesJS 0.23.9 lists its selector manager in both of its module lists, so init makes two; each
   // renders a class picker into selectorManager.appendTo, and both stay live. Only editor.Selectors is
-  // the editor's own: the other one is destroyed, which removes its picker and its listeners.
+  // the editor's own. For the other one, destroy() removes its picker and its model's listeners (and
+  // cancels its pending update); its own handler on the editor's component toggled / classes events is
+  // removed here by reference. Left: its anonymous relay of `change:state` to `selector:state`, which
+  // has no reference to remove by; it only fires that event a second time, which the live manager's
+  // debounced update absorbs.
   const liveSelectors = editor.Selectors;
-  for (const m of editor.getModel().modules as { name?: string; destroy?(): void }[]) {
-    if (m !== (liveSelectors as unknown) && m.name === "SelectorManager") m.destroy?.();
+  const em = editor.getModel();
+  type StaleSelectors = { name?: string; destroy?(): void; __updateSelectedByComponents?: () => void };
+  for (const m of em.modules as StaleSelectors[]) {
+    if (m === (liveSelectors as unknown) || m.name !== "SelectorManager") continue;
+    m.destroy?.();
+    if (m.__updateSelectedByComponents)
+      em.off("component:toggled component:update:classes", m.__updateSelectedByComponents);
   }
 
   const wrapper = () => editor.getWrapper();

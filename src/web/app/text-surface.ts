@@ -10,7 +10,7 @@ import type { Anchor, ThreadView } from "./api.js";
 import { previewText, stackBadges } from "./comments.js";
 import { clear, h, placeAt } from "./dom.js";
 import { getHighlights, setHighlights, type Highlight } from "./editor.js";
-import type { AnchorSurface, DraftStart } from "./surface.js";
+import { quoteClipped, type AnchorSurface, type DraftStart } from "./surface.js";
 
 const BADGE_GAP = 24;
 /** Shown in the panel when the selection can't be commented on. */
@@ -165,9 +165,9 @@ export class TextSurface implements AnchorSurface {
     stage.scrollTop += top - stage.getBoundingClientRect().top - 120;
   }
 
-  label(thread: ThreadView | DraftStart): string {
+  label(thread: ThreadView | DraftStart, max?: number): string {
     const quote = "number" in thread ? (thread.anchor.type === "text" ? thread.anchor.quote : "") : thread.quote;
-    return `“${quote}”`;
+    return quoteClipped(quote, max);
   }
 
   suspend(on: boolean): void {

@@ -516,8 +516,14 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     expect(await count("Home").textContent()).toBe("💬 1");
     await expect.poll(() => pinNumbered(page, 2).count(), { timeout: 10_000 }).toBe(1);
     expect(await pin1.count()).toBe(0); // another board's pin is not drawn
+    // Both threads are found: neither row says "outdated" (the panel was first listed before the canvas loaded).
+    const outdated = (text: string) => page.locator(".tp-row", { hasText: text }).locator(".chip.out");
+    await expect.poll(() => page.locator(".tp-row", { hasText: "Second" }).count()).toBe(1);
+    expect(await outdated("Second").count()).toBe(0);
+    expect(await outdated("Make the prices bigger").count()).toBe(0);
     await pickBoard(page, "Menu");
     await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
+    expect(await outdated("Make the prices bigger").count()).toBe(0);
     // Resolve from the ⋯ menu: the pin hides; selecting the thread in the panel shows it again.
     await pin1.click();
     await expect.poll(() => head.textContent()).toContain("#1 on");

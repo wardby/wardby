@@ -21,14 +21,17 @@ import type { BoardsEditor } from "./boards-editor.js";
 import { previewText } from "./comments.js";
 import { clear, h, placeAt } from "./dom.js";
 import { offsetFraction, pinPoint, type DOMRectLike } from "./pins.js";
-import type { AnchorSurface, DraftStart } from "./surface.js";
+import { quoteClipped, type AnchorSurface, type DraftStart } from "./surface.js";
 
 /** Shown while pin mode is on. */
 export const PIN_HINT = "Click anything on the board to comment · Esc to cancel";
 /** Shown in the panel when a comment is started with no element picked. */
 export const PICK_ELEMENT = "Click an element on the board to comment.";
 const COMMENT_COMMAND = "wardby:comment";
-/** Keys pressed in the canvas that the page's own key handlers (dialog and surface) get too. */
+/**
+ * Keys pressed in the canvas that the page's own key handlers (dialog and surface) get too. Only lower
+ * j / k: the dialog's J / K keys are lower-case only, on document pages as here.
+ */
 const FORWARDED_KEYS = new Set(["c", "C", "j", "k", "Escape"]);
 
 type Handlers = Parameters<AnchorSurface["connect"]>[0];
@@ -54,8 +57,8 @@ export class DesignSurface implements AnchorSurface {
   private drawQueued = false;
   /** Tip of each pin drawn now (viewport), by thread id or "draft". */
   private readonly points = new Map<string, Point>();
-  /** Threads on the board in the canvas whose element was found on the last draw. */
-  private readonly found = new Set<string>();
+  /** Open threads on the board in the canvas whose element was not found, as of the last draw (a key). */
+  private lostKey = "";
   private readonly marks: HTMLElement;
   private readonly hint: HTMLElement;
   private readonly wiredWindows = new WeakSet<Window>();
@@ -71,6 +74,8 @@ export class DesignSurface implements AnchorSurface {
     private readonly els: { pins: HTMLElement; commentButton: HTMLButtonElement; boardsList: HTMLElement },
     private readonly names: () => Map<string, string>,
     private readonly preview: (body: string) => string = (body) => previewText(body),
+    /** Runs a board switch once no fidelity pass is running (the pass switches boards to measure them). */
+    private readonly whenIdle: (run: () => void) => void = (run) => run(),
   ) {
     this.marks = h("div", { class: "pin-marks" });
     this.hint = h("div", { class: "pin-mode-hint", hidden: true, role: "status" }, PIN_HINT);
@@ -231,7 +236,11 @@ export class DesignSurface implements AnchorSurface {
     const board = t.anchor.board;
     // Another board is not in the canvas: the server's re-anchoring (the thread's status) decides.
     if (board !== this.boards.currentBoard()) return this.names().has(board);
-    return this.found.has(id);
+    // A DOM query, no layout. Before the canvas loads, or while an earlier version is shown, the
+    // element cannot be looked for: no claim that it is gone.
+    const root = this.boards.root();
+    if (this.suspended || !root) return true;
+    return locateElement(root, t.anchor) !== null;
   }
 
   isMark(target: Element): boolean {
@@ -246,26 +255,32 @@ export class DesignSurface implements AnchorSurface {
     return "C: new comment";
   }
 
-  /** Switches to the thread's board, then scrolls its element to the middle of the canvas. */
+  /**
+   * Switches to the thread's board, then scrolls its element to the middle of the canvas. A fidelity
+   * pass switches boards to measure them: the switch waits until it is done.
+   */
   reveal(thread: ThreadView): void {
     const a = thread.anchor;
     if (!isElementAnchor(a)) return;
-    if (a.board !== this.boards.currentBoard()) this.boards.selectBoard(a.board);
-    const go = () => {
-      const root = this.boards.root();
-      const el = root ? (locateElement(root, a) as unknown as HTMLElement | null) : null;
-      el?.scrollIntoView({ block: "center" });
-    };
-    const win = this.boards.canvasWindow();
-    if (win) win.requestAnimationFrame(go);
-    else go();
+    this.whenIdle(() => {
+      if (a.board !== this.boards.currentBoard()) this.boards.selectBoard(a.board);
+      const go = () => {
+        const root = this.boards.root();
+        const el = root ? (locateElement(root, a) as unknown as HTMLElement | null) : null;
+        el?.scrollIntoView({ block: "center" });
+      };
+      const win = this.boards.canvasWindow();
+      if (win) win.requestAnimationFrame(go);
+      else go();
+    });
   }
 
-  label(thread: ThreadView | DraftStart): string {
+  /** Only the element's words are cut to `max`: the board's name always shows. */
+  label(thread: ThreadView | DraftStart, max?: number): string {
     const a = thread.anchor;
     if (!isElementAnchor(a)) return "";
     const board = this.names().get(a.board) ?? a.board;
-    return a.words ? `“${a.words}” · ${board}` : `${a.tag} · ${board}`;
+    return a.words ? `${quoteClipped(a.words, max)} · ${board}` : `${a.tag} · ${board}`;
   }
 
   key(e: KeyboardEvent, typing: boolean): boolean {
@@ -313,18 +328,23 @@ export class DesignSurface implements AnchorSurface {
     this.drawQueued = true;
     requestAnimationFrame(() => {
       this.drawQueued = false;
+      const before = this.lostKey;
       this.draw();
       this.handlers?.layout();
+      // The canvas loaded, the board changed or an edit moved things: the panel's "outdated" chips follow.
+      if (this.lostKey !== before) this.handlers?.relist?.();
     });
   }
 
   private draw(): void {
     clear(this.marks);
     this.points.clear();
-    this.found.clear();
     const root = this.boards.root();
     const frameEl = this.boards.editor.Canvas.getFrameEl();
-    if (this.suspended || !root || !frameEl) return;
+    if (this.suspended || !root || !frameEl) {
+      this.lostKey = "";
+      return;
+    }
     const board = this.boards.currentBoard();
     const fr = frameEl.getBoundingClientRect();
     // The frame's content box: element rects inside it are relative to it.
@@ -350,10 +370,13 @@ export class DesignSurface implements AnchorSurface {
       items.push({ id: t.id, anchor: t.anchor, t });
     }
     if (this.draftAnchor && this.draftAnchor.board === board) items.push({ id: "draft", anchor: this.draftAnchor });
+    const lost: string[] = [];
     for (const { id, anchor, t } of items) {
       const el = locateElement(root, anchor) as unknown as Element | null;
-      if (!el) continue;
-      this.found.add(id);
+      if (!el) {
+        if (t?.status === "open") lost.push(id);
+        continue;
+      }
       const p = pinPoint(frame, el.getBoundingClientRect(), anchor.dx, anchor.dy);
       if (p.x < view.left || p.x > view.right || p.y < view.top || p.y > view.bottom) continue;
       this.points.set(id, p);
@@ -376,5 +399,6 @@ export class DesignSurface implements AnchorSurface {
       placeAt(pin, p.x - layer.left, p.y - layer.top);
       this.marks.append(pin);
     }
+    this.lostKey = `${board}:${lost.join(",")}`;
   }
 }

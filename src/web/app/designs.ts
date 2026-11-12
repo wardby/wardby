@@ -435,6 +435,7 @@ function mount(
     { pins: pinsLayer, commentButton: commentBtn, boardsList },
     boardNames,
     (body: string): string => comments.preview(body),
+    afterMeasuring,
   );
   surface = pins;
   const comments: CommentsUI = new CommentsUI(
