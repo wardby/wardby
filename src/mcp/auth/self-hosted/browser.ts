@@ -25,6 +25,14 @@ function escape(value: string) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
 }
+/**
+ * A wrong, unknown, revoked or expired login key, or a disabled user: one
+ * answer for all of them, so nothing says whether a user exists. The sign-in
+ * challenge is single-use, so the page asks for a reload before trying again.
+ */
+export const LOGIN_KEY_INVALID = "login_key_invalid";
+export const LOGIN_KEY_INVALID_TEXT = "That login key isn't valid. Reload this page and try again.";
+const INVALID_CREDENTIALS = "Invalid credentials.";
 // CORS-mode same-origin fetch retains Origin under no-referrer, unlike native form POSTs.
 const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
   const form = event.target;
@@ -34,6 +42,10 @@ const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
     const response = await fetch(form.action, { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'accept': 'application/json' }, body });
     const data = await response.json();
     if (response.ok && typeof data.redirect === 'string') { location.assign(data.redirect); return; }
+    if (data && data.error_description === ${JSON.stringify(LOGIN_KEY_INVALID)}) {
+      document.getElementById('auth-error').textContent = ${JSON.stringify(LOGIN_KEY_INVALID_TEXT)};
+      return;
+    }
   } catch {}
   document.getElementById('auth-error').textContent = 'Unable to complete the request. Reload this page and try again.';
 });`;
@@ -341,7 +353,12 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           { id, path: url.pathname, reason: err instanceof Error ? err.message || "unspecified" : "unspecified" },
           "self-hosted OAuth request rejected",
         );
-        json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id });
+        const badKey = url.pathname === "/login" && err instanceof Error && err.message === INVALID_CREDENTIALS;
+        json(res, 400, {
+          error: url.pathname === "/token" ? "invalid_grant" : "invalid_request",
+          ...(badKey ? { error_description: LOGIN_KEY_INVALID } : {}),
+          id,
+        });
       }
     }
     return true;

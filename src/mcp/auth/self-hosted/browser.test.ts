@@ -5,6 +5,7 @@ import { createPrismaClient } from "../../../core/db.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { IdentityService } from "./credentials.js";
+import { LOGIN_KEY_INVALID, LOGIN_KEY_INVALID_TEXT } from "./browser.js";
 import { startHttpServer, type HttpServerHandle } from "../../transport/streamable-http.js";
 import { buildMcpServer } from "../../server.js";
 import type { McpProviders } from "../../context.js";
@@ -143,6 +144,18 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     const interaction = /name="interaction" value="([^"]*)"/.exec(page)![1];
     const form = { login_key: user.loginKey, csrf, interaction };
     expect((await visit("/login", form, { origin: "https://evil.example" })).status).toBe(403);
+    // A wrong key says so (and only for /login), without saying whether the user exists.
+    const wrong = await visit(
+      "/login",
+      { ...form, login_key: user.loginKey.slice(0, -4) + "AAAA" },
+      { accept: "application/json" },
+    );
+    expect(wrong.status).toBe(400);
+    expect(await wrong.json()).toMatchObject({ error: "invalid_request", error_description: LOGIN_KEY_INVALID });
+    expect(page).toContain(LOGIN_KEY_INVALID_TEXT);
+    // The failed attempt used the page's challenge: sign in from a fresh page.
+    const fresh = await (await visit(authorized.headers.get("location")!)).text();
+    form.csrf = /name="csrf" value="([^"]+)"/.exec(fresh)![1];
     const signedIn = await visit("/login", form);
     expect(signedIn.status).toBe(303);
     expect(signedIn.headers.get("set-cookie")).toContain("HttpOnly; SameSite=Lax");
