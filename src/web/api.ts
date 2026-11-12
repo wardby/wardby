@@ -27,7 +27,7 @@ import {
 } from "../core/documents/comments.js";
 import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
 import { BOARD_ID } from "../core/documents/boards/ids.js";
-import { frameHtml } from "../core/documents/boards/frames.js";
+import { versionFrames } from "../core/documents/boards/frames.js";
 import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js";
 import { recordFidelity, type FidelityBoard } from "../core/documents/fidelity.js";
 import { loadContent } from "../core/documents/files.js";
@@ -243,8 +243,11 @@ export async function getFrames(
   if (!doc) throw new Error("document_not_found");
   if (doc.kind !== "design") throw new Error("document_format_mismatch");
   let content;
+  let versionId: string;
   if (number === undefined) {
-    content = (await getDocument(deps.db, documentId)).content;
+    const current = await getDocument(deps.db, documentId);
+    content = current.content;
+    versionId = current.version.id;
   } else {
     const v = await deps.db.documentVersion.findUnique({
       where: { documentId_number: { documentId, number } },
@@ -252,19 +255,12 @@ export async function getFrames(
     });
     if (!v) throw new Error("document_version_not_found");
     content = await loadContent(deps.db, v);
+    versionId = v.id;
   }
   if (content.format !== "boards-v1") throw new Error("document_format_mismatch");
   const files = content.files;
   const manifest = parseManifest(files[MANIFEST_PATH] ?? "");
-  const ids = new Set(manifest.boards.map((b) => b.id));
-  const boards = manifest.boards
-    .filter((b) => typeof files[b.file] === "string")
-    .map((b) => ({
-      id: b.id,
-      name: b.name,
-      width: b.width,
-      html: frameHtml(files[b.file], mode as "play" | "overview", ids),
-    }));
+  const boards = versionFrames(versionId, mode as "play" | "overview", manifest.boards, files);
   sendWebJson(res, 200, { boards });
 }
 

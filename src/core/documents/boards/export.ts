@@ -33,7 +33,7 @@ export function exportSlug(title: string, fallback = "design"): string {
 
 export function prototypeFile(input: {
   title: string;
-  boards: { id: string; name: string; width: number; html: string }[];
+  boards: readonly { id: string; name: string; width: number; html: string }[];
 }): string {
   const csp = `default-src 'none'; script-src 'sha256-${SCRIPT_HASH}'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'`;
   return (

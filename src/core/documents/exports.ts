@@ -16,7 +16,7 @@ import { requireDocumentAccess, type Viewer } from "./access.js";
 import { documentHourlyLimiter } from "./agent-loop.js";
 import { exportSlug, prototypeFile } from "./boards/export.js";
 import { MANIFEST_PATH, parseManifest, type Manifest } from "./boards/format.js";
-import { frameHtml } from "./boards/frames.js";
+import { frameHtml, versionFrames } from "./boards/frames.js";
 import { loadContent } from "./files.js";
 import { MARKDOWN_PDF_WIDTH, markdownPrintFile, markdownToSafeHtml } from "./markdown-export.js";
 
@@ -114,7 +114,7 @@ export async function exportFile(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; format: FileExportFormat; board?: string; versionNumber?: number },
 ): Promise<{ filename: string; mime: string; body: string }> {
-  const { doc, content } = await source(db, input.documentId, input.viewer, input.versionNumber);
+  const { doc, version, content } = await source(db, input.documentId, input.viewer, input.versionNumber);
   if (doc.kind !== "design") throw new Error("export_format_unsupported");
   const parts = designParts(content);
   const slug = exportSlug(doc.title);
@@ -124,10 +124,7 @@ export async function exportFile(
     return { filename: `${slug}-${entry.id}.html`, mime: "text/html", body: html };
   }
   if (input.format !== "prototype") throw new Error("export_format_unsupported");
-  const ids = boardIds(parts.manifest);
-  const boards = parts.manifest.boards
-    .filter((b) => typeof parts.files[b.file] === "string")
-    .map((b) => ({ id: b.id, name: b.name, width: b.width, html: frameHtml(parts.files[b.file], "play", ids) }));
+  const boards = versionFrames(version.id, "play", parts.manifest.boards, parts.files);
   return {
     filename: `${slug}-prototype.html`,
     mime: "text/html",
