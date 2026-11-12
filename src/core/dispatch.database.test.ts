@@ -10,7 +10,7 @@ import type { Executor } from "../providers/executor/types.js";
 import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "./coding-repository-set.js";
 import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
-import { dispatchRun } from "./dispatch.js";
+import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { createRepoAccessGate } from "./repo-access.js";
 
 const BASE_SHA = "c".repeat(40);
@@ -265,6 +265,135 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect((await rowsOf(continuation!.run.id)).map((r) => r.name)).toEqual(["base", "upstream"]);
     expect(second.spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
     expect(second.spies.authorizeCodingRepository).not.toHaveBeenCalled();
+  });
+
+  /** A root run of `agentId` with a writable `tools` row (pull request `toolsPr`) and the default's `result`. */
+  async function rootWithTools(agentId: string, defaultResult: "opened" | "no_changes", toolsPr = 3) {
+    const root = await dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "sync" });
+    const runId = root!.run.id;
+    const opened = (repository: string, number: number) => ({
+      schemaVersion: 1,
+      outcome: "pull_request_opened",
+      repository,
+      baseRef: "main",
+      headRef: `wardby/run-${runId}`,
+      commitSha: "a".repeat(40),
+      pullRequestUrl: `https://github.com/${repository}/pull/${number}`,
+      pullRequestNumber: number,
+      summary: "Opened the PR",
+      tests: [],
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
+    await db.codingRun.update({
+      where: { runId },
+      data: {
+        result:
+          defaultResult === "opened"
+            ? opened("acme/fork", 7)
+            : {
+                schemaVersion: 1,
+                outcome: "no_changes",
+                repository: "acme/fork",
+                baseRef: "main",
+                summary: "Nothing here",
+                tests: [],
+                usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+              },
+      },
+    });
+    const tools = `acme/tools-${suffix}-${++counter}`;
+    await db.codingRunRepository.create({
+      data: {
+        runId,
+        position: 2,
+        name: "tools",
+        access: "write",
+        provider: "github",
+        repository: tools,
+        resolvedSha: MAIN_SHA,
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        pullRequestNumber: toolsPr,
+        result: opened(tools, toolsPr),
+      },
+    });
+    return { runId, tools };
+  }
+
+  it("continues a root from one of its writable extras' pull requests (checkContinuation)", async () => {
+    const { agentId } = await codingAgent();
+    const { runId, tools } = await rootWithTools(agentId, "opened");
+    expect(await checkContinuation(db, runId, tools, owner)).toEqual({
+      ok: true,
+      root: {
+        runId,
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        pullRequestNumber: 3,
+        repo: { kind: "extra", name: "tools", repository: tools, pullRequestNumber: 3 },
+      },
+    });
+    expect(await checkContinuation(db, runId, "acme/fork")).toMatchObject({
+      ok: true,
+      root: { pullRequestNumber: 7, repo: { kind: "default" } },
+    });
+    // A read repository of the set, and one outside it, are still other repositories.
+    const [base] = await rowsOf(runId);
+    expect(await checkContinuation(db, runId, base.repository)).toEqual({ ok: false, reason: "other_repository" });
+    expect(await checkContinuation(db, runId, "acme/elsewhere")).toEqual({ ok: false, reason: "other_repository" });
+  });
+
+  it("dispatches a continuation of a root whose default repository opened no pull request but an extra did", async () => {
+    const { agentId } = await codingAgent();
+    const { runId } = await rootWithTools(agentId, "no_changes");
+    expect(await checkContinuation(db, runId, "acme/fork")).toEqual({ ok: false, reason: "no_pull_request" });
+    const continuation = await dispatchRun({
+      db,
+      executor: fakeExecutor().executor,
+      agentId,
+      codingTask: "retry the default",
+      continuesCodingRunId: runId,
+    });
+    const row = await db.codingRun.findUnique({ where: { runId: continuation!.run.id } });
+    expect(row).toMatchObject({ rootCodingRunId: runId, repository: "acme/fork", headRef: `wardby/run-${runId}` });
+    expect((await rowsOf(continuation!.run.id)).map((r) => r.name)).toEqual(["base", "upstream", "tools"]);
+  });
+
+  it("refuses a continuation of a root that opened no pull request anywhere", async () => {
+    const { agentId } = await codingAgent();
+    const { runId } = await rootWithTools(agentId, "no_changes");
+    await db.codingRunRepository.updateMany({ where: { runId }, data: { pullRequestNumber: null } });
+    await expect(
+      dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "again", continuesCodingRunId: runId }),
+    ).rejects.toEqual(new ContinuationRefusedError("no_pull_request"));
+  });
+
+  it("refuses a continuation whose workspace would be one of the root's extras", async () => {
+    const { agentId } = await codingAgent();
+    const { runId } = await rootWithTools(agentId, "opened");
+    // The root's default is now a repository this agent does not list, and its row is the agent's default.
+    await db.codingRun.update({ where: { runId }, data: { repository: `acme/gone-${suffix}` } });
+    await db.codingRunRepository.updateMany({ where: { runId, name: "tools" }, data: { repository: "acme/fork" } });
+    await expect(
+      dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "again", continuesCodingRunId: runId }),
+    ).rejects.toEqual(new ContinuationRefusedError("other_repository"));
+  });
+
+  it("refuses repositories on a continuation, which always reuses its root's set, before any run exists", async () => {
+    const { agentId } = await codingAgent();
+    const { runId } = await rootWithTools(agentId, "opened");
+    const before = (await runsOf(agentId)).length;
+    await expect(
+      dispatchRun({
+        db,
+        executor: fakeExecutor().executor,
+        agentId,
+        codingTask: "again",
+        continuesCodingRunId: runId,
+        codingRepositories: ["base"],
+      }),
+    ).rejects.toThrow(RepositorySetRefusedError);
+    expect(await runsOf(agentId)).toHaveLength(before);
   });
 
   it("records a deferred run's rows unresolved, the file's ref left for the start", async () => {

@@ -920,5 +920,20 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
         await drop([rootId]);
       }
     });
+
+    it("pullRequestMarkedReady with a name reads the root's row of that extra, not the run's own flag", async () => {
+      const rootId = `container-extra-ready-${randomUUID()}`;
+      try {
+        const [tools] = await seed(rootId, ["tools", "docs"]);
+        await db.codingRunRepository.update({ where: { id: tools.id }, data: { markedReadyAt: new Date() } });
+        const store = new PrismaContainerExecutionStore(db);
+        await expect(store.pullRequestMarkedReady(rootId, "tools")).resolves.toBe(true);
+        await expect(store.pullRequestMarkedReady(rootId, "docs")).resolves.toBe(false);
+        await expect(store.pullRequestMarkedReady(rootId, "missing")).resolves.toBe(false);
+        await expect(store.pullRequestMarkedReady(rootId)).resolves.toBe(false);
+      } finally {
+        await drop([rootId]);
+      }
+    });
   });
 });

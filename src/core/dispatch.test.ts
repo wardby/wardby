@@ -156,6 +156,9 @@ function fakeDb(
         return data;
       },
       findUnique: async ({ where }: any) => codingRuns.find((row) => row.runId === where.runId) ?? null,
+      // newestDefaultPullRequest: a root's continuations (newest first; insertion order here).
+      findMany: async ({ where }: any) =>
+        codingRuns.filter((row) => row.rootCodingRunId === where.rootCodingRunId).reverse(),
       // effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
       findFirst: async ({ where }: any) => {
         const [{ runId: rootId }] = where.OR;
@@ -1626,7 +1629,13 @@ describe("dispatchRun", () => {
 
       expect(await checkContinuation(state.db, "root_run", "openai/wardby", "owner_1")).toEqual({
         ok: true,
-        root: { runId: "root_run", baseRef: "main", headRef: "wardby/run-root_run", pullRequestNumber: 22 },
+        root: {
+          runId: "root_run",
+          baseRef: "main",
+          headRef: "wardby/run-root_run",
+          pullRequestNumber: 22,
+          repo: { kind: "default", repository: "openai/wardby", pullRequestNumber: 22 },
+        },
       });
       const result = await dispatchRun({
         db: state.db,

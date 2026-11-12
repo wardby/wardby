@@ -519,7 +519,13 @@ describe("routeHostEvent mention task text", () => {
     vi.mocked(dispatchRun).mockClear();
     vi.mocked(checkContinuation).mockResolvedValueOnce({
       ok: true,
-      root: { runId: "run_9", baseRef: "main", headRef: "wardby/run-run_9", pullRequestNumber: 9 },
+      root: {
+        runId: "run_9",
+        baseRef: "main",
+        headRef: "wardby/run-run_9",
+        pullRequestNumber: 9,
+        repo: { kind: "default", repository: REPO, pullRequestNumber: 9 },
+      },
     });
     const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
     const result = await routeHostEvent({ ...base, priorRunId: "run_9" }, d);

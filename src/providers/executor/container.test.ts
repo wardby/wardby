@@ -219,9 +219,9 @@ class FakeStore implements ContainerExecutionStore {
   }
 
   /** Fix-round description store methods; tests that need them assign them. */
-  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
+  pullRequestDescriptionBaseline?: (rootRunId: string, name?: string) => Promise<StoredDescriptionBaseline>;
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
-  pullRequestMarkedReady?: (rootRunId: string) => Promise<boolean>;
+  pullRequestMarkedReady?: (rootRunId: string, name?: string) => Promise<boolean>;
   linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
   delegatingEventTask?: (runId: string) => Promise<string | null>;
   recordPullRequestDescription?: (input: {
@@ -229,6 +229,7 @@ class FakeStore implements ContainerExecutionStore {
     expectedSha256: string | null;
     sha256: string;
     agentTextRunId: string;
+    name?: string;
   }) => Promise<boolean>;
   /** Overrun top-ups; tests that need it assign it. */
   topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome; near?: boolean }>;
@@ -468,6 +469,10 @@ class FakeVcs implements VcsProvider {
   slotErrors = new Map<string, Error>();
   /** Per slot: the pull request number finalize opens (default 7). */
   slotNumbers = new Map<string, number>();
+  /** Per slot: the description outcome finalize reports on its pull request, when set. */
+  slotDescriptions = new Map<string, DescriptionWriteOutcome>();
+  /** Runs as finalizeChanges starts, with the slot name (undefined for the default workspace). */
+  onFinalize?: (slot: string | undefined) => void;
   /** The target-branch merge prepare reports on a continuation's workspace, when set. */
   targetMerge?: PreparedWorkspace["targetMerge"];
   /** The no-push description refresh; tests that need it assign it. */
@@ -556,6 +561,7 @@ class FakeVcs implements VcsProvider {
     this.finalizeCalls.push({ slot: workspace.slot?.name, details: structuredClone(details) });
     const slot = workspace.slot?.name;
     this.events.push(slot === undefined ? "finalize" : `finalize:${slot}`);
+    this.onFinalize?.(slot);
     if (slot !== undefined) {
       const error = this.slotErrors.get(slot);
       if (error) throw error;
@@ -568,6 +574,7 @@ class FakeVcs implements VcsProvider {
         };
       }
       const number = this.slotNumbers.get(slot) ?? 7;
+      const description = this.slotDescriptions.get(slot);
       return {
         outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
         repository: workspace.repository,
@@ -577,6 +584,7 @@ class FakeVcs implements VcsProvider {
         commitSha: "d".repeat(40),
         pullRequestNumber: number,
         pullRequestUrl: `https://github.com/${workspace.repository}/pull/${number}`,
+        ...(description ? { description: structuredClone(description) } : {}),
       };
     }
     if (this.finalizeEmpty) {
@@ -5877,6 +5885,161 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(created.store.run.status).toBe("budget_exhausted");
       expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
       expect(extrasOf(created)).toEqual([]);
+    });
+
+    describe("in a continuation", () => {
+      const CONTINUATION = { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" };
+      const continued = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) =>
+        writeRow(name, { headRef: "wardby/run-root-run", continuesBranch: true, ...overrides });
+      const baseline = {
+        recordedSha256: "f".repeat(64),
+        previousAgentText: "Tools before.",
+        agentTextRunId: "root-run",
+      };
+
+      it("records the description of an extra's first pull request on the root's row of that name", async () => {
+        const created = await multi([writeRow("tools", { headRef: "wardby/run-root-run" })], {}, CONTINUATION);
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        const recorded: unknown[] = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", { kind: "written", sha256: "e".repeat(64) });
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.vcs.finalizeCalls[1]).toMatchObject({ slot: "tools" });
+        // A fresh pull request: no baseline to replace.
+        expect(created.vcs.finalizeCalls[1].details).not.toHaveProperty("description");
+        expect(recorded).toEqual([
+          {
+            rootRunId: "root-run",
+            expectedSha256: null,
+            sha256: "e".repeat(64),
+            agentTextRunId: "run-1",
+            name: "tools",
+          },
+        ]);
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({
+            name: "tools",
+            pullRequestNumber: 7,
+            prDescriptionOutcome: "written",
+            prDescriptionSha256: "e".repeat(64),
+            prDescriptionRunId: "run-1",
+          }),
+        ]);
+      });
+
+      it("records nothing on the root's row for an extra that continued its pull request", async () => {
+        const created = await multi([continued("tools")], {}, CONTINUATION);
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string; expectedSha256: string | null }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", {
+          kind: "replaced",
+          sha256: "e".repeat(64),
+          agentTextRunId: "run-1",
+        });
+        await created.executor.start("run-1");
+        expect(asked).toContain("tools");
+        expect(recorded.filter((input) => input.name === "tools")).toEqual([
+          expect.objectContaining({ expectedSha256: "f".repeat(64) }),
+        ]);
+      });
+
+      it("refreshes the description of a continued extra that changed nothing", async () => {
+        const created = await multi([continued("tools", { repository: "openai/tools" })], {}, CONTINUATION);
+        created.vcs.emptySlots.add("tools");
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        const refreshed: Array<{ repository: string; slot?: string; summary?: string }> = [];
+        created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+          refreshed.push({
+            repository: workspace.repository,
+            slot: (workspace as PreparedWorkspace).slot?.name,
+            summary: details.summary,
+          });
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(refreshed).toContainEqual({ repository: "openai/tools", slot: "tools", summary: "Fixed it." });
+        expect(asked).toContain("tools");
+        expect(recorded).toContainEqual(expect.objectContaining({ name: "tools", sha256: "9".repeat(64) }));
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({ name: "tools", pullRequestNumber: null, prDescriptionOutcome: "unchanged" }),
+        ]);
+      });
+
+      it("refreshes a no-change extra only after checking that repository's access again", async () => {
+        const gate = allowAll();
+        const created = await harness(
+          { repositories: [continued("tools")], ...CONTINUATION },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            repoAccess: gate as never,
+          },
+        );
+        created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+        created.vcs.emptySlots.add("tools");
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        let refreshes = 0;
+        created.vcs.refreshPullRequestDescription = async () => {
+          refreshes += 1;
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        created.vcs.onFinalize = (slot) => {
+          if (slot === "tools") {
+            gate.authorizeUse.mockImplementation(async (input: unknown) =>
+              (input as { repository: string }).repository === "openai/tools"
+                ? { ok: false, reason: "not_authorized" }
+                : { ok: true },
+            );
+          }
+        };
+        await created.executor.start("run-1");
+        expect(refreshes).toBe(0);
+        expect(extrasOf(created)).toEqual([expect.objectContaining({ prDescriptionOutcome: "skipped:error" })]);
+      });
+
+      it("asks whether each extra's own pull request was marked ready on a budget stop", async () => {
+        const created = await multi(
+          [continued("tools"), continued("docs", { position: 2 })],
+          {
+            outcome: "budget_exhausted",
+          },
+          CONTINUATION,
+        );
+        created.vcs.continuationPullRequestDraft = async () => undefined;
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestMarkedReady = async (_root, name) => {
+          asked.push(name);
+          // Only tools' pull request was marked ready; the default's and docs' are drafts.
+          return name === "tools";
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(asked).toEqual([undefined, "tools", "docs"]);
+        expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      });
     });
 
     it("(g) never collects or finalizes a read repository", async () => {

@@ -680,10 +680,11 @@ export interface ContainerExecutionStore {
   pullRequestRunIds?(rootRunId: string): Promise<string[]>;
   /**
    * Whether wardby marked the root run's pull request ready for review
-   * (CodingRun.markedReadyAt). Optional: the fallback when the host's draft
-   * state is unknown; without it the pull request counts as a draft.
+   * (CodingRun.markedReadyAt; with `name`, the root's row of that extra
+   * repository). Optional: the fallback when the host's draft state is
+   * unknown; without it the pull request counts as a draft.
    */
-  pullRequestMarkedReady?(rootRunId: string): Promise<boolean>;
+  pullRequestMarkedReady?(rootRunId: string, name?: string): Promise<boolean>;
   /**
    * Where the root run's pull request came from (see LinkedIssueSource).
    * Optional: without it continuations get no issue text.
@@ -935,7 +936,14 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }));
   }
 
-  async pullRequestMarkedReady(rootRunId: string): Promise<boolean> {
+  async pullRequestMarkedReady(rootRunId: string, name?: string): Promise<boolean> {
+    if (name !== undefined) {
+      const row = await this.db.codingRunRepository.findUnique({
+        where: { runId_name: { runId: rootRunId, name } },
+        select: { markedReadyAt: true },
+      });
+      return Boolean(row?.markedReadyAt);
+    }
     const root = await this.db.codingRun.findUnique({ where: { runId: rootRunId }, select: { markedReadyAt: true } });
     return Boolean(root?.markedReadyAt);
   }
@@ -2790,7 +2798,7 @@ export class ContainerExecutor implements Executor {
       const view = slot.extra ? extraView(current, slot.extra) : current;
       const continuesPullRequest = Boolean(view.rootCodingRunId) && hasPullRequestDescription(view);
       try {
-        if (continuesPullRequest && !(await this.continuationStillDraft(view, slot.workspace))) {
+        if (continuesPullRequest && !(await this.continuationStillDraft(view, slot.workspace, slot.extra?.name))) {
           containerLog.info(
             { runId: current.runId, repository: slot.name },
             "a run stopped at its budget pushes nothing onto a pull request that is no longer a draft",
@@ -2972,12 +2980,13 @@ export class ContainerExecutor implements Executor {
       const pushed = finalized.outcome !== "no_changes";
       const name = slot.extra?.name;
       const description = !pushed
-        ? slot.extra
-          ? {}
-          : await this.refreshDescriptionInTime(view, publish.agentOutput, slot.workspace)
+        ? await this.refreshDescriptionInTime(view, publish.agentOutput, slot.workspace, name)
         : await this.recordDescription(view, publish.descriptionState, descriptionOutcomeOf(finalized), name).catch(
             (): CodingRunRecord => ({}),
           );
+      if (slot.extra && pushed && !view.rootCodingRunId && run.rootCodingRunId) {
+        await this.recordFirstExtraDescription(run, slot.extra.name, description);
+      }
       const result = this.publishedResult(publish, options.budgetStopped);
       if (!slot.extra) {
         mainResult = result;
@@ -3161,16 +3170,22 @@ export class ContainerExecutor implements Executor {
    */
   /**
    * Whether a continuation's pull request is still a draft: the host's answer
-   * when it has one, else the root run's record of wardby marking it ready.
-   * A failed record lookup counts as not a draft (nothing unfinished is pushed).
+   * when it has one, else the root run's record of wardby marking it ready
+   * (`name`: an extra repository's pull request, recorded on the root's row of
+   * that name). A failed record lookup counts as not a draft (nothing
+   * unfinished is pushed).
    */
-  private async continuationStillDraft(run: ContainerRunSnapshot, workspace: PreparedWorkspace): Promise<boolean> {
+  private async continuationStillDraft(
+    run: ContainerRunSnapshot,
+    workspace: PreparedWorkspace,
+    name?: string,
+  ): Promise<boolean> {
     const draft = await this.options.vcs.continuationPullRequestDraft?.(workspace).catch(() => undefined);
     if (draft !== undefined) return draft;
     const store = this.options.store;
     if (!run.rootCodingRunId || !store.pullRequestMarkedReady) return true;
     try {
-      return !(await store.pullRequestMarkedReady(run.rootCodingRunId));
+      return !(await store.pullRequestMarkedReady(run.rootCodingRunId, ...(name !== undefined ? [name] : [])));
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not read whether the pull request was marked ready");
       return false;
@@ -3315,6 +3330,41 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * An extra repository whose first pull request a continuation opened: its description hash is
+   * recorded on the root run's row of that name too (only while that row records none), where every
+   * later round reads its baseline and mark-ready keeps its state. Never throws.
+   */
+  private async recordFirstExtraDescription(
+    run: ContainerRunSnapshot,
+    name: string,
+    description: CodingRunRecord,
+  ): Promise<void> {
+    const store = this.options.store;
+    const { prDescriptionSha256: sha256, prDescriptionRunId: agentTextRunId } = description;
+    if (!run.rootCodingRunId || !sha256 || !agentTextRunId || !store.recordPullRequestDescription) return;
+    try {
+      const won = await store.recordPullRequestDescription({
+        rootRunId: run.rootCodingRunId,
+        expectedSha256: null,
+        sha256,
+        agentTextRunId,
+        name,
+      });
+      if (!won) {
+        containerLog.warn(
+          { runId: run.runId, rootRunId: run.rootCodingRunId, repository: name },
+          "the root run already records a description for this repository's pull request; not recorded",
+        );
+      }
+    } catch (err) {
+      containerLog.warn(
+        { err, runId: run.runId, repository: name },
+        "could not record the pull request description hash",
+      );
+    }
+  }
+
+  /**
    * refreshDescriptionWithoutPush, capped at DESCRIPTION_REFRESH_TIMEOUT_MS so a
    * slow host cannot hold up store.complete; a timeout is skipped:error.
    */
@@ -3322,6 +3372,7 @@ export class ContainerExecutor implements Executor {
     run: ContainerRunSnapshot,
     output: CodingWorkerOutput,
     existingWorkspace: PreparedWorkspace | null | undefined,
+    name?: string,
   ): Promise<CodingRunRecord> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<CodingRunRecord>((resolve) => {
@@ -3334,7 +3385,7 @@ export class ContainerExecutor implements Executor {
       }, DESCRIPTION_REFRESH_TIMEOUT_MS);
     });
     try {
-      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace), timedOut]);
+      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace, name), timedOut]);
     } finally {
       clearTimeout(timer);
     }
@@ -3342,17 +3393,41 @@ export class ContainerExecutor implements Executor {
 
   /**
    * A fix round that changed nothing still re-derives its PR description (no
-   * push). Never throws: any failure is recorded as skipped:error.
+   * push). Never throws: any failure is recorded as skipped:error. `name`: an
+   * extra repository's pull request (`run` as extraView sees it, with its own
+   * workspace), checked for access by that row alone.
    */
   private async refreshDescriptionWithoutPush(
     run: ContainerRunSnapshot,
     output: CodingWorkerOutput,
     existingWorkspace: PreparedWorkspace | null | undefined,
+    name?: string,
   ): Promise<CodingRunRecord> {
     const vcs = this.options.vcs;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !vcs.refreshPullRequestDescription) return {};
-    const state = await this.descriptionStateFor(run);
-    if (!state || "failed" in state) return this.recordDescription(run, state, undefined);
+    const state = await this.descriptionStateFor(run, name);
+    if (!state || "failed" in state) return this.recordDescription(run, state, undefined, name);
+    if (name !== undefined) {
+      try {
+        if (!existingWorkspace) throw new Error("coding_workspace_lost");
+        await this.authorizeExtras(await this.requireCurrent(run.runId), { inFlight: true, only: name });
+        const outcome = await vcs.refreshPullRequestDescription(existingWorkspace, {
+          summary: output.summary,
+          tests: output.tests,
+          tag: output.tag,
+          ...(await this.pullRequestRegistryReport(run)),
+          ...(await this.issueSourceFor(run)),
+          description: { baseline: state.baseline },
+        });
+        return await this.recordDescription(run, state, outcome, name);
+      } catch (err) {
+        containerLog.warn(
+          { err, runId: run.runId, repository: name },
+          "could not refresh the pull request description",
+        );
+        return { prDescriptionOutcome: "skipped:error" };
+      }
+    }
     try {
       const input = this.preflightForCleanup(run);
       // Only the pull request is needed: a run another process launched has no workspace here.

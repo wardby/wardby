@@ -154,7 +154,13 @@ describe("startReviewFixRound", () => {
   it("refuses a known run that opened a different PR", async () => {
     vi.mocked(checkContinuation).mockResolvedValueOnce({
       ok: true,
-      root: { runId: "run_1", baseRef: "main", headRef: "h", pullRequestNumber: 9 },
+      root: {
+        runId: "run_1",
+        baseRef: "main",
+        headRef: "h",
+        pullRequestNumber: 9,
+        repo: { kind: "default", repository: REPO, pullRequestNumber: 9 },
+      },
     });
     const { deps } = setup();
     expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "cannot_continue" });

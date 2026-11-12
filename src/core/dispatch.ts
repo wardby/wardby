@@ -1,11 +1,10 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
-import { codeProviderOf, normalizeHostedRepository } from "../coding/code-host.js";
+import { codeProviderOf } from "../coding/code-host.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingTaskInputSchema,
   normalizeGitRef,
-  publicCodingRunResult,
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
@@ -38,6 +37,12 @@ import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInp
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
+  resolveRunPullRequest,
+  rootPullRequests,
+  sameRepository,
+  type RunPullRequestTarget,
+} from "./run-pull-request.js";
+import {
   resolveCodingRepository,
   type CodingRepositoryReader,
   type CodingRepositoryTarget,
@@ -45,6 +50,7 @@ import {
 import {
   CODING_SET_LINK_FILTER,
   planRepositorySet,
+  RepositorySetRefusedError,
   resolveRepositorySetRefs,
   type PlannedRunRepository,
   type ResolvedRunRepository,
@@ -64,6 +70,7 @@ export type DispatchDb = Pick<
   | "run"
   | "runHostCheck"
   | "codingRun"
+  | "codingRunRepository"
   | "task"
   | "webhook"
   | "budgetGroup"
@@ -417,17 +424,26 @@ export class ContinuationRefusedError extends Error {
 }
 
 export type ContinuationCheck =
-  | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
+  | {
+      ok: true;
+      root: {
+        runId: string;
+        baseRef: string;
+        headRef: string;
+        /** The matched pull request's number: `repo`'s. */
+        pullRequestNumber: number;
+        repo: RunPullRequestTarget;
+      };
+    }
   | { ok: false; reason: ContinuationRefusal };
-
-/** Carries the root's opening agent's owner along with the row, for the same-owner check below. */
-const CONTINUATION_ROOT_INCLUDE = { run: { select: { agent: { select: { ownerId: true } } } } } as const;
 
 /**
  * Whether this deployment can continue coding run `runId` in `repository`: the
- * run (or its root) is in this database, in that repository, and opened a pull
- * request. A run id read from a pull request can name a run that another
- * deployment sharing the same App made, so check before relying on one.
+ * run (or its root) is in this database, `repository` is the root's default
+ * repository or one of its writable extras (#537 §4), and that repository's
+ * pull request was opened. A run id read from a pull request can name a run
+ * that another deployment sharing the same App made, so check before relying
+ * on one. See resolveRunPullRequest.
  *
  * `dispatchingOwnerId`, when given (even `null`), additionally fails closed
  * unless the root's opening agent has that exact owner: a sibling-hint or a
@@ -438,47 +454,20 @@ const CONTINUATION_ROOT_INCLUDE = { run: { select: { agent: { select: { ownerId:
  * run at all" (a user-facing refusal message, not a dispatch).
  */
 export async function checkContinuation(
-  reader: Pick<DispatchTx, "codingRun">,
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
   runId: string,
   repository: string,
   dispatchingOwnerId?: string | null,
 ): Promise<ContinuationCheck> {
-  const candidate = await reader.codingRun.findUnique({ where: { runId }, include: CONTINUATION_ROOT_INCLUDE });
-  if (!candidate) return { ok: false, reason: "unknown_run" };
-  const root = candidate.rootCodingRunId
-    ? await reader.codingRun.findUnique({
-        where: { runId: candidate.rootCodingRunId },
-        include: CONTINUATION_ROOT_INCLUDE,
-      })
-    : candidate;
-  if (!root) return { ok: false, reason: "unknown_run" };
-  if (normalizeHostedRepository(root.repository) !== normalizeHostedRepository(repository)) {
-    return { ok: false, reason: "other_repository" };
-  }
-  const rootResult = publicCodingRunResult(root.result);
-  if (
-    (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") ||
-    rootResult.pullRequestNumber === undefined
-  ) {
-    return { ok: false, reason: "no_pull_request" };
-  }
-  if (dispatchingOwnerId !== undefined) {
-    const rootOwnerId = root.run?.agent?.ownerId ?? null;
-    // A null owner on either side is never treated as a match: an owner-less
-    // agent gets no continuation trust, fail closed either direction.
-    if (dispatchingOwnerId === null || rootOwnerId === null || dispatchingOwnerId !== rootOwnerId) {
-      return { ok: false, reason: "other_owner" };
-    }
-  }
-  return {
-    ok: true,
-    root: {
-      runId: root.runId,
-      baseRef: root.baseRef,
-      headRef: root.headRef,
-      pullRequestNumber: rootResult.pullRequestNumber,
-    },
-  };
+  const resolved = await resolveRunPullRequest(reader, {
+    markerRunId: runId,
+    provider: codeProviderOf(repository),
+    repository,
+    ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
+  });
+  if (!resolved.ok) return resolved;
+  const { root, repo } = resolved;
+  return { ok: true, root: { ...root, pullRequestNumber: repo.pullRequestNumber, repo } };
 }
 
 function codingTarget(
@@ -500,7 +489,7 @@ function codingTarget(
  * (see checkContinuation), else the profile's base.
  */
 async function resolveCodingBranch(
-  reader: Pick<DispatchTx, "codingRun">,
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
   options: DispatchRunOptions,
   profile: { repository: string; baseRef: string },
   /** The dispatched (continuing) agent's current owner; checkContinuation fails closed against it. */
@@ -510,9 +499,7 @@ async function resolveCodingBranch(
   if (options.codingBaseRef !== undefined) {
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
-  const check = await checkContinuation(reader, options.continuesCodingRunId, profile.repository, ownerId);
-  if (!check.ok) throw new ContinuationRefusedError(check.reason);
-  const { root } = check;
+  const root = await continuationRoot(reader, options.continuesCodingRunId, profile.repository, ownerId);
   return {
     baseRef: root.baseRef,
     headRef: root.headRef,
@@ -520,6 +507,47 @@ async function resolveCodingBranch(
     rootCodingRunId: root.runId,
     mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
+}
+
+/**
+ * The root a continuation dispatch continues (see checkContinuation): its /workspace is always the
+ * root's default repository, so a check that matched one of the root's extras is refused as another
+ * repository. A root whose default repository has no pull request yet (it had no changes, or its
+ * publish failed) while another repository of its set opened one is still continued: the follow-up
+ * retries the default repository's publish (#537 §3/§4).
+ */
+async function continuationRoot(
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
+  runId: string,
+  repository: string,
+  ownerId: string | null,
+): Promise<{ runId: string; baseRef: string; headRef: string }> {
+  const check = await checkContinuation(reader, runId, repository, ownerId);
+  if (check.ok) {
+    if (check.root.repo.kind !== "default") throw new ContinuationRefusedError("other_repository");
+    return check.root;
+  }
+  if (check.reason !== "no_pull_request") throw new ContinuationRefusedError(check.reason);
+  // The owner check came before no_pull_request, so it passed.
+  const marked = await reader.codingRun.findUnique({
+    where: { runId },
+    select: { runId: true, rootCodingRunId: true },
+  });
+  const rootId = marked?.rootCodingRunId ?? marked?.runId;
+  const root = rootId
+    ? await reader.codingRun.findUnique({
+        where: { runId: rootId },
+        select: { runId: true, repository: true, baseRef: true, headRef: true },
+      })
+    : null;
+  if (
+    !root ||
+    !sameRepository(root.repository, repository) ||
+    (await rootPullRequests(reader, root.runId)).length === 0
+  ) {
+    throw new ContinuationRefusedError("no_pull_request");
+  }
+  return { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
 }
 
 /**
@@ -834,6 +862,13 @@ export async function copyRootRepositoryRows(
  */
 export async function dispatchRun(options: DispatchRunOptions): Promise<DispatchRunResult | null> {
   const now = options.now ?? new Date();
+  if (options.continuesCodingRunId !== undefined && options.codingRepositories !== undefined) {
+    // A continuation always works in its root's set (#537 §4): a list here would be ignored, so it is refused.
+    throw new RepositorySetRefusedError(
+      "invalid_repositories",
+      "a continuation works in its root run's repositories; leave repositories out.",
+    );
+  }
   // Read outside the transaction only to decide whether to take the group
   // dispatch lock before the transaction's first read, and whether to read the
   // repository's service declaration (a network call); everything the run is
