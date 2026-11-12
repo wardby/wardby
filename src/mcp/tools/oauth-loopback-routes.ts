@@ -1,7 +1,7 @@
 /**
  * The two routes `wardby secret connect` calls with a loopback link (oauth-loopback-link.ts):
  *
- *  - POST /oauth/loopback/start    `{ redirectUri }` -> `{ authorizeUrl, expiresAt }`
+ *  - POST /oauth/loopback/start    `{ redirectUri }` -> `{ authorizeUrl, expiresAt, name }`
  *  - POST /oauth/loopback/complete `{ code, state, iss? }` -> `{ confirmationCode }`
  *
  * Served by both hosts: the HTTP transport (streamable-http.ts, behind its canonical-Host check and
@@ -189,7 +189,7 @@ export async function handleOAuthLoopbackStart(
     else internalError(res, "start");
     return;
   }
-  send(res, 200, { authorizeUrl: started.authorizeUrl, expiresAt: started.expiresAt.toISOString() });
+  send(res, 200, { authorizeUrl: started.authorizeUrl, expiresAt: started.expiresAt.toISOString(), name: link.name });
 }
 
 export async function handleOAuthLoopbackComplete(

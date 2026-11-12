@@ -175,7 +175,8 @@ describe.skipIf(!process.env.DATABASE_URL).each(["http", "stdio"] as const)(
       const p = await principal();
       const token = await host.mcp.mintRequestState(payload(host, p, { scope: "read" }));
       const { started, code, state, callback } = await begin(host, token);
-      expect(Object.keys(started.body).sort()).toEqual(["authorizeUrl", "expiresAt"]);
+      expect(Object.keys(started.body).sort()).toEqual(["authorizeUrl", "expiresAt", "name"]);
+      expect(started.body.name).toBe("browserstack");
       expect(new URL(started.body.authorizeUrl as string).searchParams.get("redirect_uri")).toBe(LOOPBACK);
       expect(new URL(started.body.authorizeUrl as string).searchParams.get("scope")).toBe("read");
       expect(Date.parse(started.body.expiresAt as string)).toBeGreaterThan(Date.now() + 9 * 60_000);
