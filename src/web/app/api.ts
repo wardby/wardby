@@ -79,6 +79,8 @@ export class ApiError extends Error {
   constructor(
     readonly code: string,
     readonly status: number,
+    /** board_format_invalid only: the server's own problem text (fixed wording, board ids and counts). */
+    readonly problems: string[] = [],
   ) {
     super(code);
   }
@@ -129,8 +131,13 @@ export class Api {
     }
     const data: unknown = await res.json().catch(() => null);
     if (!res.ok) {
-      const code = (data as { error?: unknown } | null)?.error;
-      throw new ApiError(typeof code === "string" && CODE.test(code) ? code : "internal_error", res.status);
+      const { error: code, problems } = (data ?? {}) as { error?: unknown; problems?: unknown };
+      const safeCode = typeof code === "string" && CODE.test(code) ? code : "internal_error";
+      const list =
+        safeCode === "board_format_invalid" && Array.isArray(problems)
+          ? problems.filter((p): p is string => typeof p === "string").slice(0, 10)
+          : [];
+      throw new ApiError(safeCode, res.status, list);
     }
     return data as T;
   }
@@ -149,6 +156,19 @@ export class Api {
 
   saveContent(markdown: string, baseNumber: number): Promise<{ version: { number: number } }> {
     return this.request("PUT", this.doc("/content"), { markdown, baseNumber });
+  }
+
+  /** A design save: only the changed files (null deletes one), over version `baseNumber`. */
+  saveFiles(files: Record<string, string | null>, baseNumber: number): Promise<{ version: { number: number } }> {
+    return this.request("PUT", this.doc("/content"), { files, baseNumber });
+  }
+
+  /** The design page's import fidelity results for one version (stored once per version). */
+  fidelity(
+    versionNumber: number,
+    boards: { board: string; mismatches: number; samples: string[] }[],
+  ): Promise<unknown> {
+    return this.request("POST", this.doc("/fidelity"), { versionNumber, boards });
   }
 
   createThread(anchor: Anchor, body: string, sendToAgent: boolean): Promise<{ threadId: string; number: number }> {
@@ -225,6 +245,9 @@ const MESSAGES: Record<string, string> = {
   comment_anchor_invalid: "That selection can't be commented on.",
   comment_not_found: "That comment no longer exists. Reload to see the latest.",
   document_too_large: "The document is too large to save.",
+  board_format_invalid: "This edit can't be saved.",
+  board_too_large: "A board is too large to save (512 KB at most).",
+  document_format_mismatch: "This page is out of date. Reload and try again.",
   document_version_not_found: "That version no longer exists. Reload to see the latest.",
   guest_name_invalid: "Use a name of 1–40 characters that isn't “agent”, “via” or a member's name.",
   guest_email_invalid: "That email address doesn't look right.",

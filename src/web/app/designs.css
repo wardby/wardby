@@ -1,0 +1,286 @@
+/*
+ * The design page: layout around the GrapesJS canvas, and GrapesJS's own classes re-themed to the
+ * Viewer tokens in styles.css (light and dark). The `!important`s below override GrapesJS's own
+ * stylesheet (grapes.min.css), which sets the same properties with equal or higher specificity.
+ */
+
+.design-app {
+  display: flex;
+  flex-direction: column;
+}
+.topbar .group {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.4rem;
+  border-left: 1px solid var(--border);
+}
+.topbar .group button.on {
+  background: var(--text);
+  color: var(--surface);
+  border-color: var(--text);
+}
+.banner.bad {
+  color: var(--bad);
+}
+
+.design-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 240px 1fr 320px;
+  min-height: 0;
+}
+.dside {
+  background: var(--surface);
+  overflow: auto;
+  min-height: 0;
+}
+.dside.left {
+  border-right: 1px solid var(--border);
+}
+.dside.right {
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+.dside h2 {
+  margin: 0.9rem 0.9rem 0.35rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.dside .tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.6rem 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.dside .tabs button {
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+}
+.dside .tabs button.on {
+  background: var(--bg);
+  font-weight: 600;
+}
+.dside .tabpane {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- boards list ---- */
+.boards {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.5rem;
+}
+.boards li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  border-radius: 6px;
+}
+.boards li.on {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.boards .pick {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  min-width: 0;
+}
+.boards .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.boards .bcount {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.boards .more {
+  border: 0;
+  background: transparent;
+  padding: 0.2rem 0.4rem;
+}
+.boards .bmenu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  padding: 0.25rem;
+}
+.boards .bmenu button {
+  border: 0;
+  text-align: left;
+  background: transparent;
+}
+.boards .bmenu button:hover:not(:disabled) {
+  background: var(--bg);
+}
+.add-board {
+  margin: 0.4rem 0.9rem;
+}
+
+/* ---- canvas ---- */
+.canvas-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.canvas {
+  height: 100%;
+}
+
+/* ---- checks (version warnings) ---- */
+.checks {
+  margin: 0.6rem 0.9rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.checks h2 {
+  margin: 0 0 0.25rem;
+  color: var(--warn);
+}
+.checks ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+/* ---- Wardby dialog (rename, delete, new board) ---- */
+.wdialog {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 1rem 1.1rem;
+  min-width: 320px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.wdialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+.wdialog h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+.wdialog input {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+.wdialog .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.8rem;
+}
+
+/* ---- GrapesJS re-themed to the Viewer tokens ---- */
+.design-app .gjs-one-bg {
+  background-color: var(--surface) !important;
+}
+.design-app .gjs-two-color {
+  color: var(--text) !important;
+}
+.design-app .gjs-three-bg {
+  background-color: var(--accent) !important;
+  color: var(--accent-text) !important;
+}
+.design-app .gjs-four-color,
+.design-app .gjs-four-color-h:hover {
+  color: var(--accent) !important;
+}
+.design-app .gjs-editor,
+.design-app .gjs-cv-canvas {
+  background: var(--bg);
+}
+.design-app .gjs-cv-canvas {
+  width: 100%;
+  height: 100%;
+  top: 0;
+}
+.design-app .gjs-frame-wrapper {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+.design-app .gjs-sm-sector-title,
+.design-app .gjs-layer-title,
+.design-app .gjs-trt-header,
+.design-app .gjs-clm-header {
+  background: var(--surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  font-weight: 600;
+}
+.design-app .gjs-sm-sector,
+.design-app .gjs-sm-properties,
+.design-app .gjs-layer,
+.design-app .gjs-trt-traits {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+}
+.design-app .gjs-field,
+.design-app .gjs-sm-field,
+.design-app .gjs-clm-field,
+.design-app .gjs-input-holder,
+.design-app .gjs-field input,
+.design-app .gjs-field select {
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+}
+.design-app .gjs-sm-label,
+.design-app .gjs-label,
+.design-app .gjs-trt-trait__label,
+.design-app .gjs-clm-tags {
+  color: var(--muted) !important;
+}
+.design-app .gjs-layer.gjs-selected .gjs-layer-item {
+  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+}
+.design-app .gjs-toolbar {
+  background: var(--accent) !important;
+  border-radius: 6px;
+}
+.design-app .gjs-badge {
+  background: var(--accent) !important;
+  color: var(--accent-text) !important;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.design-app .gjs-selected {
+  outline-color: var(--accent) !important;
+}
+.design-app .gjs-resizer-h {
+  border-color: var(--accent) !important;
+}
+.design-app .gjs-off-prv {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .design-main {
+    grid-template-columns: 200px 1fr 280px;
+  }
+}
