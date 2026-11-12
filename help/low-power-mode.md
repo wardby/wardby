@@ -74,7 +74,8 @@ only when `WARDBY_LOW_POWER=1`.
 
 To skip the idle window, for example right after a test, call `power_sleep`.
 Pass `target: "proxy"`, `target: "gateway"` or `target: "renderer"` to sleep one;
-omit it for the proxy and the gateway. The renderer is the optional PNG/PDF
+omit it to sleep every deployed target (a target that is not deployed is
+skipped). The renderer is the optional PNG/PDF
 export renderer (`WARDBY_RENDERER=true`); it is a target only when
 `WARDBY_RENDERER_URL` is set, sleeps after an idle window with no export
 requested, and the first export after that waits up to 2 minutes for it to wake.

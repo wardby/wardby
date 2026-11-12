@@ -117,7 +117,7 @@ describe("power tools", () => {
     await client.close();
   });
 
-  it("power_sleep with no arguments sleeps both targets, and audits it", async () => {
+  it("power_sleep with no arguments sleeps every target, renderer included, and audits it", async () => {
     logged.length = 0;
     const power = fakePower({
       sleepNow: vi.fn(async () => ({
@@ -128,12 +128,12 @@ describe("power tools", () => {
     const client = await connect(ADMIN, power);
     const r = await client.callTool({ name: "power_sleep", arguments: {} });
     expect(r.isError).toBeFalsy();
-    expect(power.sleepNow).toHaveBeenCalledWith(["proxy", "gateway"]);
+    expect(power.sleepNow).toHaveBeenCalledWith(["proxy", "gateway", "renderer"]);
     expect(JSON.parse(text(r))).toEqual({ slept: ["proxy"], blocked: [{ target: "gateway", runIds: ["r1"] }] });
     expect(logged.find((entry) => entry.payload.event === "power.sleep")?.payload).toEqual({
       event: "power.sleep",
       principal: "p-admin",
-      targets: ["proxy", "gateway"],
+      targets: ["proxy", "gateway", "renderer"],
       outcome: "ok",
       slept: ["proxy"],
       blocked: [{ target: "gateway", runIds: ["r1"] }],
@@ -219,7 +219,7 @@ describe("power tools", () => {
     expect(audit[0].payload).toEqual({
       event: "power.sleep",
       principal: "p-admin",
-      targets: ["proxy", "gateway"],
+      targets: ["proxy", "gateway", "renderer"],
       outcome: "error",
       error: 'low_power_scale_forbidden: the control plane may not patch Deployment "wardby-native-gateway"',
     });

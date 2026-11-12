@@ -18,8 +18,6 @@ import { textResult } from "./text-result.js";
 const powerToolLog = logger.child({ module: "mcp-power" });
 
 const TARGETS = ["proxy", "gateway", "renderer"] as const satisfies readonly PowerTarget[];
-/** What power_sleep without a target sleeps. The renderer is slept only when named (it also sleeps on its own when idle). */
-const DEFAULT_SLEEP_TARGETS: PowerTarget[] = ["proxy", "gateway"];
 const SleepSchema = z.object({ target: z.enum(TARGETS).optional() }).strict();
 const StatusSchema = z.object({}).strict();
 
@@ -51,7 +49,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
     name: "power_sleep",
     scope: "power:manage",
     description:
-      "Admins (power:manage): scale the coding proxy, native gateway and/or (named explicitly) the export renderer to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
+      "Admins (power:manage): scale the coding proxy, native gateway and export renderer (or one named target) to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -60,13 +58,14 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
           type: "string",
           enum: [...TARGETS],
           description:
-            "Sleep only this target. Omit to sleep the proxy and the gateway. renderer is the optional PNG/PDF export renderer; it is skipped when it is not deployed.",
+            "Sleep only this target. Omit to sleep every deployed target. renderer is the optional PNG/PDF export renderer; a target that is not deployed is skipped.",
         },
       },
     },
     handler: async (rawArgs: unknown, ctx) => {
       const { target } = parse(SleepSchema, "power_sleep arguments", rawArgs);
-      const targets: PowerTarget[] = target ? [target] : [...DEFAULT_SLEEP_TARGETS];
+      // No target: every target; sleepNow skips one this deployment does not have.
+      const targets: PowerTarget[] = target ? [target] : [...TARGETS];
       const power = ctx.providers.power ?? DISABLED_POWER;
       const audit = { event: "power.sleep", principal: ctx.principal.id, targets };
       let result;

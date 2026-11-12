@@ -494,6 +494,15 @@ describe("power (renderer target)", () => {
     expect(await power.checkAccess()).not.toContain("get deployments/undefined");
   });
 
+  it("sleepNow over every target (power_sleep with no target) skips a renderer that is not deployed", async () => {
+    const { api, power } = rendererSetup({ withRenderer: false });
+    const result = await power.sleepNow(["proxy", "gateway", "renderer"]);
+    expect(result.slept).toContain("proxy");
+    expect(result.slept).not.toContain("renderer");
+    expect(result.blocked).toEqual([]);
+    expect(api.deploymentPatches.some((p) => p.name === rendererName)).toBe(false);
+  });
+
   it("sleepNow refuses a renderer with queued or running exports", async () => {
     const { power } = rendererSetup({ withRenderer: true });
     expect(await power.sleepNow(["renderer"])).toEqual({

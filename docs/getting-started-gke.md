@@ -715,8 +715,8 @@ plane, coding proxy and native gateway (never coding-run or sandbox pods), and
 the Viewer shows any such leftover as an old replica rather than a failure.
 
 **Sleeping now.** To skip the idle window (for example right after a test), an
-admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`
-or `gateway` (default both). It scales the target to 0 at once, but never stops
+admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`,
+`gateway` or `renderer` (default: every deployed target). It scales the target to 0 at once, but never stops
 a run: a target with a pending or running run (for the gateway, a sandbox run
 or a coding run with MCP tools), or for the gateway an active gateway session,
 is left up and its run ids are returned under `blocked`.
