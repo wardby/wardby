@@ -78,6 +78,8 @@ export async function publishVersion(
     createdById?: string;
     runId?: string;
     summary?: string;
+    /** The number the editor started from: when it is no longer the latest, throws document_version_conflict. */
+    expectedNumber?: number;
   },
 ): Promise<{ versionId: string; number: number; reanchored: { kept: number; outdated: number } }> {
   const doc = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
@@ -94,6 +96,9 @@ export async function publishVersion(
           where: { documentId: input.documentId },
           _max: { number: true },
         });
+        if (input.expectedNumber !== undefined && (last._max.number ?? 0) !== input.expectedNumber) {
+          throw new Error("document_version_conflict");
+        }
         const number = (last._max.number ?? 0) + 1;
         const version = await tx.documentVersion.create({
           data: {

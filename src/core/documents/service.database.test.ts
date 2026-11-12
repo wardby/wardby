@@ -111,6 +111,41 @@ describe.skipIf(!process.env.DATABASE_URL)("document service (database)", () => 
     expect(await documentAccess(db, id, g(expired, "view"))).toBe("none");
   });
 
+  it("gives a member who came through a share link the higher of their grant and the link", async () => {
+    const { id } = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x" });
+    const { id: otherDoc } = await createDocument(db, cipher, { ownerId: owner.id, title: "T2", markdown: "y" });
+    const link = await db.documentShareLink.create({
+      data: {
+        documentId: id,
+        tokenHash: randomUUID(),
+        permission: "comment",
+        expiresAt: new Date(Date.now() + 3_600_000),
+        createdById: owner.id,
+      },
+    });
+    const viaLink = { kind: "principal", principalId: other.id, shareLinkId: link.id } as const;
+    expect(await documentAccess(db, id, { kind: "principal", principalId: other.id })).toBe("none");
+    expect(await documentAccess(db, id, viaLink)).toBe("comment");
+    // The link confers nothing on another document.
+    expect(await documentAccess(db, otherDoc, viaLink)).toBe("none");
+    // The owner keeps owner access with a weaker link.
+    expect(await documentAccess(db, id, { kind: "principal", principalId: owner.id, shareLinkId: link.id })).toBe(
+      "owner",
+    );
+    await db.documentShareLink.update({ where: { id: link.id }, data: { revokedAt: new Date() } });
+    expect(await documentAccess(db, id, viaLink)).toBe("none");
+  });
+
+  it("refuses a publish whose expected number is not the current version (document_version_conflict)", async () => {
+    const { id } = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "v1" });
+    const v2 = await publishVersion(db, cipher, { documentId: id, markdown: "v2", via: "editor", expectedNumber: 1 });
+    expect(v2.number).toBe(2);
+    await expect(
+      publishVersion(db, cipher, { documentId: id, markdown: "stale", via: "editor", expectedNumber: 1 }),
+    ).rejects.toThrow("document_version_conflict");
+    expect((await getDocument(db, id)).version.markdown).toBe("v2");
+  });
+
   it("re-anchors open threads on publish", async () => {
     const { id, versionId } = await createDocument(db, cipher, {
       ownerId: owner.id,

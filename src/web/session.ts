@@ -1,10 +1,12 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import { readCookie, secureCookies, selfHostedCookieNames } from "../mcp/auth/self-hosted/cookies.js";
 
 /**
- * Browser sessions for the document pages. The token and the CSRF value are
- * 32 random bytes each (base64url); only their sha256 hex digests are stored.
+ * Browser sessions for the document pages. The token is 32 random bytes
+ * (base64url); the CSRF value is an HMAC-SHA256 of the token (so a page
+ * reload can hand the same value out again without storing it, and it reveals
+ * nothing about the token). Only their sha256 hex digests are stored.
  * Neither value is ever logged: the token travels only in the Set-Cookie
  * header, the CSRF value only in the page bootstrap JSON.
  */
@@ -33,6 +35,8 @@ export interface WebSessionView {
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const CSRF_INFO = "wardby/web/csrf/v1";
+const csrfFor = (token: string) => createHmac("sha256", token).update(CSRF_INFO).digest("base64url");
 const cookieName = (o: WebCookieOptions) => (o.secure ? "__Host-wardby-web" : "wardby-dev-web");
 const setCookie = (o: WebCookieOptions, value: string, maxAgeSeconds: number) =>
   `${cookieName(o)}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${o.secure ? "; Secure" : ""}`;
@@ -52,7 +56,7 @@ export async function createWebSession(
     throw new Error("web session needs exactly one of principal or guest");
   }
   const token = randomBytes(32).toString("base64url");
-  const csrf = randomBytes(32).toString("base64url");
+  const csrf = csrfFor(token);
   const now = Date.now();
   await db.webSession.create({
     data: {
@@ -66,6 +70,16 @@ export async function createWebSession(
     },
   });
   return { token, csrf, cookie: setCookie(options, token, WEB_MAX_MS / 1000) };
+}
+
+/**
+ * The CSRF value of the session cookie in this Cookie header (for the page
+ * bootstrap), or null when there is no well-formed cookie. It does not check
+ * that the session is live: call readWebSession for that.
+ */
+export function webSessionCsrf(cookieHeader: string | undefined, options: WebCookieOptions = SECURE): string | null {
+  const token = tokenFrom(cookieHeader, options);
+  return token ? csrfFor(token) : null;
 }
 
 /** The live session for this Cookie header, or null (missing, unknown, expired or idle). */

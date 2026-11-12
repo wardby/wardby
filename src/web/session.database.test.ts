@@ -9,6 +9,7 @@ import {
   endWebSession,
   readWebSession,
   webCookieOptions,
+  webSessionCsrf,
   WEB_IDLE_MS,
   type SelfHostedSessionSource,
 } from "./session.js";
@@ -46,6 +47,21 @@ describe.skipIf(!process.env.DATABASE_URL)("web sessions (database)", () => {
     expect(stored).not.toContain(created.csrf);
     expect(row.expiresAt.getTime() - row.createdAt.getTime()).toBeGreaterThan(7 * 86_400_000 - 60_000);
     expect(row.expiresAt.getTime() - row.createdAt.getTime()).toBeLessThanOrEqual(7 * 86_400_000 + 60_000);
+  });
+
+  it("re-derives the same csrf value from the session cookie (for a page reload), never from a stranger's", async () => {
+    const created = await createWebSession(db, { principalId: p.id });
+    const header = cookieValue(created.cookie);
+    expect(webSessionCsrf(header)).toBe(created.csrf);
+    const other = await createWebSession(db, { principalId: p.id });
+    expect(webSessionCsrf(cookieValue(other.cookie))).toBe(other.csrf);
+    expect(other.csrf).not.toBe(created.csrf);
+    expect(webSessionCsrf(undefined)).toBeNull();
+    expect(webSessionCsrf("__Host-wardby-web=short")).toBeNull();
+    // The dev cookie name is read only with the dev options.
+    const dev = await createWebSession(db, { principalId: p.id }, { secure: false });
+    expect(webSessionCsrf(cookieValue(dev.cookie), { secure: false })).toBe(dev.csrf);
+    expect(webSessionCsrf(cookieValue(dev.cookie))).toBeNull();
   });
 
   it("sets an HttpOnly, Secure, SameSite=Lax __Host- cookie by default", async () => {
