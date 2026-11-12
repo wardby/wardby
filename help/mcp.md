@@ -58,7 +58,9 @@ agent you own (or one whose owner allows task text from others with
 (one board), `prototype` (one HTML file with a board switcher), `png` (one
 board) or `pdf` (all boards); a Markdown document exports as `pdf` only. HTML
 comes back in `fileText`, wrapped as untrusted tool output; PNG is an image
-item and PDF an embedded resource.
+item and PDF an embedded resource. A PNG or PDF still running after 150 seconds
+returns `{ "exportId": "...", "status": "running" }`; call again with the same
+arguments plus `exportId` to keep waiting for it.
 
 Version tools: `list_document_versions` (read access; newest first, `limit`
 default 50 and at most 200, `before` = the `nextBefore` it returned for older

@@ -26,7 +26,7 @@ PNG and PDF need the server's renderer, an optional service that runs headless C
 - **EKS:** build the `renderer` image, apply the manifests and set `WARDBY_RENDERER_URL`, as in the AWS deployment guide.
 - **Local:** `docker compose -f deploy/local/docker-compose.renderer.yml up -d`, then start the control plane with `WARDBY_RENDERER_URL=http://127.0.0.1:8796`.
 
-The renderer pod asks for 500m CPU and 2 GiB of memory and has a health check that restarts it if Chromium crashes or renders get stuck. In [low-power mode](low-power-mode.md) it sleeps when idle; the first export after that waits for it to wake (about 20 seconds, longer on a cold node, and the wait ends after 2 minutes). Details and isolation: [Documents and designs: exports](../docs/documents.md#exports).
+The renderer pod asks for 500m CPU and 2 GiB of memory and has a health check that restarts it if Chromium crashes or renders get stuck. In [low-power mode](low-power-mode.md) it sleeps when idle; the first export after that waits for it to wake (about 20 seconds, longer on a cold node, and the wait ends after 5 minutes). Details and isolation: [Documents and designs: exports](../docs/documents.md#exports).
 
 ## Access and limits
 
@@ -34,7 +34,7 @@ A rendered export is kept for one hour, can be read only by the person who asked
 
 ## How to ask
 
-Over MCP use `export_document` (`documentId`, `format`, `board`, `versionNumber`); it waits up to 150 seconds. Over the page API: `GET /d/api/<id>/export` for HTML, `POST /d/api/<id>/exports` then `GET /d/api/exports/<exportId>` and `.../file` for PNG and PDF.
+Over MCP use `export_document` (`documentId`, `format`, `board`, `versionNumber`). For PNG and PDF it waits up to 150 seconds; if the export is still running then (for example while the renderer wakes on a cold node), it returns `{ "exportId": "...", "status": "running" }` instead of the file. Call `export_document` again with the same arguments plus that `exportId` to keep waiting for the same export; nothing new is started and it does not count against the hourly limit again. Over the page API: `GET /d/api/<id>/export` for HTML, `POST /d/api/<id>/exports` then `GET /d/api/exports/<exportId>` and `.../file` for PNG and PDF.
 
 ## Errors
 

@@ -12,10 +12,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
-import type { ExportDeps } from "../../core/documents/exports.js";
+import { requestRenderedExport, runExport, type ExportDeps } from "../../core/documents/exports.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
-import { registerDocumentTools } from "./documents.js";
+import { awaitExport, registerDocumentTools } from "./documents.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () => {
   const db = createPrismaClient();
@@ -240,6 +240,49 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
         const bad = await call("export_document", { documentId: md, format: "png", board: "home" });
         expect(bad.isError).toBe(true);
         expect(bad.text).toContain("export_format_unsupported");
+      });
+
+      it("hands back a still-running export's id, and a later call with it waits for the same export", async () => {
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        // A renderer still waking: the job stays running until the gate opens.
+        const waking = { ...withRenderer, wake: () => gate } as ExportDeps;
+        const call = await connect(owner, undefined, { exports: waking });
+        const docId = (await call("create_document", { kind: "design", title: "Coffee", files: coffeeFiles() })).json
+          .documentId as string;
+        const viewer = { kind: "principal" as const, principalId: owner.id };
+        const { exportId } = await requestRenderedExport(waking, {
+          documentId: docId,
+          viewer,
+          format: "png",
+          board: "home",
+        });
+        const job = runExport(waking, exportId);
+        expect(await awaitExport(db, exportId, viewer, 300)).toEqual({ exportId, running: true });
+        // The same id may not be used for another document or another format.
+        const otherDoc = (await call("create_document", { kind: "design", title: "Tea", files: coffeeFiles() })).json
+          .documentId as string;
+        const wrongDoc = await call("export_document", {
+          documentId: otherDoc,
+          format: "png",
+          board: "home",
+          exportId,
+        });
+        expect(wrongDoc.text).toContain("export_not_found");
+        const wrongFormat = await call("export_document", { documentId: docId, format: "pdf", exportId });
+        expect(wrongFormat.text).toContain("export_not_found");
+        // Nor by someone else.
+        const stranger = await connect(other, undefined, { exports: waking });
+        expect((await stranger("export_document", { documentId: docId, format: "png", exportId })).text).toContain(
+          "export_not_found",
+        );
+        release();
+        await job;
+        const again = await call("export_document", { documentId: docId, format: "png", board: "home", exportId });
+        expect(again.isError).toBe(false);
+        expect(again.content[0]).toMatchObject({ type: "image", data: Buffer.from("PNG").toString("base64") });
+        // Exactly one export row: the second call did not start another.
+        expect(await db.documentExport.count({ where: { documentId: docId } })).toBe(1);
       });
 
       it("reports a missing renderer, a failing one and a missing board by code", async () => {

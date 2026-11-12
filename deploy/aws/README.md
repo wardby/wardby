@@ -242,7 +242,7 @@ renderer on:
   storage.
 - **Low-power mode.** With low-power mode on, the renderer sleeps when no export
   was requested in the idle window, and the first export after that waits for
-  it to wake (up to 2 minutes).
+  it to wake (up to 5 minutes).
 
 ## Run dependency cache
 

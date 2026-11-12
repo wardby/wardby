@@ -46,8 +46,13 @@ export const EXPORTS_PER_DOCUMENT_HOUR = 30;
 export const EXPORT_RATE_BUCKET = "document-export";
 export const EXPORT_TTL_MS = 3_600_000;
 export const EXPORT_STALE_MS = 600_000;
-/** How long a scaled-to-zero renderer may take to wake before the export fails as export_renderer_unavailable. */
-export const RENDERER_WAKE_TIMEOUT_MS = 120_000;
+/**
+ * How long a scaled-to-zero renderer may take to wake before the export fails as
+ * export_renderer_unavailable. A cold GKE Sandbox node can take several minutes; the wait plus one
+ * render (the client's 120 s timeout) stays inside EXPORT_STALE_MS, so the sweep never fails a job
+ * that is still waiting.
+ */
+export const RENDERER_WAKE_TIMEOUT_MS = 300_000;
 
 const EXPORT_CODES = new Set([
   "export_format_unsupported",
@@ -267,9 +272,9 @@ async function ownRow(db: PrismaClient, exportId: string, viewer: Viewer) {
 export async function exportStatus(
   db: PrismaClient,
   input: { exportId: string; viewer: Viewer },
-): Promise<{ id: string; status: string; errorCode: string | null; format: string }> {
+): Promise<{ id: string; documentId: string; status: string; errorCode: string | null; format: string }> {
   const row = await ownRow(db, input.exportId, input.viewer);
-  return { id: row.id, status: row.status, errorCode: row.errorCode, format: row.format };
+  return { id: row.id, documentId: row.documentId, status: row.status, errorCode: row.errorCode, format: row.format };
 }
 
 export async function exportBytes(

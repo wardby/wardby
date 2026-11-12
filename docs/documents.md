@@ -380,7 +380,11 @@ Page API: `GET /d/api/<id>/export?format=board-html|prototype&board=&version=`
 `GET /d/api/exports/<exportId>` for the status and `.../file` for the bytes.
 Over MCP, `export_document` does the same and waits up to 150 seconds for PNG
 and PDF (image and embedded-resource results); HTML comes back as `fileText`,
-wrapped as untrusted tool output.
+wrapped as untrusted tool output. A PNG or PDF export still running after 150
+seconds (for example while the renderer wakes on a cold node) returns
+`{ "exportId": "...", "status": "running" }` instead; call `export_document`
+again with the same arguments plus `exportId` to keep waiting for that export
+without starting another.
 
 HTML files carry no script except the prototype's switcher, which the file's
 own Content-Security-Policy allows by hash; boards sit in sandboxed frames (see
@@ -419,7 +423,7 @@ while buffering several renders at once), with a health check that restarts it
 if Chromium crashes or renders get stuck. In low-power mode it sleeps when no
 export was requested in the idle window; the first export after that waits for
 it to wake (about 20 seconds normally, but a cold node can take minutes, and the
-wait gives up after 2 minutes with `export_renderer_unavailable`; retrying
+wait gives up after 5 minutes with `export_renderer_unavailable`; retrying
 usually works). `power_sleep` accepts `target: "renderer"`.
 
 ## Viewer: Documents

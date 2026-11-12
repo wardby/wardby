@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createShareLink, listShareLinks, MAX_SHARE_DAYS, revokeShareLink } from "../../core/documents/share-links.js";
@@ -113,11 +114,32 @@ const exportArgs = z.object({
   format: z.enum(["board-html", "prototype", "png", "pdf"]),
   board: z.string().min(1).max(80).optional(),
   versionNumber: z.number().int().min(1).optional(),
+  exportId: z.string().min(1).max(100).optional(),
 });
 
 /** How long export_document waits for a PNG/PDF job, and the longest gap between its checks. */
 const EXPORT_WAIT_MS = 150_000;
 const EXPORT_POLL_MAX_MS = 2_000;
+
+/**
+ * Waits up to `waitMs` for a PNG/PDF export: its file when done, `{ running: true }` while it is
+ * still queued or running (the renderer may be waking on a cold node), or throws its error code.
+ */
+export async function awaitExport(
+  db: PrismaClient,
+  exportId: string,
+  viewer: Viewer,
+  waitMs: number,
+): Promise<{ exportId: string; filename: string; mime: string; body: Buffer } | { exportId: string; running: true }> {
+  const until = Date.now() + waitMs;
+  for (let gap = 100; ; gap = Math.min(gap * 2, EXPORT_POLL_MAX_MS)) {
+    const st = await exportStatus(db, { exportId, viewer });
+    if (st.status === "done") return { exportId, ...(await exportBytes(db, { exportId, viewer })) };
+    if (st.status === "failed") throw new Error(st.errorCode ?? "export_failed");
+    if (Date.now() + gap > until) return { exportId, running: true };
+    await new Promise((resolve) => setTimeout(resolve, gap));
+  }
+}
 
 export function registerDocumentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
@@ -719,7 +741,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "export_document",
     scope: "documents:read",
     description:
-      "Exports a design: board-html (one board's HTML file), prototype (one HTML file with a board switcher and working links), png (one board) or pdf (all boards); a Markdown document exports as pdf only. PNG and PDF need the server's renderer (export_renderer_unavailable otherwise) and take up to 150 seconds. File text is wrapped as untrusted tool output.",
+      "Exports a design: board-html (one board's HTML file), prototype (one HTML file with a board switcher and working links), png (one board) or pdf (all boards); a Markdown document exports as pdf only. PNG and PDF need the server's renderer (export_renderer_unavailable otherwise). A PNG or PDF call waits up to 150 seconds; if the export is still running then (a renderer waking on a cold node can take minutes), it returns { exportId, status: \"running\" } instead: call export_document again with the same arguments plus that exportId to keep waiting for the same export. File text is wrapped as untrusted tool output.",
     inputSchema: {
       type: "object",
       properties: {
@@ -727,6 +749,11 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         format: { type: "string", enum: ["board-html", "prototype", "png", "pdf"] },
         board: { type: "string", description: "The board id; required for png and board-html." },
         versionNumber: { type: "integer", minimum: 1 },
+        exportId: {
+          type: "string",
+          description:
+            "PNG/PDF only: an exportId a previous call returned with status running; waits for that export instead of starting a new one.",
+        },
       },
       required: ["documentId", "format"],
     },
@@ -751,19 +778,24 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       // Without a configured renderer the job fails as export_renderer_unavailable, as on the web routes.
       const deps = ctx.providers.exports ?? { db: ctx.db, renderer: null };
       const file = await mapped(async () => {
-        const { exportId } = await requestRenderedExport(deps, { ...base, format: input.format as "png" | "pdf" });
-        // The job runs in this process; runExport never throws.
-        void runExport(deps, exportId);
-        const until = Date.now() + EXPORT_WAIT_MS;
-        for (let gap = 100; ; gap = Math.min(gap * 2, EXPORT_POLL_MAX_MS)) {
+        let exportId = input.exportId;
+        if (exportId) {
+          // Waiting again for an earlier call's export: it must be this caller's, for this document and format.
           const st = await exportStatus(ctx.db, { exportId, viewer: base.viewer });
-          if (st.status === "done")
-            return { exportId, ...(await exportBytes(ctx.db, { exportId, viewer: base.viewer })) };
-          if (st.status === "failed") throw new Error(st.errorCode ?? "export_failed");
-          if (Date.now() + gap > until) throw new Error("export_failed");
-          await new Promise((resolve) => setTimeout(resolve, gap));
+          if (st.documentId !== input.documentId || st.format !== input.format) throw new Error("export_not_found");
+        } else {
+          ({ exportId } = await requestRenderedExport(deps, { ...base, format: input.format as "png" | "pdf" }));
+          // The job runs in this process; runExport never throws.
+          void runExport(deps, exportId);
         }
+        return awaitExport(ctx.db, exportId, base.viewer, EXPORT_WAIT_MS);
       });
+      if ("running" in file)
+        return textResult({
+          exportId: file.exportId,
+          status: "running",
+          next: "Call export_document again with the same arguments plus this exportId to keep waiting.",
+        });
       const blob = file.body.toString("base64");
       const named = { type: "text" as const, text: JSON.stringify({ filename: file.filename }) };
       if (input.format === "png")

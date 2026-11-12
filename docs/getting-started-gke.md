@@ -696,7 +696,7 @@ preflight is deferred while the proxy sleeps (`kubernetes_preflight_deferred`).
 **Export renderer.** With `WARDBY_RENDERER=true` (the optional PNG/PDF export
 renderer, see [its section](../deploy/gke/README.md#pngpdf-export-renderer-optional))
 the renderer `wardby-renderer` is a third target. It sleeps when no export was
-requested in the idle window, and the first export after that waits up to 2
+requested in the idle window, and the first export after that waits up to 5
 minutes for it to wake; if it cannot, that export fails as
 `export_renderer_unavailable`. `power_sleep` accepts `target: "renderer"`.
 

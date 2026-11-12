@@ -130,7 +130,7 @@ NetworkPolicies.
   storage. The namespace quota already leaves room for it.
 - **Low-power mode.** With `WARDBY_LOW_POWER=1` the renderer is a third
   target: it sleeps when no export was requested in the idle window, and the
-  first export after that waits for it to wake (up to 2 minutes). `power_sleep`
+  first export after that waits for it to wake (up to 5 minutes). `power_sleep`
   accepts `target: "renderer"`; see
   [Low-power mode](../../docs/getting-started-gke.md#low-power-mode).
 

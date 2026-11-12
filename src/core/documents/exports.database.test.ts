@@ -13,12 +13,14 @@ import {
   exportFile,
   exportStatus,
   MAX_EXPORT_BYTES,
+  RENDERER_WAKE_TIMEOUT_MS,
   requestRenderedExport,
   runExport,
   sweepExports,
   type ExportDeps,
   type Renderer,
 } from "./exports.js";
+import { DEFAULT_RENDERER_TIMEOUT_MS } from "./renderer-client.js";
 import { createDocument } from "./service.js";
 import { createShareLink, registerGuest } from "./share-links.js";
 
@@ -33,6 +35,13 @@ const coffee = (): Record<string, string> => ({
   ...Object.fromEntries(
     ["home", "menu", "about", "visit"].map((id) => [`boards/${id}.html`, read(`boards/${id}.html`)]),
   ),
+});
+
+describe("renderer wake timeout", () => {
+  it("allows a cold node 5 minutes, and the wait plus one render stays inside the stale sweep", () => {
+    expect(RENDERER_WAKE_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000);
+    expect(RENDERER_WAKE_TIMEOUT_MS + DEFAULT_RENDERER_TIMEOUT_MS).toBeLessThan(EXPORT_STALE_MS);
+  });
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
