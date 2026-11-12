@@ -721,6 +721,28 @@ or secrets. Codex agents get only tools the server marks `readOnlyHint: true`
 | `WARDBY_MCP_GATEWAY_URL`       | the coding proxy                                                                                         | unset         | The native sandbox gateway's base URL, for example `http://<gateway host>:<port>`. The proxy's `/mcp` route, which a coding run's worker uses as its MCP server, forwards each request to the gateway's `/coding-mcp` route; the proxy never sees an MCP server's URL or credentials. Unset, coding runs get no MCP tools: `/mcp` answers `503` with [`mcp_unavailable`](../help/errors/mcp-unavailable.md). An `http` or `https` URL without credentials, query or fragment; any other value stops start-up. |
 | `WARDBY_MCP_TOKEN`             | the coding worker                                                                                        | set by Wardby | Don't set it. Wardby gives each coding run whose agent has MCP tools its own MCP token in this worker variable. It is valid only for the proxy's `/mcp` route, and only while the run is active and before its deadline; only its hash is stored, and it is never logged.                                                                                                                                                                                                                                     |
 
+## Documents, designs and the export renderer
+
+This applies to Wardby 0.10.0 and later; the full behaviour is in
+[Documents and designs](documents.md#security).
+
+- **Page policy.** Document pages use a strict Content-Security-Policy with
+  scripts only from the same origin or a per-request nonce. A design page also
+  allows inline styles (`style-src 'unsafe-inline'`) and `data:` fonts, because
+  its editor renders board CSS in `<style>` elements; it never needs
+  `unsafe-eval`, and scripts still cannot run in boards. Bundle script tags carry
+  Subresource Integrity hashes, and the editor's telemetry is off.
+- **Boards.** Every board is sanitised on every write and is only shown in
+  `srcdoc` frames with a `sandbox` that never includes `allow-scripts`. There is
+  no separate content origin for boards yet.
+- **Renderer.** The optional PNG/PDF renderer (`WARDBY_RENDERER_URL`) runs
+  Chromium with its own sandbox off, because the container runtime's default
+  seccomp profile blocks user namespaces. Isolation rests on gVisor, a non-root
+  user, a read-only root filesystem, dropped capabilities, no egress and no
+  database or secrets. On local Docker and kind (runc) only the container
+  settings apply: keep a local renderer on localhost. It takes 500m CPU and
+  2 GiB of memory on Kubernetes.
+
 ## Slack workflow notifications
 
 This integration requires Wardby 0.6.0 or later.
