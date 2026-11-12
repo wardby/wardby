@@ -83,8 +83,13 @@ export async function publishVersion(
     summary?: string;
     /** The number the editor started from: when it is no longer the latest, throws document_version_conflict. */
     expectedNumber?: number;
+    /** Only restoreVersion sets this: a summary reading "Restored v<N>" marks a restore, so no one else may write it. */
+    allowRestoredSummary?: boolean;
   },
 ): Promise<{ versionId: string; number: number; reanchored: { kept: number; outdated: number } }> {
+  if (input.summary !== undefined && !input.allowRestoredSummary && /^\s*Restored v\d+/i.test(input.summary)) {
+    throw new Error("document_summary_invalid");
+  }
   const doc = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
   if (!doc) throw new Error("document_not_found");
   const markdown = await prepareMarkdown(db, cipher, doc.agentId, input.markdown);

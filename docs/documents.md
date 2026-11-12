@@ -128,7 +128,8 @@ The Edits tray lists every version, newest first, with who made it, how and
 when:
 
 - Saves from the browser editor by the same person, each within 5 minutes of
-  the one before, share one row ("v4–v5 · Name · 2 edits"). Versions from an
+  the one before, share one row ("v4–v5 · Name · 2 edits"); two people with the
+  same display name never share a row. Versions from an
   agent, from MCP (marked "(MCP)") and restores always have their own row.
 - An agent's version reads "Agent · via <the person who sent the threads>"
   with a "for thread #N" link that opens that thread in the Comments tray.
@@ -147,7 +148,8 @@ Markdown as a new version with the summary "Restored v<N>"; nothing is
 deleted, so a restore can itself be undone by restoring again. It goes through
 the same checks as any publish (size limit, redaction, comment re-anchoring),
 and is refused with `document_version_conflict` if someone published after the
-newest version your page shows. Documents the editor opens comment-only
+newest version your page shows, and with `document_version_is_latest` when you
+pick the version that already is the newest (nothing would change). Documents the editor opens comment-only
 (images, checklists or HTML) can still be restored, because the stored
 Markdown is copied as it is. Readers and share-link guests see the tray and
 the changes, but not Restore.
@@ -155,8 +157,10 @@ the changes, but not Restore.
 Over MCP, `list_document_versions` pages with `before` and `limit` (default
 50, at most 200; pass the returned `nextBefore` for older ones) and returns no
 content; read a version with `get_document` and `versionNumber`.
-`restore_document_version` takes `versionNumber` and an optional `baseNumber`
-(the latest version you saw) for the same conflict check.
+`restore_document_version` takes `versionNumber` and a required `baseNumber`
+(the latest version you saw) for the same conflict check. Only a restore may
+write a summary reading "Restored v<N>": `publish_version` refuses such a
+summary with `document_summary_invalid`.
 
 The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
@@ -257,7 +261,7 @@ any proxy log you cannot protect.
 
 Each error code has an article under `help/errors/`: `document_not_found`,
 `document_access_denied`, `document_too_large`, `document_kind_unsupported`,
-`document_version_conflict`, `document_version_not_found`, `document_not_agent_linked`,
+`document_version_conflict`, `document_version_is_latest`, `document_summary_invalid`, `document_version_not_found`, `document_not_agent_linked`,
 `document_agent_unavailable`, `document_repo_link_invalid`,
 `document_send_failed`, `document_send_not_available`,
 `document_too_large_for_agent`, `comment_anchor_invalid`, `comment_too_long`,

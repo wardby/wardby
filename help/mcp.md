@@ -60,11 +60,15 @@ default 50 and at most 200, `before` = the `nextBefore` it returned for older
 ones) gives each version's number, `via`, time, author kind, run id and the
 thread numbers the run answered, with names and summaries in one
 `versionsText` field wrapped as untrusted tool output, and never the Markdown
-(read a version with `get_document` `versionNumber`). `restore_document_version`
-(write access) publishes an earlier version's Markdown as a new version with
-the summary "Restored v<N>"; give `baseNumber`, the latest version you saw, to
-be refused with `document_version_conflict` if someone published since. An
-unknown number answers `document_version_not_found`.
+(read a version with `get_document` `versionNumber`; scope `documents:read`,
+as for `get_document`). `restore_document_version` (scope `documents:write`)
+publishes an earlier version's Markdown as a new version with the summary
+"Restored v<N>"; `baseNumber`, the latest version you saw, is required and
+the call is refused with `document_version_conflict` if someone published
+since, or `document_version_is_latest` if you pick the newest version. An
+unknown number answers `document_version_not_found`. `publish_version`
+(`documents:write`) refuses a summary reading "Restored v<N>" with
+`document_summary_invalid`.
 
 Comment tools: `list_comment_threads` and `get_comment_thread` return thread
 metadata plus a `threadsText` field holding everything people wrote, wrapped as

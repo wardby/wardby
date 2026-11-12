@@ -15,7 +15,15 @@ const T0 = Date.parse("2026-11-12T10:00:00Z");
 const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
 const member = (name: string) => ({ kind: "member" as const, name });
 function v(number: number, min: number, extra: Partial<VersionItem> = {}): VersionItem {
-  return { number, via: "editor", createdAt: at(min), author: member("Chris Fields"), answeredThreads: [], ...extra };
+  return {
+    number,
+    via: "editor",
+    createdAt: at(min),
+    author: member("Chris Fields"),
+    authorKey: "aaaaaaaaaaaaaaaa",
+    answeredThreads: [],
+    ...extra,
+  };
 }
 const shape = (rows: ReturnType<typeof groupVersions>) => rows.map((r) => [r.first, r.last]);
 
@@ -35,11 +43,29 @@ describe("groupVersions", () => {
     expect(GROUP_WINDOW_MS).toBe(5 * 60 * 1000);
   });
 
+  it("groups by the opaque author key, not the display name", () => {
+    const sameName = { author: member("Chris Fields") };
+    expect(shape(groupVersions([v(2, 1, { ...sameName, authorKey: "bbbbbbbbbbbbbbbb" }), v(1, 0)]))).toEqual([
+      [2, 2],
+      [1, 1],
+    ]);
+    expect(shape(groupVersions([v(2, 1), v(1, 0, { author: member("Renamed") })]))).toEqual([[1, 2]]);
+    const noKey = (n: number, min: number) => {
+      const item = v(n, min);
+      delete item.authorKey;
+      return item;
+    };
+    expect(shape(groupVersions([noKey(2, 1), noKey(1, 0)]))).toEqual([
+      [2, 2],
+      [1, 1],
+    ]);
+  });
+
   it("never groups agent, MCP, import or restore versions, or different people", () => {
     const agent = v(6, 5, { via: "agent", author: { kind: "agent", name: "Agent", viaName: "Chris Fields" } });
     const mcp = v(4, 3, { via: "mcp" });
     const restore = v(3, 2, { summary: "Restored v1" });
-    const other = v(2, 1, { author: member("Robin") });
+    const other = v(2, 1, { author: member("Robin"), authorKey: "bbbbbbbbbbbbbbbb" });
     const rows = groupVersions([v(7, 6), agent, v(5, 4), mcp, restore, other, v(1, 0)]);
     expect(shape(rows)).toEqual([
       [7, 7],

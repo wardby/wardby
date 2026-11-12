@@ -239,6 +239,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         renderViewer();
         startLive();
       },
+      returnToLatest: () => edits.back(),
     },
     viewer,
   );

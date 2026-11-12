@@ -13,6 +13,7 @@
  * version-conflict check), with the summary "Restored v<N>". Nothing is
  * rewritten in place.
  */
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
@@ -28,6 +29,10 @@ export const MAX_VERSIONS_PAGE = 200;
 export const restoredSummary = (number: number) => `Restored v${number}`;
 export const RESTORED_SUMMARY = /^Restored v(\d+)$/;
 
+/** First 16 hex characters of sha256(documentId:subject); a principal id never leaves the server. */
+const authorKeyOf = (documentId: string, subject: string) =>
+  createHash("sha256").update(`${documentId}:${subject}`).digest("hex").slice(0, 16);
+
 const FORMER_MEMBER = "Former member";
 
 export interface VersionListItem {
@@ -36,6 +41,11 @@ export interface VersionListItem {
   createdAt: Date;
   /** member: the principal who saved it; agent: "Agent", via the person who sent the threads when known. */
   author: { kind: "member" | "agent"; name: string; viaName?: string };
+  /**
+   * Opaque per-document key of who made the version (the page groups saves by it, never by name):
+   * a hash of the document and the saving principal. Absent when the author is unknown. Not a principal id.
+   */
+  authorKey?: string;
   runId?: string;
   summary?: string;
   /** Threads the version's run was sent or answered, by display number. */
@@ -101,6 +111,7 @@ export async function listVersions(
       via: v.via,
       createdAt: v.createdAt,
       author,
+      ...(v.via === "editor" && v.createdById ? { authorKey: authorKeyOf(input.documentId, v.createdById) } : {}),
       ...(v.runId ? { runId: v.runId } : {}),
       ...(v.summary ? { summary: v.summary } : {}),
       answeredThreads: [...new Set(run?.numbers ?? [])],
@@ -128,13 +139,14 @@ export async function getVersion(
 
 /**
  * Publishes version `number`'s Markdown as the next version (needs write; a
- * member). With `baseNumber`, refuses with document_version_conflict unless
- * it is still the latest.
+ * member). `baseNumber` (the latest version the caller saw) is required:
+ * document_version_conflict unless it is still the latest. Restoring the
+ * version that is already the latest is refused (document_version_is_latest).
  */
 export async function restoreVersion(
   db: PrismaClient,
   cipher: Cipher,
-  input: { documentId: string; viewer: Viewer; number: number; baseNumber?: number; via: PublishVia },
+  input: { documentId: string; viewer: Viewer; number: number; baseNumber: number; via: PublishVia },
 ): Promise<{ number: number; reanchored: { kept: number; outdated: number } }> {
   await requireDocumentAccess(db, input.documentId, input.viewer, "write");
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
@@ -143,13 +155,20 @@ export async function restoreVersion(
     select: { markdown: true },
   });
   if (!v) throw new Error("document_version_not_found");
+  const latest = await db.documentVersion.aggregate({
+    where: { documentId: input.documentId },
+    _max: { number: true },
+  });
+  if ((latest._max.number ?? 0) !== input.baseNumber) throw new Error("document_version_conflict");
+  if (input.number === input.baseNumber) throw new Error("document_version_is_latest");
   const out = await publishVersion(db, cipher, {
     documentId: input.documentId,
     markdown: v.markdown,
     via: input.via,
     createdById: input.viewer.principalId,
     summary: restoredSummary(input.number),
-    ...(input.baseNumber !== undefined ? { expectedNumber: input.baseNumber } : {}),
+    expectedNumber: input.baseNumber,
+    allowRestoredSummary: true,
   });
   return { number: out.number, reanchored: out.reanchored };
 }

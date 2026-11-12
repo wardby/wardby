@@ -35,6 +35,7 @@ const EXACT_STATUS: Record<string, number> = {
   comment_thread_closed: 409,
   comment_thread_already_sent: 409,
   document_version_conflict: 409,
+  document_version_is_latest: 409,
   document_too_large: 413,
   document_too_large_for_agent: 413,
   document_agent_unavailable: 403,
@@ -202,7 +203,7 @@ const listVersionsArgs = z.object({
 const restoreArgs = z.object({
   documentId: id,
   versionNumber: z.number().int().min(1),
-  baseNumber: z.number().int().min(1).optional(),
+  baseNumber: z.number().int().min(1),
 });
 const listDocsArgs = z.object({ ownedOnly: z.boolean().optional() });
 const listThreadsArgs = z.object({
@@ -419,7 +420,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     scope: "documents:write",
     description:
       "Restores an earlier version of a document you can write: publishes that version's Markdown as a NEW version " +
-      '(summary "Restored v<N>"); nothing is deleted. Give baseNumber (the latest version you saw) to refuse with ' +
+      '(summary "Restored v<N>"); nothing is deleted. Give baseNumber (required: the latest version you saw); it refuses with ' +
       "document_version_conflict if someone published since. Open comment threads are re-anchored as on any publish.",
     inputSchema: {
       type: "object",
@@ -428,7 +429,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         versionNumber: { type: "integer", minimum: 1 },
         baseNumber: { type: "integer", minimum: 1 },
       },
-      required: ["documentId", "versionNumber"],
+      required: ["documentId", "versionNumber", "baseNumber"],
     },
     handler: async (args: unknown, ctx) => {
       const input = restoreArgs.parse(args);
@@ -437,7 +438,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           documentId: input.documentId,
           viewer: viewerOf(ctx),
           number: input.versionNumber,
-          ...(input.baseNumber !== undefined ? { baseNumber: input.baseNumber } : {}),
+          baseNumber: input.baseNumber,
           via: "mcp",
         }),
       );

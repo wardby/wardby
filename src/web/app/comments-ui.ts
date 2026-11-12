@@ -57,6 +57,8 @@ export interface CommentsHost {
   bubble: HTMLButtonElement;
   /** Called when the viewer changes (guest registration). */
   onViewer(viewer: Viewer): void;
+  /** Leaves an earlier version shown in the Edits tray and returns to the latest, so a thread can be positioned. */
+  returnToLatest?(): void;
 }
 
 interface Pop {
@@ -310,6 +312,8 @@ export class CommentsUI {
   // ---- popover ------------------------------------------------------------------
 
   private openThread(t: ThreadView): void {
+    // The editor shows an earlier version while suspended: the thread's highlight is not there.
+    if (this.suspended) this.host.returnToLatest?.();
     this.openPop({ kind: "thread", threadId: t.id, quote: t.anchor.quote });
   }
 

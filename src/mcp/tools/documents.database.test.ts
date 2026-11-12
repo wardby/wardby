@@ -201,11 +201,20 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     );
     const missing = await call("get_document", { documentId: docId, versionNumber: 99 });
     expect(missing.text).toContain("document_version_not_found");
-    expect((await call("restore_document_version", { documentId: docId, versionNumber: 99 })).text).toContain(
-      "document_version_not_found",
-    );
+    expect(
+      (await call("restore_document_version", { documentId: docId, versionNumber: 99, baseNumber: 3 })).text,
+    ).toContain("document_version_not_found");
+    expect((await call("restore_document_version", { documentId: docId, versionNumber: 1 })).isError).toBe(true);
+    expect(
+      (await call("restore_document_version", { documentId: docId, versionNumber: 3, baseNumber: 3 })).text,
+    ).toContain("document_version_is_latest");
+    const reserved = await call("publish_version", { documentId: docId, markdown: "z", summary: "Restored v1" });
+    expect(reserved.isError).toBe(true);
+    expect(reserved.text).toContain("document_summary_invalid");
     const readOnly = await connect(owner, ["documents:read"]);
-    expect((await readOnly("restore_document_version", { documentId: docId, versionNumber: 1 })).isError).toBe(true);
+    expect(
+      (await readOnly("restore_document_version", { documentId: docId, versionNumber: 1, baseNumber: 3 })).isError,
+    ).toBe(true);
     const stranger = await connect(other);
     expect((await stranger("list_document_versions", { documentId: docId })).text).toContain("document_not_found");
   });

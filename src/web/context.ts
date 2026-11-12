@@ -191,6 +191,7 @@ const STATUS = {
   comment_not_found: 404,
   share_link_invalid: 404,
   document_version_conflict: 409,
+  document_version_is_latest: 409,
   comment_thread_closed: 409,
   comment_thread_already_sent: 409,
   document_too_large: 413,

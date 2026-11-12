@@ -15,6 +15,8 @@ export interface VersionItem {
   via: string;
   createdAt: string;
   author: { kind: "member" | "agent"; name: string; viaName?: string };
+  /** Opaque per-document key of the saving member; absent when unknown. Grouping uses it, never the name. */
+  authorKey?: string;
   runId?: string;
   summary?: string;
   answeredThreads: number[];
@@ -53,7 +55,8 @@ export function groupVersions(versions: readonly VersionItem[], windowMs = GROUP
       groupable(v) &&
       groupable(oldest) &&
       oldest.number === v.number + 1 &&
-      oldest.author.name === v.author.name &&
+      v.authorKey !== undefined &&
+      oldest.authorKey === v.authorKey &&
       Date.parse(oldest.createdAt) - Date.parse(v.createdAt) <= windowMs
     ) {
       row.items.push(v);
