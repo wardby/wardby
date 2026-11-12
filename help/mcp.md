@@ -45,15 +45,14 @@ call `create_share_link` (a view or comment link, 1 to 90 days, URL returned
 once), `list_share_links` (ids, permission, expiry, revoked, guest count; never
 URLs) and `revoke_share_link` (signs out the guests who used it).
 
-Content tools: `create_document` (Markdown up to 1 MiB; to let a coding agent
+Content tools: `create_document` (Markdown up to 1 MiB, or with `kind: "design"` a design from `files`, or imported from a repository directory with `repository`, `path` and `baseRef`; see `designs` and `design-boards-format`; to let a coding agent
 edit it, give `repository` and `path` together with an `agentId` of a coding
 agent you own (or one whose owner allows task text from others with
 `allowWebhookTaskOverride`, with execute access for you); `local:` repositories must be inside the trusted roots, else
 `document_repo_link_invalid` or the usual repository errors), `publish_version`
 (needs write access; open threads whose text is gone become outdated),
-`get_document` (current or a `versionNumber`; the title and Markdown come in
-one `documentText` field, wrapped as untrusted tool output) and
-`list_documents`.
+`get_document` (current or a `versionNumber`; the title and Markdown, or a design's files as `--- <path> ---` sections, come in one `documentText` field, wrapped as untrusted tool output) and
+`list_documents` (each with its `kind`). A design version is at most 2 MiB, a board at most 512 KB, and the MCP request body at most 1 MiB, so publish larger designs from the repository or the editor. `document_format_mismatch` means Markdown was sent for a design or files for a document; `board_format_invalid` and `board_too_large` refuse files that break the board format.
 
 `export_document` (scope `documents:read`) exports a design as `board-html`
 (one board), `prototype` (one HTML file with a board switcher), `png` (one

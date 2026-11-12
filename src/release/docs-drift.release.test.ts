@@ -84,10 +84,12 @@ function errorCodes(): Map<string, string> {
   // Documents: the codes the documents core, the web surface and the MCP tools throw or answer
   // (`throw new Error("code")` / `throw new McpError(status, "code")`, the web route status table).
   for (const file of sourceFiles.filter((f) =>
-    /src[/\\](core[/\\]documents|web)[/\\][^/\\]+\.ts$|src[/\\]mcp[/\\]tools[/\\]documents\.ts$/.test(f),
+    /src[/\\](core[/\\]documents(?:[/\\]boards)?|web|renderer)[/\\][^/\\]+\.ts$|src[/\\]mcp[/\\]tools[/\\]documents\.ts$/.test(
+      f,
+    ),
   )) {
     const form =
-      /\b(?:Error|McpError)\((?:\d+,\s*)?"((?:document|comment|share|guest|web)_[a-z_]+)"|^\s+((?:document|comment|share|guest|web)_[a-z_]+):\s*\d{3},/gm;
+      /\b(?:Error|McpError)\((?:\d+,\s*)?"((?:document|comment|share|guest|web|board|export)_[a-z_]+)"|^\s+((?:document|comment|share|guest|web|board|export)_[a-z_]+):\s*\d{3},/gm;
     for (const match of read(file).matchAll(form)) add(match[1] ?? match[2], relative(ROOT, file));
   }
   // The web page API's generic codes (src/web/context.ts, src/web/api.ts, src/web/routes.ts).

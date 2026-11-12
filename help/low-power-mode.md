@@ -78,7 +78,7 @@ omit it for the proxy and the gateway. The renderer is the optional PNG/PDF
 export renderer (`WARDBY_RENDERER=true`); it is a target only when
 `WARDBY_RENDERER_URL` is set, sleeps after an idle window with no export
 requested, and the first export after that waits up to 2 minutes for it to wake.
-Its blockers are queued or running export ids.
+Its blockers are queued or running export ids. The renderer wakes on the first PNG or PDF export after it slept (about 20 seconds; a cold node can take minutes, and the export waits up to 2 minutes before failing with `export_renderer_unavailable`, after which a retry usually works). See the `document-exports` help article.
 
 - It scales the target to 0 at once, ignoring the idle window and the woke-at
   grace.

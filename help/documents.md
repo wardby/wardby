@@ -1,7 +1,7 @@
 ---
 id: documents
-title: Documents - write, comment and review Markdown with people and a coding agent
-summary: Create Markdown documents, share them with people or by link, collect anchored comments, and send open threads to a coding agent that edits the file in a repository.
+title: Documents and designs - write, comment and review Markdown or HTML boards with people and a coding agent
+summary: Create Markdown documents or designs (HTML boards), share them with people or by link, collect anchored comments, export them, and send open threads to a coding agent that edits the files in a repository.
 audience: operator
 tags: [documents, markdown, comments, create_document, publish_version, share, send_threads_to_agent, live updates]
 appliesTo: ">=0.10.0"
@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Documents
 
-A document is a Markdown file with versions and comment threads, opened in a browser at `https://<your-host>/d/<documentId>`. People edit it in the page; agents and scripts use MCP tools. The full guide is [docs/documents.md](../docs/documents.md).
+A document is a Markdown file (or a [design](designs.md): a set of HTML boards) with versions and comment threads, opened in a browser at `https://<your-host>/d/<documentId>`. People edit it in the page; agents and scripts use MCP tools. The full guide is [docs/documents.md](../docs/documents.md).
 
 ## Quick start
 
@@ -21,7 +21,7 @@ A document is a Markdown file with versions and comment threads, opened in a bro
 
 ## Tools
 
-- Documents: `create_document`, `publish_version`, `get_document` (`versionNumber` for an earlier version), `list_documents`.
+- Documents and designs (`kind: "design"` takes `files` instead of `markdown`): `create_document`, `publish_version`, `get_document` (`versionNumber` for an earlier version), `list_documents`.
 - Versions: `list_document_versions`, `restore_document_version`.
 - Comments: `list_comment_threads`, `get_comment_thread`, `reply_to_thread`, `resolve_thread`.
 - Sharing: `create_share_link`, `list_share_links`, `revoke_share_link`, and `grant_access` / `revoke_access` / `list_access` for people.
@@ -29,6 +29,10 @@ A document is a Markdown file with versions and comment threads, opened in a bro
 - Agents: `send_threads_to_agent` (see [Comment threads and agents](comment-threads-and-agents.md)).
 
 They need the `documents:read` and `documents:write` scopes; `send_threads_to_agent` also needs `runs:trigger`. No Wardby role is required. Define the scopes at your identity provider (see [Identity and access](identity-and-access.md)).
+
+## Designs
+
+A design is a document of kind `design`: HTML boards you edit visually, comment on with pins, view in Overview, click through in Play, export, and send to a coding agent. Start with [Designs](designs.md) and the [board format](design-boards-format.md).
 
 ## Mentions
 
@@ -48,10 +52,12 @@ Document text and comments are written by people. Tool results wrap them as untr
 
 ## Errors
 
-Codes such as `document_not_found`, `document_access_denied` and `document_too_large` have articles under `errors/` (search the code).
+Codes such as `document_not_found`, `document_access_denied`, `document_too_large`, `board_format_invalid` and the `export_*` codes have articles under `errors/` (search the code).
 
 ## Related
 
+- [Designs](designs.md) and the [board format](design-boards-format.md)
+- [Exporting designs and documents](document-exports.md)
 - [Document edits and restore](document-edits.md)
 - [Share a document by link](document-share-links.md)
 - [Send comment threads to a coding agent](comment-threads-and-agents.md)

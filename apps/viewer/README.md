@@ -104,6 +104,15 @@ enter its client id when adding the server. The client must:
   requests it so the provider returns a refresh token, and sign-in fails without
   one.
 
+## Documents view
+
+The Documents tab lists the documents and designs you own or were granted on the
+server (Wardby 0.10.0 and later; it uses the same `admin:view` sign-in as the
+rest of the app). It loads the newest 500 and filters by agent, repository and
+title in the app. Opening a row sends your browser to the document's page; the
+app opens only `https` links, so a server on plain `http` is not supported here.
+See [Documents and designs](../../docs/documents.md).
+
 ## Infrastructure view
 
 The Infrastructure tab shows the Kubernetes namespace where a server runs coding

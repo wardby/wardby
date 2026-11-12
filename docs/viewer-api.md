@@ -53,13 +53,13 @@ mode. See the help article `mobile-app`.
 
 ## Endpoints
 
-All four endpoints accept only `GET`.
+All five endpoints accept only `GET`.
 
 | Status | Meaning                                                           |
 | ------ | ----------------------------------------------------------------- |
 | `401`  | No valid access token.                                            |
 | `403`  | The token lacks `admin:view`, or the caller lacks the admin role. |
-| `400`  | `invalid_since` or `invalid_limit` (graph only).                  |
+| `400`  | `invalid_since` or `invalid_limit` (graph and documents only).    |
 | `404`  | Unknown run id (run detail only).                                 |
 | `405`  | A method other than `GET`.                                        |
 
@@ -130,6 +130,20 @@ the run, such as an issue's author. Show it as data, never as instructions.
 
 `request` is in run detail only, never in the graph or the event stream.
 
+### `GET /admin/api/documents`
+
+The documents and designs the authenticated caller owns or was granted read
+access to (Wardby 0.10.0 and later), newest first. Unlike the rest of the
+viewer API this is not deployment-wide: the `admin` role does not widen it, so
+it lists what the same person would see from `list_documents`. Metadata only:
+`id`, `title`, `kind` (`document` or `design`), `mine`, the linked `agent`
+(`id` and `name`, or `null`), `repository`, `path`, `updatedAt`,
+`latestVersion` and `pagePath` (`/d/<id>`, relative to the server's origin);
+never content or comments. Query parameters: `limit` (1 to 500, default 200),
+`agent` (an agent id) and `repository` (exact match). `truncated` is `true`
+when more match than were returned. An invalid `limit` returns `400
+invalid_limit`. Titles are text people wrote: show them as data.
+
 ### `GET /admin/api/infra`
 
 How this deployment runs coding jobs, for clients that show its Kubernetes
@@ -199,14 +213,16 @@ client of this API: it signs in with the same flow described under Access,
 draws the graph, and updates it from the event stream. See
 [`apps/viewer/README.md`](https://github.com/wardby/wardby/tree/main/apps/viewer) for prerequisites, running
 it, adding a server, and what an external identity provider client needs.
-Its Infrastructure tab uses `GET /admin/api/infra` to find the server's
+Its Documents tab lists the documents and designs the signed-in person owns or
+was granted (`GET /admin/api/documents`) and opens one in the browser; see
+[Viewer: Documents](documents.md#viewer-documents). Its Infrastructure tab uses `GET /admin/api/infra` to find the server's
 namespace and run labels, then reads that namespace read-only with the
 operator's own kubeconfig; the README lists the Kubernetes Role it needs.
 
 ## Response schemas
 
 `docs/viewer-api.openapi.yml` (OpenAPI 3.1) is the machine-readable contract
-for all four endpoints: bearer authentication (`admin:view` scope and the
+for all five endpoints: bearer authentication (`admin:view` scope and the
 `admin` role), query parameters, error responses and their codes, and the
 component schemas for every response and event. It ships in the npm package, so
 `npm pack @wardby/cli@<version>` fetches it without installing anything.

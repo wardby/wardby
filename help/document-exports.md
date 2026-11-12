@@ -1,21 +1,43 @@
 ---
 id: document-exports
 title: Exporting designs and documents
-summary: Download a board or a whole prototype as HTML, or get a PNG or PDF; what each needs and how long it is kept.
+summary: Download a design board or prototype as HTML, or get a PNG or PDF of a design or a Markdown document; what each needs, where the renderer runs, how long files are kept and the error codes.
 audience: operator
-tags: [documents, designs, export, export_document, pdf, png, prototype]
+tags: [documents, designs, export, export_document, pdf, png, prototype, renderer, WARDBY_RENDERER_URL]
 appliesTo: ">=0.10.0"
 ---
 
 # Exporting designs and documents
 
-- `board-html`: one board's HTML file. No renderer needed.
-- `prototype`: one HTML file with a board switcher and working links between boards. No renderer needed.
-- `png`: one board as an image (needs `board`).
-- `pdf`: all boards of a design, or a Markdown document, as a PDF.
+| Format       | For                  | Result                                                               | Renderer |
+| ------------ | -------------------- | -------------------------------------------------------------------- | -------- |
+| `board-html` | a design             | One board's HTML file (needs `board`)                                | no       |
+| `prototype`  | a design             | One HTML file with a board switcher and working links between boards | no       |
+| `png`        | a design             | One board as an image (needs `board`)                                | yes      |
+| `pdf`        | a design or Markdown | All boards of a design, or a paginated A4 PDF of a Markdown document | yes      |
 
-PNG and PDF need the server's renderer (an optional service the operator turns on). Without one the request is refused with [`export_renderer_unavailable`](errors/export-renderer-unavailable.md). A Markdown PDF leaves out images that are not embedded as `data:` URLs. A rendered export is kept for one hour, can be read only by the person who asked, and each document allows 30 requests an hour. Anonymous share-link readers can download HTML but must sign in to ask for PNG or PDF.
+A Markdown document exports as PDF only; its page has **Export PDF**, and a design page has an Export menu. A Markdown PDF leaves out images that are not embedded as `data:` URLs. Add `versionNumber` to export an older version.
+
+## The renderer
+
+PNG and PDF need the server's renderer, an optional service that runs headless Chromium over the boards. It is off unless `WARDBY_RENDERER_URL` is set. Without it the request is refused with [`export_renderer_unavailable`](errors/export-renderer-unavailable.md) and nothing is queued; HTML exports still work.
+
+- **GKE:** `WARDBY_RENDERER=true` for `deploy/gke/up.sh` builds, applies and configures it.
+- **EKS:** build the `renderer` image, apply the manifests and set `WARDBY_RENDERER_URL`, as in the AWS deployment guide.
+- **Local:** `docker compose -f deploy/local/docker-compose.renderer.yml up -d`, then start the control plane with `WARDBY_RENDERER_URL=http://127.0.0.1:8796`.
+
+The renderer pod asks for 500m CPU and 2 GiB of memory and has a health check that restarts it if Chromium crashes or renders get stuck. In [low-power mode](low-power-mode.md) it sleeps when idle; the first export after that waits for it to wake (about 20 seconds, longer on a cold node, and the wait ends after 2 minutes). Details and isolation: [Documents and designs: exports](../docs/documents.md#exports).
+
+## Access and limits
+
+A rendered export is kept for one hour, can be read only by the person who asked, is at most 20 MiB ([`export_too_large`](errors/export-too-large.md)), and each document allows 30 requests an hour ([`export_rate_limited`](errors/export-rate-limited.md)). Anonymous share-link readers can download HTML but must sign in, or register as a guest, to ask for PNG or PDF ([`export_sign_in_required`](errors/export-sign-in-required.md)).
+
+## How to ask
 
 Over MCP use `export_document` (`documentId`, `format`, `board`, `versionNumber`); it waits up to 150 seconds. Over the page API: `GET /d/api/<id>/export` for HTML, `POST /d/api/<id>/exports` then `GET /d/api/exports/<exportId>` and `.../file` for PNG and PDF.
 
-Related: [Documents](documents.md), [MCP](mcp.md), [Share links](document-share-links.md).
+## Errors
+
+[`export_format_unsupported`](errors/export-format-unsupported.md), [`export_not_found`](errors/export-not-found.md), [`export_failed`](errors/export-failed.md), plus the four linked above.
+
+Related: [Designs](designs.md), [Documents](documents.md), [MCP](mcp.md), [Share links](document-share-links.md).

@@ -1,18 +1,24 @@
-# Documents
+# Documents and designs
 
-Documents are Markdown files with versions and anchored comment threads, edited
-in the browser at `https://<your-host>/d/<documentId>` and driven by MCP tools.
-Share one with people (grants), with anyone holding a link (share links and
-guests), or with a coding agent that edits it from comments. Available in 0.10.0
-and later.
+A document is either Markdown text or a **design**: a set of HTML boards
+(screens) that people edit visually. Both have versions and anchored comment
+threads, open in the browser at `https://<your-host>/d/<documentId>` and are
+driven by MCP tools. Share one with people (grants), with anyone holding a link
+(share links and guests), or with a coding agent that edits it from comments.
+Available in 0.10.0 and later.
 
-This is the first phase: Markdown documents only. There is no design canvas,
-PDF/PNG export, comparing two arbitrary versions or repository export yet.
+Exports (HTML, PNG, PDF) cover both kinds. There is no comparing two arbitrary
+versions, and no way to create a design from the browser: create one with
+`create_document` (`kind: "design"`), from files or imported from a repository
+directory.
 
 ## What you get
 
 - Create and edit Markdown (up to 1 MiB a version) in a browser editor, or
   publish versions over MCP. Every version is kept.
+- Create designs (boards of HTML, up to 2 MiB a version), edit them visually in
+  the browser, view all boards at once (Overview), click through them as a
+  prototype (Play), and export them (see [Designs](#designs)).
 - Select text to start a comment thread; threads anchor to the quoted text and
   follow it across versions. If the text is deleted, the thread is marked
   outdated.
@@ -26,23 +32,25 @@ PDF/PNG export, comparing two arbitrary versions or repository export yet.
 - An Edits tray: every version, who made it and how, the changes each one
   made shown inline, and restore (see [Edits and restore](#edits-and-restore)).
 - Links to share a document with people who have no account.
-- Send open threads to a coding agent that edits a file in a repository.
+- Send open threads to a coding agent that edits a file (or, for a design, a
+  directory) in a repository.
+- Export a design as HTML, PNG or PDF and a Markdown document as PDF.
 
 ## Tools
 
-| Tool                                                         | Scope             | Purpose                                                                      |
-| ------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------- |
-| `create_document`                                            | `documents:write` | Create a document; optionally link it to a repository file and coding agent  |
-| `publish_version`                                            | `documents:write` | Publish the next version (needs `write`)                                     |
-| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                     |
-| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered |
-| `restore_document_version`                                   | `documents:write` | Publish an earlier version's Markdown as a new version (needs `write`)       |
-| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)        |
-| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                     |
-| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                             |
-| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                              |
-| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                   |
-| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF  |
+| Tool                                                         | Scope             | Purpose                                                                                     |
+| ------------------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------- |
+| `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)              |
+| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                    |
+| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                |
+| `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                       |
+| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                       |
+| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                    |
+| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                            |
+| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                             |
+| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                  |
+| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                 |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
 as untrusted content: agents must treat it as data, never as instructions.
@@ -167,6 +175,101 @@ The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
 with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
 
+## Designs
+
+A design is a set of **boards**: one HTML file per screen, described by a
+`manifest.json`, with an optional `brand.md` (up to 64 KB of notes agents may
+read). Every change is a new version, as for Markdown, and a design can be
+shared, commented on and exported like a document. Its `kind` is `design`
+(`list_documents` and `get_document` report it).
+
+Create one with `create_document` and `kind: "design"`, passing `files` (a map
+of path to text) or, for a design that lives in a repository, a coding
+`agentId`, `repository`, `path` (the directory holding `manifest.json`; `.` for
+the repository root) and `baseRef`, with no `files`: Wardby reads the design
+from that directory at that branch. A document or design can only be linked to a
+repository its agent is already authorized for (`document_repo_link_invalid`
+otherwise). Publish changes with `publish_version` and a full `files` map.
+`get_document` returns each file as a `--- <path> ---` section of
+`documentText`, with `kind`, the file sizes and any `warnings`. A request that
+does not fit the document's kind (Markdown for a design, files for a document)
+is refused with `document_format_mismatch`.
+
+Creating or publishing normalises the files: the manifest is rewritten in a
+fixed layout and each board is sanitised (see [Security](#security)). Anything
+that does not follow the format is refused with `board_format_invalid`, whose
+message names the board and the kind of problem and never the offending text or
+URL. Things removed without refusing (scripts, event handlers, `javascript:`
+links, unsupported elements) are listed as warnings on the version.
+
+### Board format v1
+
+The files an agent or a person supplies must follow seven rules: the
+`manifest.json` shape and board ids, no JavaScript, all CSS in the file with no
+external resources, responsive layout, `#board:<id>` links between boards, CSS
+variables on `body`, and a size budget per board. The exact rules, a manifest
+example and a copy-ready agent skill are in the help article
+`design-boards-format` ([source](../help/design-boards-format.md); read it with
+`get_help_article`). Send-to-agent puts the same rules in the task, so a coding
+agent follows them without extra setup.
+
+### Editing designs
+
+The design page edits the current version in a visual editor (GrapesJS, bundled
+with Wardby, no CDN). Everyone sees the **Boards** list (left), the canvas, the
+Desktop, Tablet and Phone widths for checking the responsive layout, and the
+**Comments** and **History** tabs. People with `write` access also get:
+
+- Board actions (add, rename, move up and down, delete) and a **Layers** tree.
+- **Style** and **Settings** tabs (right) for the selected element, with Undo
+  and Redo.
+
+Edits save by themselves a moment after you stop, as a new version that
+contains only the changed files. If someone else published first, the page says
+so and offers to reload rather than overwriting. An edit that would break the
+board format (for example an external image) is not saved, and the page shows
+the problem.
+
+A board's CSS as written is kept as a **base layer** that always renders as
+written; the editor's own changes are saved as a separate block on top. When a
+writer first opens a version, the page renders each board as written and in the
+editor and compares computed styles. Where they differ it lists "N styles may
+not be editable on board X" under **Checks**: the board still looks right, but
+those styles live only in the base layer, so the Style panel cannot change them.
+To change them, edit the HTML and CSS in the repository or send a comment to a
+coding agent.
+
+### Comments on boards
+
+Comment threads on a design are **pins**. Press `C` (or use the Comment
+button), click an element in the canvas and write the comment; Esc leaves
+comment mode. A pin is anchored to the element (its board, its id when it has
+one, its tag, its first words and its path), plus the point you clicked as a
+fraction of the element's box, so it stays on the element at every device
+width. Open threads show as numbered pins; a resolved or outdated thread shows
+its pin only while it is selected. When a new version no longer contains the
+element, the thread is marked outdated, as for Markdown text. Replies,
+mentions, resolve and reopen, live updates and share-link guests work as for
+documents, and the Comments tab is the same list.
+
+### Overview and Play
+
+**Overview** shows every board at once as a scaled tile; picking a tile opens
+that board in the editor. **Play** shows the design as a prototype, one board at
+a time at Desktop, Tablet or Phone width: `#board:<id>` links move between
+boards, Back steps back and Exit closes it. Both render boards in sandboxed
+frames that cannot run script (see [Security](#security)), for every viewer
+including share-link readers.
+
+### Design version history
+
+The **History** tab lists versions as the Edits tray does for documents. Click a
+version to see its boards read-only in a layer over the canvas (the editor
+cannot be reached while it is open, and comments pause); **Restore this
+version** (members with `write`) publishes its files as a new version, with the
+same `document_version_conflict` and `document_version_is_latest` checks as for
+documents. Over MCP use `list_document_versions` and `restore_document_version`.
+
 ## Names and privacy
 
 Members appear under the display name the identity provider gives
@@ -202,13 +305,17 @@ public.
 ## Sending threads to a coding agent
 
 Link a document to a repository file at creation: `create_document` with
-`agentId`, `repository` and `path` together. The agent must be a coding
+`agentId`, `repository` and `path` together. (A design links to a directory
+instead; see [Sending design threads](#sending-design-threads).) The agent must be a coding
 agent you own, or one whose owner set `codingProfile.allowWebhookTaskOverride`
 and granted you `execute`: a send hands the agent task text, the same rule as
 `trigger_agent`. `path` is a repository-relative `.md` file of plain segments
 (letters, digits, `.`, `_`, `-`; at most 256 characters); `baseRef`, if given,
-must be a valid branch name. An `agentId` without a repository follows the
-same rule.
+must be a valid branch name. The repository must be one the agent is already
+authorized for (its coding repository, or one on its repository list that is
+linked), so linking a document never widens what an agent can reach; otherwise
+`create_document` answers `document_repo_link_invalid`, and a send re-checks it.
+An `agentId` without a repository follows the same rule.
 Then a person with `write` access sends open threads (up to 50) from the page or
 with `send_threads_to_agent`. Wardby starts one coding run (run trigger
 `comment`) with the document, the threads and the file path; when it ends, the
@@ -223,70 +330,186 @@ agent and remain allowed to give it task text (its owner, or the owner's
 images, task lists or raw HTML open comment-only in the page, because the
 editor would rewrite them.
 
+The task text is also redacted at send time against the agent's current secret
+values, so a value that became a secret after the version was published does not
+reach the run.
+
 Secret values of the linked agent are replaced in document titles, document
 and comment text before they are stored, so a pasted secret does not become
 document content. The file an agent run writes, and its replies, are also
 checked for token-shaped values (provider keys, Git host tokens) before they are
 published.
 
+### Sending design threads
+
+A design links to a repository **directory** holding `manifest.json` (`path`;
+`.` for the root) and needs a `baseRef`, the branch the agent's run starts from.
+Any coding agent works, Codex or Claude Code, with the same rules as for a
+document. A send compares the design in Wardby with the directory at `baseRef`
+and puts only the files that differ in the task (and lists files to delete);
+board files already in the repository are not repeated. The whole task, with
+the threads and the agent's own instructions, must fit the 64 KiB coding-task
+limit, or the send is refused with `document_too_large_for_agent`. The threads
+are pins, so each is described by its board, the element's tag, its first words
+and its path. The task states the [board format](#board-format-v1) rules. When
+the run ends, the design directory at the run's head ref becomes the next
+version if the design has not changed meanwhile, with the same normalisation
+and sanitising as any publish (a result that breaks the format counts as a
+failed run: the threads get the failed reply and the design is not changed). If the design in the
+repository cannot be read (a board missing or too large), the send fails with
+`document_send_failed` and no thread changes.
+
 ## Exports
 
-A design exports as one board's HTML file (`board-html`), one HTML file for the
-whole prototype with a board switcher and working links (`prototype`), a PNG of
-one board, or a PDF of all boards. A Markdown document exports as PDF only.
+| Format       | For                  | Result                                                               | Needs the renderer |
+| ------------ | -------------------- | -------------------------------------------------------------------- | ------------------ |
+| `board-html` | a design             | One board's HTML file (`board` required)                             | no                 |
+| `prototype`  | a design             | One HTML file with a board switcher and working links between boards | no                 |
+| `png`        | a design             | One board as an image (`board` required)                             | yes                |
+| `pdf`        | a design or Markdown | All boards of a design, or a paginated A4 PDF of a Markdown document | yes                |
+
+A Markdown document exports as PDF only (`export_format_unsupported` otherwise).
+Both kinds have an Export menu on the page, and a document page has **Export
+PDF**. An export covers the current version, or the one you ask for
+(`versionNumber`). A Markdown PDF leaves out images that are not embedded as
+`data:` URLs.
+
 Page API: `GET /d/api/<id>/export?format=board-html|prototype&board=&version=`
 (share-readable) and, for PNG and PDF, `POST /d/api/<id>/exports` with
 `{ format, board?, versionNumber? }` (answers 202 with `exportId`), then
 `GET /d/api/exports/<exportId>` for the status and `.../file` for the bytes.
 Over MCP, `export_document` does the same and waits up to 150 seconds for PNG
-and PDF (image and embedded-resource results).
+and PDF (image and embedded-resource results); HTML comes back as `fileText`,
+wrapped as untrusted tool output.
 
 HTML files carry no script except the prototype's switcher, which the file's
-own Content-Security-Policy allows by hash; boards sit in sandboxed frames.
+own Content-Security-Policy allows by hash; boards sit in sandboxed frames (see
+[Security](#security)). A rendered export is kept for one hour and can be read
+only by whoever asked for it. Anonymous share-link readers can download HTML
+exports but need to sign in or register as a guest to ask for PNG or PDF
+(`export_sign_in_required`). The stored content was redacted against the linked
+agent's secret values when it was written, so exports hold none.
+
+### The renderer
+
 PNG and PDF need the server's renderer; without one the request is refused with
 `export_renderer_unavailable` (HTTP 503) and nothing is queued. The renderer is
 an optional service (headless Chromium, no egress, no database or secrets) that
-the control plane reaches at `WARDBY_RENDERER_URL`; on GKE set
-`WARDBY_RENDERER=true` for `deploy/gke/up.sh`
-([renderer](../deploy/gke/README.md#pngpdf-export-renderer-optional)), on EKS see
-[the AWS module](../deploy/aws/README.md#pngpdf-export-renderer-optional), and
-locally use `deploy/local/docker-compose.renderer.yml`. In low-power mode it
-sleeps when idle and the first export after that waits for it to wake. A Markdown PDF
-leaves out images that are not embedded as `data:` URLs. A rendered export is kept for one hour and can be
-read only by whoever asked for it. Anonymous share-link readers can download HTML
-exports but need to sign in or register as a guest to ask for PNG or PDF. The
-stored content was redacted against the linked agent's secret values when it was
-written, so exports hold none.
+the control plane calls over HTTP.
+
+| Variable              | Default             | Meaning                                                                                                                      |
+| --------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_RENDERER_URL` | unset (no renderer) | Base URL of the renderer, `http(s)://host:port` with no credentials, query or fragment. Unset turns PNG and PDF exports off. |
+| `RENDERER_DEPLOYMENT` | `wardby-renderer`   | The Kubernetes Deployment low-power mode scales for the renderer.                                                            |
+| `PORT`                | `8796`              | On the renderer service itself (not the control plane): the port it listens on.                                              |
+
+Where to turn it on:
+
+- **GKE:** set `WARDBY_RENDERER=true` for `deploy/gke/up.sh`; it builds the
+  image, applies the manifests and sets `WARDBY_RENDERER_URL`
+  ([renderer](../deploy/gke/README.md#pngpdf-export-renderer-optional)).
+- **EKS:** the Terraform module creates the image repository; build, apply and
+  configure as in [the AWS module](../deploy/aws/README.md#pngpdf-export-renderer-optional).
+- **Local:** build the image (`npm run renderer:image:local`), then
+  `docker compose -f deploy/local/docker-compose.renderer.yml up -d` and start
+  the control plane with `WARDBY_RENDERER_URL=http://127.0.0.1:8796`.
+
+On Kubernetes the pod asks for 500m CPU and 2 GiB of memory (the most it needs
+while buffering several renders at once), with a health check that restarts it
+if Chromium crashes or renders get stuck. In low-power mode it sleeps when no
+export was requested in the idle window; the first export after that waits for
+it to wake (about 20 seconds normally, but a cold node can take minutes, and the
+wait gives up after 2 minutes with `export_renderer_unavailable`; retrying
+usually works). `power_sleep` accepts `target: "renderer"`.
+
+## Viewer: Documents
+
+The desktop viewer (`apps/viewer`) has a **Documents** tab that lists the
+documents and designs the signed-in person owns or was granted, from
+`GET /admin/api/documents` (see [the viewer API](viewer-api.md#get-adminapidocuments)).
+Like the rest of the viewer it needs the `admin:view` scope and the `admin`
+role, so the tab is for administrators; it does not show documents the person
+merely could open as an administrator. It loads the newest 500 and filters them
+in the app by agent, repository and title, so an older document that does not
+show up is past that window (other clients can pass the API's `agent` and
+`repository` parameters). Opening a row sends the browser to
+`https://<your-host>/d/<id>`; the viewer only opens `https` links, so a server on
+plain `http` cannot be opened from the viewer (copy the address instead).
 
 ## Limits
 
-| Limit                        | Value                                        |
-| ---------------------------- | -------------------------------------------- |
-| Markdown per version         | 1 MiB (UTF-8 bytes)                          |
-| Comment or reply             | 10,000 characters                            |
-| Quoted anchor text           | 500 characters                               |
-| Guest name                   | 1-40 characters                              |
-| Share link lifetime          | 1-90 days, default 14                        |
-| Threads per send             | 50                                           |
-| Sends per document           | 30 an hour                                   |
-| PNG/PDF exports per document | 30 an hour, each at most 20 MiB              |
-| Guest comments and replies   | 30 an hour per guest                         |
-| Guest registrations per link | 20 an hour                                   |
-| Document sent to an agent    | 60,000 characters                            |
-| Mentions checked per comment | 20 (members and guests)                      |
-| Live-update streams          | 5 per browser session on each server replica |
+| Limit                        | Value                                                            |
+| ---------------------------- | ---------------------------------------------------------------- |
+| Markdown per version         | 1 MiB (UTF-8 bytes)                                              |
+| Design per version           | 2 MiB in all (`document_too_large`)                              |
+| One board                    | 40 KB recommended (a warning), 512 KB hard (`board_too_large`)   |
+| Boards per design            | 50                                                               |
+| `brand.md`                   | 64 KB                                                            |
+| MCP request body             | 1 MiB (publish larger designs from the repository or the editor) |
+| Comment or reply             | 10,000 characters                                                |
+| Quoted anchor text           | 500 characters                                                   |
+| Guest name                   | 1-40 characters                                                  |
+| Share link lifetime          | 1-90 days, default 14                                            |
+| Threads per send             | 50                                                               |
+| Sends per document           | 30 an hour                                                       |
+| PNG/PDF exports per document | 30 an hour, each at most 20 MiB                                  |
+| Guest comments and replies   | 30 an hour per guest                                             |
+| Guest registrations per link | 20 an hour                                                       |
+| Document sent to an agent    | 60,000 characters (a design: the 64 KiB coding task)             |
+| Mentions checked per comment | 20 (members and guests)                                          |
+| Live-update streams          | 5 per browser session on each server replica                     |
 
-## Security headers
+## Security
 
 Document pages are served by the control plane with a strict
 Content-Security-Policy (`default-src 'none'`; scripts only from the same
-origin or a per-request nonce, no inline styles, no framing), `Referrer-Policy:
-no-referrer`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
-`Cache-Control: no-store`. The editor bundle ships with Wardby and loads from
-the same origin, with no CDN. Changing requests need a matching `Origin` and a
-per-session CSRF header. Session cookies are `__Host-` prefixed, HttpOnly and
-Secure on HTTPS. Share tokens are in the URL path, so keep that path out of
+origin or a per-request nonce, no framing), `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
+`Cache-Control: no-store`. A Markdown page allows no inline styles. A **design
+page** also allows inline `<style>` (`style-src 'self' 'unsafe-inline'`) and
+`data:` fonts (`font-src 'self' data:`): the editor renders each board's CSS in
+`<style>` elements inside its canvas and inlines its icon font, and the canvas
+inherits the page policy. Scripts still cannot run there: there is no
+`unsafe-eval`, no inline script, and board HTML is sanitised before it is
+stored. The editor bundle ships with Wardby and loads from the same origin, with
+no CDN, and its script tags carry Subresource Integrity (sha384) hashes; the
+editor's telemetry is switched off. Changing requests need a matching `Origin`
+and a per-session CSRF header. Session cookies are `__Host-` prefixed, HttpOnly
+and Secure on HTTPS. Share tokens are in the URL path, so keep that path out of
 any proxy log you cannot protect.
+
+**Board sanitiser.** Every board is parsed and sanitised on every write (create,
+publish, editor save, restore, and a coding agent's result), so a stored board
+is never trusted markup:
+
+- Removed (and counted as a warning): `<script>`, `on*` attributes,
+  `javascript:` and `vbscript:` URLs, forms and inputs, frames, `object`,
+  `embed`, media elements, `<link>`, `<meta>`, `<base>`, `srcset`,
+  SMIL animation, `foreignObject`, and the editor's `data-gjs-*` attributes.
+- Refused with `board_format_invalid`: any external reference, that is a
+  stylesheet, image, font or `url()`/`@import` that is not a `data:` image or a
+  `#fragment` (links to `https://` pages are fine), script-like CSS
+  (`expression()`, `behavior`), malformed CSS, a bad manifest, and files that
+  the manifest does not list.
+
+**Frames.** Boards are shown in `srcdoc` frames, never as page markup. Overview
+and the version-history view use an empty `sandbox` (no script, no same-origin,
+no navigation). Play uses `sandbox="allow-top-navigation-by-user-activation"`,
+which only lets a board link change the page's fragment. The downloaded
+prototype file adds `allow-same-origin` (so its switcher can set the frame) but
+never `allow-scripts`; the file's own policy allows only its switcher script, by
+hash. There is no separate content origin for boards yet.
+
+**Renderer isolation.** The renderer runs Chromium with Chromium's own sandbox
+off, because the container runtime's default seccomp profile blocks the user
+namespaces it needs. The pod is therefore the boundary: gVisor (GKE sandbox
+nodes, or the EKS gVisor node group), a non-root user, a read-only root
+filesystem, all capabilities dropped, no service-account token, no database or
+secrets, and a NetworkPolicy that admits only the control plane and lets the
+renderer reach nothing. On local Docker and kind (runc) only the container
+settings apply, so do not expose a local renderer beyond localhost. PNG and PDF
+exports require a signed-in member or a registered guest; the renderer is never
+reachable from the browser.
 
 ## Troubleshooting
 
@@ -295,7 +518,8 @@ Each error code has an article under `help/errors/`: `document_not_found`,
 `document_version_conflict`, `document_version_is_latest`, `document_summary_invalid`, `document_version_not_found`, `document_not_agent_linked`,
 `document_agent_unavailable`, `document_repo_link_invalid`,
 `document_send_failed`, `document_send_not_available`,
-`document_too_large_for_agent`, `comment_anchor_invalid`, `comment_too_long`,
+`document_too_large_for_agent`, `document_format_mismatch`,
+`board_format_invalid`, `board_too_large`, `comment_anchor_invalid`, `comment_too_long`,
 `comment_thread_closed`, `comment_thread_already_sent`,
 `comment_send_rate_limited`, `comment_not_found`, `comment_edit_forbidden`,
 `guest_name_invalid`, `guest_email_invalid`, `share_link_invalid`,
