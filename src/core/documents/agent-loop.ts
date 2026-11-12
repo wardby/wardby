@@ -30,6 +30,7 @@ import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import {
@@ -39,11 +40,12 @@ import {
   type AgentEditFormat,
   type SendContext,
 } from "./agent-formats.js";
-import { assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
+import { assertAgentRepository, assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
 import { listThreads, postAgentReply } from "./comments.js";
 import { contentHash } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
 import { getDocument, publishVersion } from "./service.js";
+import { withHtmlEscapedForms } from "./formats/boards.js";
 import { formatFor, type DocumentFormat } from "./formats/index.js";
 
 export { currentDocumentHeading, MAX_SEND_MARKDOWN_CHARS, REPLIES_FENCE } from "./agent-formats.js";
@@ -125,6 +127,12 @@ function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: Docu
  * The run's task: the adapter's instructions, then the untrusted context
  * holding the adapter's part (whole) and the threads (cut to the room left in
  * the coding task). A document that leaves too little room is refused.
+ *
+ * The task is stored in the run record (Run and CodingRun request), so every
+ * part of it is redacted by exact value against the agent's current secret
+ * values (`redact`) before it is measured and composed: a value that became an
+ * agent secret after the version was published, or that a commenter wrote,
+ * never reaches the record or the agent.
  */
 function buildTask(
   ef: AgentEditFormat,
@@ -133,17 +141,21 @@ function buildTask(
   context: SendContext,
   threads: Awaited<ReturnType<typeof listThreads>>,
   agentInstructions: string,
+  redact: (text: string) => string,
 ): string {
-  const task = ef.instructions(
-    doc,
-    versionNumber,
-    threads.map((t) => t.number),
+  const task = redact(
+    ef.instructions(
+      doc,
+      versionNumber,
+      threads.map((t) => t.number),
+      context,
+    ),
   );
-  const documentPart = `${context.heading}\n${context.body}\n\n${THREADS_HEADING}\n`;
+  const documentPart = redact(`${context.heading}\n${context.body}\n\n${THREADS_HEADING}\n`);
   const used = byteLength(composeTaskOverride(task, documentPart)) + byteLength(agentInstructions.trim());
   const room = MAX_CODING_TASK_BYTES - TASK_RESERVE_BYTES - used;
   if (room < MIN_THREADS_BYTES) throw new Error("document_too_large_for_agent");
-  const text = threadsText(threads, formatFor(doc.kind));
+  const text = redact(threadsText(threads, formatFor(doc.kind)));
   const byChars = text.length > MAX_UNTRUSTED_BODY_CHARS ? text.slice(0, MAX_UNTRUSTED_BODY_CHARS) : text;
   const fitted = truncateText(byChars, room, byteLength, THREADS_CUT_MARKER);
   const threadsPart =
@@ -192,7 +204,8 @@ export async function sendThreadsToAgent(
       kind: true,
       ownerId: true,
       systemPrompt: true,
-      codingProfile: { select: { allowWebhookTaskOverride: true } },
+      codingProfile: { select: { allowWebhookTaskOverride: true, repository: true, repositoryAuthorizedVia: true } },
+      repositories: { select: { repository: true, authorizedVia: true } },
     },
   });
   if (agent?.kind !== "coding") throw new Error("document_not_agent_linked");
@@ -202,6 +215,13 @@ export async function sendThreadsToAgent(
     throw new Error("document_agent_unavailable");
   }
   assertDocumentAgentOverride(doc.ownerId, agent);
+  // Ruling T6-1 at send time too: no repository is read, and no run started, for an agent that is no
+  // longer authorized for the linked repository.
+  try {
+    assertAgentRepository(agent, doc.repository);
+  } catch (err) {
+    throw new Error("document_not_agent_linked", { cause: err });
+  }
   const ef = agentEditFormat(doc.kind);
   const path = ef.validLinkPath(doc.path);
   const baseRef = doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
@@ -232,7 +252,25 @@ export async function sendThreadsToAgent(
     { repository: doc.repository, path, baseRef },
     { number: version.number, content },
   );
-  const task = buildTask(ef, { path, baseRef, kind: doc.kind }, version.number, context, threads, agent.systemPrompt);
+  // The agent's current secret values, with the JSON- and HTML-escaped forms (board bodies are
+  // serialised HTML, the manifest JSON). A failed read refuses the send: the task is not built unchecked.
+  let secretValues: string[];
+  try {
+    secretValues = withHtmlEscapedForms(
+      (await loadAgentSecretValues(db, deps.cipher, agentId)).flatMap((e) => e.values),
+    );
+  } catch (err) {
+    throw new Error("document_send_failed", { cause: err });
+  }
+  const task = buildTask(
+    ef,
+    { path, baseRef, kind: doc.kind },
+    version.number,
+    context,
+    threads,
+    agent.systemPrompt,
+    (text) => redactExactSecretValues(text, secretValues),
+  );
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {

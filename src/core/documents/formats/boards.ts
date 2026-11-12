@@ -42,7 +42,7 @@ const HTML_ESCAPES: ReadonlyArray<Readonly<Record<string, string>>> = [
 ];
 
 /** Each value plus the forms an HTML serialiser writes it in. A backstop: the decoded pass is the check. */
-function withHtmlEscapedForms(values: readonly string[]): string[] {
+export function withHtmlEscapedForms(values: readonly string[]): string[] {
   const out = new Set<string>();
   for (const value of values) {
     out.add(value);

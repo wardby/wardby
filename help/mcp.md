@@ -91,7 +91,7 @@ thread is resolved. Any other ending posts "The agent run failed; the document
 was not changed." on each thread. Each run's ending is answered once.
 
 Errors: `document_not_agent_linked` (no coding agent, repository or path, or
-the repository is not on the agent's list), `document_agent_unavailable` (the
+the repository is not on the agent's list or no longer authorized for it), `document_agent_unavailable` (the
 document's owner no longer has execute access to the agent, or is not its
 owner and the owner does not allow others' task text),
 `document_too_large_for_agent` (the current version is over 60,000 characters,
@@ -99,4 +99,4 @@ or does not fit in a coding task with the agent's instructions),
 `comment_thread_closed` (a thread is not open), `comment_thread_already_sent` (a
 thread's earlier run has not finished yet), `comment_send_rate_limited` (30
 sends per document per hour), `document_send_failed` (the run could not be
-started; try again).
+started, or a design's repository copy could not be read; try again).

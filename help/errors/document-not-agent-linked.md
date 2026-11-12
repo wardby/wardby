@@ -11,6 +11,6 @@ appliesTo: ">=0.10.0"
 
 `document_not_agent_linked` (HTTP 400). Sending comment threads to an agent works only on a document linked to a file in a repository and to a coding agent: `create_document` with `agentId`, `repository` and `path` together. A document without those, or linked to a native agent, returns this. The same code is returned by `create_document` when you pass `repository` but not an agent, or the other way round.
 
-Create a new linked document (the link cannot be added later), or edit the document yourself. A repository the agent cannot choose for this run (not linked, or refused by its policy) also returns this.
+Create a new linked document (the link cannot be added later), or edit the document yourself. A repository the agent cannot choose for this run (not linked, no longer authorized for the agent, or refused by its policy) also returns this, and so does a design linked without a base ref.
 
 See [Documents](../documents.md).

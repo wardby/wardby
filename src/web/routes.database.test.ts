@@ -1058,7 +1058,14 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
           budgetUsd: 1,
           kind: "coding",
           ownerId: owner.id,
-          codingProfile: { create: { provider: "codex", repository: "acme/web-docs", protectedPaths: [] } },
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository: "acme/web-docs",
+              repositoryAuthorizedVia: "admin",
+              protectedPaths: [],
+            },
+          },
         },
       });
       await db.document.update({

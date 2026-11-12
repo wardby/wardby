@@ -11,6 +11,8 @@ import {
 } from "./format.js";
 
 const MANIFEST_READ_BYTES = 64 * 1024;
+/** The problem readDesignFromRepository reports when there is no design at the ref (no manifest.json). */
+export const MANIFEST_MISSING_PROBLEM = "manifest.json is missing";
 const TOO_LARGE = /^(github|local)_file_too_large$/;
 const NOT_TEXT = /^(github|local)_file_(not_utf8|not_a_file)$/;
 
@@ -52,7 +54,7 @@ export async function readDesignFromRepository(
     }
   };
   const manifestText = await at(MANIFEST_PATH, MANIFEST_READ_BYTES, null);
-  if (manifestText === null) throw new BoardFormatError(["manifest.json is missing"]);
+  if (manifestText === null) throw new BoardFormatError([MANIFEST_MISSING_PROBLEM]);
   const manifest = parseManifest(manifestText);
   const files: Record<string, string> = { [MANIFEST_PATH]: manifestText };
   for (const b of manifest.boards) {
