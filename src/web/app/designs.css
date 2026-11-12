@@ -339,6 +339,172 @@
   display: none;
 }
 
+/* ---- overlays: Overview, Play, an older version ---- */
+.overlay {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  z-index: 50;
+}
+.overlay.overview,
+.overlay.play {
+  position: fixed;
+  inset: 0;
+}
+.overlay.version-view {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+}
+.ov-bar,
+.play-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding: 0.5rem 0.9rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.ov-bar .muted {
+  margin-right: auto;
+}
+.play-bar .group {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.4rem;
+  border-left: 1px solid var(--border);
+}
+.play-bar .group button.on,
+.vv-boards button.on {
+  background: var(--text);
+  color: var(--surface);
+  border-color: var(--text);
+}
+.play-bar button:last-child {
+  margin-left: auto;
+}
+.ov-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  padding: 1.2rem;
+  overflow: auto;
+  align-content: flex-start;
+}
+.ov-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.ov-stage {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.ov-view {
+  overflow: hidden;
+}
+.ov-frame {
+  border: 0;
+  display: block;
+  background: #fff;
+}
+.ov-pick {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.ov-pick:hover,
+.ov-pick:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.ov-name {
+  font-size: 0.85rem;
+}
+.ov-empty {
+  padding: 2rem;
+  color: var(--muted);
+}
+.play-stage,
+.vv-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.8rem;
+}
+.play-stage {
+  background: var(--bg);
+}
+.play-frame,
+.vv-frame {
+  flex: 1;
+  min-height: 0;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+.vv-frame {
+  min-height: 70vh;
+}
+.vv-boards {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+  flex-wrap: wrap;
+}
+.version-view .vbar {
+  position: static;
+  max-width: none;
+  margin: 0;
+  border-radius: 0;
+}
+
+/* ---- Export menu ---- */
+.exp-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 14rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+.exp-menu[hidden] {
+  display: none;
+}
+.exp-menu button {
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+.exp-menu button:hover {
+  background: var(--bg);
+}
+.exp-note {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.exp-note:empty {
+  display: none;
+}
+
 @media (max-width: 1100px) {
   .design-main {
     grid-template-columns: 200px 1fr 280px;

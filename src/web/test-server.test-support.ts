@@ -103,7 +103,10 @@ export interface TestWebServer {
   close(): Promise<void>;
   design(input: {
     title: string;
-    files: Record<string, string>;
+    files?: Record<string, string>;
+    /** A Markdown document instead of a design (with `markdown`). */
+    kind?: "document";
+    markdown?: string;
     access: DesignAccess;
     /** Also create a share link with this permission (for guests and anonymous visitors). */
     share?: "view" | "comment";
@@ -177,10 +180,10 @@ export async function startTestWebServer(opts: {
     async design(input) {
       const owner = await principal("Olive Owner");
       const doc = await createDocument(db, TEST_CIPHER, {
-        kind: "design",
+        kind: input.kind ?? "design",
         ownerId: owner,
         title: input.title,
-        files: input.files,
+        ...(input.kind === "document" ? { markdown: input.markdown ?? "# Notes\n" } : { files: input.files }),
       });
       let first = owner;
       let second: string;

@@ -819,3 +819,11 @@ img.ProseMirror-separator {
   padding: 0 0.1em;
   border-radius: 2px;
 }
+
+.export-note {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.export-note:empty {
+  display: none;
+}

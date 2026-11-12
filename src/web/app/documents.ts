@@ -19,6 +19,7 @@ import {
 } from "./api.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
+import { pdfExportButton } from "./exports-menu.js";
 import { EditsTray } from "./edits-ui.js";
 import { createEditor } from "./editor.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
@@ -72,6 +73,14 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const version = h("span", { class: "badge" }, `v${baseNumber}`);
   const saveState = h("span", { class: "save", aria: { live: "polite" } });
   const liveNote = h("span", { class: "live-note", hidden: true, role: "status" });
+  // Export PDF: only when this server can render (a renderer is set up); same client as the design Export menu.
+  const exportPdfBtn = h(
+    "button",
+    { type: "button", hidden: payload.document.canRender !== true, data: { action: "export-pdf" } },
+    "Export PDF",
+  );
+  const exportNote = h("span", { class: "export-note", role: "status" });
+  pdfExportButton(exportPdfBtn, exportNote, api);
   const who = h("span", { class: "who-am-i" });
   const account = h("span", { class: "account" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
@@ -131,6 +140,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
           title,
           version,
         ),
+        exportPdfBtn,
+        exportNote,
         saveState,
         liveNote,
         who,

@@ -8,7 +8,7 @@
 import type { ElementAnchor } from "../../core/documents/element-anchors.js";
 import type { VersionWarning } from "../../core/documents/warnings.js";
 import type { TextAnchor } from "./anchors.js";
-import type { VersionItem } from "./history.js";
+import type { VersionItem } from "./version-rows.js";
 
 export type { ElementAnchor, TextAnchor };
 /** A thread's anchor: words in a document's text, or an element on a design board. */
@@ -55,6 +55,8 @@ export interface DocumentPayload {
     repository?: string | null;
     path?: string | null;
     canSend: boolean;
+    /** Whether PNG and PDF export is available on this server (a renderer is set up). */
+    canRender?: boolean;
   };
   version: PayloadVersion;
   me: Viewer;
@@ -74,6 +76,23 @@ export interface MentionEntry {
   guestId?: string;
   name: string;
 }
+
+/** One board as the frames route serves it: sandboxed-frame HTML (frames.ts), never page markup. */
+export interface FrameBoard {
+  id: string;
+  name: string;
+  width: number;
+  html: string;
+}
+
+/** A file the server sends as an attachment (an export), with the name it suggests. */
+export interface DownloadedFile {
+  blob: Blob;
+  filename: string;
+}
+
+export type ExportFileFormat = "board-html" | "prototype";
+export type RenderedFormat = "png" | "pdf";
 
 export class ApiError extends Error {
   constructor(
@@ -112,8 +131,9 @@ export class Api {
     this.csrf = boot.csrf;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const headers: Record<string, string> = { accept: "application/json" };
+  /** One request; a non-2xx answer throws ApiError with the server's fixed code. */
+  private async raw(method: string, path: string, body?: unknown, accept = "application/json"): Promise<Response> {
+    const headers: Record<string, string> = { accept };
     if (this.boot.shareToken) headers["x-wardby-share"] = this.boot.shareToken;
     if (method !== "GET") headers["x-wardby-csrf"] = this.csrf;
     if (body !== undefined) headers["content-type"] = "application/json";
@@ -129,8 +149,8 @@ export class Api {
     } catch {
       throw new ApiError("network_error", 0);
     }
-    const data: unknown = await res.json().catch(() => null);
     if (!res.ok) {
+      const data: unknown = await res.json().catch(() => null);
       const { error: code, problems } = (data ?? {}) as { error?: unknown; problems?: unknown };
       const safeCode = typeof code === "string" && CODE.test(code) ? code : "internal_error";
       const list =
@@ -139,7 +159,19 @@ export class Api {
           : [];
       throw new ApiError(safeCode, res.status, list);
     }
-    return data as T;
+    return res;
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await this.raw(method, path, body);
+    return (await res.json().catch(() => null)) as T;
+  }
+
+  /** A file answer: the bytes and the name the server suggests (its own slug, [a-z0-9-] and an extension). */
+  private async download(path: string): Promise<DownloadedFile> {
+    const res = await this.raw("GET", path, undefined, "*/*");
+    const named = /filename="([A-Za-z0-9._-]{1,120})"/.exec(res.headers.get("content-disposition") ?? "");
+    return { blob: await res.blob(), filename: named?.[1] ?? "export" };
   }
 
   private doc(sub = ""): string {
@@ -185,6 +217,39 @@ export class Api {
 
   restore(number: number, baseNumber: number): Promise<{ version: { number: number } }> {
     return this.request("POST", this.doc(`/versions/${number}/restore`), { baseNumber });
+  }
+
+  /** A design version's boards as sandboxed-frame HTML: Play (board links) or Overview (no links). */
+  async frames(mode: "play" | "overview", version?: number): Promise<FrameBoard[]> {
+    const q = `mode=${mode}${version !== undefined ? `&version=${version}` : ""}`;
+    const r = await this.request<{ boards: FrameBoard[] }>("GET", this.doc(`/frames?${q}`));
+    return Array.isArray(r?.boards) ? r.boards : [];
+  }
+
+  /** A board (HTML) or the whole prototype (HTML) of a design version, computed on request. */
+  exportFile(opts: { format: ExportFileFormat; board?: string; version?: number }): Promise<DownloadedFile> {
+    const q = new URLSearchParams({ format: opts.format });
+    if (opts.board) q.set("board", opts.board);
+    if (opts.version !== undefined) q.set("version", String(opts.version));
+    return this.download(this.doc(`/export?${q.toString()}`));
+  }
+
+  /** Asks for a rendered PNG (one board) or PDF (all boards, or a document); returns the job to poll. */
+  async startExport(opts: { format: RenderedFormat; board?: string; versionNumber?: number }): Promise<string> {
+    const r = await this.request<{ exportId: string }>("POST", this.doc("/exports"), {
+      format: opts.format,
+      ...(opts.board ? { board: opts.board } : {}),
+      ...(opts.versionNumber !== undefined ? { versionNumber: opts.versionNumber } : {}),
+    });
+    return r.exportId;
+  }
+
+  exportStatus(exportId: string): Promise<{ status: string; errorCode: string | null }> {
+    return this.request("GET", `/d/api/exports/${encodeURIComponent(exportId)}`);
+  }
+
+  exportBytes(exportId: string): Promise<DownloadedFile> {
+    return this.download(`/d/api/exports/${encodeURIComponent(exportId)}/file`);
   }
 
   send(threadIds: string[]): Promise<unknown> {
@@ -252,6 +317,13 @@ const MESSAGES: Record<string, string> = {
   guest_name_invalid: "Use a name of 1–40 characters that isn't “agent”, “via” or a member's name.",
   guest_email_invalid: "That email address doesn't look right.",
   share_link_invalid: "This share link is no longer valid.",
+  export_renderer_unavailable: "PNG and PDF export isn't set up on this server.",
+  export_rate_limited: "Too many exports of this design in the last hour. Try again later.",
+  export_sign_in_required: "Sign in or add your name to export PNG or PDF.",
+  export_timeout: "The export is taking too long. Try again.",
+  export_failed: "The export couldn't be made. Try again.",
+  export_too_large: "This is too large to export.",
+  export_not_found: "That export is no longer available. Try again.",
   network_error: "Can't reach the server. Check your connection.",
 };
 

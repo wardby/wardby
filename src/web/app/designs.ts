@@ -20,6 +20,7 @@ import {
   readBootstrap,
   type Bootstrap,
   type DocumentPayload,
+  type FrameBoard,
   type Viewer,
 } from "./api.js";
 import { createBoardsEditor, ManifestUnreadableError, type BoardsEditor, type DeviceId } from "./boards-editor.js";
@@ -27,6 +28,10 @@ import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { measureFidelity } from "./fidelity.js";
 import { DesignSurface } from "./design-surface.js";
+import { DesignHistory } from "./design-history.js";
+import { exportsMenu } from "./exports-menu.js";
+import { openOverview } from "./overview.js";
+import { openPlay } from "./play.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
 
 const SAVE_DELAY_MS = 1500;
@@ -151,10 +156,9 @@ function mount(
   );
   const undoBtn = h("button", { type: "button", title: "Undo" }, "Undo");
   const redoBtn = h("button", { type: "button", title: "Redo" }, "Redo");
-  // Overview, Play and Export are wired by their own step (Task 15).
-  const overviewBtn = h("button", { type: "button", disabled: true, data: { action: "overview" } }, "▦ Overview");
-  const playBtn = h("button", { type: "button", disabled: true, data: { action: "play" } }, "▶ Play");
-  const exportBtn = h("button", { type: "button", disabled: true, data: { action: "export" } }, "Export ▾");
+  const overviewBtn = h("button", { type: "button", data: { action: "overview" } }, "▦ Overview");
+  const playBtn = h("button", { type: "button", data: { action: "play" } }, "▶ Play");
+  const exportBtn = h("button", { type: "button", data: { action: "export" } }, "Export ▾");
   const commentBtn = h("button", { type: "button", class: "primary", data: { action: "comment" } }, "💬 Comment");
 
   const boardsList = h("ul", { class: "boards", aria: { label: "Boards" } });
@@ -171,18 +175,21 @@ function mount(
   const checks = h("div", { class: "checks", hidden: true, role: "note" });
   const commentsPanel = h("div", { class: "panel" });
   const count = h("span", { class: "ccount" });
-  type Tab = "style" | "settings" | "comments";
+  const historyPanel = h("div", { class: "panel" });
+  type Tab = "style" | "settings" | "comments" | "history";
   const tabs: Record<Tab, HTMLButtonElement> = {
     style: h("button", { type: "button", role: "tab", data: { tab: "style" }, hidden: !canWrite }, "Style"),
     settings: h("button", { type: "button", role: "tab", data: { tab: "settings" }, hidden: !canWrite }, "Settings"),
     comments: h("button", { type: "button", role: "tab", data: { tab: "comments" } }, "Comments ", count),
+    history: h("button", { type: "button", role: "tab", data: { tab: "history" } }, "History"),
   };
   const panes: Record<Tab, HTMLElement> = {
     style: h("div", { class: "tabpane", role: "tabpanel" }, selectorsPanel, stylesPanel),
     settings: h("div", { class: "tabpane", role: "tabpanel" }, traitsPanel),
     comments: h("div", { class: "tabpane", role: "tabpanel" }, checks, commentsPanel),
+    history: h("div", { class: "tabpane", role: "tabpanel" }, historyPanel),
   };
-  const TABS: Tab[] = ["style", "settings", "comments"];
+  const TABS: Tab[] = ["style", "settings", "comments", "history"];
   const showTab = (which: Tab) => {
     for (const k of TABS) {
       const on = k === which;
@@ -191,9 +198,23 @@ function mount(
       panes[k].hidden = !on;
     }
   };
-  for (const k of TABS) tabs[k].addEventListener("click", () => showTab(k));
+  for (const k of TABS) {
+    tabs[k].addEventListener("click", () => {
+      showTab(k);
+      if (k === "history") void designHistory.open();
+    });
+  }
   showTab(canWrite ? "style" : "comments");
 
+  const leftSide = h(
+    "aside",
+    { class: "dside left", aria: { label: "Boards and layers" } },
+    h("h2", {}, "Boards"),
+    boardsList,
+    addBoardBtn,
+    h("h2", { hidden: !canWrite }, "Layers"),
+    h("div", { hidden: !canWrite }, layersPanel),
+  );
   clear(root);
   append(
     root,
@@ -227,23 +248,16 @@ function mount(
       h(
         "div",
         { class: "design-main" },
-        h(
-          "aside",
-          { class: "dside left", aria: { label: "Boards and layers" } },
-          h("h2", {}, "Boards"),
-          boardsList,
-          addBoardBtn,
-          h("h2", { hidden: !canWrite }, "Layers"),
-          h("div", { hidden: !canWrite }, layersPanel),
-        ),
+        leftSide,
         canvasWrap,
         h(
           "aside",
           { class: "dside right", aria: { label: "Style, settings and comments" } },
-          h("div", { class: "tabs", role: "tablist" }, tabs.style, tabs.settings, tabs.comments),
+          h("div", { class: "tabs", role: "tablist" }, tabs.style, tabs.settings, tabs.comments, tabs.history),
           panes.style,
           panes.settings,
           panes.comments,
+          panes.history,
         ),
       ),
     ),
@@ -447,6 +461,7 @@ function mount(
       page: canvasWrap,
       panel: commentsPanel,
       count,
+      returnToLatest: () => designHistory.back(),
       onViewer: (v) => {
         viewer = v;
         renderViewer();
@@ -457,10 +472,33 @@ function mount(
   );
   // The button also toggles pin mode (design-surface.ts); the threads show while commenting.
   commentBtn.addEventListener("click", () => showTab("comments"));
+  // ---- version history: the History tab, an older version read-only, Restore ----
+  const designHistory = new DesignHistory({
+    api,
+    panel: historyPanel,
+    stage: canvasWrap,
+    canRestore: () => canWrite,
+    latest: () => ({ number: baseNumber, busy: dirty() || saving || measuring || conflict }),
+    onViewing: (viewing) => {
+      // The editor stays as it is under the older version; it cannot be reached, and comments wait.
+      comments.suspend(viewing);
+      canvasEl.inert = viewing;
+      leftSide.inert = viewing;
+      undoBtn.disabled = viewing;
+      redoBtn.disabled = viewing;
+      if (viewing) (document.activeElement as HTMLElement | null)?.blur();
+    },
+    onRestored: () => void refresh(),
+  });
+  let historyNumber = baseNumber;
   const applyPayload = (p: DocumentPayload) => {
     comments.apply(p);
     commentBtn.hidden = !comments.canComment;
     renderBoards();
+    if (p.version.number !== historyNumber) {
+      historyNumber = p.version.number;
+      void designHistory.refresh();
+    }
   };
 
   renderViewer();
@@ -640,6 +678,46 @@ function mount(
     // With no earlier entries every board is measured (carried is empty).
     await runFidelity(baseNumber, carried);
   };
+
+  // ---- Overview, Play and Export ----
+  /** Saves pending edits first, so the frames and exports show what the page shows. */
+  const flushSave = async () => {
+    if (!dirty() || conflict || measuring) return;
+    clearTimeout(timer);
+    await save();
+  };
+  let opening = false;
+  /** One overlay at a time; the board frames come from the server for the version shown. */
+  const openFrames = async (mode: "play" | "overview", open: (frames: FrameBoard[]) => void) => {
+    if (opening || root.querySelector(":scope > .overlay")) return;
+    opening = true;
+    try {
+      await flushSave();
+      open(await api.frames(mode, baseNumber));
+    } catch (err) {
+      clear(saveBanner);
+      saveBanner.append(errorMessage(err));
+      saveBanner.hidden = false;
+    } finally {
+      opening = false;
+    }
+  };
+  overviewBtn.addEventListener("click", () => {
+    void openFrames("overview", (frames) => {
+      openOverview(root, frames, (id) => afterMeasuring(() => boards.selectBoard(id)));
+    });
+  });
+  playBtn.addEventListener("click", () => {
+    void openFrames("play", (frames) => {
+      openPlay(root, frames, boards.currentBoard());
+    });
+  });
+  exportsMenu(
+    exportBtn,
+    api,
+    () => ({ board: boards.currentBoard(), version: baseNumber }),
+    payload.document.canRender === true,
+  );
 
   // ---- live updates ----
   /** Shows a newer version in place, keeping the selected board and device. */

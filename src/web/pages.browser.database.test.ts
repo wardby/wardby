@@ -612,4 +612,220 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     expect(seen.errors).toEqual([]);
     await context.close();
   }, 60_000);
+
+  it("lists the versions, shows an older one read-only, and restores it as a new version", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const h1 = page.frameLocator(CANVAS).locator("h1").first();
+    const original = (await h1.textContent())!;
+    await h1.dblclick();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" (edited)");
+    await page.locator(".topbar .crumbs").click();
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    await page.locator("[data-tab=history]").click();
+    await expect.poll(() => page.locator(".tp-row").count()).toBe(2);
+    expect(await page.locator(".tp-row").first().textContent()).toContain("latest");
+    // Viewing v1: its boards, read-only (an empty sandbox), comments and editing off.
+    await page.locator('.tp-row[data-version="1"]').click();
+    const view = page.locator(".overlay.version-view");
+    await expect.poll(() => view.isVisible()).toBe(true);
+    expect(await view.locator("iframe").getAttribute("sandbox")).toBe("");
+    expect(await view.locator(".vv-boards button").count()).toBe(4);
+    await expect.poll(() => view.frameLocator("iframe").locator("h1").first().textContent()).toBe(original);
+    expect(await view.textContent()).toContain("Viewing v1");
+    await page.keyboard.press("Escape");
+    await expect.poll(() => view.count()).toBe(0);
+    // Restore creates v3, "Restored v1", and the editor shows it.
+    await page.locator('.tp-row[data-version="1"]').click();
+    await page.getByRole("button", { name: "Restore this version" }).click();
+    await page.getByRole("button", { name: "Restore", exact: true }).click();
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v3");
+    await expect.poll(() => view.count()).toBe(0);
+    await expect.poll(() => h1.textContent(), { timeout: 10_000 }).toBe(original);
+    const latest = await server.db.documentVersion.findFirst({
+      where: { documentId },
+      orderBy: { number: "desc" },
+      select: { number: true, summary: true },
+    });
+    expect(latest).toEqual({ number: 3, summary: "Restored v1" });
+    await expect.poll(() => page.locator(".tp-row").first().textContent()).toContain("Restored v1");
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 90_000);
+
+  it("lets a reader see the history but not restore", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "read" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await page.locator("[data-tab=history]").click();
+    await expect.poll(() => page.locator(".tp-row").count()).toBe(1);
+    await page.locator('.tp-row[data-version="1"]').click();
+    await expect.poll(() => page.locator(".overlay.version-view").isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Back to latest" }).count()).toBe(1);
+    await context.close();
+  }, 60_000);
 });
+
+const withLink = (): Record<string, string> => {
+  const f = files();
+  f["boards/home.html"] = f["boards/home.html"].replace(
+    "</body>",
+    '<a class="outside" href="https://example.com/away">Outside</a></body>',
+  );
+  return f;
+};
+
+describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath()))(
+  "Overview, Play and Export (browser)",
+  () => {
+    let server: TestWebServer;
+    let bare: TestWebServer;
+    let browser: Browser;
+    beforeAll(async () => {
+      server = await startTestWebServer({ assetsRoot: "dist/web-assets", exports: "fake" });
+      bare = await startTestWebServer({ assetsRoot: "dist/web-assets", exports: null });
+      browser = await chromium.launch();
+    }, 60_000);
+    afterAll(async () => {
+      await browser?.close();
+      await server?.close();
+      await bare?.close();
+    });
+
+    async function open(srv: TestWebServer, hash = "", access: "write" | "read" = "write") {
+      const { documentId, cookie } = await srv.design({ title: "Coffee", files: withLink(), access });
+      const context = await browser.newContext({ acceptDownloads: true });
+      await context.addCookies([cookie]);
+      const page = await context.newPage();
+      const seen = watch(page, srv.origin);
+      await page.goto(`${srv.origin}/d/${documentId}${hash}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      return { page, context, seen, documentId };
+    }
+
+    it("shows every board in Overview as an inert sandboxed tile, and a tile opens that board", async () => {
+      const { page, context, seen } = await open(server);
+      await page.locator("[data-action=overview]").click();
+      const frames = page.locator(".overlay.overview iframe");
+      await expect.poll(() => frames.count()).toBe(4);
+      for (let i = 0; i < 4; i++) {
+        expect(await frames.nth(i).getAttribute("sandbox")).toBe("");
+        expect(await frames.nth(i).getAttribute("srcdoc")).toContain("<");
+        const inner = await (await frames.nth(i).elementHandle())?.contentFrame();
+        expect(await inner!.locator("a[href]").count()).toBe(0);
+      }
+      await page.locator(".ov-pick[data-board=menu]").click();
+      await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");
+      expect(await page.locator(".overlay").count()).toBe(0);
+      expect(seen.violations).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      await context.close();
+    }, 60_000);
+
+    it("plays the prototype: board links change the fragment, Back returns, devices resize, outside links do nothing, Esc restores the page", async () => {
+      const { page, context, seen } = await open(server, "#keep");
+      await page.locator("[data-action=play]").click();
+      const frameEl = page.locator("iframe.play-frame");
+      await expect.poll(() => frameEl.count()).toBe(1);
+      expect(await frameEl.getAttribute("sandbox")).toBe("allow-top-navigation-by-user-activation");
+      const frame = page.frameLocator("iframe.play-frame");
+      await expect.poll(() => frame.locator("h1").first().textContent()).toContain("Good coffee");
+      // An outside link has no href, and clicking it changes nothing.
+      expect(await frame.locator("a.outside").getAttribute("href")).toBeNull();
+      const before = page.url();
+      await frame.locator("a.outside").click();
+      expect(page.url()).toBe(before);
+      expect(await frame.locator("h1").first().textContent()).toContain("Good coffee");
+      // A board link sets the fragment and shows that board.
+      await frame.locator('a[href="#board-menu"]').first().click();
+      await expect.poll(() => page.evaluate<string>("location.hash")).toBe("#board-menu");
+      await expect.poll(() => frame.locator("h1").first().textContent()).toContain("A short list");
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await expect.poll(() => frame.locator("h1").first().textContent()).toContain("Good coffee");
+      expect(await page.evaluate<string>("location.hash")).toBe("#board-home");
+      await page.locator("[data-device=Phone]").click();
+      await expect.poll(async () => Math.round((await frameEl.boundingBox())!.width)).toBe(390);
+      // Esc with focus on the bar closes Play and puts the page's fragment back.
+      await page.locator(".play-bar").focus();
+      await page.keyboard.press("Escape");
+      await expect.poll(() => page.locator(".overlay").count()).toBe(0);
+      expect(await page.evaluate<string>("location.hash")).toBe("#keep");
+      // Exit does the same.
+      await page.locator("[data-action=play]").click();
+      await expect.poll(() => frameEl.count()).toBe(1);
+      await page.getByRole("button", { name: "Exit", exact: true }).click();
+      await expect.poll(() => page.locator(".overlay").count()).toBe(0);
+      expect(await page.evaluate<string>("location.hash")).toBe("#keep");
+      expect(seen.violations).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      await context.close();
+    }, 60_000);
+
+    it("downloads HTML for a board and the prototype, and PNG and PDF through the renderer", async () => {
+      const { page, context, seen } = await open(server);
+      const choose = async (name: string) => {
+        if (!(await page.getByRole("menuitem", { name }).isVisible()))
+          await page.locator("[data-action=export]").click();
+        const download = page.waitForEvent("download", { timeout: 20_000 });
+        await page.getByRole("menuitem", { name }).click();
+        return download;
+      };
+      expect((await choose("This board (HTML)")).suggestedFilename()).toBe("coffee-home.html");
+      expect((await choose("Whole prototype (HTML)")).suggestedFilename()).toBe("coffee-prototype.html");
+      expect((await choose("This board (PNG)")).suggestedFilename()).toBe("coffee-home.png");
+      expect((await choose("All boards (PDF)")).suggestedFilename()).toBe("coffee-boards.pdf");
+      expect(seen.violations).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      await context.close();
+    }, 90_000);
+
+    it("says PNG and PDF export isn't set up when the server has no renderer, and downloads nothing", async () => {
+      const { page, context } = await open(bare);
+      let downloads = 0;
+      page.on("download", () => downloads++);
+      await page.locator("[data-action=export]").click();
+      await page.getByRole("menuitem", { name: "This board (PNG)" }).click();
+      await expect
+        .poll(() => page.locator(".exp-note").textContent())
+        .toBe("PNG and PDF export isn't set up on this server.");
+      await page.waitForTimeout(500);
+      expect(downloads).toBe(0);
+      await context.close();
+    }, 60_000);
+
+    it("offers Export PDF on a Markdown page only when the server can render, and downloads <slug>.pdf", async () => {
+      const make = async (srv: TestWebServer) => {
+        const { documentId, cookie } = await srv.design({
+          title: "Weekly Notes",
+          kind: "document",
+          markdown: "# Weekly\n\nHello.\n",
+          access: "write",
+        });
+        const context = await browser.newContext({ acceptDownloads: true });
+        await context.addCookies([cookie]);
+        const page = await context.newPage();
+        await page.goto(`${srv.origin}/d/${documentId}`);
+        await expect.poll(() => page.locator(".topbar .title").textContent(), { timeout: 20_000 }).toContain("Weekly");
+        return { page, context };
+      };
+      const withRenderer = await make(server);
+      const pdf = withRenderer.page.waitForEvent("download", { timeout: 20_000 });
+      await withRenderer.page.getByRole("button", { name: "Export PDF" }).click();
+      expect((await pdf).suggestedFilename()).toBe("weekly-notes.pdf");
+      await withRenderer.context.close();
+      const without = await make(bare);
+      expect(await without.page.getByRole("button", { name: "Export PDF" }).count()).toBe(0);
+      await without.context.close();
+    }, 90_000);
+  },
+);
