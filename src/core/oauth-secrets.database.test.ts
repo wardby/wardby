@@ -917,12 +917,24 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       return { fetchImpl, arrived, release: open, signals };
     }
 
-    /** Connections waiting for a row lock taken by a refresh's SELECT ... FOR UPDATE. */
-    async function lockWaiters(): Promise<number> {
-      const rows = await db.$queryRaw<{ n: bigint }[]>`
-        SELECT count(*) AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'`;
-      return Number(rows[0].n);
+    /**
+     * Connections blocked by one specific backend. Scoped to the lock holder so a waiter from another
+     * test file (or a stale one) sharing this database can never satisfy the check.
+     */
+    async function lockWaitersBlockedBy(holderPid: number): Promise<number> {
+      const rows = await db.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${holderPid} = ANY(pg_blocking_pids(pid))`;
+      return rows[0].n;
+    }
+
+    /** The backend holding the row lock on a Secret, found through the locking transaction id (row xmax). */
+    async function rowLockHolderPid(id: string): Promise<number> {
+      const rows = await db.$queryRaw<{ pid: number }[]>`
+        SELECT l.pid::int AS pid FROM "Secret" s
+        JOIN pg_locks l ON l.locktype = 'transactionid' AND l.granted AND l.transactionid::text = s.xmax::text
+        WHERE s."id" = ${id}`;
+      if (rows.length !== 1) throw new Error("the row lock holder is not visible yet");
+      return rows[0].pid;
     }
 
     it("a caller that waited for the lock refreshes within its budget, and the newest refresh token is stored", async () => {
@@ -936,8 +948,9 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights: new Map() });
       // The first holds the lock and its request is at the provider; the second then queues for the lock.
       await gate.arrived;
+      const holderPid = await rowLockHolderPid(stale.id);
       const second = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights: new Map() });
-      await until(async () => (await lockWaiters()) > 0);
+      await until(async () => (await lockWaitersBlockedBy(holderPid)) > 0);
       gate.release();
       const [a, b] = await Promise.all([first, second]);
       expect(a.value).toBe("fake-access-2");
@@ -1160,18 +1173,20 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     async function holdLock(id: string) {
       let release!: () => void;
       const released = new Promise<void>((r) => (release = r));
-      let locked!: () => void;
-      const isLocked = new Promise<void>((r) => (locked = r));
+      let locked!: (pid: number) => void;
+      const isLocked = new Promise<number>((r) => (locked = r));
       const holder = db.$transaction(
         async (tx) => {
           await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "id" = ${id} FOR UPDATE`;
-          locked();
+          const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+          locked(pid);
           await released;
         },
         { timeout: 15_000 },
       );
-      await isLocked;
+      const pid = await isLocked;
       return {
+        pid,
         release: async () => {
           release();
           await holder;
@@ -1228,7 +1243,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
           flights: new Map(),
         }).catch((e: unknown) => e);
         // The refresh is waiting for the lock: it has not sent anything yet.
-        await until(async () => (await lockWaiters()) > 0);
+        await until(async () => (await lockWaitersBlockedBy(lock.pid)) > 0);
         stop.abort();
         error = await pending;
       } finally {
@@ -1254,7 +1269,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
           signal: stop.signal,
           flights: new Map(),
         }).catch((e: unknown) => e);
-        await until(async () => (await lockWaiters()) > 0);
+        await until(async () => (await lockWaitersBlockedBy(lock.pid)) > 0);
         stop.abort();
         expectRetryable(await pending);
         // The abandoned flight's lock wait runs out (4 s) while the lock is still held.
@@ -1382,7 +1397,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
             flights,
           }).catch((e: unknown) => e),
         );
-        await until(async () => (await lockWaiters()) > 0);
+        await until(async () => (await lockWaitersBlockedBy(lock.pid)) > 0);
         for (const s of stops) s.abort();
         stopped = await Promise.all(pending);
       } finally {
@@ -1436,7 +1451,8 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       });
       // One request is at the provider and the other flight queues for the row lock behind it.
       await gate.arrived;
-      await until(async () => (await lockWaiters()) > 0);
+      const holderPid = await rowLockHolderPid(stale.id);
+      await until(async () => (await lockWaitersBlockedBy(holderPid)) > 0);
       gate.release();
       const [plain, forced] = await Promise.all([plainCall, forcedCall]);
       // Two flights, two transactions; the row lock still makes the second find the token refreshed.
