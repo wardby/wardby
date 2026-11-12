@@ -33,7 +33,7 @@ import {
 } from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
-import { McpError } from "../errors.js";
+import { McpError, uniqueFields } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -342,6 +342,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         adminOverride: args.adminOverride === true,
       });
       let link;
+      let linkedName = args.name ?? defaultRepositoryName(repository);
       try {
         link = await ctx.db.$transaction(
           async (tx) => {
@@ -357,6 +358,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               }
               // A write link keeps its name when re-linked without one (a backfilled name may not be the default).
               name = args.name ?? existingWrite?.name ?? defaultRepositoryName(repository);
+              linkedName = name;
               if (!isCodingRepositoryName(name)) throw invalidName();
               const named = await tx.agentRepository.findUnique({
                 where: { agentId_name: { agentId: args.agentId, name } },
@@ -411,9 +413,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         );
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-          if (JSON.stringify(err.meta?.target ?? "").includes("name")) {
+          const fields = uniqueFields(err.meta, "AgentRepository");
+          if (fields.includes("agentId") && fields.includes("name")) {
             // A concurrent link took the name between the check and the write.
-            throw nameTakenRace(args.name ?? defaultRepositoryName(repository));
+            throw nameTakenRace(linkedName);
           }
           if (checkName !== null) throw checkNameTaken(checkName, repository);
         }

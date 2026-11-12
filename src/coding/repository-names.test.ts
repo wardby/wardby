@@ -9,12 +9,11 @@ describe("defaultRepositoryName", () => {
   it("is the folder name of a local repository", () => {
     expect(defaultRepositoryName("local:/srv/repos/My-Fork")).toBe("my-fork");
   });
-  it("repairs a short name as the migration does, so it always matches the format", () => {
-    expect(defaultRepositoryName("acme/_private")).toBe("private");
-    expect(defaultRepositoryName("local:/srv/My Repo!")).toBe("my-repo-");
-    expect(defaultRepositoryName("acme/" + "x".repeat(70))).toBe("x".repeat(59));
-    expect(defaultRepositoryName("local:/")).toBe("repo");
-    expect(isCodingRepositoryName(defaultRepositoryName("acme/_private"))).toBe(true);
+  it("never adds a suffix and never repairs a bad name", () => {
+    expect(defaultRepositoryName("acme/_private")).toBe("_private");
+    expect(isCodingRepositoryName("_private")).toBe(false);
+    expect(defaultRepositoryName("local:/")).toBe("");
+    expect(isCodingRepositoryName("")).toBe(false);
   });
   it("leaves the reserved name to be refused, never suffixing it", () => {
     expect(defaultRepositoryName("acme/Workspace")).toBe("workspace");

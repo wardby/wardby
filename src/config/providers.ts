@@ -585,6 +585,8 @@ export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
+  // Validated here so a bad CODING_MAX_RUN_REPOSITORIES stops start-up, not one link_repository call.
+  loadCodingRunRepositoryLimit(env);
   return {
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
     queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,

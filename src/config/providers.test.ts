@@ -326,6 +326,12 @@ describe("loadCodingConcurrencyConfig", () => {
     });
   });
 
+  it.each(["0", "18", "many"])("rejects CODING_MAX_RUN_REPOSITORIES=%s at start-up", (value) => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_RUN_REPOSITORIES: value })).toThrow(
+      /CODING_MAX_RUN_REPOSITORIES must be/,
+    );
+  });
+
   it.each(["0", "-1", "1.5", "many"])("rejects CODING_MAX_CONCURRENT=%s", (value) => {
     expect(() => loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: value })).toThrow(
       "CODING_MAX_CONCURRENT must be a positive integer.",

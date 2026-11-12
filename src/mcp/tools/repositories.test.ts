@@ -365,17 +365,50 @@ describe("repository tools", () => {
         await client.close();
       });
 
-      it("repairs a long default name to the format, but refuses a reserved or bad explicit name", async () => {
+      it("refuses a default name that doesn't fit the format and asks for an explicit name", async () => {
         const { mcp } = setup(agents(), "p1");
         const client = await connectClient(mcp);
         const long = await call(client, { repository: `acme/${"x".repeat(64)}`, access: "write" });
-        expect(linkOf(long)).toMatchObject({ name: "x".repeat(59) });
+        expect(errorText(long as never)).toMatch(/^repository_name_invalid:/);
+        const named = await call(client, { repository: `acme/${"x".repeat(64)}`, access: "write", name: "long" });
+        expect(linkOf(named)).toMatchObject({ name: "long" });
         const reserved = await call(client, { repository: "acme/workspace", access: "write" });
         expect(errorText(reserved as never)).toMatch(/^repository_name_invalid:/);
         const explicit = await call(client, { repository: "acme/ok", access: "write", name: "workspace" });
         expect(errorText(explicit as never)).toMatch(/^repository_name_invalid:/);
         const upper = await call(client, { repository: "acme/ok", access: "write", name: "Web" });
         expect(errorText(upper as never)).toMatch(/^repository_name_invalid:/);
+        await client.close();
+      });
+
+      it("maps a pg-adapter unique race on agentId_name to repository_name_taken, naming a reused write-link name", async () => {
+        const race = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+          code: "P2002",
+          clientVersion: "test",
+          meta: {
+            modelName: "AgentRepository",
+            driverAdapterError: {
+              cause: { kind: "UniqueConstraintViolation", constraint: { index: "AgentRepository_agentId_name_key" } },
+            },
+          },
+        });
+        const backfilled: FakeRepositoryRow = {
+          id: "r1",
+          agentId: "c1",
+          provider: "github",
+          repository: "acme/web",
+          name: "web-2",
+          access: "write",
+          triggers: [],
+          checkName: null,
+          createdAt: new Date(),
+        };
+        const { mcp } = setup(agents(), "p1", [backfilled], { failUpsertWith: race });
+        const client = await connectClient(mcp);
+        const reused = await call(client, { repository: "acme/web", access: "write" });
+        expect(errorText(reused as never)).toMatch(/^repository_name_taken:.*"web-2"/);
+        const fresh = await call(client, { repository: "acme/other", access: "write" });
+        expect(errorText(fresh as never)).toMatch(/^repository_name_taken:.*"other"/);
         await client.close();
       });
 

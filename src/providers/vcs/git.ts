@@ -27,7 +27,7 @@ import { simulatorGitEnvironment } from "../../config/test-simulators.js";
 import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
-import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
+import { COMMIT_SHA, MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
 import type {
@@ -47,7 +47,6 @@ export const DEFAULT_MAX_CHANGED_FILES = 1_000;
 export const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
-const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 const SAFE_GIT_USERNAME = /^[A-Za-z0-9._-]{1,64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
@@ -652,7 +651,7 @@ export class GitVcsProvider implements VcsProvider {
   /** The two-parent merge commit (baseCommit, the target) of the staged tree, as the Wardby identity. */
   private async commitMerge(prepared: PreparedWorkspace, merge: TargetMerge): Promise<string> {
     const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
     const commitSha = (
       await this.gitFor(prepared, [
         "commit-tree",
@@ -665,7 +664,7 @@ export class GitVcsProvider implements VcsProvider {
         `Merge ${merge.ref} into ${prepared.headRef} (Wardby run ${prepared.runId})`,
       ])
     ).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
     await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha, prepared.baseCommit]);
     return commitSha;
   }
@@ -779,7 +778,7 @@ export class GitVcsProvider implements VcsProvider {
     const expected = this.expectedPaths(normalized.runId);
     if (
       workspace.id !== `vcs-${normalized.runId}` ||
-      !SAFE_COMMIT_SHA.test(workspace.baseCommit) ||
+      !COMMIT_SHA.test(workspace.baseCommit) ||
       workspace.repository !== normalized.repository ||
       workspace.baseRef !== normalized.baseRef ||
       workspace.headRef !== normalized.headRef ||
@@ -892,7 +891,7 @@ export class GitVcsProvider implements VcsProvider {
       throw new Error("vcs_target_merge_failed", { cause: error });
     }
     const [tree, ...paths] = output.split("\0");
-    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_target_merge_failed");
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_target_merge_failed");
     const conflictedPaths = [...new Set(paths.filter(Boolean))].map(validateChangedPath);
     if (conflictedPaths.length > this.maxChangedFiles) throw new Error("vcs_target_merge_failed");
     const targetMerge: TargetMerge = { ref, targetCommit, conflictedPaths };
@@ -912,7 +911,7 @@ export class GitVcsProvider implements VcsProvider {
           messagePath,
         ])
       ).stdout.trim();
-      if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_commit_sha_invalid");
+      if (!COMMIT_SHA.test(stateCommit)) throw new Error("vcs_commit_sha_invalid");
       await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", MERGE_STATE_REF, stateCommit]);
     } finally {
       await rm(messagePath, { force: true });
@@ -933,7 +932,7 @@ export class GitVcsProvider implements VcsProvider {
       ])
     ).stdout.trim();
     if (!stateCommit) return undefined;
-    if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_merge_state_invalid");
+    if (!COMMIT_SHA.test(stateCommit)) throw new Error("vcs_merge_state_invalid");
     const raw = (await this.gitForPaths(gitMetadataPath, workspacePath, ["cat-file", "commit", stateCommit])).stdout;
     const split = raw.indexOf("\n\n");
     if (split < 0) throw new Error("vcs_merge_state_invalid");
@@ -946,7 +945,7 @@ export class GitVcsProvider implements VcsProvider {
     if (
       parents.length !== 2 ||
       parents[0] !== workspace.baseCommit ||
-      !SAFE_COMMIT_SHA.test(parents[1]) ||
+      !COMMIT_SHA.test(parents[1]) ||
       !message.startsWith(`${MERGE_STATE_SUBJECT}\n\n`)
     ) {
       throw new Error("vcs_merge_state_invalid");
@@ -1141,7 +1140,7 @@ export class GitVcsProvider implements VcsProvider {
     const line = result.stdout.trim();
     if (!line) return null;
     const [sha, ref, ...rest] = line.split(/\s+/);
-    if (rest.length > 0 || !SAFE_COMMIT_SHA.test(sha) || ref !== `refs/heads/${workspace.headRef}`) {
+    if (rest.length > 0 || !COMMIT_SHA.test(sha) || ref !== `refs/heads/${workspace.headRef}`) {
       throw new Error("vcs_remote_response_invalid");
     }
     return sha;
@@ -1155,7 +1154,7 @@ export class GitVcsProvider implements VcsProvider {
     const sha = (
       await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-parse", "--verify", revision])
     ).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(sha)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(sha)) throw new Error("vcs_commit_sha_invalid");
     return sha;
   }
 
