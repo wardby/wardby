@@ -4,6 +4,7 @@ import { MobileDisabledError, type SelfHostedAuthProvider } from "../../../provi
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 import { logger } from "../../../core/logger.js";
 import { PAGE_STYLE } from "../../shared/page-style.js";
+import { selfHostedCookieNames } from "./cookies.js";
 
 const authLog = logger.child({ module: "self-hosted-oauth" });
 
@@ -77,9 +78,7 @@ function hidden(name: string, value: string) {
 
 export function browserHandler(provider: SelfHostedAuthProvider) {
   const canonical = new URL(provider.config.canonicalUri);
-  const secure = canonical.protocol === "https:";
-  const sessionName = secure ? "__Host-wardby-session" : "wardby-dev-session";
-  const loginName = secure ? "__Host-wardby-login" : "wardby-dev-login";
+  const { secure, session: sessionName, login: loginName } = selfHostedCookieNames(provider.config.canonicalUri);
   const limiter = new PostgresRateLimiter(provider.db, provider.credentials);
   const cookie = (name: string, value: string, sameSite: string, age: number) =>
     `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${age}${secure ? "; Secure" : ""}`;
