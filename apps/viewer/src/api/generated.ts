@@ -45,6 +45,9 @@ export interface GraphSnapshot {
         }
       | {
           kind: "host_event";
+        }
+      | {
+          kind: "comment";
         };
     turns: number;
     tokensIn: number;
@@ -152,6 +155,9 @@ export interface RunDetail {
       }
     | {
         kind: "host_event";
+      }
+    | {
+        kind: "comment";
       };
   turns: number;
   tokensIn: number;

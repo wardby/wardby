@@ -93,6 +93,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   webhook: "webhook",
   subagent: "sub-agent",
   host_event: "GitHub/Jira event",
+  comment: "comment",
 };
 const triggerLabel = (trigger: string): string => TRIGGER_LABELS[trigger] ?? trigger;
 

@@ -209,6 +209,19 @@
                 "kind"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "comment"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
             }
           ]
         },

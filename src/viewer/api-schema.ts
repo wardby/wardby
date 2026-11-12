@@ -35,6 +35,8 @@ export const RunTriggerSchema = z.discriminatedUnion("kind", [
   /** `url`: the issue's page on the tracker, or null when the server has no site configured for it. */
   z.object({ kind: z.literal("issue"), provider: z.string(), issueKey: z.string(), url: z.string().nullable() }),
   z.object({ kind: z.literal("host_event") }),
+  /** Started by sending a document's comment threads to its agent. */
+  z.object({ kind: z.literal("comment") }),
 ]);
 
 /** When the outcome happened (PR opened, comment last updated, check completed); null while a check is pending. */

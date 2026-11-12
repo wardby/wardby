@@ -535,6 +535,14 @@ components:
                     required:
                       - kind
                     additionalProperties: false
+                  - type: object
+                    properties:
+                      kind:
+                        type: string
+                        const: comment
+                    required:
+                      - kind
+                    additionalProperties: false
               turns:
                 type: integer
               tokensIn:
@@ -912,6 +920,14 @@ components:
                 kind:
                   type: string
                   const: host_event
+              required:
+                - kind
+              additionalProperties: false
+            - type: object
+              properties:
+                kind:
+                  type: string
+                  const: comment
               required:
                 - kind
               additionalProperties: false
