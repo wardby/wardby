@@ -32,6 +32,7 @@ import {
   validDesignDir,
   validDocumentBaseRef,
   validDocumentPath,
+  assertAgentRepository,
   validDocumentRepository,
 } from "../../core/documents/agent-link.js";
 import type { McpRequestContext } from "../context.js";
@@ -286,6 +287,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       const input = createDocArgs.parse(args);
       const design = input.kind === "design";
       if (!design && input.markdown === undefined) throw new McpError(400, "document_format_mismatch");
+      if (!design && input.files !== undefined) throw new McpError(400, "document_format_mismatch");
       if (design && input.markdown !== undefined) throw new McpError(400, "document_format_mismatch");
       if (design && input.files === undefined && input.repository === undefined) {
         throw new McpError(400, "document_format_mismatch");
@@ -306,7 +308,10 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         // document redact against that agent's secret values: an oracle for them.
         const row = await ctx.db.agent.findUnique({
           where: { id: input.agentId },
-          include: { codingProfile: { select: { allowWebhookTaskOverride: true } } },
+          include: {
+            codingProfile: { select: { allowWebhookTaskOverride: true, repository: true } },
+            repositories: { select: { repository: true, authorizedVia: true } },
+          },
         });
         const { agent } = await assertAgentAccess(ctx, row, input.agentId, "execute");
         await mapped(async () => assertDocumentAgentOverride(ctx.principal.id, agent));
@@ -316,6 +321,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
           if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
           else repository = await mapped(async () => validDocumentRepository(repository!));
+          // Import reads files with the server's repository credentials: stay inside the agent's own.
+          await mapped(async () => assertAgentRepository(agent, repository!));
         }
       }
       if (repository === undefined && baseRef !== undefined) throw new McpError(400, "document_repo_link_invalid");

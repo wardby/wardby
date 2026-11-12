@@ -92,6 +92,8 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       })
     ).id;
   });
+  const linkRepo = (agentId: string, repository: string, provider = "github", authorizedVia: string | null = "admin") =>
+    db.agentRepository.create({ data: { agentId, provider, repository, access: "write", authorizedVia } });
   afterAll(async () => {
     await db.document.deleteMany({ where: { ownerId: owner.id } });
     const agents = [codingAgentId, nativeAgentId, profiledAgentId];
@@ -101,6 +103,11 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     await db.agent.deleteMany({ where: { id: { in: agents } } });
     await db.principal.deleteMany({ where: { id: { in: [owner.id, other.id] } } });
     await db.$disconnect();
+  });
+
+  beforeAll(async () => {
+    // codingAgentId is authorized for acme/docs through a link; profiledAgentId through its profile.
+    await linkRepo(codingAgentId, "acme/docs");
   });
 
   const anchor = { type: "text" as const, quote: "hello world", prefix: "", suffix: "" };
@@ -189,6 +196,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
           },
         };
         const call = await connect(owner, undefined, { executor: reader });
+        await linkRepo(codingAgentId, `local:${root}`, "local");
         const link = {
           kind: "design",
           title: "Imported",
@@ -211,6 +219,51 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
         expect((await noReader("create_document", { ...link, baseRef: "main" })).text).toContain(
           "document_repo_link_invalid",
         );
+      } finally {
+        if (previous === undefined) delete process.env.LOCAL_REPO_ROOTS;
+        else process.env.LOCAL_REPO_ROOTS = previous;
+      }
+    });
+  });
+
+  describe("repository links stay inside the agent's repositories", () => {
+    it("refuses a design import or document link outside them, before any read", async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "wardby-design-")));
+      execFileSync("git", ["init", "-q", root]);
+      const previous = process.env.LOCAL_REPO_ROOTS;
+      process.env.LOCAL_REPO_ROOTS = root;
+      try {
+        let reads = 0;
+        const reader = {
+          ...executor,
+          readCodingRepositoryFile: async () => {
+            reads += 1;
+            return null;
+          },
+        };
+        const call = await connect(owner, undefined, { executor: reader });
+        const design = { kind: "design", title: "Out", agentId: codingAgentId, path: "design", baseRef: "main" };
+        const doc = { title: "Out", markdown: "x", agentId: codingAgentId, path: "docs/o.md" };
+        for (const repository of ["other/secret-repo", `local:${root}`, "ACME/Docs-Other"]) {
+          for (const input of [design, doc]) {
+            const out = await call("create_document", { ...input, repository });
+            expect(out.isError, repository).toBe(true);
+            expect(out.text).toContain("document_repo_link_invalid");
+            expect(out.text).not.toContain("secret-repo");
+          }
+        }
+        expect(reads).toBe(0);
+        // A link that exists but was never authorized does not count.
+        await linkRepo(codingAgentId, "acme/unauthorized", "github", null);
+        expect((await call("create_document", { ...doc, repository: "acme/unauthorized" })).isError).toBe(true);
+        expect(reads).toBe(0);
+        // The agent's own repositories work, in any letter case.
+        expect((await call("create_document", { ...doc, repository: "ACME/Docs" })).isError).toBe(false);
+        const profiled = { ...doc, agentId: profiledAgentId };
+        expect((await call("create_document", { ...profiled, repository: "acme/docs" })).isError).toBe(false);
+        const imp = await call("create_document", { ...design, repository: "acme/docs" });
+        expect(imp.text).toContain("manifest.json is missing");
+        expect(reads).toBe(1);
       } finally {
         if (previous === undefined) delete process.env.LOCAL_REPO_ROOTS;
         else process.env.LOCAL_REPO_ROOTS = previous;

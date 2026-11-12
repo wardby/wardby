@@ -18,6 +18,11 @@ const NOT_TEXT = /^(github|local)_file_(not_utf8|not_a_file)$/;
  * A design's files at `ref` in a repository. Repository content is agent output: token shapes are
  * redacted here, and the format adapter redacts exact secret values when it prepares the files.
  * Errors name only a board id or a fixed code, never a path or file text.
+ *
+ * Limitation: the routing executor returns null both for "file absent" and for "no coding executor
+ * can read" (its other callers rely on null), so with no reader configured behind it a missing
+ * manifest surfaces as "manifest.json is missing". Only an executor without the method at all gives
+ * document_repo_link_invalid.
  */
 export async function readDesignFromRepository(
   executor: Pick<Executor, "readCodingRepositoryFile">,

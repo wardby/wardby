@@ -57,3 +57,33 @@ export function validDocumentBaseRef(baseRef: string): string {
 export function assertDocumentAgentOverride(principalId: string, agent: CodingOverrideAgent): void {
   if (!codingOverrideAllowed(principalId, agent)) throw new Error("document_agent_unavailable");
 }
+
+/** What assertAgentRepository reads of an agent: its default repository and its linked repositories. */
+export interface AgentRepositoryScope {
+  codingProfile?: { repository: string } | null;
+  repositories?: { repository: string; authorizedVia: string | null }[];
+}
+
+/**
+ * A document or design may be linked only to a repository the agent is already authorized for:
+ * its codingProfile.repository, or an authorized AgentRepository link (authorizedVia set; a null
+ * one is "never authorized; use is refused"). `repository` is already canonical (hosted: lower-case
+ * via validDocumentRepository; local: canonicalLocalRepository). Throws document_repo_link_invalid
+ * with fixed text, never naming the repository.
+ */
+export function assertAgentRepository(agent: AgentRepositoryScope, repository: string): void {
+  const allowed = [
+    ...(agent.codingProfile ? [agent.codingProfile.repository] : []),
+    ...(agent.repositories ?? []).filter((r) => r.authorizedVia !== null).map((r) => r.repository),
+  ];
+  const same = (candidate: string): boolean => {
+    if (candidate === repository) return true;
+    if (repository.startsWith("local:") || candidate.startsWith("local:")) return false;
+    try {
+      return normalizeHostedRepository(candidate) === repository;
+    } catch {
+      return false;
+    }
+  };
+  if (!allowed.some(same)) throw new Error("document_repo_link_invalid");
+}
