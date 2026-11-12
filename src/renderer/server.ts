@@ -9,26 +9,46 @@ import { z } from "zod";
 import { logger, type Logger } from "../core/logger.js";
 import type { ChromeRenderer } from "./chrome.js";
 
-export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
+/**
+ * The request body cap. It holds the largest request the control plane sends with room for JSON
+ * escaping: a whole design (at most 2 MiB of boards, framed) or one paginated document (at most
+ * MAX_PAGINATED_HTML_BYTES) even if every character doubles (a quote or backslash becomes two).
+ * Characters escaped as \uXXXX can push a body past it; the client reports that as too large.
+ */
+export const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 /** One board's HTML; a stored board is at most 512 KiB plus the frame the control plane adds. */
 export const MAX_HTML_BYTES = 600 * 1024;
+/** One paginated document's HTML (a Markdown document of at most 1 MiB, rendered and framed). */
+export const MAX_PAGINATED_HTML_BYTES = 3 * 1024 * 1024;
 export const MAX_PDF_BOARDS = 50;
+/** A whole render (all boards of a PDF) must finish within this, or it is aborted. */
+export const DEFAULT_RENDER_DEADLINE_MS = 90_000;
 const MAX_DRAIN_BYTES = 32 * 1024 * 1024;
 
-const html = z.string().refine((s) => Buffer.byteLength(s, "utf8") <= MAX_HTML_BYTES);
+const htmlUpTo = (max: number) => z.string().refine((s) => Buffer.byteLength(s, "utf8") <= max);
 const width = z.number().int().min(320).max(2560);
-const board = z.object({ html, width });
+const board = z.object({ html: htmlUpTo(MAX_HTML_BYTES), width });
 const pngBody = board;
-const pdfBody = z.object({ boards: z.array(board).min(1).max(MAX_PDF_BOARDS) });
+const pdfBody = z.union([
+  z.object({ boards: z.array(board).min(1).max(MAX_PDF_BOARDS), paginate: z.literal(false).optional() }),
+  z.object({
+    boards: z.array(z.object({ html: htmlUpTo(MAX_PAGINATED_HTML_BYTES), width })).length(1),
+    paginate: z.literal(true),
+  }),
+]);
+
+/** What the server needs from Chromium; `isConnected` absent = always connected (tests). */
+export type RendererChrome = Pick<ChromeRenderer, "png" | "pdf"> & Partial<Pick<ChromeRenderer, "isConnected">>;
 
 type Route = "healthz" | "png" | "pdf" | "other";
-type Fail = "invalid_request" | "payload_too_large" | "busy" | "render_failed" | "not_found";
+type Fail = "invalid_request" | "payload_too_large" | "busy" | "render_failed" | "not_found" | "unavailable";
 const FAIL_STATUS: Record<Fail, number> = {
   invalid_request: 400,
   payload_too_large: 413,
   busy: 429,
   render_failed: 500,
   not_found: 404,
+  unavailable: 503,
 };
 
 class HttpFail extends Error {
@@ -100,23 +120,78 @@ function parse<T>(schema: z.ZodType<T>, raw: Buffer): T {
   return r.data;
 }
 
+/**
+ * Exits the process (non-zero) when Chromium goes away, so the orchestrator restarts the pod
+ * instead of leaving a renderer whose every render fails. The log line is fixed text.
+ */
+export function superviseChrome(
+  chrome: Pick<ChromeRenderer, "onDisconnected">,
+  opts: { log?: Logger; exit?: (code: number) => void } = {},
+): void {
+  const log = opts.log ?? logger.child({ module: "renderer" });
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  chrome.onDisconnected(() => {
+    log.error("renderer browser disconnected; exiting");
+    exit(1);
+  });
+}
+
+/** Runs `work` with an abort signal; past `ms` the signal fires and the result is render_failed. */
+async function withDeadline<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctl = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      reject(new HttpFail("render_failed"));
+    }, ms);
+  });
+  const running = work(ctl.signal);
+  // A render that settles after the deadline is ignored (its rejection too).
+  running.catch(() => undefined);
+  try {
+    return await Promise.race([running, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createRendererServer(
-  chrome: Pick<ChromeRenderer, "png" | "pdf">,
-  opts: { maxBodyBytes?: number; concurrency?: number; queue?: number; log?: Logger } = {},
+  chrome: RendererChrome,
+  opts: {
+    maxBodyBytes?: number;
+    concurrency?: number;
+    queue?: number;
+    renderDeadlineMs?: number;
+    log?: Logger;
+  } = {},
 ): Server {
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-  const slots = semaphore(opts.concurrency ?? 2, opts.queue ?? 8);
+  const concurrency = opts.concurrency ?? 2;
+  const queue = opts.queue ?? 8;
+  const deadlineMs = opts.renderDeadlineMs ?? DEFAULT_RENDER_DEADLINE_MS;
+  const slots = semaphore(concurrency, queue);
   const log = opts.log ?? logger.child({ module: "renderer" });
+  const connected = () => chrome.isConnected?.() ?? true;
 
   async function handle(req: IncomingMessage, route: Route): Promise<{ type: string; bytes: Buffer }> {
-    if (route === "healthz" && req.method === "GET") return { type: "text/plain", bytes: Buffer.from("ok") };
+    if (route === "healthz" && req.method === "GET") {
+      if (!connected()) throw new HttpFail("unavailable");
+      return { type: "text/plain", bytes: Buffer.from("ok") };
+    }
     if ((route !== "png" && route !== "pdf") || req.method !== "POST") throw new HttpFail("not_found");
     const raw = await readBody(req, maxBodyBytes);
     const input = route === "png" ? { png: parse(pngBody, raw) } : { pdf: parse(pdfBody, raw) };
+    if (!connected()) throw new HttpFail("unavailable");
     await slots.acquire();
     try {
-      if (input.png) return { type: "image/png", bytes: await chrome.png(input.png.html, input.png.width) };
-      return { type: "application/pdf", bytes: await chrome.pdf(input.pdf.boards) };
+      return await withDeadline(deadlineMs, async (signal) => {
+        if (input.png) {
+          return { type: "image/png", bytes: await chrome.png(input.png.html, input.png.width, { signal }) };
+        }
+        const paginate = input.pdf.paginate === true;
+        return { type: "application/pdf", bytes: await chrome.pdf(input.pdf.boards, { paginate, signal }) };
+      });
     } catch (err) {
       if (err instanceof HttpFail) throw err;
       // The error is dropped: a Chromium message can quote the page it failed on.
@@ -176,6 +251,9 @@ export function createRendererServer(
       },
     );
   });
+  // Bounds how many bodies can be in flight at once: the render slots and the queue, plus a few for
+  // health probes and refusals. Connections past it are dropped by Node.
+  server.maxConnections = concurrency + queue + 4;
   server.requestTimeout = 120_000;
   server.headersTimeout = 15_000;
   return server;

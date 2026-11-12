@@ -107,8 +107,21 @@ CMD ["node", "dist/cli.js", "serve"]
 FROM runtime AS renderer
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright HOME=/tmp
-RUN npx --no-install playwright-core install --with-deps --only-shell chromium \
+# The browser's runtime libraries are installed by name rather than with `--with-deps`, which
+# also pulls Playwright's "tools" set (xvfb, Mesa, a dozen font packages) that a headless shell
+# never uses. The list is Playwright's own debian12 "chromium" dependency list (the same for
+# amd64 and arm64; playwright-core lib/coreBundle.js, `deps["debian12-x64"].chromium`): re-check
+# it on every playwright-core bump. Fonts are a deliberate set: fontconfig, Liberation (metric
+# compatible with Arial/Times/Courier), Noto Color Emoji and WenQuanYi Zen Hei for CJK text.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 \
+       libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+       libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+       libfontconfig1 libfreetype6 fonts-liberation fonts-noto-color-emoji fonts-wqy-zenhei \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
+    && npx --no-install playwright-core install --only-shell chromium \
     && chmod -R a+rX /ms-playwright
 USER node
 EXPOSE 8796

@@ -27,7 +27,13 @@ export function createRendererClient(baseUrl: string, opts: { timeoutMs?: number
     }
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
-      throw new Error(res.status === 429 || res.status === 503 ? "export_renderer_unavailable" : "export_failed");
+      throw new Error(
+        res.status === 429 || res.status === 503
+          ? "export_renderer_unavailable"
+          : res.status === 413
+            ? "export_too_large"
+            : "export_failed",
+      );
     }
     const declared = Number(res.headers.get("content-length") ?? "");
     if (Number.isFinite(declared) && declared > MAX_EXPORT_BYTES) {
@@ -61,6 +67,10 @@ export function createRendererClient(baseUrl: string, opts: { timeoutMs?: number
 
   return {
     png: (input) => call("/v1/png", { html: input.html, width: input.width }),
-    pdf: (input) => call("/v1/pdf", { boards: input.boards.map((b) => ({ html: b.html, width: b.width })) }),
+    pdf: (input) =>
+      call("/v1/pdf", {
+        boards: input.boards.map((b) => ({ html: b.html, width: b.width })),
+        ...(input.paginate ? { paginate: true } : {}),
+      }),
   };
 }

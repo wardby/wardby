@@ -63,4 +63,40 @@ describe.skipIf(!existsSync(chromium.executablePath()))("renderer chrome", () =>
     ]);
     expect((await PDFDocument.load(pdf)).getPageCount()).toBe(2);
   }, 60_000);
+  it("lays a paginated document out on as many A4 pages as it needs, unclipped", async () => {
+    // 220 blocks of 100 px: taller than MAX_RENDER_HEIGHT, which would clip a one-page render.
+    const blocks = Array.from({ length: 220 }, (_, i) => `<div style="height:100px">Paragraph ${i}</div>`).join("");
+    const html =
+      `<!doctype html><html><head><style>@page{size:A4;margin:18mm}body{margin:0}</style></head>` +
+      `<body>${blocks}</body></html>`;
+    expect(220 * 100).toBeGreaterThan(MAX_RENDER_HEIGHT);
+    const doc = await PDFDocument.load(await chrome.pdf([{ html, width: 794 }], { paginate: true }));
+    // A4 less 2 × 18 mm is about 987 CSS px of content, so 22 000 px needs at least 22 pages.
+    expect(doc.getPageCount()).toBeGreaterThanOrEqual(22);
+    const { width, height } = doc.getPage(0).getSize();
+    expect(Math.round(width)).toBe(595);
+    expect(Math.round(height)).toBe(842);
+  }, 60_000);
+
+  it("rejects an aborted render and keeps rendering afterwards", async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect(chrome.png(home, 1280, { signal: ctl.signal })).rejects.toThrow();
+    const ctl2 = new AbortController();
+    const pending = chrome.pdf([{ html: home, width: 1280 }], { signal: ctl2.signal });
+    setTimeout(() => ctl2.abort(), 5);
+    await expect(pending).rejects.toThrow();
+    const png = await chrome.png(home, 1280);
+    expect(png.subarray(1, 4).toString()).toBe("PNG");
+  }, 60_000);
+
+  it("reports a lost browser", async () => {
+    const other = await launchChrome();
+    let lost = 0;
+    other.onDisconnected(() => (lost += 1));
+    expect(other.isConnected()).toBe(true);
+    await other.close();
+    expect(other.isConnected()).toBe(false);
+    expect(lost).toBe(1);
+  }, 60_000);
 });

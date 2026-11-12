@@ -4,7 +4,7 @@
  */
 import { logger } from "../core/logger.js";
 import { launchChrome } from "./chrome.js";
-import { createRendererServer } from "./server.js";
+import { createRendererServer, superviseChrome } from "./server.js";
 
 const log = logger.child({ module: "renderer" });
 
@@ -19,8 +19,10 @@ async function main(): Promise<void> {
   const listenPort = port(process.env.PORT);
   const chrome = await launchChrome();
   const server = createRendererServer(chrome);
-  server.listen(listenPort, "0.0.0.0", () => log.info({ port: listenPort }, "renderer listening"));
   let stopping = false;
+  // A crashed browser makes every render fail: exit so the pod restarts (not on our own close).
+  superviseChrome(chrome, { log, exit: (code) => !stopping && process.exit(code) });
+  server.listen(listenPort, "0.0.0.0", () => log.info({ port: listenPort }, "renderer listening"));
   const stop = (signal: string) => {
     if (stopping) return;
     stopping = true;

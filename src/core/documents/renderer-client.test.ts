@@ -41,6 +41,8 @@ describe("createRendererClient", () => {
     await client.pdf({ boards: [{ html: "b", width: 800 }] });
     expect(seen.path).toBe("/v1/pdf");
     expect(JSON.parse(seen.body!)).toEqual({ boards: [{ html: "b", width: 800 }] });
+    await client.pdf({ boards: [{ html: "m", width: 794 }], paginate: true });
+    expect(JSON.parse(seen.body!)).toEqual({ boards: [{ html: "m", width: 794 }], paginate: true });
   });
 
   it("maps 503 and 429 to export_renderer_unavailable", async () => {
@@ -62,6 +64,15 @@ describe("createRendererClient", () => {
       .pdf({ boards: [{ html: "x", width: 800 }] })
       .catch((e: Error) => e);
     expect((err as Error).message).toBe("export_failed");
+  });
+
+  it("maps a renderer 413 to export_too_large", async () => {
+    const url = await stub((_req, res) => {
+      res.writeHead(413).end('{"error":"payload_too_large"}');
+    });
+    await expect(createRendererClient(url).pdf({ boards: [{ html: "x", width: 800 }] })).rejects.toThrow(
+      "export_too_large",
+    );
   });
 
   it("maps a closed port to export_renderer_unavailable", async () => {

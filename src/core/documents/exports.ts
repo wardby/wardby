@@ -27,7 +27,8 @@ export type RenderedExportFormat = "png" | "pdf";
 
 export interface Renderer {
   png(input: { html: string; width: number }): Promise<Buffer>;
-  pdf(input: { boards: { html: string; width: number }[] }): Promise<Buffer>;
+  /** `paginate`: one document on as many print pages as it needs (Markdown); default one page per board. */
+  pdf(input: { boards: { html: string; width: number }[]; paginate?: boolean }): Promise<Buffer>;
 }
 
 export interface ExportDeps {
@@ -223,7 +224,7 @@ export async function runExport(deps: ExportDeps, exportId: string): Promise<voi
         // Count only: never the dropped references themselves.
         if (safe.droppedImages > 0) log.info({ exportId, droppedImages: safe.droppedImages }, "export left out images");
         const html = markdownPrintFile(doc.title, safe.html);
-        bytes = await deps.renderer.pdf({ boards: [{ html, width: MARKDOWN_PDF_WIDTH }] });
+        bytes = await deps.renderer.pdf({ boards: [{ html, width: MARKDOWN_PDF_WIDTH }], paginate: true });
         mime = "application/pdf";
       }
       if (bytes.length > MAX_EXPORT_BYTES) throw new Error("export_too_large");

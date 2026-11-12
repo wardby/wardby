@@ -48,6 +48,7 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
   let designId: string;
   let mdId: string;
   let sent: { html: string; width: number }[] = [];
+  let paginated: (boolean | undefined)[] = [];
   const fake: Renderer = {
     png: async (i) => {
       sent.push({ html: i.html, width: i.width });
@@ -55,6 +56,7 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
     },
     pdf: async (i) => {
       sent.push(...i.boards);
+      paginated.push(i.paginate);
       return Buffer.from("PDF");
     },
   };
@@ -194,8 +196,11 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
 
   it("renders a PDF of all boards in manifest order, and a Markdown PDF", async () => {
     sent = [];
+    paginated = [];
     const id = await run({ documentId: designId, viewer: ownerV, format: "pdf" });
     expect(sent).toHaveLength(4);
+    // Designs: one page per board; Markdown: paginated (ruling T10-1).
+    expect(paginated).toEqual([undefined]);
     sent.forEach((b) => noSecrets(b.html));
     expect(await exportBytes(db, { exportId: id, viewer: ownerV })).toMatchObject({
       mime: "application/pdf",
@@ -203,8 +208,10 @@ describe.skipIf(!process.env.DATABASE_URL)("exports (database)", () => {
     });
 
     sent = [];
+    paginated = [];
     const md = await run({ documentId: mdId, viewer: ownerV, format: "pdf" });
     expect(sent).toHaveLength(1);
+    expect(paginated).toEqual([true]);
     expect(sent[0].width).toBe(794);
     expect(sent[0].html).toContain("Heading One");
     expect(sent[0].html).not.toContain("<script");
