@@ -107,13 +107,15 @@ export class IdentityService {
       await tx.authLoginKey.updateMany({ where: { userId: user.id }, data: { revokedAt: now } });
       await tx.authSession.updateMany({ where: { userId: user.id }, data: { revokedAt: now } });
       await tx.oAuthFamily.updateMany({ where: { userId: user.id }, data: { revokedAt: now } });
+      // Document-page sessions too: they outlive the login session they were bridged from.
+      await tx.webSession.deleteMany({ where: { principalId: user.principalId } });
     });
   }
   /**
    * Adds and/or removes roles on an existing user (never creates one). Any
    * actual change signs the user out in the same transaction: their OAuth
-   * grant families, refresh grants, browser sessions and unexchanged
-   * authorization codes are revoked, and they sign in and authorize afresh.
+   * grant families, refresh grants, browser sessions (including document-page
+   * sessions) and unexchanged authorization codes are revoked, and they sign in and authorize afresh.
    * (Roles are also read live on every request, so even a direct database
    * edit applies to live tokens at once.) A no-op change revokes nothing.
    */
@@ -146,6 +148,7 @@ export class IdentityService {
           where: { family: { userId: user.id }, revokedAt: null },
           data: { revokedAt: now },
         });
+        await tx.webSession.deleteMany({ where: { principalId: user.principalId } });
       }
       return { subject, roles, revokedGrants: changed };
     });
@@ -158,6 +161,8 @@ export class IdentityService {
       await tx.authLoginKey.update({ where: { keyId }, data: { revokedAt: new Date() } });
       await tx.authSession.updateMany({ where: { userId: key.userId }, data: { revokedAt: new Date() } });
       await tx.oAuthFamily.updateMany({ where: { userId: key.userId }, data: { revokedAt: new Date() } });
+      const user = await tx.authUser.findUniqueOrThrow({ where: { id: key.userId }, select: { principalId: true } });
+      await tx.webSession.deleteMany({ where: { principalId: user.principalId } });
     });
   }
   listUsers() {

@@ -99,6 +99,14 @@ export async function resolveContext(req: IncomingMessage, deps: WebDeps): Promi
     };
   }
   if (!session.principalId) return { kind: "none" };
+  // Self-hosted: a disabled user's session counts as absent (disableUser also deletes it).
+  if (deps.authMode === "self-hosted") {
+    const user = await deps.db.authUser.findUnique({
+      where: { principalId: session.principalId },
+      select: { status: true },
+    });
+    if (user?.status === "disabled") return { kind: "none" };
+  }
   return {
     kind: "member",
     session,

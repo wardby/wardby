@@ -1105,5 +1105,67 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         await db.principal.deleteMany({ where: { id: principal.id } });
       }
     });
+
+    it("ends a disabled user's page sessions, and refuses a disabled user's leftover session", async () => {
+      const sport = await freePort();
+      const sorigin = `http://127.0.0.1:${sport}`;
+      const canonicalUri = `${sorigin}/mcp`;
+      const provider = new SelfHostedAuthProvider(
+        { canonicalUri, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) },
+        db,
+      );
+      const identity = new IdentityService(db, "b2".repeat(32));
+      const subject = `web-sh-off-${s}`;
+      await identity.createUser(subject, [], "Dee Disabled");
+      const principal = await db.principal.findUniqueOrThrow({ where: { subject } });
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: docId,
+          granteeKind: "principal",
+          granteePrincipalId: principal.id,
+          granteeKey: `principal:${principal.id}`,
+          level: "read",
+        },
+      });
+      const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri } });
+      const sh = await startHttpServer({
+        mcp,
+        config: { canonicalUri, httpBind: { host: "127.0.0.1", port: sport }, authProviderKind: "self-hosted" },
+        auth: { authProvider: provider, db, providers: {} as never },
+        selfHosted: provider,
+        web: { db, cipher, canonicalUri, authMode: "self-hosted", selfHosted: provider, assetsRoot: assets },
+      });
+      try {
+        const live = await session(principal.id);
+        expect((await callAt(sorigin, `/d/api/${docId}`, { jar: live.jar })).status).toBe(200);
+
+        // A role change signs the user out of the pages too.
+        await identity.changeRoles(subject, ["model-manager"], []);
+        expect(await db.webSession.count({ where: { principalId: principal.id } })).toBe(0);
+        expect((await callAt(sorigin, `/d/api/${docId}`, { jar: live.jar })).status).toBe(401);
+        // A no-op change keeps the session.
+        const kept = await session(principal.id);
+        await identity.changeRoles(subject, ["model-manager"], []);
+        expect(await db.webSession.count({ where: { principalId: principal.id } })).toBe(1);
+
+        // Disabling deletes the page sessions in the same transaction.
+        await identity.disableUser(subject);
+        expect(await db.webSession.count({ where: { principalId: principal.id } })).toBe(0);
+        expect((await callAt(sorigin, `/d/api/${docId}`, { jar: kept.jar })).status).toBe(401);
+
+        // A session that survived anyway (created after the disable) still counts as absent.
+        const leftover = await session(principal.id);
+        expect((await callAt(sorigin, `/d/api/${docId}`, { jar: leftover.jar })).status).toBe(401);
+      } finally {
+        await sh.close();
+        await db.webSession.deleteMany({ where: { principalId: principal.id } });
+        await db.resourceGrant.deleteMany({ where: { granteePrincipalId: principal.id } });
+        await db.authLoginKey.deleteMany({ where: { user: { principalId: principal.id } } });
+        await db.authUser.deleteMany({ where: { principalId: principal.id } });
+        await db.principalProfile.deleteMany({ where: { principalId: principal.id } });
+        await db.principal.deleteMany({ where: { id: principal.id } });
+      }
+    });
   });
 });

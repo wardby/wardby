@@ -63,7 +63,8 @@ Creation prints the complete high-entropy login key once. Distribute it out of
 band through a secure channel; plaintext cannot be recovered from the database.
 Login keys expire after one year. For a lost key, create a replacement and
 revoke the old public key ID. Revocation also revokes the user's existing
-sessions and OAuth families. Disable is terminal through the CLI; reactivation
+sessions and OAuth families, and signs them out of document pages. Disabling a
+user, or changing their roles, signs them out of document pages at once too. Disable is terminal through the CLI; reactivation
 requires a separately reviewed operator workflow.
 
 The CLI rejects any flag a command does not take, for example
