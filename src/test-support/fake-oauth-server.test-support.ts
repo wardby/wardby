@@ -69,6 +69,8 @@ export async function startFakeOAuthServer(
      * HTTP Basic credentials; any other answers 401 `invalid_client`.
      */
     checkClient?: boolean;
+    /** Opt-in: answer every client registration with this status and JSON body (a string is sent as is). */
+    registerResponse?: { status: number; body: unknown };
   } = {},
 ): Promise<FakeOAuthServer> {
   const revocation = opts.revocation ?? true;
@@ -269,6 +271,16 @@ export async function startFakeOAuthServer(
           return;
         case "POST /register": {
           if (!dcr) break;
+          if (opts.registerResponse) {
+            const { status, body } = opts.registerResponse;
+            if (typeof body === "string") {
+              res.writeHead(status, { "content-type": "text/html" });
+              res.end(body);
+            } else {
+              sendJson(res, status, body);
+            }
+            return;
+          }
           const clientId = `fake-client-${randomUUID()}`;
           clients.add(clientId);
           let body: Record<string, unknown> = {};

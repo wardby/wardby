@@ -39,7 +39,13 @@ import {
   type OAuthTokens,
 } from "./oauth-client/tokens.js";
 import { logger } from "./logger.js";
-import { confirmOAuthLink, startOAuthLink, type OAuthLinkAdapter, type OAuthLinkDb } from "./oauth-link.js";
+import {
+  confirmOAuthLink,
+  startOAuthLink,
+  type OAuthCallbackKind,
+  type OAuthLinkAdapter,
+  type OAuthLinkDb,
+} from "./oauth-link.js";
 import { parseSecretBrokerConfig, type SecretBrokerConfig } from "./secret-broker-config.js";
 
 export const OAUTH_SECRET_PURPOSE = "oauth-secret";
@@ -63,6 +69,27 @@ export const SECRET_OAUTH_INPUT_TOO_LONG =
 /** Any cipher (KMS) failure on the OAuth path; the cause's text is never carried. */
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
+
+/**
+ * The caller-facing text of a refused client registration: only the validated error code, the HTTP
+ * status, a fixed-list method name and fixed sentences, never provider text. The loopback hint
+ * applies to the web flow only; on the loopback flow the provider refused even a loopback URI.
+ */
+export function registrationFailedMessage(err: OAuthProtocolError, callback: OAuthCallbackKind): string {
+  const d = err.registration ?? {};
+  const prefix = "secret_oauth_registration_failed:";
+  if (d.authMethod !== undefined) {
+    return `${prefix} the OAuth provider registered Wardby with an unsupported client authentication method (${d.authMethod})`;
+  }
+  const facts = [d.providerError, d.status !== undefined ? `HTTP ${d.status}` : undefined].filter(Boolean).join(", ");
+  const refused = d.status === undefined || d.status < 200 || d.status >= 300;
+  const base = refused
+    ? `${prefix} the OAuth provider refused to register Wardby${facts ? ` (${facts})` : ""}`
+    : `${prefix} the OAuth provider's registration reply was unusable (${facts})`;
+  return d.providerError === "invalid_redirect_uri" && callback === "web"
+    ? `${base}; it may accept only loopback callbacks — connect with oauth.callback "loopback" and the Wardby CLI`
+    : base;
+}
 
 /** Connecting (discovery, registration, start or finish) could not reach the provider: nothing changed. */
 export const SECRET_OAUTH_PROVIDER_UNAVAILABLE =
@@ -166,11 +193,28 @@ const ContextSchema = z
     /** A registered client secret, encrypted: the context is stored as plain JSON. */
     clientSecretCiphertext: z.string().optional(),
     scope: z.string().optional(),
+    /**
+     * The redirect URI this request's authorize URL (and any client registration) used: the web
+     * callback, or a loopback URI on the owner's machine. The code exchange uses the same one.
+     * Absent on requests started before it was stored; those use the callback's own URI.
+     */
+    redirectUri: z.string().optional(),
+    /**
+     * Set on a request the owner's CLI started (`/oauth/loopback/start`): only the loopback complete
+     * route may complete it, and the web callback refuses it. Absent: a web request.
+     */
+    callback: z.literal("loopback").optional(),
   })
   .strict();
 
 /** The link request's context for an OAuth secret. Holds no secret value in the clear. */
 export type OAuthSecretContext = z.infer<typeof ContextSchema>;
+
+/** A stored link request's context read back, or undefined when it is not an OAuth secret's context. */
+export function parseOAuthSecretContext(context: unknown): OAuthSecretContext | undefined {
+  const parsed = ContextSchema.safeParse(context);
+  return parsed.success ? parsed.data : undefined;
+}
 
 /** The link request's result: shown on the callback page and carried to the confirm. */
 export interface OAuthSecretResult {
@@ -257,23 +301,20 @@ function validatedBroker(resource: string): SecretBrokerConfig {
   return parseSecretBrokerConfig(oauthBroker(resource));
 }
 
-export async function startOAuthSecretConnect(input: {
-  db: OAuthLinkDb & Pick<PrismaClient, "secret">;
-  /** Encrypts a registered client secret into the link request's context. */
-  cipher: SecretCipher;
+/**
+ * The checks a connect runs before it asks the provider anything: input lengths, the resource's URL
+ * rules and broker host, and the name (a non-OAuth secret of that name is refused). Returns the
+ * normalised resource. Throws the same fixed errors as startOAuthSecretConnect.
+ */
+export async function precheckOAuthSecretConnect(input: {
+  db: Pick<PrismaClient, "secret">;
   ownerId: string;
   name: string;
   resource: string;
   scope?: string;
   clientId?: string;
-  /** The callback URI for OAUTH_SECRET_PURPOSE (oauthRedirectUri). */
-  redirectUri: string;
-  /** The fetch policy of the MCP server path; tests allow-list their local fake. */
   options?: SafeFetchOptions;
-  fetchImpl?: typeof safeFetch;
-  now?: Date;
-}): Promise<{ authorizeUrl: string; expiresAt: Date }> {
-  const options = input.options ?? {};
+}): Promise<{ resource: string }> {
   try {
     boundedString(input.name, 1024);
     if (input.scope !== undefined) boundedString(input.scope, 1024);
@@ -283,7 +324,7 @@ export async function startOAuthSecretConnect(input: {
   }
   let resource: string;
   try {
-    resource = normaliseResource(input.resource, options);
+    resource = normaliseResource(input.resource, input.options ?? {});
     // Refuse a host the broker could not send to (an IP address) before asking it anything.
     validatedBroker(resource);
   } catch {
@@ -296,6 +337,35 @@ export async function startOAuthSecretConnect(input: {
     select: { oauth: true },
   });
   if (existing && existing.oauth === null) throw new Error(SECRET_NOT_OAUTH);
+  return { resource };
+}
+
+export async function startOAuthSecretConnect(input: {
+  db: OAuthLinkDb & Pick<PrismaClient, "secret">;
+  /** Encrypts a registered client secret into the link request's context. */
+  cipher: SecretCipher;
+  ownerId: string;
+  name: string;
+  resource: string;
+  scope?: string;
+  clientId?: string;
+  /**
+   * The callback URI for this request: the web callback for OAUTH_SECRET_PURPOSE (oauthRedirectUri),
+   * or a loopback URI the owner's CLI listens on. Stored in the context, so the code exchange uses it too.
+   */
+  redirectUri: string;
+  /**
+   * Which route completes this request: the web callback (default) or the loopback complete route,
+   * for a sign-in the owner's CLI started. Stored in the context.
+   */
+  callback?: OAuthCallbackKind;
+  /** The fetch policy of the MCP server path; tests allow-list their local fake. */
+  options?: SafeFetchOptions;
+  fetchImpl?: typeof safeFetch;
+  now?: Date;
+}): Promise<{ authorizeUrl: string; expiresAt: Date }> {
+  const options = input.options ?? {};
+  const { resource } = await precheckOAuthSecretConnect({ ...input, options });
 
   let meta;
   try {
@@ -320,7 +390,14 @@ export async function startOAuthSecretConnect(input: {
   } else if (!meta.registrationEndpoint) {
     throw new Error(SECRET_OAUTH_CLIENT_ID_REQUIRED);
   } else {
-    client = await registerClient(meta, input.redirectUri, options, input.fetchImpl);
+    try {
+      client = await registerClient(meta, input.redirectUri, options, input.fetchImpl);
+    } catch (err) {
+      if (err instanceof OAuthProtocolError && err.code === "registration_failed") {
+        throw new Error(registrationFailedMessage(err, input.callback ?? "web"), { cause: err });
+      }
+      throw err;
+    }
   }
   const context: OAuthSecretContext = {
     ownerId: input.ownerId,
@@ -329,6 +406,8 @@ export async function startOAuthSecretConnect(input: {
     client: { clientId: client.clientId, ...(client.authMethod ? { authMethod: client.authMethod } : {}) },
     ...(client.clientSecret ? { clientSecretCiphertext: await encrypt(input.cipher, client.clientSecret) } : {}),
     ...(input.scope ? { scope: input.scope } : {}),
+    redirectUri: input.redirectUri,
+    ...(input.callback === "loopback" ? { callback: "loopback" as const } : {}),
   };
   return startOAuthLink({
     db: input.db,
@@ -354,6 +433,11 @@ export function oauthSecretAdapter(
         redirectUri,
         ...(context.scope ? { scope: context.scope } : {}),
       }),
+    // The URI this request's authorize URL carried; an invalid context is refused by `complete` itself.
+    redirectUri: (context) => parseOAuthSecretContext(context)?.redirectUri,
+    // A loopback-started request belongs to the loopback route; anything else (an invalid context
+    // included, which `complete` then refuses) to the web callback.
+    callbackKind: (context) => (parseOAuthSecretContext(context)?.callback === "loopback" ? "loopback" : "web"),
     complete: async ({ code, codeVerifier, redirectUri, context, iss }) => {
       const ctx = parseContext(context);
       // RFC 9207: when the provider names the issuer, it must be the one discovered.

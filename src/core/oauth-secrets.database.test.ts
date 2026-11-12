@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "#prisma";
 import { brokeredFetch } from "../sandbox/brokered-fetch.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-support/fake-oauth-server.test-support.js";
@@ -13,6 +14,7 @@ import {
   oauthBroker,
   OAuthSecretMetaSchema,
   oauthSecretAdapter,
+  parseOAuthSecretContext,
   SECRET_NOT_OAUTH,
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
@@ -100,7 +102,7 @@ let fake: FakeOAuthServer;
 async function callback(
   callbackUrl: string,
   adapter: OAuthLinkAdapter<unknown, unknown>,
-  extra: { iss?: string; state?: string } = {},
+  extra: { iss?: string; state?: string; callbackKind?: "web" | "loopback" } = {},
 ) {
   const cb = new URL(callbackUrl);
   return completeOAuthCallback({
@@ -111,6 +113,7 @@ async function callback(
     code: cb.searchParams.get("code"),
     iss: extra.iss,
     redirectUri: REDIRECT,
+    ...(extra.callbackKind ? { callbackKind: extra.callbackKind } : {}),
   });
 }
 
@@ -237,6 +240,46 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(changes[1].before).toEqual({ ...oauthBroker(fake.mcpUrl), oauthStatus: "connected" });
   });
 
+  it("names a refused registration's cause; the loopback hint is for the web flow only", async () => {
+    const refusing = await startFakeOAuthServer({
+      publicHost: HOST,
+      registerResponse: {
+        status: 400,
+        body: { error: "invalid_redirect_uri", error_description: "SECRET-DESCRIPTION" },
+      },
+    });
+    try {
+      const ownerId = await owner();
+      const start = (callback?: "web" | "loopback") =>
+        startOAuthSecretConnect({
+          db,
+          cipher,
+          ownerId,
+          name: "refused",
+          resource: refusing.mcpUrl,
+          redirectUri: REDIRECT,
+          options: OPTS,
+          ...(callback ? { callback } : {}),
+        }).then(
+          () => new Error("unreachable"),
+          (e: unknown) => e as Error,
+        );
+      logged.mockClear();
+      const web = await start("web");
+      expect(web.message).toBe(
+        'secret_oauth_registration_failed: the OAuth provider refused to register Wardby (invalid_redirect_uri, HTTP 400); it may accept only loopback callbacks — connect with oauth.callback "loopback" and the Wardby CLI',
+      );
+      const loop = await start("loopback");
+      expect(loop.message).toBe(
+        "secret_oauth_registration_failed: the OAuth provider refused to register Wardby (invalid_redirect_uri, HTTP 400)",
+      );
+      expect(web.message + loop.message).not.toContain("SECRET-DESCRIPTION");
+      expect(JSON.stringify(logged.mock.calls)).toContain("SECRET-DESCRIPTION");
+    } finally {
+      await refusing.close();
+    }
+  });
+
   it("refuses a name used by a non-OAuth secret, at start and at confirm", async () => {
     const ownerId = await owner();
     await db.secret.create({ data: { ownerId, name: "plain", ciphertext: "enc:eA==", keyId: "test-key" } });
@@ -310,6 +353,115 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     await expect(
       startOAuthSecretConnect({ db, cipher, ownerId, name: "x", resource: fake.mcpUrl, redirectUri: REDIRECT }),
     ).rejects.toThrow(/https/);
+  });
+
+  it("uses a per-request loopback redirect URI for registration, authorize and the token exchange", async () => {
+    const ownerId = await owner();
+    const LOOPBACK = "http://127.0.0.1:53111/callback";
+    const rec = recordingFetch();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "loopback",
+      resource: fake.mcpUrl,
+      redirectUri: LOOPBACK,
+      callback: "loopback",
+      options: OPTS,
+      fetchImpl: rec.impl,
+    });
+    const registration = rec.requests.find((r) => r.url.endsWith("/register"));
+    expect(JSON.parse(registration?.body ?? "{}")).toMatchObject({ redirect_uris: [LOOPBACK] });
+    expect(new URL(started.authorizeUrl).searchParams.get("redirect_uri")).toBe(LOOPBACK);
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(request.context).toMatchObject({ redirectUri: LOOPBACK, callback: "loopback" });
+
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    expect(callbackUrl.startsWith(`${LOOPBACK}?`)).toBe(true);
+    const adapter = oauthSecretAdapter(cipher, OPTS, rec.impl) as OAuthLinkAdapter<unknown, unknown>;
+    // A loopback-started request is never completed by the web callback, and that refusal spends nothing.
+    await expect(callback(callbackUrl, adapter)).resolves.toEqual({ kind: "invalid" });
+    expect(rec.requests.some((r) => r.url.endsWith("/token"))).toBe(false);
+    // The callback step is given the web URI; the request's own (loopback) URI wins, so the
+    // exchange matches what the authorize URL carried (the fake checks redirect_uri).
+    const outcome = await callback(callbackUrl, adapter, { callbackKind: "loopback" });
+    expect(outcome.kind).toBe("confirm");
+    const token = rec.requests.find((r) => r.url.endsWith("/token"));
+    expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(LOOPBACK);
+    if (outcome.kind !== "confirm") throw new Error("unreachable");
+    await expect(confirmCode(ownerId, "loopback", outcome.code)).resolves.toMatchObject({ status: "connected" });
+  });
+
+  it("stores the web redirect URI in the context, and the web callback is unchanged", async () => {
+    const ownerId = await owner();
+    const rec = recordingFetch();
+    const { outcome } = await connect(ownerId, "web-uri", { fetchImpl: rec.impl });
+    expect(outcome.kind).toBe("confirm");
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(request.context).toMatchObject({ redirectUri: REDIRECT });
+    expect(request.context).not.toHaveProperty("callback");
+    const token = rec.requests.find((r) => r.url.endsWith("/token"));
+    expect(new URLSearchParams(token?.body ?? "").get("redirect_uri")).toBe(REDIRECT);
+  });
+
+  it("a request stored before per-request URIs (no redirectUri in its context) uses the callback's URI", async () => {
+    const ownerId = await owner();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "legacy",
+      resource: fake.mcpUrl,
+      redirectUri: REDIRECT,
+      options: OPTS,
+    });
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    const legacy = { ...(request.context as Prisma.JsonObject) };
+    delete legacy.redirectUri;
+    await db.oAuthLinkRequest.update({ where: { id: request.id }, data: { context: legacy } });
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    const adapter = oauthSecretAdapter(cipher, OPTS) as OAuthLinkAdapter<unknown, unknown>;
+    expect((await callback(callbackUrl, adapter)).kind).toBe("confirm");
+  });
+
+  it("a web-started request is never completed by the loopback route", async () => {
+    const ownerId = await owner();
+    const started = await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "web-only",
+      resource: fake.mcpUrl,
+      redirectUri: REDIRECT,
+      options: OPTS,
+    });
+    const callbackUrl = await fake.approve(started.authorizeUrl);
+    const adapter = oauthSecretAdapter(cipher, OPTS) as OAuthLinkAdapter<unknown, unknown>;
+    await expect(callback(callbackUrl, adapter, { callbackKind: "loopback" })).resolves.toEqual({ kind: "invalid" });
+    expect((await callback(callbackUrl, adapter)).kind).toBe("confirm");
+  });
+
+  it("parseOAuthSecretContext reads a stored context, and undefined for anything else", async () => {
+    const ownerId = await owner();
+    await startOAuthSecretConnect({
+      db,
+      cipher,
+      ownerId,
+      name: "ctx",
+      resource: fake.mcpUrl,
+      redirectUri: "http://127.0.0.1:53112/callback",
+      callback: "loopback",
+      options: OPTS,
+    });
+    const request = await db.oAuthLinkRequest.findFirstOrThrow({ where: { principalId: ownerId } });
+    expect(parseOAuthSecretContext(request.context)).toMatchObject({
+      ownerId,
+      name: "ctx",
+      callback: "loopback",
+      redirectUri: "http://127.0.0.1:53112/callback",
+    });
+    expect(parseOAuthSecretContext({ label: "x" })).toBeUndefined();
+    expect(parseOAuthSecretContext(null)).toBeUndefined();
   });
 
   it("refuses a replayed callback state", async () => {

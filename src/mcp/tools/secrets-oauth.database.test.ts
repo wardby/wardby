@@ -53,7 +53,11 @@ async function connect(p: Principal, canonicalUri = CANONICAL) {
     mcpReq: { requestState: () => undefined },
   };
   mcp.setFixedContext(ctx);
-  registerSecretsTools(mcp, { buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`, protocolElicitation: false });
+  registerSecretsTools(mcp, {
+    buildElicitationUrl: async (t) => `${ORIGIN}/x?t=${t}`,
+    protocolElicitation: false,
+    oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
+  });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });

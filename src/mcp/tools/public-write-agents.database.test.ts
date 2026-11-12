@@ -72,7 +72,11 @@ async function connect(who: Principal, admin = false) {
   });
   registerAgentTools(mcp);
   registerGrantTools(mcp);
-  registerSecretsTools(mcp, { buildElicitationUrl: async () => "https://test.invalid/e", protocolElicitation: false });
+  registerSecretsTools(mcp, {
+    buildElicitationUrl: async () => "https://test.invalid/e",
+    protocolElicitation: false,
+    oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
+  });
   registerDatastoreTools(mcp);
   registerRepositoryTools(mcp);
   registerSubAgentTools(mcp);
