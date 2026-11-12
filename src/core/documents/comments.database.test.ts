@@ -8,9 +8,11 @@ import {
   createThread,
   deleteComment,
   editComment,
+  guestMentionCandidates,
   listThreads,
   MAX_MENTIONS_CHECKED,
   mentionCandidates,
+  mentionedGuestNames,
   reply,
   setThreadStatus,
 } from "./comments.js";
@@ -244,5 +246,48 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
     cands = await mentionCandidates(db, d);
     expect(cands.map((c) => c.principalId)).toContain(outsider.id);
     await db.principalProfile.delete({ where: { principalId: outsider.id } });
+  });
+  it("guest mentions: members may mention guests who commented here; names resolve only on this document", async () => {
+    const d = (await createDocument(db, cipher, { ownerId: owner.id, title: "G", markdown: "hello world" })).id;
+    const link = async (documentId: string) =>
+      db.documentShareLink.create({
+        data: {
+          documentId,
+          tokenHash: createHash("sha256").update(randomUUID()).digest("hex"),
+          permission: "comment",
+          expiresAt: new Date(Date.now() + 86_400_000),
+          createdById: owner.id,
+        },
+      });
+    const here = await link(d);
+    const talker = await db.documentGuest.create({ data: { shareLinkId: here.id, name: "Tess" } });
+    const silent = await db.documentGuest.create({ data: { shareLinkId: here.id, name: "Sid" } });
+    const talkerViewer: Viewer = { kind: "guest", guestId: talker.id, shareLinkId: here.id, permission: "comment" };
+    await createThread(db, cipher, { documentId: d, viewer: talkerViewer, anchor, body: "a guest comment" });
+    await createThread(db, cipher, { documentId: d, viewer: asOwner(), anchor, body: "a member comment" });
+
+    // Only guests who commented on this document; never members, never the silent guest.
+    const cands = await guestMentionCandidates(db, d);
+    expect(cands).toEqual([{ guestId: talker.id, name: "Tess" }]);
+    expect(cands.some((c) => c.guestId === owner.id)).toBe(false);
+    // A guest who commented on another document (docId's Gus) is not offered here.
+    expect(cands.some((c) => c.guestId === guestId)).toBe(false);
+
+    // @[guest:...] for this document's guest resolves; one from another document does not.
+    const body = `ping @[guest:${talker.id}] and @[guest:${guestId}] and @[${member.id}]`;
+    const t = await createThread(db, cipher, { documentId: d, viewer: asOwner(), anchor, body });
+    expect(t.mentionsWithoutAccess).toEqual([member.id]);
+    expect(await mentionedGuestNames(db, d, [body])).toEqual([{ guestId: talker.id, name: "Tess" }]);
+    // On Gus's own document it is the other way round.
+    expect(await mentionedGuestNames(db, docId, [body])).toEqual([{ guestId, name: "Gus" }]);
+    expect(await mentionedGuestNames(db, d, ["no mentions"])).toEqual([]);
+    void silent;
+  });
+
+  it("the mention cap counts guest mentions too", async () => {
+    const guests = Array.from({ length: MAX_MENTIONS_CHECKED }, (_, i) => `@[guest:g${i}]`);
+    const body = `${guests.join(" ")} @[nobody-after-cap-${s.slice(0, 8)}]`;
+    const t = await createThread(db, cipher, { documentId: docId, viewer: asOwner(), anchor, body });
+    expect(t.mentionsWithoutAccess).toEqual([]);
   });
 });

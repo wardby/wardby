@@ -10,7 +10,7 @@ import type { Viewer } from "./access.js";
 import { parseTextAnchor } from "./anchors.js";
 import type { TextAnchor } from "./anchors.js";
 import { MAX_COMMENT_CHARS } from "./limits.js";
-import { parseMentions } from "./mentions.js";
+import { parseGuestMentions, parseMentionRefs } from "./mentions.js";
 import { notifyDocumentChange } from "./events.js";
 import { displayNameFor } from "./names.js";
 import { profileNames } from "./profiles.js";
@@ -69,13 +69,17 @@ export async function principalNames(db: CommentDb, ids: string[]): Promise<Map<
 export const MAX_MENTIONS_CHECKED = 20;
 
 /**
- * Deduped mentioned ids that cannot see the document, among the first
- * MAX_MENTIONS_CHECKED (a long body could otherwise cost hundreds of access
- * queries per comment). The body is not changed.
+ * Deduped mentioned member ids that cannot see the document, among the first
+ * MAX_MENTIONS_CHECKED mentions of either kind (a long body could otherwise
+ * cost hundreds of access queries per comment). Guest mentions count toward
+ * the cap but need no check: a guest already holds the link. The body is not
+ * changed.
  */
 async function mentionsWithoutAccess(db: CommentDb, documentId: string, body: string): Promise<string[]> {
   const missing: string[] = [];
-  for (const id of [...new Set(parseMentions(body))].slice(0, MAX_MENTIONS_CHECKED)) {
+  for (const ref of parseMentionRefs(body).slice(0, MAX_MENTIONS_CHECKED)) {
+    if (ref.kind !== "principal") continue;
+    const id = ref.id;
     const access = await documentAccess(db, documentId, { kind: "principal", principalId: id });
     if (access === "none") missing.push(id);
   }
@@ -266,6 +270,43 @@ export async function mentionCandidates(
   }
   const names = await principalNames(db, [...ids]);
   return [...ids].filter((id) => names.has(id)).map((principalId) => ({ principalId, name: names.get(principalId)! }));
+}
+
+/**
+ * Guests a member may @mention on this document: guests of its share links
+ * who have a (not deleted) comment on it. Never members; no access check of
+ * its own (the caller requires comment access and a member viewer).
+ */
+export async function guestMentionCandidates(
+  db: CommentDb,
+  documentId: string,
+): Promise<{ guestId: string; name: string }[]> {
+  const guests = await db.documentGuest.findMany({
+    where: { shareLink: { documentId }, comments: { some: { deletedAt: null, thread: { documentId } } } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, name: true },
+  });
+  return guests.map((g) => ({ guestId: g.id, name: g.name }));
+}
+
+/**
+ * Names for the `@[guest:id]` mentions in these bodies, only for guests of
+ * this document's own share links: a guest id from another document stays
+ * unresolved (the page shows "@unknown"). Guest names are already shown to
+ * every reader as comment authors.
+ */
+export async function mentionedGuestNames(
+  db: CommentDb,
+  documentId: string,
+  bodies: readonly string[],
+): Promise<{ guestId: string; name: string }[]> {
+  const ids = [...new Set(bodies.flatMap(parseGuestMentions))];
+  if (ids.length === 0) return [];
+  const guests = await db.documentGuest.findMany({
+    where: { id: { in: ids }, shareLink: { documentId } },
+    select: { id: true, name: true },
+  });
+  return guests.map((g) => ({ guestId: g.id, name: g.name }));
 }
 
 /**

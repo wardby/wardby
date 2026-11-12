@@ -6,7 +6,6 @@
  * Errors surface as fixed codes only (the server never sends other text).
  */
 import type { TextAnchor } from "./anchors.js";
-import type { MentionCandidate } from "./comments.js";
 
 export interface Viewer {
   kind: "member" | "guest" | "anonymous";
@@ -53,6 +52,15 @@ export interface DocumentPayload {
   version: { number: number; markdown: string; createdAt: string };
   me: Viewer;
   threads: ThreadView[];
+  /** Names for @[guest:id] mentions in these threads (this document's own guests only). */
+  mentionedGuests?: { guestId: string; name: string }[];
+}
+
+/** One /mentions entry: a member (principalId) or a guest who commented on this document (guestId). */
+export interface MentionEntry {
+  principalId?: string;
+  guestId?: string;
+  name: string;
 }
 
 export class ApiError extends Error {
@@ -123,7 +131,7 @@ export class Api {
     return this.request("GET", this.doc());
   }
 
-  mentions(): Promise<{ candidates: MentionCandidate[] }> {
+  mentions(): Promise<{ candidates: MentionEntry[] }> {
     return this.request("GET", this.doc("/mentions"));
   }
 

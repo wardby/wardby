@@ -7,6 +7,7 @@ import type { Editor } from "@tiptap/core";
 import { anchorForRange, docText, rangeForAnchor, type TextAnchor } from "./anchors.js";
 import { ApiError, errorMessage, type Api, type DocumentPayload, type ThreadView, type Viewer } from "./api.js";
 import {
+  candidateFrom,
   decodeMentions,
   encodeMentions,
   initials,
@@ -78,6 +79,7 @@ export class CommentsUI {
   viewer: Viewer;
   canSend = false;
   threads: ThreadView[] = [];
+  /** Shown names by mention ref: members from /mentions, this document's guests from the payload. */
   private names = new Map<string, string>();
   private candidates: MentionCandidate[] = [];
   private filter: Filter = "open";
@@ -123,18 +125,23 @@ export class CommentsUI {
     this.viewer = payload.me;
     this.canSend = payload.document.canSend;
     this.threads = payload.threads;
+    for (const g of payload.mentionedGuests ?? []) this.names.set(`guest:${g.guestId}`, `${g.name} (guest)`);
     for (const id of [...this.checked]) if (!this.threads.some((t) => t.id === id)) this.checked.delete(id);
     this.refreshHighlights();
     this.render();
   }
 
   async loadMentions(): Promise<void> {
-    // Mentions are member to member: guests get no @-list (the server sends them none).
+    // Only members get an @-list (members and guests who commented here); guests get none (the server sends none).
     if (this.viewer.kind !== "member" || !this.canComment) return;
     try {
       const r = await this.host.api.mentions();
-      this.candidates = r.candidates;
-      this.names = new Map(r.candidates.map((c) => [c.principalId, c.name]));
+      // Members, then the guests who commented on this document (shown as "<name> (guest)").
+      this.candidates = r.candidates.flatMap((c) => {
+        const cand = candidateFrom(c);
+        return cand ? [cand] : [];
+      });
+      for (const c of this.candidates) this.names.set(c.ref, c.name);
       this.render();
     } catch {
       // Mentions are optional: names fall back to "@member".
@@ -742,7 +749,7 @@ export class CommentsUI {
     ta.value = `${ta.value.slice(0, s.start)}@${p.name} ${ta.value.slice(end)}`;
     const caret = s.start + p.name.length + 2;
     ta.setSelectionRange(caret, caret);
-    if (!pop.picked.some((x) => x.principalId === p.principalId)) pop.picked.push(p);
+    if (!pop.picked.some((x) => x.ref === p.ref)) pop.picked.push(p);
     this.hideSuggest();
     ta.focus();
   }

@@ -39,23 +39,31 @@ export function stackBadges(tops: number[], gap: number): number[] {
 export type Token = { kind: "text" | "bold" | "italic" | "code" | "mention" | "br"; text: string };
 
 const MENTION_ID = "[A-Za-z0-9_-]{1,64}";
+/** What goes between `@[` and `]`: a principal id, or `guest:` and a guest id. */
+const MENTION_REF = `(?:guest:)?${MENTION_ID}`;
 const FORMAT = new RegExp(
   [
     "`([^`\\n]+)`", // 1 code
     "\\*\\*([^*\\n]+)\\*\\*", // 2 bold
     "(?<![\\w*])\\*(?=\\S)([^*\\n]+?)(?<=\\S)\\*(?![\\w*])", // 3 italic (star)
     "(?<![\\w_])_(?=\\S)([^_\\n]+?)(?<=\\S)_(?![\\w_])", // 4 italic (underscore)
-    `@\\[(${MENTION_ID})\\]`, // 5 mention
+    `@\\[(${MENTION_REF})\\]`, // 5 mention
     "(\\n)", // 6 line break
   ].join("|"),
   "gu",
 );
 
-const mentionName = (id: string, names?: ReadonlyMap<string, string>) => `@${names?.get(id) ?? "member"}`;
+/**
+ * The text shown for a mention: the current name when known. An unknown
+ * member shows as "@member"; a guest not on this document (the server only
+ * names this document's guests) shows as "@unknown".
+ */
+const mentionName = (ref: string, names?: ReadonlyMap<string, string>) =>
+  `@${names?.get(ref) ?? (ref.startsWith("guest:") ? "unknown" : "member")}`;
 
 /**
  * Splits a comment body into tokens for the renderer: **bold**, *italic* /
- * _italic_, `code`, @[id] mentions (shown with the current name) and line
+ * _italic_, `code`, @[id] and @[guest:id] mentions (shown with the current name) and line
  * breaks. Everything else is plain text; the renderer sets each token with
  * textContent, so no markup in a body is ever parsed.
  */
@@ -98,34 +106,42 @@ export function mentionQuery(value: string, caret: number): { start: number; que
   return { start: m.index + m[1].length, query: m[2] };
 }
 
+/** Someone the composer can mention: `ref` is what is stored between `@[` and `]`. */
 export interface MentionCandidate {
-  principalId: string;
+  ref: string;
   name: string;
+}
+
+/** The ref and shown name for a /mentions entry: members by principal id, guests as "<name> (guest)". */
+export function candidateFrom(c: { principalId?: string; guestId?: string; name: string }): MentionCandidate | null {
+  if (typeof c.principalId === "string") return { ref: c.principalId, name: c.name };
+  if (typeof c.guestId === "string") return { ref: `guest:${c.guestId}`, name: `${c.name} (guest)` };
+  return null;
 }
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Turns the `@Name` text of picked people into stored `@[principalId]` mentions (longest names first). */
+/** Turns the `@Name` text of picked people into stored `@[ref]` mentions (longest names first). */
 export function encodeMentions(text: string, picked: readonly MentionCandidate[]): string {
   let out = text;
   const byLength = [...picked].sort((a, b) => b.name.length - a.name.length);
   for (const p of byLength) {
     if (!p.name) continue;
-    out = out.replace(new RegExp(`@${escapeRegExp(p.name)}(?![\\p{L}\\p{N}_])`, "gu"), `@[${p.principalId}]`);
+    out = out.replace(new RegExp(`@${escapeRegExp(p.name)}(?![\\p{L}\\p{N}_])`, "gu"), `@[${p.ref}]`);
   }
   return out;
 }
 
-/** The editable form of a stored body: known `@[id]` mentions become `@Name` (and are returned as picked). */
+/** The editable form of a stored body: known `@[ref]` mentions become `@Name` (and are returned as picked). */
 export function decodeMentions(
   body: string,
   names: ReadonlyMap<string, string>,
 ): { text: string; picked: MentionCandidate[] } {
   const picked = new Map<string, MentionCandidate>();
-  const text = body.replace(new RegExp(`@\\[(${MENTION_ID})\\]`, "g"), (whole, id: string) => {
-    const name = names.get(id);
+  const text = body.replace(new RegExp(`@\\[(${MENTION_REF})\\]`, "g"), (whole, ref: string) => {
+    const name = names.get(ref);
     if (!name) return whole;
-    picked.set(id, { principalId: id, name });
+    picked.set(ref, { ref, name });
     return `@${name}`;
   });
   return { text, picked: [...picked.values()] };

@@ -589,6 +589,27 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       const page2 = await call(`/d/${docId}`, { jar: m.jar });
       expect(await page2.text()).not.toContain(GUEST_EMAIL);
 
+      // A member can mention the guest who commented here (never their email); the mention resolves.
+      const gus = await db.documentGuest.findFirstOrThrow({ where: { shareLinkId: link.id } });
+      const cands = await call(`/d/api/${docId}/mentions`, { jar: m.jar });
+      const candText = await cands.text();
+      expect(JSON.parse(candText).candidates).toContainEqual({ guestId: gus.id, name: "Gus" });
+      expect(candText).not.toContain(GUEST_EMAIL);
+      const mentioned = await call(`/d/api/${docId}/threads`, {
+        method: "POST",
+        jar: m.jar,
+        csrf: m.csrf,
+        body: {
+          anchor: { type: "text", quote: "hello", prefix: "", suffix: " world" },
+          body: `@[guest:${gus.id}] ok?`,
+        },
+      });
+      expect(mentioned.status).toBe(201);
+      const withMention = (await (await call(`/d/api/${docId}`, { jar: m.jar })).json()) as {
+        mentionedGuests: unknown;
+      };
+      expect(withMention.mentionedGuests).toEqual([{ guestId: gus.id, name: "Gus" }]);
+
       // Revoking the link ends the guest: the session is treated as absent.
       await revokeShareLink(db, { shareLinkId: link.id, viewer: { kind: "principal", principalId: owner.id } });
       const after = await call(`/d/api/${docId}`, { jar });

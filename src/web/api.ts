@@ -15,8 +15,10 @@ import {
   createThread,
   deleteComment,
   editComment,
+  guestMentionCandidates,
   listThreads,
   mentionCandidates,
+  mentionedGuestNames,
   principalNames,
   reply,
   setThreadStatus,
@@ -71,6 +73,12 @@ export async function getDocumentJson(
   const { document, version } = await getDocument(deps.db, documentId);
   const me = await describeViewer(deps, documentId, viewer, anonymous);
   const threads = await listThreads(deps.db, { documentId, viewer, filter: "all" });
+  // Names for @[guest:id] mentions, only for this document's own guests.
+  const mentionedGuests = await mentionedGuestNames(
+    deps.db,
+    documentId,
+    threads.flatMap((t) => t.comments.map((c) => c.body)),
+  );
   const member = viewer.kind === "principal";
   sendWebJson(res, 200, {
     document: {
@@ -84,6 +92,7 @@ export async function getDocumentJson(
     version: { number: version.number, markdown: version.markdown, createdAt: version.createdAt },
     me,
     threads,
+    mentionedGuests,
   });
 }
 
@@ -194,9 +203,19 @@ export async function getMentions(
 ): Promise<void> {
   // mentionCandidates has no access check of its own: only commenters may list members.
   await requireDocumentAccess(deps.db, documentId, viewer, "comment");
-  // Mentions are member to member: a share-link guest never sees the member directory.
-  const candidates = viewer.kind === "guest" ? [] : await mentionCandidates(deps.db, documentId);
-  sendWebJson(res, 200, { candidates: candidates.map((c) => ({ principalId: c.principalId, name: c.name })) });
+  // A share-link guest never sees the member directory, and gets no list at all (R19). Members may
+  // mention members and the guests who commented on this document (R22).
+  if (viewer.kind === "guest") return sendWebJson(res, 200, { candidates: [] });
+  const [members, guests] = await Promise.all([
+    mentionCandidates(deps.db, documentId),
+    guestMentionCandidates(deps.db, documentId),
+  ]);
+  sendWebJson(res, 200, {
+    candidates: [
+      ...members.map((c) => ({ principalId: c.principalId, name: c.name })),
+      ...guests.map((g) => ({ guestId: g.guestId, name: g.name })),
+    ],
+  });
 }
 
 export async function postSend(

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  candidateFrom,
   decodeMentions,
   encodeMentions,
   initials,
@@ -104,8 +105,8 @@ describe("tokenizeBody", () => {
 
 describe("composer mentions", () => {
   const people = [
-    { principalId: "p1", name: "Ana Ruiz" },
-    { principalId: "p2", name: "Ana" },
+    { ref: "p1", name: "Ana Ruiz" },
+    { ref: "p2", name: "Ana" },
   ];
   it("finds the @query before the caret", () => {
     expect(mentionQuery("hello @an", 9)).toEqual({ start: 6, query: "an" });
@@ -123,8 +124,45 @@ describe("composer mentions", () => {
     const names = new Map([["p1", "Ana Ruiz"]]);
     expect(decodeMentions("cc @[p1] and @[zz]", names)).toEqual({
       text: "cc @Ana Ruiz and @[zz]",
-      picked: [{ principalId: "p1", name: "Ana Ruiz" }],
+      picked: [{ ref: "p1", name: "Ana Ruiz" }],
     });
+  });
+});
+
+describe("guest mentions", () => {
+  const names = new Map([
+    ["p1", "Ana Ruiz"],
+    ["guest:g1", "Tess (guest)"],
+  ]);
+  it("render both stored forms; a guest not on this document shows as @unknown", () => {
+    expect(tokenizeBody("@[p1] @[guest:g1] @[guest:other] @[nobody]", names)).toEqual([
+      { kind: "mention", text: "@Ana Ruiz" },
+      { kind: "text", text: " " },
+      { kind: "mention", text: "@Tess (guest)" },
+      { kind: "text", text: " " },
+      { kind: "mention", text: "@unknown" },
+      { kind: "text", text: " " },
+      { kind: "mention", text: "@member" },
+    ]);
+    expect(previewText("hi @[guest:g1]", names)).toBe("hi @Tess (guest)");
+  });
+  it("keeps a malformed guest ref as text", () => {
+    expect(tokenizeBody("@[guest:] @[guest:bad id]", names)).toEqual([
+      { kind: "text", text: "@[guest:] @[guest:bad id]" },
+    ]);
+  });
+  it("encode and decode guests by ref", () => {
+    const picked = [{ ref: "guest:g1", name: "Tess (guest)" }];
+    expect(encodeMentions("thanks @Tess (guest)!", picked)).toBe("thanks @[guest:g1]!");
+    expect(decodeMentions("thanks @[guest:g1] @[guest:zz]", names)).toEqual({
+      text: "thanks @Tess (guest) @[guest:zz]",
+      picked,
+    });
+  });
+  it("maps /mentions entries to candidates", () => {
+    expect(candidateFrom({ principalId: "p1", name: "Ana" })).toEqual({ ref: "p1", name: "Ana" });
+    expect(candidateFrom({ guestId: "g1", name: "Tess" })).toEqual({ ref: "guest:g1", name: "Tess (guest)" });
+    expect(candidateFrom({ name: "x" })).toBeNull();
   });
 });
 
