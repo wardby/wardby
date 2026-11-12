@@ -31,18 +31,25 @@ Wardby refreshes the token when the secret is used within 60 seconds of its expi
 or gets an unusable answer changes nothing; try again
 ([`secret_oauth_refresh_unavailable`](errors/secret-oauth-refresh-unavailable.md),
 [`secret_oauth_refresh_failed`](errors/secret-oauth-refresh-failed.md)). When the provider refuses the refresh
-token or client, or the service refuses (401) an access token that has no refresh token, the secret's `status` in `list_secrets` becomes `reauth_required` (with a `reauthReason`) and
+token or client, or (0.9.12 and later) the service refuses an access token that has no refresh token with an
+attributable 401 (see `rejected` below), the secret's `status` in `list_secrets` becomes `reauth_required` (with a `reauthReason`) and
 uses fail with [`secret_reauth_required`](errors/secret-reauth-required.md). To reconnect, repeat the connect
 steps under the **same name**; attachments and MCP servers keep working. `list_secrets` shows `status`
 (`connected` or `reauth_required`) and never a token.
 
-Uses of one secret that need a refresh at the same time on one Wardby server share a single refresh. A call that
-is stopped (its run stopped, or its MCP call timed out) stops waiting at once with
-`secret_oauth_refresh_unavailable`. A refresh no call still waits for is cancelled if it has not yet contacted
-the provider, leaving the secret unchanged (the server log records the reason `aborted`); a refresh already sent
-completes and is saved. If the provider issued new tokens but Wardby could not store them, the log records
-`rotated_unsaved`, and the secret may need connecting again. The `reauthReason` is `invalid_grant`,
-`invalid_client`, `expired` or `rejected` (the service refused the token with a 401 and there is no refresh token).
+From 0.9.12, uses of one secret that need a refresh at the same time on one Wardby server share a single refresh.
+A call that is stopped (its run stopped, or its MCP call timed out) stops waiting at once: a tool's brokered
+`fetch` fails with `secret_oauth_refresh_unavailable`, and an MCP tool call stopped while its secrets load fails
+with `mcp_call_timeout` ("The call was stopped."). A refresh no call still waits for is cancelled if it has not
+yet contacted the provider, leaving the secret unchanged (the server log records the reason `aborted`); a refresh
+already sent completes and is saved. If the provider issued new tokens but Wardby could not store them, the log
+records `rotated_unsaved`, and the secret may need connecting again.
+
+The `reauthReason` is `invalid_grant`, `invalid_client`, `expired` or (0.9.12 and later) `rejected`. A secret
+with no refresh token is marked `rejected` only when the request carried that one OAuth secret and the service
+answered 401 with `WWW-Authenticate: Bearer` and `error="invalid_token"`. Any other 401 (no such header, another
+error, or a request that carried several OAuth secrets) leaves the secret connected and returns the 401 to the
+call. A secret with a refresh token is refreshed once and the request retried once on any 401.
 
 ## Delete and revocation
 

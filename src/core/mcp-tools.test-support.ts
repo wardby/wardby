@@ -8,7 +8,10 @@ import type { safeFetch } from "../sandbox/safe-fetch.js";
 export type CallHandler = (name: string, args: Record<string, unknown>, signal?: AbortSignal) => unknown;
 
 /** A Streamable-HTTP MCP server as a safeFetch stand-in: JSON responses, a session id, tools/call via `onCall`. */
-export function fakeMcpServer(onCall: CallHandler, options: { status?: number } = {}) {
+export function fakeMcpServer(
+  onCall: CallHandler,
+  options: { status?: number; headers?: Record<string, string> } = {},
+) {
   const seen: { method?: string; authorization?: string }[] = [];
   const impl = (async (
     url: string,
@@ -25,7 +28,7 @@ export function fakeMcpServer(onCall: CallHandler, options: { status?: number } 
       status,
       statusText: "",
       url,
-      headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1" },
+      headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1", ...options.headers },
       bodyBase64: Buffer.from(payload === undefined ? "" : JSON.stringify(payload)).toString("base64"),
     });
     if (options.status !== undefined) return reply(options.status, undefined);

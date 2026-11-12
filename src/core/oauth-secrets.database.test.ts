@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { brokeredFetch } from "../sandbox/brokered-fetch.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-support/fake-oauth-server.test-support.js";
 import { createPrismaClient } from "./db.js";
@@ -331,6 +332,17 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     );
     expect(JSON.stringify(logged.mock.calls)).not.toContain("fake-");
     expect(JSON.stringify(logged.mock.calls)).not.toContain("evil");
+  });
+
+  it("refuses an empty iss through the real adapter and stores nothing", async () => {
+    const ownerId = await owner();
+    const tokensBefore = fake.tokenRequests;
+    // The helper forwards "" as given: an empty iss is present, and is not the discovered issuer.
+    const { outcome } = await connect(ownerId, "iss-empty", { iss: "" });
+    expect(outcome).toEqual({ kind: "failed" });
+    // Refused before the code exchange: no token request, no tokens, no secret.
+    expect(fake.tokenRequests).toBe(tokensBefore);
+    expect(await db.secret.findUnique({ where: { ownerId_name: { ownerId, name: "iss-empty" } } })).toBeNull();
   });
 
   it("keeps a registered client secret as ciphertext in the context and sends it as the provider asks", async () => {
@@ -1556,7 +1568,11 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       await withoutRefreshToken(current.id, current.oauth, 3600_000);
       const changesBefore = await db.secretBrokerChange.count({ where: { secretId: current.id } });
       logged.mockClear();
-      const mcp = fakeMcpServer(() => textResult("never"), { status: 401 });
+      // RFC 6750: the resource says the bearer token itself is invalid; the scheme's case doesn't matter.
+      const mcp = fakeMcpServer(() => textResult("never"), {
+        status: 401,
+        headers: { "WWW-Authenticate": 'bEARER realm="mcp", error="invalid_token"' },
+      });
       const fetchImpl: typeof safeFetch = async (url, init, options) => {
         if (url !== mcpUrl) throw new Error("unexpected request");
         return mcp.impl(url, init, options);
@@ -1588,6 +1604,118 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       await expect(decryptEntry(db, cipher, after, { options: OPTS })).rejects.toThrow(
         SECRET_REAUTH_REQUIRED("rejected"),
       );
+    });
+
+    /** An agent with each named secret attached under the same name, and its accessor. */
+    async function accessorFor(ownerId: string, names: string[]) {
+      const agentId = await agentOf(ownerId);
+      for (const name of names) {
+        await db.agentSecret.create({ data: { agentId, secretId: (await row(ownerId, name)).id, boundName: name } });
+      }
+      return buildSecretsAccessor(agentId, cipher, db, { options: OPTS });
+    }
+
+    /** A brokered resource on the secrets' host: answers 401 (with `headers`) until `okAfter` requests. */
+    function resource401(headers: Record<string, string>, okAfter = Infinity) {
+      const seen: Record<string, string>[] = [];
+      const fetchImpl: typeof safeFetch = async (url, init) => {
+        if (!url.startsWith(`https://${HOST}/api`)) throw new Error("unexpected request");
+        seen.push({ ...(init?.headers ?? {}) });
+        const status = seen.length > okAfter ? 200 : 401;
+        return {
+          ok: status === 200,
+          status,
+          statusText: "",
+          url,
+          headers: status === 401 ? { "content-type": "text/plain", ...headers } : { "content-type": "text/plain" },
+          bodyBase64: Buffer.from(status === 401 ? "denied" : "fine").toString("base64"),
+        };
+      };
+      return { seen, fetchImpl };
+    }
+
+    it("a 401 without an RFC 6750 invalid_token leaves a secret with no refresh token connected and returns the 401", async () => {
+      const ownerId = await owner();
+      await connectAs(ownerId, "unattributed");
+      const current = await row(ownerId, "unattributed");
+      await withoutRefreshToken(current.id, current.oauth, 3600_000);
+      const changesBefore = await db.secretBrokerChange.count({ where: { secretId: current.id } });
+      const accessor = await accessorFor(ownerId, ["unattributed"]);
+      const tokensBefore = fake.tokenRequests;
+      for (const headers of [
+        {} as Record<string, string>,
+        { "www-authenticate": 'Bearer realm="api"' },
+        { "www-authenticate": 'Bearer error="insufficient_scope"' },
+        { "www-authenticate": 'Basic error="invalid_token"' },
+      ]) {
+        const resource = resource401(headers, 1);
+        const out = (await brokeredFetch({
+          url: `https://${HOST}/api/other-path`,
+          init: { method: "GET" },
+          secretNames: ["unattributed"],
+          secrets: accessor,
+          fetchImpl: resource.fetchImpl,
+          policy: {},
+          redactFromConsole: () => {},
+        })) as { status: number; bodyBase64: string };
+        expect(out.status).toBe(401);
+        expect(Buffer.from(out.bodyBase64, "base64").toString()).toBe("denied");
+        // Nothing new to send: no retry, even though the resource would now answer 200.
+        expect(resource.seen).toHaveLength(1);
+        expect(resource.seen[0].authorization).toBe("Bearer fake-access-norefresh");
+      }
+      expect(fake.tokenRequests).toBe(tokensBefore);
+      const after = await row(ownerId, "unattributed");
+      expect(metaOf(after.oauth).status).toBe("connected");
+      expect(metaOf(after.oauth).reauthReason).toBeUndefined();
+      expect(await db.secretBrokerChange.count({ where: { secretId: current.id } })).toBe(changesBefore);
+    });
+
+    it("a 401 for a request with two OAuth secrets marks neither, and refreshes and retries the one with a refresh token", async () => {
+      const ownerId = await owner();
+      await connectAs(ownerId, "two-norefresh");
+      await connectAs(ownerId, "two-refresh");
+      const bare = await row(ownerId, "two-norefresh");
+      await withoutRefreshToken(bare.id, bare.oauth, 3600_000);
+      // The second secret goes in its own header, so both placements fit one request.
+      const other = await row(ownerId, "two-refresh");
+      const otherBroker = parseSecretBrokerConfig(other.broker);
+      await db.secret.update({
+        where: { id: other.id },
+        data: { broker: { ...otherBroker, placement: { kind: "header", name: "X-Other", format: "Bearer {value}" } } },
+      });
+      const usedBefore = (await payloadOf((await row(ownerId, "two-refresh")).ciphertext)).accessToken;
+      const accessor = await accessorFor(ownerId, ["two-norefresh", "two-refresh"]);
+      const tokensBefore = fake.tokenRequests;
+      // Even an invalid_token 401 is not attributable to either secret when the request carried both.
+      const resource = resource401({ "www-authenticate": 'Bearer error="invalid_token"' }, 1);
+      const out = (await brokeredFetch({
+        url: `https://${HOST}/api/two`,
+        init: { method: "GET" },
+        secretNames: ["two-norefresh", "two-refresh"],
+        secrets: accessor,
+        fetchImpl: resource.fetchImpl,
+        policy: {},
+        redactFromConsole: () => {},
+      })) as { status: number };
+      expect(out.status).toBe(200);
+      expect(fake.tokenRequests).toBe(tokensBefore + 1);
+      expect(resource.seen).toHaveLength(2);
+      const usedAfter = (await payloadOf((await row(ownerId, "two-refresh")).ciphertext)).accessToken;
+      expect(usedAfter).not.toBe(usedBefore);
+      expect(resource.seen[0]).toMatchObject({
+        authorization: "Bearer fake-access-norefresh",
+        "x-other": `Bearer ${usedBefore}`,
+      });
+      expect(resource.seen[1]).toMatchObject({
+        authorization: "Bearer fake-access-norefresh",
+        "x-other": `Bearer ${usedAfter}`,
+      });
+      for (const name of ["two-norefresh", "two-refresh"]) {
+        const meta = metaOf((await row(ownerId, name)).oauth);
+        expect(meta.status).toBe("connected");
+        expect(meta.reauthReason).toBeUndefined();
+      }
     });
 
     it("a forced refresh for a token no longer stored leaves a secret with no refresh token connected", async () => {

@@ -214,6 +214,7 @@ export async function loadServerSecrets(
         ...fetch,
         ...(signal ? { signal } : {}),
         ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+        ...(call?.attributable ? { attributable: true } : {}),
       });
     } catch (err) {
       const isOAuth = stored.oauth !== null && stored.oauth !== undefined;

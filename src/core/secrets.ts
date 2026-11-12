@@ -50,6 +50,12 @@ export interface SecretEntry {
 /** Per call: the caller's stop signal, so an OAuth refresh it no longer waits for ends promptly. */
 export interface SecretCallOptions {
   signal?: AbortSignal;
+  /**
+   * `refresh` only: the 401 is this secret's own (the request carried no other OAuth secret, and the
+   * resource answered RFC 6750 `invalid_token`). Only then is a secret with no refresh token marked
+   * reauth_required (`rejected`); otherwise it is left as it is.
+   */
+  attributable?: boolean;
 }
 export interface SecretsAccessor {
   /** Readable secrets only: a brokered secret throws `secret_brokered`. */
@@ -455,6 +461,7 @@ export function buildSecretsAccessor(
       ...fetch,
       ...(signal ? { signal } : {}),
       ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+      ...(call?.attributable ? { attributable: true } : {}),
     });
   }
   async function resolve(name: string, call?: SecretCallOptions): Promise<SecretEntry | undefined> {

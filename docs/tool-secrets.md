@@ -135,18 +135,27 @@ Provider requirements:
   refresher), and once more, with a single retry of the request, when a
   brokered request to the service gets a 401. Refresh tokens that rotate are
   stored as they change. Uses of one secret that need a refresh at the same time
-  on one Wardby server share a single refresh. A call that is stopped (its run
-  stopped, or its MCP call timed out) stops waiting for the refresh at once with
-  [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md);
-  a refresh no call still waits for is cancelled if it has not yet contacted the
+  on one Wardby server share a single refresh (from 0.9.12). A call that is
+  stopped (its run stopped, or its MCP call timed out) stops waiting for the
+  refresh at once: a tool's brokered `fetch` fails with
+  [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md),
+  and an MCP tool call stopped while its secrets load fails with
+  [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md) ("The call was
+  stopped."). A refresh no call still waits for is cancelled if it has not yet contacted the
   provider, leaving the secret unchanged, and the log records the reason
   `aborted`. A refresh already sent to the provider still completes and is
   saved, even if every call waiting for it was stopped.
 - **When it cannot refresh.** If the provider refuses the grant or the client
   (`invalid_grant`, `invalid_client`), the token is past its expiry with no
-  refresh token (`expired`), or the service refuses the token with a 401 before
-  its expiry and there is no refresh token (`rejected`), the secret becomes `reauth_required` and uses of
-  it fail with [`secret_reauth_required`](../help/errors/secret-reauth-required.md).
+  refresh token (`expired`), or (from 0.9.12) the service refuses the token
+  before its expiry with an attributable 401 and there is no refresh token
+  (`rejected`), the secret becomes `reauth_required` and uses of it fail with
+  [`secret_reauth_required`](../help/errors/secret-reauth-required.md). A 401 is
+  attributable only when the request carried that one OAuth secret and the
+  response has `WWW-Authenticate: Bearer` with `error="invalid_token"`
+  (RFC 6750). Any other 401 changes no secret with no refresh token: the request
+  is not retried and the call gets the 401 back. A secret with a refresh token
+  is still refreshed once, and the request retried once, on any 401.
   A provider that is only unreachable or answers badly leaves the secret as it
   was; see [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)
   and [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md).

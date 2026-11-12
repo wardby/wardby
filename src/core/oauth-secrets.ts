@@ -507,6 +507,12 @@ export interface StoredOAuthSecret {
 export interface OAuthResolveOptions {
   /** Refresh even when not due, unless the stored access token is no longer this one (another caller refreshed). */
   forceRefreshIfStill?: string;
+  /**
+   * With `forceRefreshIfStill`: the refusal is this secret's own (sole OAuth secret in the request,
+   * RFC 6750 `invalid_token`). Only then is a secret with no refresh token marked `rejected`; a
+   * forced refresh without it leaves such a secret unchanged and returns its current token.
+   */
+  attributable?: boolean;
   /** The fetch policy the caller's brokered fetches use; the refresh adds its own 15 s timeout. */
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
@@ -562,6 +568,11 @@ function isForced(payload: OAuthSecretPayload, opts: OAuthResolveOptions): boole
   return opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill;
 }
 
+/** A forced refresh whose 401 is attributable to this secret alone: the only case `rejected` is marked. */
+function isAttributablyRejected(payload: OAuthSecretPayload, opts: OAuthResolveOptions): boolean {
+  return opts.attributable === true && isForced(payload, opts);
+}
+
 function wantsRefresh(
   meta: OAuthSecretMeta,
   payload: OAuthSecretPayload,
@@ -582,8 +593,9 @@ function isExpired(meta: OAuthSecretMeta, now: Date): boolean {
  * one `forceRefreshIfStill` names, it is refreshed first, under a row lock, so concurrent callers
  * spend a refresh token once. A provider that refuses the grant or the client marks the secret
  * reauth_required, and so does an access token past its expiry with no refresh token (`expired`) or
- * one the resource refused with no refresh token to replace it (`rejected`, a forced refresh); one
- * inside the early window with no refresh token is sent as is. Every error is an
+ * one the resource refused with no refresh token to replace it (`rejected`: a forced refresh whose
+ * 401 is attributable, see `attributable`); a forced refresh that is not attributable leaves a
+ * secret with no refresh token unchanged. One inside the early window with no refresh token is sent as is. Every error is an
  * OAuthSecretFlowError with a fixed message and no cause.
  */
 export async function currentOAuthPayload(
@@ -596,7 +608,7 @@ export async function currentOAuthPayload(
   const meta = connectedMeta(row.oauth, row.name);
   const payload = await storedPayload(cipher, row.ciphertext);
   if (!wantsRefresh(meta, payload, opts, now)) return payload;
-  if (!payload.refreshToken && !isExpired(meta, now) && !isForced(payload, opts)) return payload;
+  if (!payload.refreshToken && !isExpired(meta, now) && !isAttributablyRejected(payload, opts)) return payload;
   return refreshShared(db, cipher, row, opts, now);
 }
 
@@ -612,6 +624,8 @@ function callerSignal(opts: OAuthResolveOptions): AbortSignal | undefined {
  * refused token for a forced refresh (a forced caller must not take an unforced caller's answer,
  * which might be the very token it saw refused). The entry goes when the refresh settles, success
  * or failure, so a failure is never handed to a later caller. The row lock stays, for other processes.
+ * A caller that joins a flight gets the first caller's fetch settings (policy, fetchImpl, clock);
+ * every caller in this process passes the same ones in production (Ruling OS-5).
  */
 function refreshShared(
   db: Pick<PrismaClient, "$transaction">,
@@ -624,7 +638,11 @@ function refreshShared(
   // No transaction is opened for a caller that has already stopped.
   if (signal?.aborted) return Promise.reject(refreshUnavailable());
   const flights = opts.flights ?? processFlights;
-  const key = opts.forceRefreshIfStill === undefined ? row.id : `${row.id}\n${opts.forceRefreshIfStill}`;
+  // An attributable forced caller may mark `rejected`; one that is not must never share its flight.
+  const key =
+    opts.forceRefreshIfStill === undefined
+      ? row.id
+      : `${row.id}\n${opts.forceRefreshIfStill}\n${opts.attributable === true ? "a" : "-"}`;
   let flight = flights.get(key);
   if (!flight) {
     const controller = new AbortController();
@@ -748,7 +766,8 @@ async function refreshLocked(
         if (!payload.refreshToken) {
           if (isExpired(meta, now)) return markReauth(tx, row, locked[0], meta, "expired");
           // The resource refused the token, and there is nothing to replace it with.
-          if (isForced(payload, opts)) return markReauth(tx, row, locked[0], meta, "rejected");
+          // Only when the 401 is this secret's own; any other 401 changes nothing.
+          if (isAttributablyRejected(payload, opts)) return markReauth(tx, row, locked[0], meta, "rejected");
           return { kind: "current", payload };
         }
         // The request gets what is left of the transaction less a margin to commit what it returns,

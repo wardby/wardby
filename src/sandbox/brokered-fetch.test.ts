@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SecretEntry, SecretsAccessor } from "../core/secrets.js";
-import { brokeredFetch } from "./brokered-fetch.js";
+import { brokeredFetch, isInvalidTokenChallenge } from "./brokered-fetch.js";
 import type { safeFetch } from "./safe-fetch.js";
 
 type Fetched = { url: string; init: { headers?: Record<string, string>; body?: string } };
@@ -12,16 +12,16 @@ const bearer = {
 const oauthEntry = (token: string, redact: string[]): SecretEntry =>
   ({ value: token, broker: bearer, oauth: { redact } }) as unknown as SecretEntry;
 
-function respond(status: number, body = "{}") {
-  return { status, headers: {}, url: "https://oauth.fake.test/mcp", bodyBase64: Buffer.from(body).toString("base64") };
+function respond(status: number, body = "{}", headers: Record<string, string> = {}) {
+  return { status, headers, url: "https://oauth.fake.test/mcp", bodyBase64: Buffer.from(body).toString("base64") };
 }
 
-function setup(statuses: number[], bodies: string[] = []) {
+function setup(statuses: number[], bodies: string[] = [], headers: Array<Record<string, string>> = []) {
   const calls: Fetched[] = [];
   const fetchImpl = (async (url: string, init: Fetched["init"]) => {
     calls.push({ url, init });
     const i = calls.length - 1;
-    return respond(statuses[i] ?? 200, bodies[i]);
+    return respond(statuses[i] ?? 200, bodies[i], headers[i]);
   }) as unknown as typeof safeFetch;
   const console_: string[] = [];
   return { calls, fetchImpl, console_, redactFromConsole: (v: string) => console_.push(v) };
@@ -263,5 +263,131 @@ describe("brokeredFetch stop signal", () => {
       redactFromConsole: t.redactFromConsole,
     });
     expect(seen).toEqual([controller.signal, controller.signal]);
+  });
+});
+
+describe("isInvalidTokenChallenge (RFC 6750)", () => {
+  it.each([
+    ['Bearer error="invalid_token"'],
+    ["Bearer error=invalid_token"],
+    ['bearer realm="api", error="invalid_token", error_description="The access token expired"'],
+    ['BEARER   error = "invalid_token" ,'],
+  ])("accepts %s", (value) => {
+    expect(isInvalidTokenChallenge({ "www-authenticate": value })).toBe(true);
+    expect(isInvalidTokenChallenge({ "WWW-Authenticate": value })).toBe(true);
+  });
+
+  it.each([
+    [""],
+    ["Bearer"],
+    ['Bearer realm="api"'],
+    ['Bearer error="insufficient_scope"'],
+    ['Bearer error="invalid_request"'],
+    ['Bearer error="INVALID_TOKEN"'],
+    ['Bearer error="invalid_token_x"'],
+    ['Bearer error_description="invalid_token"'],
+    ['Basic error="invalid_token"'],
+    ['Bearerx error="invalid_token"'],
+    ['Bearer error="invalid_token", error="insufficient_scope"'],
+    ['Bearer error="invalid_token", Basic realm="x"'],
+    ['Bearer error="invalid_token'],
+    ["Bearer abc123=="],
+    [`Bearer realm="${"r".repeat(2100)}", error="invalid_token"`],
+  ])("refuses %s", (value) => {
+    expect(isInvalidTokenChallenge({ "www-authenticate": value })).toBe(false);
+  });
+
+  it("refuses a missing header, a non-string, and two header keys", () => {
+    expect(isInvalidTokenChallenge({})).toBe(false);
+    expect(isInvalidTokenChallenge(undefined)).toBe(false);
+    expect(isInvalidTokenChallenge({ "www-authenticate": ["Bearer error=invalid_token"] })).toBe(false);
+    expect(
+      isInvalidTokenChallenge({
+        "www-authenticate": 'Bearer error="invalid_token"',
+        "WWW-Authenticate": 'Bearer error="invalid_token"',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("brokeredFetch 401 attribution", () => {
+  const invalidToken = { "www-authenticate": 'Bearer error="invalid_token"' };
+
+  function recording(fresh: (name: string, used: string) => SecretEntry) {
+    const calls: Array<{ name: string; attributable?: boolean }> = [];
+    const refresh = async (name: string, used: string, opts?: { attributable?: boolean }) => {
+      calls.push({ name, attributable: opts?.attributable });
+      return fresh(name, used);
+    };
+    return { calls, refresh };
+  }
+
+  it("passes attributable for one OAuth secret and an invalid_token 401", async () => {
+    const t = setup([401, 200], [], [invalidToken]);
+    const r = recording(() => oauthEntry("new-token-2", ["new-token-2"]));
+    const secrets = {
+      resolve: async () => oauthEntry("old-token-1", ["old-token-1"]),
+      refresh: r.refresh,
+    } as unknown as SecretsAccessor;
+    await brokeredFetch({ ...base, init: {}, secrets, fetchImpl: t.fetchImpl, redactFromConsole: t.redactFromConsole });
+    expect(r.calls).toEqual([{ name: "s", attributable: true }]);
+  });
+
+  it("does not pass attributable for a 401 without invalid_token", async () => {
+    const t = setup([401, 200], [], [{ "www-authenticate": 'Bearer realm="api"' }]);
+    const r = recording(() => oauthEntry("new-token-2", ["new-token-2"]));
+    const secrets = {
+      resolve: async () => oauthEntry("old-token-1", ["old-token-1"]),
+      refresh: r.refresh,
+    } as unknown as SecretsAccessor;
+    await brokeredFetch({ ...base, init: {}, secrets, fetchImpl: t.fetchImpl, redactFromConsole: t.redactFromConsole });
+    expect(r.calls).toEqual([{ name: "s", attributable: false }]);
+  });
+
+  it("does not pass attributable when the request carried two OAuth secrets, even for invalid_token", async () => {
+    const t = setup([401, 200], [], [invalidToken]);
+    const apiKey = { placement: { kind: "header", name: "X-Api-Key", format: "{value}" }, hosts: ["oauth.fake.test"] };
+    const r = recording((name) =>
+      name === "a"
+        ? oauthEntry("new-a-2", ["new-a-2"])
+        : ({ value: "new-b-2", broker: apiKey, oauth: { redact: ["new-b-2"] } } as unknown as SecretEntry),
+    );
+    const secrets = {
+      resolve: async (name: string) =>
+        name === "a"
+          ? oauthEntry("old-a-1", ["old-a-1"])
+          : ({ value: "old-b-1", broker: apiKey, oauth: { redact: ["old-b-1"] } } as unknown as SecretEntry),
+      refresh: r.refresh,
+    } as unknown as SecretsAccessor;
+    await brokeredFetch({
+      ...base,
+      secretNames: ["a", "b"],
+      init: {},
+      secrets,
+      fetchImpl: t.fetchImpl,
+      redactFromConsole: t.redactFromConsole,
+    });
+    expect(r.calls).toEqual([
+      { name: "a", attributable: false },
+      { name: "b", attributable: false },
+    ]);
+  });
+
+  it("returns the 401 unchanged, scrubbed and without a retry, when no token changed", async () => {
+    const t = setup([401, 200], ["echo old-token-1"]);
+    const secrets = {
+      resolve: async () => oauthEntry("old-token-1", ["old-token-1"]),
+      refresh: async () => oauthEntry("old-token-1", ["old-token-1"]),
+    } as unknown as SecretsAccessor;
+    const out = (await brokeredFetch({
+      ...base,
+      init: {},
+      secrets,
+      fetchImpl: t.fetchImpl,
+      redactFromConsole: t.redactFromConsole,
+    })) as { status: number; bodyBase64: string };
+    expect(out.status).toBe(401);
+    expect(t.calls).toHaveLength(1);
+    expect(Buffer.from(out.bodyBase64, "base64").toString()).not.toContain("old-token-1");
   });
 });
