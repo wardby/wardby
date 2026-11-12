@@ -54,6 +54,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "renderer:image:local": "docker build -f deploy/Dockerfile --target renderer -t wardby-renderer:local .",
     "build:vendor": "node scripts/build-sandbox-vendor.mjs",
     "build:help": "tsx src/help/build.ts",
     "build:web": "node scripts/build-web.mjs",

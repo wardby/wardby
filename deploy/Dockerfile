@@ -99,3 +99,17 @@ ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that
 # splits them (deploy/production/compose.yml) overrides this per container.
 CMD ["node", "dist/cli.js", "serve"]
+
+# Optional PNG/PDF export renderer (docs/documents.md, "Exports"): the runtime image plus
+# Playwright's Chromium headless shell, so it shares every layer with the control plane except
+# the browser. Runs in its own pod with no database, no secrets and no egress
+# (deploy/kind-coding/manifests/renderer/). Linux amd64 and arm64.
+FROM runtime AS renderer
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright HOME=/tmp
+RUN npx --no-install playwright-core install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /ms-playwright
+USER node
+EXPOSE 8796
+CMD ["node", "dist/renderer/main.js"]

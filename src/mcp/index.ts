@@ -57,6 +57,8 @@ import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
 import { loadGitHubAllowedAccounts } from "../config/github-allowed-accounts.js";
+import { loadRendererConfig } from "../config/renderer.js";
+import { createRendererClient } from "../core/documents/renderer-client.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import { buildPower } from "../core/power-composition.js";
@@ -375,11 +377,17 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // separate refresh tool.
   const modelCatalog = await startModelCatalog(prisma);
   const baseProviders = options.providers ?? buildMcpProviders().providers;
-  // PNG/PDF design exports, built once and shared by the web routes and export_document. The renderer
-  // service is wired in a later step: until then those jobs fail as export_renderer_unavailable.
+  // PNG/PDF exports, built once and shared by the web routes (canRender) and export_document. Without
+  // WARDBY_RENDERER_URL those requests are refused as export_renderer_unavailable. Parsed now so a
+  // malformed URL stops startup; only whether one is set is logged, never the URL.
+  const rendererConfig = loadRendererConfig();
+  mcpLog.info({ configured: rendererConfig.url !== null }, "PNG/PDF export renderer");
   const providers: McpProviders = baseProviders.exports
     ? baseProviders
-    : { ...baseProviders, exports: { db: prisma, renderer: null } };
+    : {
+        ...baseProviders,
+        exports: { db: prisma, renderer: rendererConfig.url ? createRendererClient(rendererConfig.url) : null },
+      };
   await providers.executor.launch?.();
   warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
