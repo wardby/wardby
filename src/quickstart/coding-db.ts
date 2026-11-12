@@ -5,7 +5,6 @@
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import { LOCAL_REPO_PREFIX } from "../coding/local-repo.js";
-import { defaultRepositoryName } from "../coding/repository-names.js";
 import type { DeclaredService } from "../coding/services/declaration.js";
 import type { LocalAgent } from "./coding-doctor.js";
 import { seedCodingAgents, type CodingSeedInput, type CodingSeedResult, type SeedDb } from "./coding-seed.js";
@@ -25,7 +24,7 @@ async function withDb<T>(
   }
 }
 
-function seedDb(db: PrismaClient): SeedDb {
+export function seedDb(db: PrismaClient): SeedDb {
   return {
     findAgent: (name) => db.agent.findUnique({ where: { name }, select: { id: true, kind: true, systemPrompt: true } }),
     createAgent: (data) => db.agent.create({ data, select: { id: true } }),
@@ -39,12 +38,12 @@ function seedDb(db: PrismaClient): SeedDb {
     upsertLocalLink: async (agentId, link) => {
       const fields = { access: link.access, triggers: [], checkName: null, ...link.stamp };
       await db.agentRepository.upsert({
-        where: { agentId_name: { agentId, name: defaultRepositoryName(link.repository) } },
+        where: { agentId_name: { agentId, name: `local:${link.repository}` } },
         create: {
           agentId,
           provider: "local",
           repository: link.repository,
-          name: defaultRepositoryName(link.repository),
+          name: `local:${link.repository}`,
           ...fields,
         },
         update: fields,

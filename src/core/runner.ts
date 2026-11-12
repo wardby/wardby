@@ -1140,6 +1140,40 @@ export async function readRedactionValues(accessor: SecretsAccessor, names: read
 }
 
 /**
+ * Live authorization of one repository link a native run holds: the link's
+ * current stamp and access, and the agent's CURRENT owner. Native links are
+ * named `<provider>:<repository>`; the stored provider and repository must
+ * still match the pinned link.
+ */
+export async function authorizeRepositoryLink(
+  db: Pick<RunnerDb, "agentRepository">,
+  repoAccess: RepoAccessGate,
+  agentId: string,
+  link: { provider: string; repository: string; access: string },
+) {
+  const current = await db.agentRepository.findUnique({
+    where: { agentId_name: { agentId, name: `${link.provider}:${link.repository}` } },
+    include: { agent: { select: { ownerId: true } } },
+  });
+  // Removed, or downgraded to read since the run loaded it as write.
+  if (!current || (link.access === "write" && current.access !== "write")) {
+    return { ok: false as const, reason: "not_authorized" as const };
+  }
+  if (current.provider !== link.provider || current.repository !== link.repository) {
+    return { ok: false as const, reason: "not_authorized" as const };
+  }
+  return repoAccess.authorizeUse({
+    ownerId: current.agent.ownerId,
+    provider: current.provider,
+    repository: current.repository,
+    required: requiredLevel(current.access === "write" ? "write" : "read"),
+    authorizedVia: current.authorizedVia,
+    // The run is under way: retry a transient GitHub error once.
+    retryTransient: true,
+  });
+}
+
+/**
  * One attempt's tool surface for a native run. `builtinHandler(name)` is the
  * single source of truth for which names are trusted built-ins (memory,
  * repo_*, jira_*, sub-agent/parent memory, delegate_to_*) and returns undefined
@@ -1340,27 +1374,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           // Live, not from the pinned load: the link's current stamp and
           // access, and the agent's CURRENT owner (a make_owner, unlink, or
           // lost GitHub access takes effect on the very next call).
-          authorize: async (link) => {
-            const current = await db.agentRepository.findUnique({
-              where: {
-                agentId_name: { agentId: loaded.agentId, name: `${link.provider}:${link.repository}` },
-              },
-              include: { agent: { select: { ownerId: true } } },
-            });
-            // Removed, or downgraded to read since the run loaded it as write.
-            if (!current || (link.access === "write" && current.access !== "write")) {
-              return { ok: false, reason: "not_authorized" };
-            }
-            return repoAccess.authorizeUse({
-              ownerId: current.agent.ownerId,
-              provider: current.provider,
-              repository: current.repository,
-              required: requiredLevel(current.access === "write" ? "write" : "read"),
-              authorizedVia: current.authorizedVia,
-              // The run is under way: retry a transient GitHub error once.
-              retryTransient: true,
-            });
-          },
+          authorize: (link) => authorizeRepositoryLink(db, repoAccess, loaded.agentId, link),
         });
       };
     }
