@@ -48,7 +48,9 @@ A `run_blocked` event uses the same ⛔ package registry wording and fixes as
 [Run status comments](status-comments.md). See [Package refusal errors](errors/package-refusals.md)
 for allowlist, release-age, advisory, and malware guidance.
 
-wardby never posts code, diffs, review text, or run output to Slack.
+Notifications never post code, diffs, review text, or run output to Slack. A
+run's report reaches Slack only through a run hook an admin approved to
+include it (`includeFinalText`).
 
 ## If something isn't posting
 

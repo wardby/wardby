@@ -66,7 +66,7 @@ import {
   isPublicWritable,
   filterUnusableMcpServers,
 } from "../../core/grants.js";
-import { projectTool } from "./tools.js";
+import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
@@ -1209,7 +1209,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         ctx,
         await ctx.db.agent.findUnique({
           where: { id: args.id },
-          include: { tools: { include: { tool: true } }, codingProfile: true, repositories: true },
+          include: {
+            tools: { include: { tool: { include: TOOL_GRANTS_INCLUDE } } },
+            codingProfile: true,
+            repositories: true,
+          },
         }),
         args.id,
         "read",

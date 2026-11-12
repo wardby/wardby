@@ -8,7 +8,12 @@
  * instead of crashing the run or the host process.
  */
 
-import { createPrivilegedHost, installSandboxApi, type PrivilegedHost } from "./host-functions.js";
+import {
+  createPrivilegedHost,
+  installSandboxApi,
+  type PrivilegedHost,
+  type SlackConnection,
+} from "./host-functions.js";
 import type { ParserWorkerPool } from "./parser-worker/pool.js";
 import { SANDBOX_PRELUDE } from "./prelude.js";
 import {
@@ -50,6 +55,8 @@ export interface SandboxInvocation {
   allowedFetchHosts?: string[];
   /** Overrides the sandbox's outbound network call — tests only. */
   fetchImpl?: typeof safeFetch;
+  /** The server's Slack connection (run hooks on a granted public tool only); slack.post throws without it. */
+  slack?: SlackConnection;
 }
 
 /** Tool code plus whichever privileged host serves its bridges (in-process, or a gateway). */
@@ -128,6 +135,7 @@ export function privilegedHostFor(invocation: SandboxInvocation, signal: AbortSi
     logger: invocation.logger,
     allowedFetchHosts: invocation.allowedFetchHosts,
     fetchImpl: invocation.fetchImpl,
+    slack: invocation.slack,
     signal,
     fetchTimeoutMs: fetchTimeoutFor(
       invocation.timeoutMs ?? invocation.limits?.wallTimeLimitMs ?? DEFAULT_SANDBOX_LIMITS.wallTimeLimitMs,

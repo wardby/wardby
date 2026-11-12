@@ -43,6 +43,13 @@ adds the run's final text — masked against the agent's secrets and cut to
 Masking only knows wardby's own secrets: a credential a run found elsewhere
 and quoted is not masked.
 
+## Posting with the server's Slack bot
+
+From 0.9.12 a hook can post to Slack without its own token, through a system
+tool: a public tool an admin granted the server's Slack connection. The tool
+calls `slack.post(channel, text, { threadTs })`; the token stays on the
+server. Search help for "system tools".
+
 ## Check on hooks
 
 `list_run_hooks` shows each hook's settings, `capabilitiesGranted`,

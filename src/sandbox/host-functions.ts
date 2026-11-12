@@ -76,7 +76,31 @@ export interface HostFunctionOptions {
   fetchImpl?: typeof safeFetch;
   /** Each fetch's timeout (fetchTimeoutFor the tool's limit); the default fetch timeout when absent. */
   fetchTimeoutMs?: number;
+  /**
+   * The server's Slack connection, for a public tool an admin granted it and
+   * called from a run hook (#529). Absent everywhere else, where slack.post
+   * throws connection_unavailable. Never crosses into the sandbox: the tool
+   * only ever gets `{ ts }` back.
+   */
+  slack?: SlackConnection;
 }
+
+/**
+ * Host side of slack.post: posts with the server's Slack client after its own
+ * checks (channel scope, masking). Built by core/system-tools/connections.ts.
+ */
+export interface SlackConnection {
+  post(channel: string, text: string, threadTs?: string): Promise<{ ts: string }>;
+}
+
+/** slack.post calls allowed per tool invocation, so one hook delivery can't flood a channel. */
+export const SLACK_POST_LIMIT = 20;
+/** Slack's own limit on a message's text. */
+export const SLACK_TEXT_MAX = 40_000;
+const SLACK_CHANNEL_ID = /^[CG][A-Z0-9]{2,20}$/i;
+const SLACK_TS = /^\d+\.\d+$/;
+export const CONNECTION_UNAVAILABLE =
+  "connection_unavailable: slack.post works only in a run hook, for a public tool an admin granted the Slack connection";
 
 function args<T extends unknown[]>(argsJson: string): T {
   return JSON.parse(argsJson) as T;
@@ -102,6 +126,7 @@ export const PRIVILEGED_BRIDGE_NAMES = [
   "__bridge_sharedDatastoreDelete",
   "__bridge_sharedDatastoreList",
   "__bridge_secretsGet",
+  "__bridge_slackPost",
 ] as const;
 export type PrivilegedBridgeName = (typeof PRIVILEGED_BRIDGE_NAMES)[number];
 export type PrivilegedHost = Record<PrivilegedBridgeName, HostBridge>;
@@ -139,6 +164,7 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
   const fetchedSecretValues = new Set<string>(options.redactSecretValues ?? []);
   // The console line is JSON text, so each value is masked in its escaped form too.
   const redactSecrets = (text: string): string => redactExactSecretValues(text, withEscapedForms(fetchedSecretValues));
+  let slackPosts = 0;
 
   return {
     async __bridge_console(argsJson) {
@@ -240,6 +266,24 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
       const value = secrets ? await secrets.get(name) : undefined;
       if (value) fetchedSecretValues.add(value);
       return value ?? null;
+    },
+
+    async __bridge_slackPost(argsJson) {
+      const [channel, text, threadTs] = args<[unknown, unknown, unknown]>(argsJson);
+      if (!options.slack) throw new Error(CONNECTION_UNAVAILABLE);
+      if (typeof channel !== "string" || !SLACK_CHANNEL_ID.test(channel)) {
+        throw new Error("slack_bad_args: channel must be a Slack channel id (C… or G…)");
+      }
+      if (typeof text !== "string" || text.length === 0 || text.length > SLACK_TEXT_MAX) {
+        throw new Error(`slack_bad_args: text must be 1 to ${SLACK_TEXT_MAX} characters`);
+      }
+      if (threadTs !== null && threadTs !== undefined && (typeof threadTs !== "string" || !SLACK_TS.test(threadTs))) {
+        throw new Error("slack_bad_args: threadTs must be a message ts such as 1700000000.000100");
+      }
+      if (++slackPosts > SLACK_POST_LIMIT) {
+        throw new Error(`slack_post_limit: at most ${SLACK_POST_LIMIT} slack.post calls per tool call`);
+      }
+      return options.slack.post(channel.toUpperCase(), text, typeof threadTs === "string" ? threadTs : undefined);
     },
   };
 }
