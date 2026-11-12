@@ -286,8 +286,12 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     try {
       secrets = await loadServerSecrets(ctx.db, ctx.cipher, server, {
         ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+        // A run stopped while the secrets load ends any OAuth refresh at once.
+        signal: ctx.signal,
       });
     } catch (err) {
+      // A stop during the load ended any OAuth refresh: say so, not "try again".
+      if (ctx.signal.aborted) return fail("mcp_call_timeout", "The call was stopped.");
       if (err instanceof McpCredentialsUnavailableError) {
         logCredentialsUnavailable(ctx.log, err);
         return fail(err.code, shared ? SHARED_CREDENTIALS_MESSAGE : err.message);

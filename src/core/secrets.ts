@@ -47,13 +47,17 @@ export interface SecretEntry {
   /** Set for an OAuth secret: every value that must be redacted (access, refresh, client secret). */
   oauth?: { redact: string[] };
 }
+/** Per call: the caller's stop signal, so an OAuth refresh it no longer waits for ends promptly. */
+export interface SecretCallOptions {
+  signal?: AbortSignal;
+}
 export interface SecretsAccessor {
   /** Readable secrets only: a brokered secret throws `secret_brokered`. */
   get(name: string): Promise<string | undefined>;
   /** Host-internal: value and broker config, brokered or not. Never exposed to tool code. */
-  resolve?(name: string): Promise<SecretEntry | undefined>;
+  resolve?(name: string, call?: SecretCallOptions): Promise<SecretEntry | undefined>;
   /** OAuth only: refresh now unless another caller already replaced `usedValue`; resolves the fresh entry. */
-  refresh?(name: string, usedValue: string): Promise<SecretEntry | undefined>;
+  refresh?(name: string, usedValue: string, call?: SecretCallOptions): Promise<SecretEntry | undefined>;
   /**
    * For redaction lists only: the entry as stored, never refreshed and never refused for its OAuth
    * status (a reauth_required secret's tokens are still listed). Its value is not for sending.
@@ -65,6 +69,8 @@ export interface SecretsAccessor {
 export interface SecretFetchSettings {
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
+  /** A stop signal for every refresh these settings make (a per-call signal takes its place). */
+  signal?: AbortSignal;
 }
 
 /** A stored secret as the loaders read it. */
@@ -438,20 +444,22 @@ export function buildSecretsAccessor(
     const { id, name: secretName, ciphertext, broker, oauth } = attachment.secret;
     return { id, name: secretName, ciphertext, broker: broker ?? null, oauth: oauth ?? null };
   }
-  function entryOf(row: StoredSecretRow, forceRefreshIfStill?: string): Promise<SecretEntry> {
+  function entryOf(row: StoredSecretRow, call?: SecretCallOptions, forceRefreshIfStill?: string): Promise<SecretEntry> {
     const isOAuth = row.oauth !== null && row.oauth !== undefined;
     // Refreshing needs a transaction; only a provider double lacks one.
     if (isOAuth && (!db.$transaction || !db.secret)) {
       throw new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
     }
+    const signal = call?.signal ?? fetch.signal;
     return decryptEntry(db as Pick<PrismaClient, "$transaction" | "secret">, cipher, row, {
       ...fetch,
+      ...(signal ? { signal } : {}),
       ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
     });
   }
-  async function resolve(name: string): Promise<SecretEntry | undefined> {
+  async function resolve(name: string, call?: SecretCallOptions): Promise<SecretEntry | undefined> {
     const row = await load(name);
-    return row ? entryOf(row) : undefined;
+    return row ? entryOf(row, call) : undefined;
   }
   return {
     resolve,
@@ -464,10 +472,10 @@ export function buildSecretsAccessor(
       if (entry?.broker) throw new Error(BROKERED_GET_MESSAGE);
       return entry?.value;
     },
-    async refresh(name: string, usedValue: string): Promise<SecretEntry | undefined> {
+    async refresh(name: string, usedValue: string, call?: SecretCallOptions): Promise<SecretEntry | undefined> {
       const row = await load(name);
       if (!row || row.oauth === null || row.oauth === undefined) return undefined;
-      return entryOf(row, usedValue);
+      return entryOf(row, call, usedValue);
     },
     async storedEntry(name: string): Promise<SecretEntry | undefined> {
       const row = await load(name);
@@ -491,11 +499,12 @@ export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: re
       return accessor.get(name);
     },
     ...(accessor.resolve && {
-      resolve: async (name: string) => (allowed.has(name) ? accessor.resolve!(name) : undefined),
+      resolve: async (name: string, call?: SecretCallOptions) =>
+        allowed.has(name) ? accessor.resolve!(name, call) : undefined,
     }),
     ...(accessor.refresh && {
-      refresh: async (name: string, usedValue: string) =>
-        allowed.has(name) ? accessor.refresh!(name, usedValue) : undefined,
+      refresh: async (name: string, usedValue: string, call?: SecretCallOptions) =>
+        allowed.has(name) ? accessor.refresh!(name, usedValue, call) : undefined,
     }),
     ...(accessor.storedEntry && {
       storedEntry: async (name: string) => (allowed.has(name) ? accessor.storedEntry!(name) : undefined),

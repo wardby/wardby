@@ -141,3 +141,30 @@ describe("brokeredFetch 401 retry", () => {
     expect(t.calls).toHaveLength(1);
   });
 });
+
+describe("brokeredFetch stop signal", () => {
+  it("passes the policy's signal to resolve and to the 401 refresh", async () => {
+    const t = setup([401, 200]);
+    const controller = new AbortController();
+    const seen: Array<AbortSignal | undefined> = [];
+    const secrets = {
+      resolve: async (_name: string, opts?: { signal?: AbortSignal }) => {
+        seen.push(opts?.signal);
+        return oauthEntry("old-token-1", ["old-token-1"]);
+      },
+      refresh: async (_name: string, _used: string, opts?: { signal?: AbortSignal }) => {
+        seen.push(opts?.signal);
+        return oauthEntry("new-token-2", ["new-token-2"]);
+      },
+    } as unknown as SecretsAccessor;
+    await brokeredFetch({
+      ...base,
+      policy: { signal: controller.signal },
+      init: {},
+      secrets,
+      fetchImpl: t.fetchImpl,
+      redactFromConsole: t.redactFromConsole,
+    });
+    expect(seen).toEqual([controller.signal, controller.signal]);
+  });
+});

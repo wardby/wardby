@@ -513,7 +513,29 @@ export interface OAuthResolveOptions {
   now?: Date;
   /** Milliseconds on a monotonic clock, for the transaction's time budget; tests replace it. */
   clock?: () => number;
+  /**
+   * The caller's stop signal (`options.signal` counts too). An aborted caller stops waiting at once
+   * with the retryable error; the shared refresh is aborted, ending its transaction and releasing
+   * the row lock, only once no caller still waits for it.
+   */
+  signal?: AbortSignal;
+  /** The single-flight table; defaults to this process's. Tests give separate tables to act as separate processes. */
+  flights?: RefreshFlights;
 }
+
+/** One refresh in flight, shared by every caller in this process that wants the same secret refreshed. */
+interface RefreshFlight {
+  promise: Promise<OAuthSecretPayload>;
+  /** Aborts the token request, so the transaction ends and the row lock is released. */
+  controller: AbortController;
+  /** Callers still waiting that can abort; a caller with no signal pins the flight for good. */
+  abortable: number;
+  pinned: boolean;
+}
+export type RefreshFlights = Map<string, RefreshFlight>;
+
+/** Per process, so only one database connection here waits on a secret's row lock at a time. */
+const processFlights: RefreshFlights = new Map();
 
 /** The connected meta; reauth_required (or meta that can't be read) throws SECRET_REAUTH_REQUIRED. */
 function connectedMeta(oauth: unknown, name: string): OAuthSecretMeta {
@@ -575,7 +597,72 @@ export async function currentOAuthPayload(
   const payload = await storedPayload(cipher, row.ciphertext);
   if (!wantsRefresh(meta, payload, opts, now)) return payload;
   if (!payload.refreshToken && !isExpired(meta, now) && !isForced(payload, opts)) return payload;
-  return refreshLocked(db, cipher, row, opts, now);
+  return refreshShared(db, cipher, row, opts, now);
+}
+
+/** The caller's signal and its fetch policy's, as one; undefined when it gave neither. */
+function callerSignal(opts: OAuthResolveOptions): AbortSignal | undefined {
+  const signals = [opts.signal, opts.options?.signal].filter((s): s is AbortSignal => s !== undefined);
+  return signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+}
+
+/**
+ * Single-flight in front of refreshLocked: concurrent callers in this process that want the same
+ * secret refreshed share one transaction and one token request. The key is the secret id, plus the
+ * refused token for a forced refresh (a forced caller must not take an unforced caller's answer,
+ * which might be the very token it saw refused). The entry goes when the refresh settles, success
+ * or failure, so a failure is never handed to a later caller. The row lock stays, for other processes.
+ */
+function refreshShared(
+  db: Pick<PrismaClient, "$transaction">,
+  cipher: SecretCipher,
+  row: StoredOAuthSecret,
+  opts: OAuthResolveOptions,
+  now: Date,
+): Promise<OAuthSecretPayload> {
+  const signal = callerSignal(opts);
+  // No transaction is opened for a caller that has already stopped.
+  if (signal?.aborted) return Promise.reject(refreshUnavailable());
+  const flights = opts.flights ?? processFlights;
+  const key = opts.forceRefreshIfStill === undefined ? row.id : `${row.id}\n${opts.forceRefreshIfStill}`;
+  let flight = flights.get(key);
+  if (!flight) {
+    const controller = new AbortController();
+    const promise = refreshLocked(db, cipher, row, opts, now, controller.signal).finally(() => {
+      if (flights.get(key) === started) flights.delete(key);
+    });
+    const started: RefreshFlight = { promise, controller, abortable: 0, pinned: false };
+    // Every caller may have stopped waiting: the outcome is then nobody's, and not unhandled.
+    started.promise.catch(() => {});
+    flights.set(key, started);
+    flight = started;
+  }
+  if (!signal) {
+    flight.pinned = true;
+    return flight.promise;
+  }
+  const joined = flight;
+  joined.abortable += 1;
+  return new Promise<OAuthSecretPayload>((resolve, reject) => {
+    let waiting = true;
+    const onAbort = () => {
+      if (!waiting) return;
+      waiting = false;
+      joined.abortable -= 1;
+      if (joined.abortable === 0 && !joined.pinned) {
+        // Nobody waits any more: a new caller starts afresh rather than joining a stopping refresh.
+        if (flights.get(key) === joined) flights.delete(key);
+        joined.controller.abort();
+      }
+      reject(refreshUnavailable());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    // An abort that lands after the flight settled changes nothing: the promise has already settled.
+    void joined.promise.then(resolve, reject).finally(() => {
+      waiting = false;
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
 }
 
 type LockedOutcome =
@@ -633,6 +720,7 @@ async function refreshLocked(
   row: StoredOAuthSecret,
   opts: OAuthResolveOptions,
   now: Date,
+  signal: AbortSignal,
 ): Promise<OAuthSecretPayload> {
   let outcome: LockedOutcome;
   // Set once the provider has answered with new tokens: a failure after that loses a rotation.
@@ -665,6 +753,8 @@ async function refreshLocked(
         const left = REFRESH_TRANSACTION_TIMEOUT_MS - (clock() - startedAt);
         const timeoutMs = Math.min(REFRESH_TIMEOUT_MS, left - REFRESH_COMMIT_MARGIN_MS);
         if (timeoutMs < REFRESH_MIN_REQUEST_MS) throw refreshUnavailable();
+        // Stopped while waiting for the lock: roll back now rather than spend the refresh token.
+        if (signal.aborted) throw refreshUnavailable();
         const client: OAuthClient = {
           clientId: meta.clientId,
           ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
@@ -676,7 +766,9 @@ async function refreshLocked(
             meta,
             client,
             payload.refreshToken,
-            { ...opts.options, timeoutMs },
+            // The flight's signal, never one caller's: an abort reaches the request only when no
+            // caller still waits. Once the provider answers, the tokens are stored whatever happens.
+            { ...opts.options, signal, timeoutMs },
             opts.fetchImpl,
             now,
           );
@@ -714,6 +806,11 @@ async function refreshLocked(
       // rotating provider may have spent the stored refresh token. The caller's error is unchanged.
       log.warn({ secretId: row.id, reason: "rotated_unsaved" }, "OAuth secret refresh failed");
       throw err instanceof OAuthSecretFlowError ? err : refreshUnavailable();
+    }
+    if (signal.aborted) {
+      // Every caller stopped: the transaction was rolled back and the lock released, nothing changed.
+      log.info({ secretId: row.id, reason: "aborted" }, "OAuth secret refresh stopped");
+      throw refreshUnavailable();
     }
     if (err instanceof OAuthSecretFlowError) {
       if (err.reason !== "reauth_required")

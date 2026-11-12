@@ -866,9 +866,10 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       fake.accessTtlSeconds = 30;
       const stale = await read();
       const fetchImpl = slowToken(2000);
-      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      // Separate single-flight tables: the two callers act as two processes, meeting at the row lock.
+      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights: new Map() });
       await new Promise((r) => setTimeout(r, 200));
-      const second = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      const second = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights: new Map() });
       const [a, b] = await Promise.all([first, second]);
       expect(a.value).toBe("fake-access-2");
       expect(b.value).toBe("fake-access-3");
@@ -883,9 +884,14 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       fake.accessTtlSeconds = 30;
       const stale = await read();
       const fetchImpl = slowToken(5500);
-      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl });
+      // Separate single-flight tables: the two callers act as two processes, meeting at the row lock.
+      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights: new Map() });
       await new Promise((r) => setTimeout(r, 200));
-      const second = await decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl }).catch((e: unknown) => e);
+      const second = await decryptEntry(db, cipher, stale, {
+        options: OPTS,
+        fetchImpl,
+        flights: new Map(),
+      }).catch((e: unknown) => e);
       expect((second as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
       expect((second as { retryable?: boolean }).retryable).toBe(true);
       expect((second as Error).cause).toBeUndefined();
@@ -962,6 +968,265 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       const after = await read();
       expect(after.ciphertext).toBe(before.ciphertext);
       expect(metaOf(after.oauth).status).toBe("connected");
+    });
+
+    /** Delays every token request by `ms`, giving up at once when the request's signal aborts. */
+    const abortableSlowToken =
+      (ms: number): typeof safeFetch =>
+      async (url, init, options) => {
+        if (url.endsWith("/token")) {
+          await new Promise<void>((resolve, reject) => {
+            const signal = options?.signal;
+            const cancelled = () => reject(new Error("fetch_cancelled_or_timeout"));
+            if (signal?.aborted) return cancelled();
+            const timer = setTimeout(resolve, ms);
+            signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                cancelled();
+              },
+              { once: true },
+            );
+          });
+        }
+        return safeFetch(url, init, options);
+      };
+
+    /** The test database with a spy counting the transactions opened. */
+    function countingDb() {
+      const transaction = vi.fn((...args: unknown[]) =>
+        (db.$transaction as (...a: unknown[]) => Promise<unknown>).apply(db, args),
+      );
+      return { db: { secret: db.secret, $transaction: transaction } as unknown as typeof db, transaction };
+    }
+
+    const expectRetryable = (error: unknown) => {
+      expect((error as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((error as { retryable?: boolean }).retryable).toBe(true);
+      expect((error as Error).cause).toBeUndefined();
+    };
+
+    it("an aborted refresh releases the row lock at once, so another process's caller gets it", async () => {
+      const { read } = await connected("abort-lock", 30);
+      const stale = await read();
+      const stop = new AbortController();
+      const holder = decryptEntry(db, cipher, stale, {
+        options: OPTS,
+        fetchImpl: abortableSlowToken(12_000),
+        signal: stop.signal,
+        flights: new Map(),
+      }).catch((e: unknown) => e);
+      // Let the holder take the lock and start its (slow) token request.
+      await new Promise((r) => setTimeout(r, 500));
+      const waiter = decryptEntry(db, cipher, stale, { options: OPTS, flights: new Map() });
+      await new Promise((r) => setTimeout(r, 200));
+      const abortedAt = Date.now();
+      stop.abort();
+      expectRetryable(await holder);
+      expect(Date.now() - abortedAt).toBeLessThan(500);
+      const entry = await waiter;
+      // Well inside the 4 s lock wait: the aborted transaction rolled back promptly.
+      expect(Date.now() - abortedAt).toBeLessThan(1500);
+      expect(entry.value).toBe("fake-access-2");
+      // The aborted request never reached the provider, so the stored refresh token was spent once.
+      expect(fake.tokenRequests).toBe(1);
+      expect((await payloadOf((await read()).ciphertext)).refreshToken).toBe("fake-refresh-2");
+      expect(logText()).toContain("aborted");
+      expect(logText()).not.toContain("fake-");
+    }, 20_000);
+
+    it("a caller whose signal is already aborted opens no transaction and sends no request", async () => {
+      const { read } = await connected("abort-early", 30);
+      const counted = countingDb();
+      const stop = new AbortController();
+      stop.abort();
+      const error = await decryptEntry(counted.db, cipher, await read(), {
+        options: OPTS,
+        signal: stop.signal,
+      }).catch((e: unknown) => e);
+      expectRetryable(error);
+      expect(counted.transaction).not.toHaveBeenCalled();
+      expect(fake.tokenRequests).toBe(0);
+    });
+
+    it("shares one refresh among five concurrent resolves in one process: one transaction, one request", async () => {
+      const { read } = await connected("single-flight", 30);
+      const stale = await read();
+      const counted = countingDb();
+      const flights = new Map();
+      const entries = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl: slowToken(300), flights }),
+        ),
+      );
+      expect(counted.transaction).toHaveBeenCalledTimes(1);
+      expect(fake.tokenRequests).toBe(1);
+      expect(new Set(entries.map((e) => e.value))).toEqual(new Set(["fake-access-2"]));
+      expect(flights.size).toBe(0);
+    });
+
+    it("shares one refresh by default too (the process-wide table)", async () => {
+      const { read } = await connected("single-flight-default", 30);
+      const stale = await read();
+      const counted = countingDb();
+      await Promise.all(
+        Array.from({ length: 5 }, () =>
+          decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl: slowToken(300) }),
+        ),
+      );
+      expect(counted.transaction).toHaveBeenCalledTimes(1);
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("one caller's abort fails only that caller; the shared refresh goes on for the live ones", async () => {
+      const { read } = await connected("abort-shared", 30);
+      const stale = await read();
+      const counted = countingDb();
+      const flights = new Map();
+      const fetchImpl = abortableSlowToken(1000);
+      const stop = new AbortController();
+      const stopped = decryptEntry(counted.db, cipher, stale, {
+        options: OPTS,
+        fetchImpl,
+        signal: stop.signal,
+        flights,
+      }).catch((e: unknown) => e);
+      const liveSignal = new AbortController().signal;
+      const live = [
+        decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl, flights, signal: liveSignal }),
+        decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl, flights }),
+      ];
+      await new Promise((r) => setTimeout(r, 200));
+      const abortedAt = Date.now();
+      stop.abort();
+      expectRetryable(await stopped);
+      expect(Date.now() - abortedAt).toBeLessThan(200);
+      const entries = await Promise.all(live);
+      expect(entries.map((e) => e.value)).toEqual(["fake-access-2", "fake-access-2"]);
+      expect(counted.transaction).toHaveBeenCalledTimes(1);
+      expect(fake.tokenRequests).toBe(1);
+      expect(flights.size).toBe(0);
+    }, 20_000);
+
+    it("a caller arriving after the first one aborted joins the refresh, which keeps going for it", async () => {
+      const { read } = await connected("abort-then-join", 30);
+      const stale = await read();
+      const flights = new Map();
+      const fetchImpl = abortableSlowToken(800);
+      const stop = new AbortController();
+      const first = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, signal: stop.signal, flights }).catch(
+        (e: unknown) => e,
+      );
+      const second = decryptEntry(db, cipher, stale, { options: OPTS, fetchImpl, flights });
+      await new Promise((r) => setTimeout(r, 100));
+      stop.abort();
+      expectRetryable(await first);
+      expect((await second).value).toBe("fake-access-2");
+      expect(fake.tokenRequests).toBe(1);
+    }, 20_000);
+
+    it("when every caller aborts, the shared refresh stops and the next call starts a new one", async () => {
+      const { read } = await connected("abort-all", 30);
+      const stale = await read();
+      const counted = countingDb();
+      const flights = new Map();
+      const stops = [new AbortController(), new AbortController()];
+      const stopped = stops.map((s) =>
+        decryptEntry(counted.db, cipher, stale, {
+          options: OPTS,
+          fetchImpl: abortableSlowToken(12_000),
+          signal: s.signal,
+          flights,
+        }).catch((e: unknown) => e),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      for (const s of stops) s.abort();
+      for (const e of await Promise.all(stopped)) expectRetryable(e);
+      // The entry is gone at once: a new caller does not join the stopped refresh.
+      expect(flights.size).toBe(0);
+      const started = Date.now();
+      const entry = await decryptEntry(counted.db, cipher, stale, { options: OPTS, flights });
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(entry.value).toBe("fake-access-2");
+      expect(counted.transaction).toHaveBeenCalledTimes(2);
+      expect(fake.tokenRequests).toBe(1);
+    }, 20_000);
+
+    it("a failed shared refresh is not kept: the next call starts a new one", async () => {
+      const { read } = await connected("flight-fails", 30);
+      const stale = await read();
+      const counted = countingDb();
+      const flights = new Map();
+      const failing = tokenAnswer(503, { error: "temporarily_unavailable" });
+      const errors = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl: failing, flights }).catch(
+            (e: unknown) => e,
+          ),
+        ),
+      );
+      for (const e of errors) expectRetryable(e);
+      expect(counted.transaction).toHaveBeenCalledTimes(1);
+      expect(flights.size).toBe(0);
+      const entry = await decryptEntry(counted.db, cipher, stale, { options: OPTS, flights });
+      expect(entry.value).toBe("fake-access-2");
+      expect(counted.transaction).toHaveBeenCalledTimes(2);
+      expect(fake.tokenRequests).toBe(1);
+    });
+
+    it("a forced refresh does not join an unforced one: each keys its own flight", async () => {
+      const { read } = await connected("flight-keys", 30);
+      const stale = await read();
+      const counted = countingDb();
+      const flights = new Map();
+      const fetchImpl = slowToken(300);
+      const [plain, forced] = await Promise.all([
+        decryptEntry(counted.db, cipher, stale, { options: OPTS, fetchImpl, flights }),
+        decryptEntry(counted.db, cipher, stale, {
+          options: OPTS,
+          fetchImpl,
+          flights,
+          forceRefreshIfStill: "fake-access-1",
+        }),
+      ]);
+      // Two flights, two transactions; the row lock still makes the second find the token refreshed.
+      expect(counted.transaction).toHaveBeenCalledTimes(2);
+      expect(fake.tokenRequests).toBe(1);
+      expect([plain.value, forced.value]).toEqual(["fake-access-2", "fake-access-2"]);
+    });
+
+    it("the accessors pass a stop signal through to the refresh", async () => {
+      const { ownerId, read } = await connected("accessor-abort", 30);
+      const agentId = `oauth-agent-${randomUUID()}`;
+      agentIds.push(agentId);
+      await db.agent.create({
+        data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId },
+      });
+      await db.agentSecret.create({ data: { agentId, secretId: (await read()).id, boundName: "BS" } });
+      const stop = new AbortController();
+      stop.abort();
+      const accessor = buildSecretsAccessor(agentId, cipher, db, { options: OPTS });
+      expectRetryable(await accessor.resolve!("BS", { signal: stop.signal }).catch((e: unknown) => e));
+      expectRetryable(await accessor.refresh!("BS", "fake-access-1", { signal: stop.signal }).catch((e: unknown) => e));
+      expect(fake.tokenRequests).toBe(0);
+
+      // An MCP server's accessor: the load's signal, and a per-call one on refresh.
+      const server = { id: "srv-abort", ownerId, name: "bs", url: fake.mcpUrl, secretNames: ["accessor-abort"] };
+      const loadError = await loadServerSecrets(db, cipher, server, { options: OPTS, signal: stop.signal }).catch(
+        (e: unknown) => e,
+      );
+      expect((loadError as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((loadError as { retryable?: boolean }).retryable).toBe(true);
+      expect(fake.tokenRequests).toBe(0);
+      const { accessor: serverAccessor } = await loadServerSecrets(db, cipher, server, { options: OPTS });
+      expect(fake.tokenRequests).toBe(1);
+      const refreshError = await serverAccessor.refresh!("accessor-abort", "fake-access-2", {
+        signal: stop.signal,
+      }).catch((e: unknown) => e);
+      expect((refreshError as Error).message).toBe(SECRET_OAUTH_REFRESH_UNAVAILABLE);
+      expect((refreshError as { retryable?: boolean }).retryable).toBe(true);
+      expect(fake.tokenRequests).toBe(1);
     });
 
     /** An MCP server on the resource's host, owned by a new owner and shared (use) with a guest. */
@@ -1071,6 +1336,56 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
       expect(entry.value).toBe("fake-access-norefresh");
       expect(metaOf((await read()).oauth).status).toBe("connected");
     });
+
+    it("a run stopped while its MCP secrets load ends the refresh at once and says the call was stopped", async () => {
+      const name = "stop-at-load";
+      const { ownerId, ownAgent } = await sharedServer("stop-load", name);
+      const current = await row(ownerId, name);
+      const oauth = {
+        ...metaOf(current.oauth),
+        tokenEndpoint: `https://${HOST}/token`,
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+      };
+      await db.secret.update({ where: { id: current.id }, data: { oauth } });
+      // The token endpoint answers only after 12 s, unless the request is aborted first.
+      const fetchImpl: typeof safeFetch = async (url, _init, options) => {
+        if (!url.endsWith("/token")) throw new Error("unexpected request");
+        return new Promise((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("too late")), 12_000);
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(new Error("fetch_cancelled_or_timeout"));
+            },
+            { once: true },
+          );
+        });
+      };
+      const pin = (await loadMcpToolPins(db, ownAgent)).find((p) => p.toolName === "echo");
+      if (!pin) throw new Error("no pin");
+      const stop = new AbortController();
+      const log = { info: vi.fn(), warn: vi.fn() };
+      const pending = handleMcpTool(pin, "{}", {
+        db,
+        cipher,
+        agentId: ownAgent,
+        runId: `run-${randomUUID()}`,
+        signal: stop.signal,
+        fetchImpl,
+        log: log as never,
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      const stoppedAt = Date.now();
+      stop.abort();
+      const out = await pending;
+      expect(Date.now() - stoppedAt).toBeLessThan(1000);
+      expect(JSON.parse(out)).toEqual({ error: "mcp_call_timeout", message: "The call was stopped." });
+      expect(out).not.toContain("fake-");
+      // Nothing changed: the transaction rolled back.
+      expect((await row(ownerId, name)).ciphertext).toBe(current.ciphertext);
+      expect(metaOf((await row(ownerId, name)).oauth).status).toBe("connected");
+    }, 20_000);
 
     for (const when of ["load", "mid-call"] as const) {
       it(`a retryable refresh failure at ${when} gives a grantee the try-again message; the owner the specific one`, async () => {

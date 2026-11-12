@@ -132,7 +132,12 @@ Provider requirements:
   used within 60 seconds of its expiry or after it has expired (there is no background
   refresher), and once more, with a single retry of the request, when a
   brokered request to the service gets a 401. Refresh tokens that rotate are
-  stored as they change.
+  stored as they change. Uses of one secret that need a refresh at the same time
+  on one Wardby server share a single refresh. A call that is stopped (its run
+  stopped, or its MCP call timed out) stops waiting for the refresh at once with
+  [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md);
+  a refresh no call still waits for is cancelled, leaving the secret unchanged,
+  and the log records the reason `aborted`.
 - **When it cannot refresh.** If the provider refuses the grant or the client
   (`invalid_grant`, `invalid_client`), the token is past its expiry with no
   refresh token (`expired`), or the service refuses the token with a 401 before

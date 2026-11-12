@@ -47,7 +47,8 @@ export async function brokeredFetch(input: BrokeredFetchInput): Promise<unknown>
   const extraScrub: string[] = [];
   for (const name of secretNames) {
     boundedString(name, 1024);
-    const entry = secrets?.resolve ? await secrets.resolve(name) : undefined;
+    // The fetch's stop signal reaches an OAuth refresh too, so a stopped call releases its row lock.
+    const entry = secrets?.resolve ? await secrets.resolve(name, { signal: policy?.signal }) : undefined;
     if (!entry?.broker)
       throw new Error(`secret_not_brokered: "${name}" is not a brokered secret attached to this tool`);
     assertBrokerableValue(entry.broker, entry.value);
@@ -88,7 +89,7 @@ export async function brokeredFetch(input: BrokeredFetchInput): Promise<unknown>
       refreshed.push(secret);
       continue;
     }
-    const entry = await secrets.refresh(secret.name, secret.value);
+    const entry = await secrets.refresh(secret.name, secret.value, { signal: policy?.signal });
     if (!entry?.broker) {
       refreshed.push(secret);
       continue;

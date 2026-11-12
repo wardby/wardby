@@ -19,6 +19,7 @@ import { OAuthSecretFlowError } from "./oauth-secrets.js";
 import {
   decryptEntry,
   type SecretEntry,
+  type SecretCallOptions,
   type SecretFetchSettings,
   type SecretsAccessor,
   type StoredSecretRow,
@@ -200,11 +201,18 @@ export async function loadServerSecrets(
     if (!broker.hosts.includes(host))
       throw new McpServerInputError(`Secret "${name}" is not brokered to host ${host}; add it to the secret's hosts.`);
   };
-  const entryOf = async (stored: StoredSecretRow, name: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+  const entryOf = async (
+    stored: StoredSecretRow,
+    name: string,
+    call?: SecretCallOptions,
+    forceRefreshIfStill?: string,
+  ): Promise<SecretEntry> => {
     let entry: SecretEntry;
+    const signal = call?.signal ?? fetch.signal;
     try {
       entry = await decryptEntry(db, cipher, stored, {
         ...fetch,
+        ...(signal ? { signal } : {}),
         ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
       });
     } catch (err) {
@@ -219,11 +227,16 @@ export async function loadServerSecrets(
     addValues(entry);
     return entry;
   };
-  const reload = async (name: string, id: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+  const reload = async (
+    name: string,
+    id: string,
+    call?: SecretCallOptions,
+    forceRefreshIfStill?: string,
+  ): Promise<SecretEntry> => {
     const stored = await db.secret.findUnique({ where: { id }, select: STORED_SECRET_SELECT });
     if (!stored) throw new McpServerInputError(`Secret "${name}" was not found among your secrets.`);
     checkBroker(stored, name);
-    return entryOf(stored, name, forceRefreshIfStill);
+    return entryOf(stored, name, call, forceRefreshIfStill);
   };
   for (const name of server.secretNames) {
     const stored = await db.secret.findUnique({
@@ -239,13 +252,13 @@ export async function loadServerSecrets(
     get: async () => {
       throw new Error("secret_brokered: this secret is brokered; it is never readable");
     },
-    resolve: async (name) => {
+    resolve: async (name, call) => {
       const id = oauthIds.get(name);
-      return id === undefined ? entries.get(name) : reload(name, id);
+      return id === undefined ? entries.get(name) : reload(name, id, call);
     },
-    refresh: async (name, usedValue) => {
+    refresh: async (name, usedValue, call) => {
       const id = oauthIds.get(name);
-      return id === undefined ? undefined : reload(name, id, usedValue);
+      return id === undefined ? undefined : reload(name, id, call, usedValue);
     },
   };
   return { accessor, values };
