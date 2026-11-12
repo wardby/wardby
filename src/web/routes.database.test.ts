@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest, createServer } from "node:http";
-import { connect, type AddressInfo } from "node:net";
+import { request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JSDOM, VirtualConsole } from "jsdom";
@@ -16,7 +16,6 @@ import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { loggablePath, startHttpServer, type HttpServerHandle } from "../mcp/transport/streamable-http.js";
-import type { AuthProvider } from "../providers/auth/types.js";
 import { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { IdentityService } from "../mcp/auth/self-hosted/credentials.js";
 import { setLogLineFilter } from "../core/logger.js";
@@ -24,6 +23,7 @@ import type { OidcLogin } from "./oidc-login.js";
 import { GUEST_RATE_LIMITS, WEB_RATE_WINDOW_MS } from "./rate-limits.js";
 import { createWebSession } from "./session.js";
 import type { WebDeps } from "./routes.js";
+import { freePort, Jar, startWebHttpServer } from "./test-server.test-support.js";
 
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
 const JS = "documents-abc123.js";
@@ -73,34 +73,6 @@ function decodedStrings(text: string): string[] {
 const OWNER_EMAIL = "olive.owner@example.com";
 const GUEST_EMAIL = "gus.guest@example.com";
 const DEV = { secure: false };
-
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
-  const port = (probe.address() as AddressInfo).port;
-  await new Promise<void>((r) => probe.close(() => r()));
-  return port;
-}
-
-/** A tiny cookie jar: name → value, updated from Set-Cookie (Max-Age=0 removes). */
-class Jar {
-  readonly values = new Map<string, string>();
-  constructor(init: Record<string, string> = {}) {
-    for (const [k, v] of Object.entries(init)) this.values.set(k, v);
-  }
-  header(): string {
-    return [...this.values].map(([k, v]) => `${k}=${v}`).join("; ");
-  }
-  take(res: Response): void {
-    for (const c of res.headers.getSetCookie()) {
-      const [pair] = c.split(";", 1);
-      const i = pair.indexOf("=");
-      const [k, v] = [pair.slice(0, i), pair.slice(i + 1)];
-      if (/Max-Age=0\b/.test(c) || v === "") this.values.delete(k);
-      else this.values.set(k, v);
-    }
-  }
-}
 
 function bootstrapOf(html: string): Record<string, unknown> {
   const m = /<script nonce="([^"]+)">window\.__WARDBY__ = (.*?);<\/script>/s.exec(html);
@@ -170,23 +142,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
   }
 
   async function startServerAt(atPort: number, extra: Partial<WebDeps> = {}) {
-    const base = `http://127.0.0.1:${atPort}`;
-    const canonicalUri = `${base}/mcp`;
-    const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri } });
-    return startHttpServer({
-      mcp,
-      config: { canonicalUri, httpBind: { host: "127.0.0.1", port: atPort }, authProviderKind: "delegating" },
-      auth: { authProvider: {} as AuthProvider, db, providers: {} as never },
-      web: {
-        db,
-        cipher,
-        canonicalUri,
-        authMode: "delegating",
-        oidc: fakeOidc,
-        assetsRoot: assets,
-        ...extra,
-      },
-    });
+    return startWebHttpServer(db, atPort, { cipher, oidc: fakeOidc, assetsRoot: assets, ...extra });
   }
 
   const session = async (principalId: string) => {
