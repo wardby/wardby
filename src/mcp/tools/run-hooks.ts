@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Prisma, type RunHook } from "#prisma";
-import { callRunHook } from "../../core/run-hooks/dispatcher.js";
+import { callRunHook, HOOK_TOOL_SELECT } from "../../core/run-hooks/dispatcher.js";
 import { buildHookEvent } from "../../core/run-hooks/params.js";
 import { SAMPLE_PAYLOADS, TEST_FINAL_TEXT } from "../../core/run-hooks/samples.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
@@ -388,7 +388,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
     handler: async (args: { hookId: string }, ctx) => {
       const hook = await ctx.db.runHook.findUnique({
         where: { id: args.hookId },
-        include: { tool: { select: { name: true, code: true, paramsZod: true, timeoutMs: true } } },
+        include: { tool: { select: HOOK_TOOL_SELECT } },
       });
       if (!hook) throw new McpError(404, `Run hook "${args.hookId}" not found.`);
       const { agent } = await assertAgentAccess(
@@ -398,7 +398,12 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
         "write",
       );
       const result = await callRunHook(
-        { db: ctx.db, secrets: ctx.providers.secrets, datastore: ctx.providers.datastore },
+        {
+          db: ctx.db,
+          secrets: ctx.providers.secrets,
+          datastore: ctx.providers.datastore,
+          ...(ctx.providers.chat ? { chat: ctx.providers.chat } : {}),
+        },
         {
           hook,
           tool: hook.tool,

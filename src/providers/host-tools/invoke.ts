@@ -136,6 +136,7 @@ export async function invokeHostTool(input: HostToolInvocation): Promise<HostToo
       __bridge_sharedDatastoreDelete: absent,
       __bridge_sharedDatastoreList: absent,
       __bridge_secretsGet: absent,
+      __bridge_slackPost: absent,
     };
   };
 

@@ -84,9 +84,13 @@ thread.
 
 ### What is never sent
 
-wardby never posts code, diffs, review bodies, or run output to Slack. Error
-messages shown in Slack are a short first line only (at most 200 characters),
-never a full error or stack trace.
+Notifications never post code, diffs, review bodies, or run output to Slack.
+Error messages shown in Slack are a short first line only (at most 200
+characters), never a full error or stack trace. A run's report reaches Slack
+only through a [run hook](run-hooks.md) an admin approved to include it
+(`includeFinalText`), whether the hook's tool posts with its own token or with
+this server's bot (a system tool, see
+[Post through the server's Slack connection](run-hooks.md#post-through-the-servers-slack-connection)).
 
 ## 1. Create the Slack app
 
@@ -256,9 +260,10 @@ nothing posted in Slack can start or affect a run.
 What leaves to Slack: issue keys, titles, and their links; pull request
 numbers and links; agent names; review verdicts; fix-round numbers; a failed
 run's reason (its first line, at most 200 characters); and, only when a
-link's `includeCost` is on, the run's spend line. wardby never posts code,
-diffs, review bodies, or run output, and an error message shown in Slack is a
-short first line only, never a full error or stack trace.
+link's `includeCost` is on, the run's spend line. Notifications never post
+code, diffs, review bodies, or run output, and an error message shown in Slack
+is a short first line only, never a full error or stack trace. (A run hook an
+admin approved can post a run's report; see above.)
 
 Issue titles go to the linked channel regardless of Jira issue security: an
 issue restricted by a Jira security level still has its key and title posted.

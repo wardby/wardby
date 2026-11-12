@@ -395,6 +395,18 @@ globalThis.secrets = {
   },
 };
 
+// ---- slack (bridged; the server's Slack connection, run hooks only) ----
+// Only a public tool an admin granted the Slack connection, called from a run
+// hook, gets a working slack.post; everywhere else it throws
+// connection_unavailable. The bot token never enters the sandbox.
+
+globalThis.slack = {
+  post: async (channel, text, options) =>
+    JSON.parse(
+      await __bridge_slackPost(JSON.stringify([channel, text, (options && options.threadTs) || null])),
+    ),
+};
+
 // ---- parsers (bridged; real parser libraries run host-side) ----
 
 globalThis.parseHTML = async (html) => JSON.parse(await __bridge_parseHTML(JSON.stringify([String(html)])));

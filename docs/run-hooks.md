@@ -184,6 +184,62 @@ return "posted";
 Hook it with `allowedSecrets: ["SLACK_BOT_TOKEN"]`, `allowedHosts: ["slack.com"]`
 and `config: { "channel": "C…" }`. The bot must be in the channel.
 
+## Post through the server's Slack connection
+
+From 0.9.12, a hook can post to Slack without a token of its own: through the
+bot wardby's [Slack notifications](slack-notifications.md) already use. The
+token stays on the server; the tool never sees it. This needs a **system
+tool** — a public tool an admin granted the Slack connection:
+
+1. Write the tool (as in the example above, but with `slack.post` instead of
+   `fetch`), then have an admin make it public with `make_tool_public`. From
+   then on it has no owner: everyone can attach or hook it, and only an admin
+   (`update_tool`, `delete_tool`) or the operator's CLI can change it.
+2. An admin grants it the connection and limits where it may post:
+
+   ```json
+   { "toolId": "<tool id>", "connection": "slack", "channels": ["C0123456789"] }
+   ```
+
+   `channels` is a list of channel ids, or `["linked"]` (any channel that has
+   a Slack notification link — an admin already approved posting there), or
+   `["*"]` (any channel the bot is in). Granting again replaces the list;
+   `revoke_tool_connection` removes it.
+
+3. Teams hook it to their agents as usual, picking the channel in `config`. No
+   `allowedSecrets` or `allowedHosts` are needed for the post.
+
+```js
+// code: a system tool that posts a summary and the report in its thread
+const { event, config } = params;
+const d = event.data || {};
+const head = `*${event.agent.name}* finished: ${d.status} ($${d.costUsd})`;
+const { ts } = await slack.post(config.channel, head);
+if (event.finalText) {
+  for (let i = 0; i < event.finalText.length && i < 5 * 3500; i += 3500) {
+    await slack.post(config.channel, event.finalText.slice(i, i + 3500), { threadTs: ts });
+  }
+}
+return "posted";
+```
+
+`slack.post(channel, text, { threadTs })` returns `{ ts }`. wardby checks the
+channel against the grant on every call, masks the text by exact value against
+the agent's secrets, and posts. A tool may post at most 20 messages per
+delivery, each up to 40,000 characters. Failures come back as errors the tool
+can throw on (and the hook retries): `slack_channel_not_granted`,
+`slack_error: <code>` (Slack's own error code, such as `not_in_channel`), or
+`connection_unavailable` — the tool isn't public, has no grant, or isn't
+running from a run hook. Agents can't call `slack.post` from their own tool
+calls; only hook deliveries and `test_run_hook` get the connection.
+
+Changing a system tool is safe for the teams using it: when an admin updates a
+public tool, every attachment and hook on an agent with an owner loses that
+owner's capability grants (secrets, hosts) until the owner grants them again.
+The Slack grant belongs to the tool, so a hook that only uses `slack.post`
+keeps working. `wardby tool make-public`, `grant-connection` and
+`revoke-connection` do the same from the CLI.
+
 ## Example: send an email
 
 The same pattern with an email provider's HTTP API (replace the host, path and

@@ -6,11 +6,12 @@
  * tool -- but the attachment rules are the same for both, and are always
  * judged against the *tool's* owner:
  *
- * - An update is refused while the tool is attached to any agent owned by
- *   someone other than the tool's owner (a public agent counts, unless the
- *   tool is public too). An attachment's grants hand whatever code the row
- *   holds to that agent owner's secrets and hosts, and the description
- *   reaches their model context.
+ * - An update of an owned tool is refused while the tool is attached to any
+ *   agent owned by someone other than the tool's owner (a public agent
+ *   counts). An attachment's grants hand whatever code the row holds to that
+ *   agent owner's secrets and hosts, and the description reaches their model
+ *   context. A public tool is updated anyway, and those owners' consent is
+ *   cleared in the same transaction (see updateToolGuarded).
  * - A delete is refused while any attachment remains; `detach` first removes
  *   the attachments to the tool owner's own agents (for a public tool, the
  *   public agents), never anyone else's. The check runs before any detach,
@@ -114,19 +115,44 @@ export async function attachedAgents(
 /** Refuses (by throwing) unless the caller may change this tool; receives the row read inside the transaction. */
 export type AuthorizeTool = (tool: Tool | null) => void;
 
+/** How many attachments and run hooks lost their owner's capability consent in a public-tool update. */
+export interface ConsentCleared {
+  attachments: number;
+  hooks: number;
+}
+
+/**
+ * Updates a tool. An owned tool keeps the old rule: refused while it runs for
+ * an agent with a different owner. A public tool (#529) is updated anyway --
+ * otherwise a system tool could never be fixed once a team uses it -- and in
+ * the same transaction every attachment and run hook on an agent *with* an
+ * owner loses that owner's capability consent, so the new code gets none of
+ * their secrets or hosts until each owner grants them again. Connection grants
+ * belong to the tool, so a hook using only slack.post keeps working.
+ */
 export async function updateToolGuarded(
   db: Pick<PrismaClient, "$transaction">,
   toolId: string,
   data: Prisma.ToolUpdateInput,
   authorize: AuthorizeTool,
-): Promise<Tool> {
+): Promise<Tool & { consentCleared?: ConsentCleared }> {
   return db.$transaction(
     async (tx) => {
       const tool = await tx.tool.findUnique({ where: { id: toolId } });
       authorize(tool);
       const others = (await attachedAgents(tx, toolId)).filter((agent) => agent.ownerId !== tool!.ownerId);
-      if (others.length > 0) throw new ToolAttachedError("other_owners", others);
-      return tx.tool.update({ where: { id: toolId }, data });
+      if (tool!.ownerId !== null) {
+        if (others.length > 0) throw new ToolAttachedError("other_owners", others);
+        return tx.tool.update({ where: { id: toolId }, data });
+      }
+      const owned = { toolId, agent: { ownerId: { not: null } } };
+      const reset = { capabilitiesGrantedById: null };
+      const [attachments, hooks] = await Promise.all([
+        tx.agentTool.updateMany({ where: { ...owned, capabilitiesGrantedById: { not: null } }, data: reset }),
+        tx.runHook.updateMany({ where: { ...owned, capabilitiesGrantedById: { not: null } }, data: reset }),
+      ]);
+      const updated = await tx.tool.update({ where: { id: toolId }, data });
+      return { ...updated, consentCleared: { attachments: attachments.count, hooks: hooks.count } };
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );

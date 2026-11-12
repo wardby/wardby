@@ -41,6 +41,8 @@ function fakeDb(
     },
     agentTool: {
       findMany: async () => attachments.map((a) => ({ agent: a.agent })),
+      // The public-tool update's consent reset: counts the owned agents' attachments.
+      updateMany: async () => ({ count: attachments.filter((a) => a.agent.ownerId !== null).length }),
       deleteMany: async ({ where }: { where: { agentId: { in: string[] } } }) => {
         attachments = attachments.filter((a) => !where.agentId.in.includes(a.agent.id));
         return { count: 0 };
@@ -48,6 +50,7 @@ function fakeDb(
     },
     runHook: {
       findMany: async () => hooks.map((h) => ({ agent: h.agent })),
+      updateMany: async () => ({ count: hooks.filter((h) => h.agent.ownerId !== null).length }),
       deleteMany: async ({ where }: { where: { agentId: { in: string[] } } }) => {
         hooks = hooks.filter((h) => !where.agentId.in.includes(h.agent.id));
         return { count: 0 };
@@ -121,14 +124,19 @@ describe("updateToolGuarded", () => {
     expect(fake.tool()?.code).toBe("old");
   });
 
-  it("judges a public tool against public agents: an owned agent blocks, a public one doesn't", async () => {
+  it("updates a public tool on owned agents too, clearing their owners' consent", async () => {
     const onPublic = fakeDb({ id: "t1", ownerId: null, code: "old" }, [{ id: "a1", name: "shared", ownerId: null }]);
     await updateToolGuarded(onPublic.db, "t1", { code: "new" }, allow);
     expect(onPublic.tool()?.code).toBe("new");
 
-    const onOwned = fakeDb({ id: "t1", ownerId: null, code: "old" }, [{ id: "a1", name: "theirs", ownerId: "p2" }]);
-    expect((await rejection(updateToolGuarded(onOwned.db, "t1", { code: "new" }, allow))).reason).toBe("other_owners");
-    expect(onOwned.tool()?.code).toBe("old");
+    const onOwned = fakeDb(
+      { id: "t1", ownerId: null, code: "old" },
+      [{ id: "a1", name: "theirs", ownerId: "p2" }],
+      [{ id: "a2", name: "hooked", ownerId: "p3" }],
+    );
+    const updated = await updateToolGuarded(onOwned.db, "t1", { code: "new" }, allow);
+    expect(onOwned.tool()?.code).toBe("new");
+    expect(updated.consentCleared).toEqual({ attachments: 1, hooks: 1 });
   });
 
   it("lets the caller's authorize refuse before anything is read or written", async () => {

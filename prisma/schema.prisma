@@ -181,33 +181,40 @@ enum RunStatus {
 
 /// Phase 3: a WASM-sandboxed, Zod-validated tool a model can call.
 model Tool {
-  id          String      @id @default(cuid())
+  id               String                @id @default(cuid())
   /// Unique per owner (@@unique below), not globally: the name is what the
   /// model calls, so what must never repeat is a name within one agent's
   /// attachments — attach_tool, `wardby tool attach` and the importer refuse
   /// a second same-named tool on an agent.
-  name        String
-  description String
+  name             String
+  description      String
   /// Zod schema *source text*; compiled and evaluated inside the sandbox,
   /// never in the host process.
-  paramsZod   String
+  paramsZod        String
   /// JSON Schema derived from paramsZod at registration time (deriveJsonSchema)
   /// and cached here — re-deriving it on every run would spin a fresh QuickJS
   /// runtime and evaluate the whole vendored zod bundle per attached tool,
   /// before the first LLM call, on every single run. Safe to cache because
   /// every write of paramsZod (create, and MCP update_tool) re-derives it in
   /// the same write. A run pins the version its load step read.
-  jsonSchema  Json
+  jsonSchema       Json
   /// Tool body source; run inside the sandbox with the validated params.
-  code        String
+  code             String
   /// The tool's own time limit per call (ms). Null = the default (10 s). A
   /// run uses the lower of this and WARDBY_TOOL_MAX_TIMEOUT_MS, and pins the
   /// value its load step read, like the code.
-  timeoutMs   Int?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  agents      AgentTool[]
-  runHooks    RunHook[]
+  timeoutMs        Int?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  agents           AgentTool[]
+  runHooks         RunHook[]
+  /// Server connections an admin granted this (public) tool (#529).
+  connectionGrants ToolConnectionGrant[]
+  /// Who made the tool public with make_tool_public, and when. Null for a
+  /// tool that was never published that way (created public by the CLI, or
+  /// still owned).
+  publishedById    String?
+  publishedAt      DateTime?
 
   // Phase 4: ownership. Null = owner-less (a transition state; tool grants
   // arrive in the resource-sharing grants Phase 2, see ResourceGrant).
@@ -2299,4 +2306,23 @@ model HostProviderTrustedAccount {
   hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
 
   @@id([provider, accountId])
+}
+
+/// An admin's grant of a server-held connection to a public tool (#529): the
+/// tool may use the connection (slack.post) from a run hook, within `channels`.
+model ToolConnectionGrant {
+  id          String   @id @default(cuid())
+  toolId      String
+  tool        Tool     @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  /// "slack" today; validated in code.
+  connection  String
+  /// Channel ids (upper-case), or exactly ["linked"] (any channel with a Slack
+  /// notification link), or exactly ["*"] (any channel the bot is in).
+  channels    String[]
+  /// The admin who granted it; null when granted from the CLI.
+  grantedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([toolId, connection])
 }

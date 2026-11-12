@@ -46,7 +46,7 @@
   account and webhook, and links agents to projects.
 - [Send workflow updates to Slack](slack-notifications.md) (0.6.0+) links a Slack
   channel to a Jira project or an agent to follow cards from pickup to merge.
-- [Run hooks](run-hooks.md) (0.9.8+) ties your own sandbox tool to an agent's
+- [Run hooks](run-hooks.md) (0.9.8+; posting through the server's Slack bot with a system tool, 0.9.12+) ties your own sandbox tool to an agent's
   events, such as `run_completed`, to send results to Slack, email or any API.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
