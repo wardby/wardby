@@ -23,7 +23,12 @@ const PROSE_SELECTOR = Array.from(PROSE).join(",");
 const LAYOUT = /display\s*:\s*(?:inline-)?(?:flex|grid)|grid-template|position\s*:\s*(?:absolute|fixed|sticky)/i;
 const norm = (s: string | null) => (s ?? "").replace(/\s+/g, " ").trim();
 
-/** Selectors of the style rules in `css` (at-rules skipped, states and pseudo-elements dropped, `*` ignored). */
+const MAX_SELECTORS = 500;
+
+/**
+ * Selectors of the style rules in `css` that have a class, id or attribute part (at-rules skipped,
+ * states and pseudo-elements dropped; bare type selectors and `*` ignored), deduped and capped.
+ */
 function ruleSelectors(css: string): string[] {
   const out: string[] = [];
   for (const m of css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{/g)) {
@@ -36,10 +41,10 @@ function ruleSelectors(css: string): string[] {
           "",
         )
         .trim();
-      if (sel && sel !== "*") out.push(sel);
+      if (sel && /[.#[]/.test(sel)) out.push(sel);
     }
   }
-  return out;
+  return Array.from(new Set(out)).slice(0, MAX_SELECTORS);
 }
 
 export interface HtmlMeasure {

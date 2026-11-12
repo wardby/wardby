@@ -85,6 +85,22 @@ describe("element anchors", () => {
     expect(anchorForElement("home", doc.getElementById("hero")!, 0, 0, doc.body, stored).elementId).toBe("hero");
   });
 
+  it("lets storedIds alone decide, so real ids like intro survive", () => {
+    const doc = parse('<body><p id="intro">Hi</p><p id="i3kd">Gen</p></body>');
+    const stored = new Set(["intro"]);
+    expect(anchorForElement("home", doc.getElementById("intro")!, 0, 0, doc.body, stored).elementId).toBe("intro");
+    expect(anchorForElement("home", doc.getElementById("i3kd")!, 0, 0, doc.body, stored).elementId).toBeUndefined();
+    expect(anchorForElement("home", doc.getElementById("i3kd")!, 0, 0, doc.body, new Set(["i3kd"])).elementId).toBe(
+      "i3kd",
+    );
+    expect(anchorForElement("home", doc.getElementById("i3kd")!, 0, 0, doc.body).elementId).toBeUndefined();
+  });
+
+  it("throws when the element is not under the root", () => {
+    const doc = parse("<body><div id=a><p>x</p></div><div id=b></div></body>");
+    expect(() => elementPath(doc.querySelector("p")!, doc.getElementById("b")!)).toThrow("element_not_under_root");
+  });
+
   it("clamps fractions", () => {
     expect([clamp01(-1), clamp01(2), clamp01(Number.NaN), clamp01(0.3)]).toEqual([0, 1, 0, 0.3]);
   });

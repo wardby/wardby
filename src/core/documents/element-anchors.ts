@@ -14,7 +14,7 @@ export const MAX_ANCHOR_WORDS = 60;
 const SEGMENT = "[a-z][a-z0-9-]{0,31}:nth-of-type\\(\\d{1,4}\\)";
 const PATH = new RegExp(`^(?:body|${SEGMENT}(?:>${SEGMENT}){0,63})$`);
 const ID_OK = /^[A-Za-z][\w-]{0,127}$/;
-/** Ids GrapesJS generates for components it has to address (for example `i3kd`, `ix9a-2`). Never used as anchors. */
+/** Ids GrapesJS generates for components it has to address (for example `i3kd`, `ix9a-2`). Only a fallback: when the stored file's ids are known they decide instead. */
 export const GRAPES_GENERATED_ID = /^i[a-z0-9]{2,}(-\d+)?$/;
 
 const schema = z
@@ -63,12 +63,15 @@ export function anchorTarget(el: ElementLike): ElementLike {
   return svg ?? el;
 }
 
-/** `tag:nth-of-type(n)` segments from below `root` down to `el`; "body" for the root itself. */
+/**
+ * `tag:nth-of-type(n)` segments from below `root` down to `el`; "body" for the root itself.
+ * Throws when `el` is not under `root`.
+ */
 export function elementPath(el: ElementLike, root: ElementLike): string {
   const parts: string[] = [];
-  for (let e: ElementLike | null = el; e && e !== root; e = e.parentElement) {
-    const parent: ElementLike | null = e.parentElement;
-    if (!parent) break;
+  for (let e: ElementLike | null = el; e !== root; e = e.parentElement) {
+    const parent: ElementLike | null = e?.parentElement ?? null;
+    if (!e || !parent) throw new Error("element_not_under_root");
     let n = 0;
     for (const sib of Array.from<ElementLike>(parent.children)) {
       if (tagOf(sib) === tagOf(e)) n += 1;
@@ -94,7 +97,8 @@ export function anchorForElement(
   storedIds?: ReadonlySet<string>,
 ): ElementAnchor {
   const el = anchorTarget(picked);
-  const idOk = ID_OK.test(el.id) && !GRAPES_GENERATED_ID.test(el.id) && (!storedIds || storedIds.has(el.id));
+  // storedIds alone decides when given; the generated-id pattern is only the fallback without it.
+  const idOk = ID_OK.test(el.id) && (storedIds ? storedIds.has(el.id) : !GRAPES_GENERATED_ID.test(el.id));
   return {
     type: "element",
     board,
@@ -117,6 +121,7 @@ export function locateElement(root: ElementLike, a: ElementAnchor): ElementLike 
     const byId = root.querySelectorAll(`[id="${a.elementId}"]`)[0];
     if (byId && tagOf(byId) === a.tag) return byId;
   }
+  // The root itself is found only by the path "body".
   const byPath = a.path === "body" ? root : root.querySelectorAll(`:scope>${a.path}`)[0];
   if (byPath && tagOf(byPath) === a.tag && sameText(byPath)) return byPath;
   if (head.length >= 8) {

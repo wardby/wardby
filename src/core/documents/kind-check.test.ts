@@ -16,6 +16,11 @@ describe("kind check", () => {
     const prose = `<!doctype html><html><body>${"<p>Plain paragraph of text that goes on.</p>".repeat(20)}</body></html>`;
     expect(kindWarnings("design", { boards: [prose] })[0]?.kind).toBe("kind");
   });
+  it("still warns for prose with only bare type-selector typography CSS", () => {
+    const prose = `<!doctype html><html><head><style>body,p,h1,li,*{font:16px serif}</style></head><body>${"<p>Plain paragraph of text that goes on.</p>".repeat(20)}</body></html>`;
+    expect(measureHtml(prose).styledShare).toBeLessThan(0.1);
+    expect(kindWarnings("design", { boards: [prose] })[0]?.kind).toBe("kind");
+  });
   it("warns when Markdown carries page layout", () => {
     const w = kindWarnings("document", { markdown: '# A\n\n<div style="display:flex"><div>a</div><div>b</div></div>' });
     expect(w[0]).toMatchObject({ kind: "kind", message: expect.stringMatching(/save it as a design/) });
