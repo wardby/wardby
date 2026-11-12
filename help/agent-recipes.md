@@ -247,7 +247,9 @@ manual step for the user: merge the first knowledge pull request, tick any App
 events still missing, or try the first `@` mention. Remind them that Wardby never
 merges pull requests for them.
 
-Related: [Builder and router prompts](help://builder-agent),
+Related: Keep a fork in sync with its upstream (help article `fork-sync`),
+Several repositories in one coding run (help article `multi-repository-runs`),
+[Builder and router prompts](help://builder-agent),
 [Set up an architecture agent](help://architecture-agent),
 [Architecture knowledge bundles](help://knowledge),
 [Choose a native or coding agent](help://creating-agents),

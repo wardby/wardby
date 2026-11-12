@@ -100,4 +100,6 @@ mode: no pull-request grouping, outcomes or run steps." It still lists each
 agent's latest runs. Upgrade the server to 0.8.0 or later; the notice goes away
 at the pane's next check.
 
+See also Several repositories in one coding run (help article `multi-repository-runs`).
+
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

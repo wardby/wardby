@@ -131,6 +131,9 @@ it from a release that includes session resume (see
 [Build a tool runner image for a Claude Code agent](help://build-claude-code-image)),
 or its runs fail at input with `worker_input_failed`.
 
+A run over several repositories resumes with only `/workspace` mapped; see
+Several repositories in one coding run (help article `multi-repository-runs`).
+
 Full setup: [Resume a run locally](../docs/coding-agent-setup.md#resume-a-run-locally).
 See also [Choose a native or coding agent](help://creating-agents).
 

@@ -79,7 +79,7 @@ The tool's params are `{ event, config }`:
 ```
 
 - `data` holds the event kind's own fields. For `run_completed` they are shown
-  above; `reason` is the first line of the run's error. `pullRequests` has one entry per pull request the run opened; a coding run over several repositories lists one for each repository it changed. The other kinds carry
+  above; `reason` is the first line of the run's error. `pullRequests` has one entry per pull request the run opened; a coding run over several repositories lists one for each repository it changed, and a top-level coding run (one a schedule or a person started, not a lead's sub-run) lists its own pull requests. The other kinds carry
   the same fields their Slack messages are built from (`prLabel`, `prUrl`,
   `verdict`, `round`, `merged`, …).
 - `finalText` and `finalTextTruncated` appear only on a hook created with

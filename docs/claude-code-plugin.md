@@ -132,6 +132,11 @@ printed for removing it later (**Copy cleanup**): `git -C <clone> worktree remov
 worktree it created and `rm -r` for its folder under `~/.wardby/sessions/`. The
 pane runs neither.
 
+A coding run over several repositories continues in your clone of its default
+repository only: a resumed session maps just `/workspace`. The pane lists each
+other repository of the run with its branch (or, for a read-only one, its
+commit) and a `git clone` line to copy.
+
 ## Using the pane
 
 - **Ledger** (desktop): runs grouped by pull request (or Jira issue), each group

@@ -460,6 +460,13 @@ collection. It creates exactly four private subdirectories and emits
 The worker sees only these volume subpaths:
 
 - `/workspace`: read-write checkout files.
+- `/repos/<name>`: one folder for each extra repository of a run that has
+  several (see [A coding agent's repositories](coding-agent-setup.md#several-repositories-in-one-run)).
+  A writable extra is read-write like `/workspace`; a read link's folder is
+  mounted read-only and holds one commit's files with no git metadata. The
+  Codex worker and Claude Code's tool runner mount them; the Claude agent
+  container never does, as it never mounts `/workspace`. Only `/workspace` and
+  the writable `/repos/<name>` folders are collected after the run.
 - Git metadata remains in the trusted keeper volume and is not mounted into the worker.
 - `/run/wardby/input`: read-only, validated input artifact.
 - `/run/wardby/output`: read-write result artifact.
@@ -594,6 +601,13 @@ so a stopped run opens or updates no pull request, even when its worker had
 already finished (see [Stop or cancel a run](../help/stop-run.md)).
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
 its runs are reconciled to `lost`, which frees them.
+
+`CODING_MAX_RUN_REPOSITORIES` (default `5`, from 1 to 17) caps the repositories
+one coding run can hold: its default repository plus its extras. The run's
+workspace disk budget and its 100,000-entry limit cover all of them together;
+a run whose repositories together exceed the entry limit fails in preparation
+with the `coding_failure_workspace` category. A value outside the range stops
+start-up.
 
 A native lead with `parallelDelegations` can dispatch several coding runs at
 once. They count against `CODING_MAX_CONCURRENT` like any other runs, and the

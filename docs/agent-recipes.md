@@ -593,6 +593,85 @@ fails with category `continuation_closed` and pushes nothing — see
   the same time can briefly both see the same remaining run-tree budget and
   both be admitted against it.
 
+### Fork sync: one coding agent, three repositories
+
+A scheduled agent can keep a fork up to date with its upstream by merging in
+what changed upstream since the last sync, with no git history in the run. It
+needs Wardby 0.10.0 or later. The run holds three copies of code:
+
+| Folder            | What it is                                         | Access    |
+| ----------------- | -------------------------------------------------- | --------- |
+| `/workspace`      | the fork, `your-org/your-fork`, on its base branch | writable  |
+| `/repos/base`     | `upstream-org/upstream` at the last-synced commit  | read-only |
+| `/repos/upstream` | `upstream-org/upstream` at its `main`              | read-only |
+
+The fork keeps a one-line marker file at its root, `upstream-sync`, holding the
+upstream commit the fork was last synced to (a 40-hex SHA, or a tag). The sync never
+needs history: it merges each changed file three ways from the fork's version,
+the last-synced version and the new upstream version, then moves the marker.
+
+1. **The agent.** A coding agent with `codingProfile.repository` set to
+   `your-org/your-fork` and a `defaultTask` (needed to schedule it).
+2. **Two read links to the same upstream repository** under different names, both in the default set:
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "base",
+  "ref": { "fromFile": "upstream-sync" },
+  "inDefaultSet": true
+}
+```
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "upstream",
+  "ref": "main",
+  "inDefaultSet": true
+}
+```
+
+`base` reads its commit from the fork's `upstream-sync` file at dispatch, so
+it follows the marker with no change to the agent. The first time, create
+the marker in the fork with the commit your fork currently matches. If the
+file is missing or does not hold a valid commit, the run is refused with
+`repository_ref_unreadable` and nothing starts. 3. **The task** (`defaultTask`), in your own words, says:
+
+- compare `/repos/base` with `/repos/upstream` and list the files that
+  changed upstream;
+- for each, merge it three ways into the fork's file at `/workspace`;
+- resolve every conflict by reading both sides, never leaving conflict
+  markers;
+- write the upstream ref the sync reached into `upstream-sync` as a single
+  line (a 40-hex commit SHA, a tag or a branch; the marker is read as a read
+  link's ref). The run lists each folder with only the first seven
+  characters of its commit and has no git history, so the task must say
+  where the agent gets the full value: a release tag, or a tool that asks
+  the host for the upstream tip;
+- run the fork's tests.
+
+4. **The merge command depends on the coding provider.** On Codex, use
+   `git merge-file <fork file> <base file> <upstream file>`, which writes the
+   merged result into the fork file and exits non-zero while conflicts remain.
+   Claude Code's tool runner has no git, so use `diff3 -m -E <fork file>
+   <base file> <upstream file>` and redirect its output into the fork file;
+   it exits 1 when conflict markers were written. State the one for your
+   provider in the task.
+5. **Schedule it** with `set_schedule`, for example `0 6 * * 1` with your
+   `timezone`. A scheduled run is top-level, and its pull request appears in
+   `run_completed.pullRequests`, so a run hook can post it to a channel.
+
+The run opens one pull request in the fork. The read-only folders are not
+collected or pushed. Keep the budget generous enough for a large upstream
+change, and review the first runs by hand. See also the
+[fork-sync help article](../help/fork-sync.md) and
+[Several repositories in one run](coding-agent-setup.md#several-repositories-in-one-run).
+
 ### Together with Recipe A
 
 Coding runs automatically receive the repository's knowledge index and base

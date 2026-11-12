@@ -71,7 +71,10 @@ is the way to approve a repository there.
 
 ## A coding agent's repositories
 
-A coding agent works in one repository per run, chosen from its list:
+A coding agent works in a **default repository** (mounted at `/workspace`) and,
+since 0.10.0, can also have more repositories in the same run, writable or
+read-only, each in its own folder under `/repos/<name>`. Its list comes from
+its links:
 
 - `codingProfile.repository` is the **default** repository.
 - `link_repository` adds more. A link on a coding agent takes
@@ -89,7 +92,8 @@ Only the agent's owner (or an admin approving explicitly with `adminOverride`)
 can add a repository, and the same authorization applies as for the default;
 see [Repository authorization](#repository-authorization).
 
-The repository is chosen when the run starts and never changes during it:
+The default repository of a run is chosen when the run starts and never
+changes during it:
 
 - `trigger_agent` takes an optional `repository`. Leave it out and the run uses
   the default repository. Name one that is not on the list and the call is
@@ -108,6 +112,10 @@ The repository is chosen when the run starts and never changes during it:
   `continuePriorRun` is given: a follow-up works in the repository of the run
   it continues. Without a choice the call is refused with
   `repository_required`.
+
+- `trigger_agent` also takes `repositories`, and a webhook body
+  `wardbyRepositories`, to choose the extra repositories of one run; see
+  [Several repositories in one run](#several-repositories-in-one-run).
 
 Everything else about the agent is shared across its repositories: toolchain,
 worker image, services, system prompt, budget, protected paths and the package
@@ -130,6 +138,145 @@ repository their runs should not work in.
 
 For the refusals, see [Repository required](../help/errors/repository-required.md)
 and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
+
+### Several repositories in one run
+
+A run always has its default repository at `/workspace`. Each extra repository
+is a link on the agent and appears in the run at `/repos/<name>`. Extras are
+**writable** (a write link) or **read-only** (a read link).
+
+**Read links.** `link_repository` with `access: "read"` adds a repository the
+run can look at but never change:
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "upstream",
+  "ref": "main",
+  "inDefaultSet": true
+}
+```
+
+- A read link needs a `ref`: a branch, a tag or a full 40-hex commit SHA. It
+  takes no triggers, `checkName` or `baseRef`. The repository can be on GitHub
+  or a `local:` path.
+- The run gets one commit's files and no git history. The commit is resolved
+  when the run is dispatched and recorded on the run, so a branch that moves
+  later does not change a run already started. Nothing in a read-only folder is
+  collected, committed or pushed.
+- The agent's owner needs read access to the repository on the host (or an
+  admin approves the link with `adminOverride`), as for any link. A public
+  repository is cloned anonymously when the GitHub App is not installed on it.
+- Read links follow the GitHub allowlist like every link. To read another
+  account's repository, add that account to `WARDBY_GITHUB_ALLOWED_ACCOUNTS`;
+  an administrator's approval does not reach past it.
+
+**`name`.** The folder name under `/repos/` and the way the run, `trigger_agent`
+and delegation refer to the link. It matches `[a-z0-9][a-z0-9._-]{0,62}` and is
+not `workspace`. The default is the repository's short name in lower case
+(`your-org/api` is `api`). Names are unique per agent, and the same repository
+can be linked twice under two names. A name already used by another link is
+refused with `repository_name_taken`, and a name (or default name) that does
+not fit the format with `repository_name_invalid`; pass an explicit `name` in
+either case. See [Repository name taken](../help/errors/repository-name-taken.md)
+and [Repository name invalid](../help/errors/repository-name-invalid.md).
+
+**`ref` and `fromFile`.** Instead of a fixed ref, a read link can take
+`ref: { "fromFile": "<path>" }`. The file is read from the **default
+repository's** base branch when the run is dispatched and holds one trimmed
+line of at most 255 bytes: a branch, a tag or a 40-hex commit SHA. A missing,
+empty, too long or invalid file, or a ref that does not exist, refuses the run
+before anything is created with `repository_ref_unreadable`. The message names
+the link and the file's path and never the file's content. See
+[Repository ref could not be read](../help/errors/repository-ref-unreadable.md).
+
+**The default set.** A link with `inDefaultSet: true` is in every run of the
+agent. A run's repositories are the default repository plus the links in the
+default set. There is no "all repositories" switch, so linking a repository
+never widens an existing agent's runs by itself.
+
+**Per-run lists.** One run can name its own list of link names, which replaces
+the default set for that run (`[]` means the default repository only):
+
+- `trigger_agent` takes `repositories`. As with `repository`, only the agent's
+  owner can pass it, unless `codingProfile.allowWebhookTaskOverride` is on.
+- A webhook body can carry `wardbyRepositories` (up to 32 names) under the same
+  `allowWebhookTaskOverride` rule as `wardbyRepository`. A refusal is a 400
+  with `{ "error": "invalid_repositories" }`, and for a name or size refusal
+  also `"error_description"` (`repository_not_listed` or
+  `repository_set_too_large`); an unreadable ref is a 400
+  `{ "error": "repository_ref_unreadable" }`.
+- A lead's `delegate_to_<name>` call takes `repositories` when the sub-agent
+  has any set-eligible link. A set or ref refusal comes back to the lead as
+  `{ "error": "<code>", "message": "…" }`.
+- A name that is not a set-eligible link of the agent is refused with
+  `repository_not_listed`; a repeated name, or `repositories` sent with a
+  continuation (a follow-up works in its run's own set), with
+  `invalid_repositories`. `repositories` on a native agent is refused too.
+  See [Invalid repositories](../help/errors/invalid-repositories.md).
+- `repository` still chooses which writable link is the run's default
+  repository at `/workspace`.
+
+**Limits.**
+
+- `CODING_MAX_RUN_REPOSITORIES` (default `5`) caps the repositories of one run:
+  the default repository plus its extras. It must be between 1 and 17 (the
+  default repository plus 16 extras); a larger value fails config load and
+  stops start-up. `link_repository` refuses a default set over it, and a
+  per-run list over it is refused at dispatch, both with
+  `repository_set_too_large`. See
+  [Repository set too large](../help/errors/repository-set-too-large.md).
+- Shared across the run: the workspace disk budget (`workspaceDiskMb`) and the
+  100,000-entry cap on files and folders cover all repositories together.
+- Per writable repository: `VCS_MAX_CHANGED_FILES`, `VCS_MAX_DIFF_BYTES` and
+  the protected paths apply to each repository's own changes.
+- Only the default repository supplies `CLAUDE.md`, skills, the dependency
+  cache, `services.yaml` and the knowledge index.
+
+**Publishing.** Each writable repository with changes gets its own branch
+(`wardby/run-<id of the root run>`) and pull request, the default repository first and
+then the extras in the order of the run's set. The pull requests list each
+other in their "Related pull requests" section, and each carries its own merge
+order. A run whose repositories all published (or had nothing to publish)
+succeeds. If some published and others failed, the run ends **failed** with
+`partially_published`: what published stays published, and the error lists
+each repository as `published`, `no_changes` or the category it failed with. A
+follow-up retries the failed ones. See
+[Partially published](../help/errors/partially-published.md).
+
+**Authorization.** Before the clone, and again before each push, every
+repository of the run is checked against the agent owner's current access and
+the link must still exist with the same access. A denial refuses the run (or
+the push) with the matching `repo_access_*` code; see
+[Repository access refused](../help/errors/repo-access.md).
+
+**Follow-ups.** A follow-up, a review fix round or mark-ready always works in
+the set of the run it continues, with the same names and resolved commits; it
+never re-resolves refs. A follow-up can start from the pull request of any
+writable repository of the set, and each repository's pull request is updated
+in place (a repository that only now has changes gets a new one). Only one
+follow-up runs at a time for each run, single-repository runs included: a
+mention that arrives meanwhile gets a comment saying a follow-up is already
+running, and the person mentions again after it finishes. This is a change for
+single-repository runs, which could previously overlap. A repository other than
+the default one still needs its own review link with the triggers you want
+before it gets reviews or fix rounds.
+
+**Where it shows.** `get_run` lists a run's `repositories`; `list_runs`
+repository search matches any of them; the viewer and the Claude Code pane
+show one pull request line for each repository changed. A top-level coding
+run's own pull requests appear in `run_completed.pullRequests` and in the
+finished comment, as a delegated sub-run's always did.
+
+**Resume locally.** Local session resume maps only `/workspace`: a resumed
+session sees the default repository, and `/repos/<name>` folders are not
+recreated on the developer's machine. The pane lists each extra repository
+with its branch or commit and a clone command instead.
+
+For a worked example, see the fork-sync recipe in
+[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-three-repositories).
 
 ## See what a run was asked to do
 
