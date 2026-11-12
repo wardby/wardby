@@ -177,6 +177,10 @@ What the CLI needs:
   points at a plain `http` address unless it is `127.0.0.1`, `localhost` or `[::1]`.
 - Nothing else of Wardby's: the CLI needs no database or credentials.
 
+If a reverse proxy, load balancer or WAF sits in front of Wardby, it must pass
+`POST /oauth/loopback/start` and `POST /oauth/loopback/complete` to Wardby, the same
+as `/oauth/callback`.
+
 Security:
 
 - The `link` is a credential for 10 minutes. It names one owner, one secret name

@@ -502,12 +502,16 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     }
   });
 
-  /** A request's row state, to check a refusal consumed nothing. */
-  async function rowFor(state: string | null) {
-    const stateHash = createHash("sha256")
-      .update(state ?? "", "utf8")
-      .digest("hex");
-    return db.oAuthLinkRequest.findUnique({ where: { stateHash } });
+  /** The newest request a principal started (optionally of one purpose or context), to check a refusal consumed nothing. */
+  async function rowFor(principalId: string, where: { purpose?: string; context?: object } = {}) {
+    return db.oAuthLinkRequest.findFirst({
+      where: {
+        principalId,
+        ...(where.purpose !== undefined ? { purpose: where.purpose } : {}),
+        ...(where.context !== undefined ? { context: { equals: where.context } } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+    });
   }
 
   it("refuses a request of a purpose with no adapter without consuming its state", async () => {
@@ -522,7 +526,7 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     const state = new URL(started.authorizeUrl).searchParams.get("state");
     const done = await completeOAuthCallback({ db, adapters, cipher, state, code: "c", redirectUri: REDIRECT });
     expect(done).toEqual({ kind: "invalid" });
-    expect((await rowFor(state))?.callbackAt).toBeNull();
+    expect((await rowFor(p.id, { purpose: "other" }))?.callbackAt).toBeNull();
     // The adapter it belongs to can still complete it.
     const other = await completeOAuthCallback({
       db,
@@ -561,7 +565,7 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     expect(refused).toEqual({ kind: "invalid" });
     expect(seen).toEqual([{ principalId: p.id, purpose: "test", context: { label: "mine" } }]);
     expect(calls).toHaveLength(0);
-    expect((await rowFor(state))?.callbackAt).toBeNull();
+    expect((await rowFor(p.id))?.callbackAt).toBeNull();
     const accepted = await completeOAuthCallback({
       db,
       adapters,
@@ -605,12 +609,12 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     const loopbackState = await begin(true);
     expect(await run(loopbackState)).toEqual({ kind: "invalid" });
     expect(await run(loopbackState, "web")).toEqual({ kind: "invalid" });
-    expect((await rowFor(loopbackState))?.callbackAt).toBeNull();
+    expect((await rowFor(p.id, { context: { label: "k", loopback: true } }))?.callbackAt).toBeNull();
     expect((await run(loopbackState, "loopback")).kind).toBe("confirm");
 
     const webState = await begin(false);
     expect(await run(webState, "loopback")).toEqual({ kind: "invalid" });
-    expect((await rowFor(webState))?.callbackAt).toBeNull();
+    expect((await rowFor(p.id, { context: { label: "k" } }))?.callbackAt).toBeNull();
     expect((await run(webState)).kind).toBe("confirm");
 
     // An adapter without the hook is web only.
