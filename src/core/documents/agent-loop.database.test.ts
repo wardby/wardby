@@ -522,7 +522,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       await expect(
         sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
       ).rejects.toThrow("document_agent_unavailable");
-      // A grant gives it back.
+      // execute alone is not enough: an execute-only grantee may not give the agent task text (trigger_agent's rule).
       await db.resourceGrant.create({
         data: {
           resourceType: "agent",
@@ -535,11 +535,36 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       });
       await expect(
         sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+      ).rejects.toThrow("document_agent_unavailable");
+      // The agent's owner allowing others' task text gives it back.
+      await db.codingAgentProfile.update({
+        where: { agentId: codingAgentId },
+        data: { allowWebhookTaskOverride: true },
+      });
+      await expect(
+        sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
       ).resolves.toMatchObject({ runId: expect.any(String) });
     } finally {
+      await db.codingAgentProfile.update({
+        where: { agentId: codingAgentId },
+        data: { allowWebhookTaskOverride: false },
+      });
       await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: codingAgentId } });
       await db.agent.update({ where: { id: codingAgentId }, data: { ownerId: owner.id } });
     }
+  });
+
+  it("refuses a stored link whose path or base ref is unsafe: document_repo_link_invalid, nothing sent", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const runsBefore = await db.run.count({ where: { agentId: codingAgentId } });
+    for (const data of [{ path: "../etc/passwd.md" }, { path: "docs/notes.txt" }, { baseRef: "main..evil" }]) {
+      await db.document.update({ where: { id: docId }, data: { path, baseRef: "main", ...data } });
+      await expect(
+        sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t1.threadId] }),
+      ).rejects.toThrow("document_repo_link_invalid");
+    }
+    expect(await db.run.count({ where: { agentId: codingAgentId } })).toBe(runsBefore);
   });
 });
 

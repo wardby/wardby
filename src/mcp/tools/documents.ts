@@ -14,7 +14,12 @@ import { MAX_THREADS_PER_SEND, sendThreadsToAgent } from "../../core/documents/a
 import { requireScope } from "../auth/resource-server.js";
 import { isLocalRepository } from "../../coding/protocol.js";
 import { canonicalLocalRepository } from "../auth/repo-authorization.js";
-import { requireAgentAccess } from "../auth/access.js";
+import { assertAgentAccess } from "../auth/access.js";
+import {
+  assertDocumentAgentOverride,
+  validDocumentBaseRef,
+  validDocumentPath,
+} from "../../core/documents/agent-link.js";
 import type { McpRequestContext } from "../context.js";
 
 /** Codes whose status no suffix rule gives. */
@@ -183,7 +188,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "create_document",
     scope: "documents:write",
     description:
-      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you can execute); baseRef is optional.",
+      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you own, or one whose owner allows others' task text: codingProfile.allowWebhookTaskOverride). path is a repo-relative .md file; baseRef is optional.",
     inputSchema: {
       type: "object",
       properties: {
@@ -202,12 +207,24 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         throw new McpError(400, "document_repo_link_invalid");
       }
       let repository = input.repository;
+      let path = input.path;
+      let baseRef = input.baseRef;
       if (repository !== undefined) {
         if (input.agentId === undefined) throw new McpError(400, "document_repo_link_invalid");
-        const { agent } = await requireAgentAccess(ctx, input.agentId, "execute");
+        // Linking a coding agent takes execute on it plus the coding-task override rule (owner, or the
+        // owner's allowWebhookTaskOverride): the same rule as trigger_agent, re-checked at every send.
+        const row = await ctx.db.agent.findUnique({
+          where: { id: input.agentId },
+          include: { codingProfile: { select: { allowWebhookTaskOverride: true } } },
+        });
+        const { agent } = await assertAgentAccess(ctx, row, input.agentId, "execute");
         if (agent.kind !== "coding") throw new McpError(400, "document_repo_link_invalid");
+        await mapped(async () => assertDocumentAgentOverride(ctx.principal.id, agent));
+        path = await mapped(async () => validDocumentPath(input.path!));
+        if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
         if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
       }
+      if (repository === undefined && baseRef !== undefined) throw new McpError(400, "document_repo_link_invalid");
       const created = await mapped(() =>
         createDocument(ctx.db, ctx.providers.secrets, {
           ownerId: ctx.principal.id,
@@ -215,8 +232,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           markdown: input.markdown,
           agentId: input.agentId,
           repository,
-          path: input.path,
-          baseRef: input.baseRef,
+          path,
+          baseRef,
           via: "mcp",
         }),
       );

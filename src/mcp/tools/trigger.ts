@@ -49,6 +49,7 @@ import { assertAgentAccess } from "../auth/access.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
+import { codingOverrideAllowed, type CodingOverrideAgent } from "../../core/coding-override.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -132,22 +133,17 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 }
 
 /**
- * A non-owner's coding task or baseRef would steer what the owner's
- * repository authority does, so it is allowed only when the owner opted in
- * to non-owner task text (codingProfile.allowWebhookTaskOverride, the same
- * opt-in webhooks use). Otherwise a non-owner run uses the owner's
- * defaultTask. Resource-sharing grants spec §3.4.5.
+ * A non-owner's coding task, baseRef or repository is allowed only with the
+ * owner's opt-in: the shared rule in core/coding-override.ts. Otherwise a
+ * non-owner run uses the owner's defaultTask.
  */
 function assertOverrideAllowed(
   principalId: string,
-  agent: { id: string; ownerId: string | null; codingProfile: { allowWebhookTaskOverride: boolean } | null },
+  agent: { id: string } & CodingOverrideAgent,
   args: { task?: string; baseRef?: string; repository?: string },
 ): void {
-  // Strictly the owner: the stdio operator's owner-level access doesn't make
-  // it the owner whose repository authority the task steers (review M8).
-  const isOwner = agent.ownerId !== null && agent.ownerId === principalId;
-  if (isOwner || (args.task === undefined && args.baseRef === undefined && args.repository === undefined)) return;
-  if (!agent.codingProfile?.allowWebhookTaskOverride) {
+  if (args.task === undefined && args.baseRef === undefined && args.repository === undefined) return;
+  if (!codingOverrideAllowed(principalId, agent)) {
     throw new McpError(
       403,
       `Agent "${agent.id}": only its owner can pass a task, baseRef or repository, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,

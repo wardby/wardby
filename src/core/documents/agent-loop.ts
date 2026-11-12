@@ -31,6 +31,7 @@ import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
+import { assertDocumentAgentOverride, validDocumentBaseRef, validDocumentPath } from "./agent-link.js";
 import { listThreads, postAgentReply } from "./comments.js";
 import { MAX_MARKDOWN_BYTES } from "./limits.js";
 import { publishVersion } from "./service.js";
@@ -105,7 +106,7 @@ export function currentDocumentHeading(versionNumber: number): string {
 const THREADS_HEADING = "COMMENT THREADS:";
 const THREADS_CUT_MARKER = "\n\n[comment threads cut to fit the task]";
 
-/** The run's task: fixed text only. Nothing a person wrote is in it, except the path the document's owner linked. */
+/** The run's task: fixed text only. Nothing a person wrote is in it, except the validated path and ref the owner linked. */
 function instructions(doc: { path: string; baseRef: string | null }, versionNumber: number, numbers: number[]): string {
   const path = JSON.stringify(doc.path);
   return [
@@ -200,13 +201,23 @@ export async function sendThreadsToAgent(
   const agentId = doc.agentId;
   const agent = await db.agent.findUnique({
     where: { id: agentId },
-    select: { id: true, kind: true, ownerId: true, systemPrompt: true },
+    select: {
+      id: true,
+      kind: true,
+      ownerId: true,
+      systemPrompt: true,
+      codingProfile: { select: { allowWebhookTaskOverride: true } },
+    },
   });
   if (agent?.kind !== "coding") throw new Error("document_not_agent_linked");
-  // The owner linked the agent while holding execute on it; the link is only good while they still do.
+  // The owner linked the agent while holding execute on it and the right to give it task text (trigger_agent's
+  // rule); the link is only good while they still hold both.
   if (!atLeast("agent", await effectiveAccess(db, "agent", agent, doc.ownerId), "execute")) {
     throw new Error("document_agent_unavailable");
   }
+  assertDocumentAgentOverride(doc.ownerId, agent);
+  const path = validDocumentPath(doc.path);
+  const baseRef = doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
 
   const ids = [...new Set(input.threadIds)];
   if (ids.length === 0 || ids.length > MAX_THREADS_PER_SEND) throw new Error("comment_not_found");
@@ -236,7 +247,7 @@ export async function sendThreadsToAgent(
     idSet.has(t.id),
   );
   if (threads.length !== ids.length) throw new Error("comment_thread_closed");
-  const task = buildTask({ path: doc.path, baseRef: doc.baseRef }, version, threads, agent.systemPrompt);
+  const task = buildTask({ path, baseRef }, version, threads, agent.systemPrompt);
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
@@ -257,7 +268,7 @@ export async function sendThreadsToAgent(
       triggeredById: senderId,
       codingTask: task,
       codingRepository: doc.repository,
-      ...(doc.baseRef ? { codingBaseRef: doc.baseRef } : {}),
+      ...(baseRef ? { codingBaseRef: baseRef } : {}),
       // In the run's own transaction: the threads are marked sent only with the run, only while still
       // open, and only when no earlier run of theirs is still going or still to be answered.
       afterPersist: async (tx, run) => {

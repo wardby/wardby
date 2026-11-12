@@ -76,7 +76,8 @@ was not changed." on each thread. Each run's ending is answered once.
 
 Errors: `document_not_agent_linked` (no coding agent, repository or path, or
 the repository is not on the agent's list), `document_agent_unavailable` (the
-document's owner no longer has execute access to the agent),
+document's owner no longer has execute access to the agent, or is not its
+owner and the owner does not allow others' task text),
 `document_too_large_for_agent` (the current version is over 60,000 characters,
 or does not fit in a coding task with the agent's instructions),
 `comment_thread_closed` (a thread is not open), `comment_thread_already_sent` (a

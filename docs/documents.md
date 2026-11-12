@@ -105,7 +105,12 @@ public.
 ## Sending threads to a coding agent
 
 Link a document to a repository file at creation: `create_document` with
-`agentId` (a coding agent you can execute), `repository` and `path` together.
+`agentId`, `repository` and `path` together. The agent must be a coding
+agent you own, or one whose owner set `codingProfile.allowWebhookTaskOverride`
+and granted you `execute`: a send hands the agent task text, the same rule as
+`trigger_agent`. `path` is a repository-relative `.md` file of plain segments
+(letters, digits, `.`, `_`, `-`; at most 256 characters); `baseRef`, if given,
+must be a valid branch name.
 Then a person with `write` access sends open threads (up to 50) from the page or
 with `send_threads_to_agent`. Wardby starts one coding run (run trigger
 `comment`) with the document, the threads and the file path; when it ends, the
@@ -115,7 +120,8 @@ edit), and the agent replies on each thread and resolves those it addressed.
 
 Limits: 30 sends per document per hour, a document up to 60,000 characters,
 one run per thread at a time. The document owner must keep `execute` on the
-agent. Native agents do not edit documents in this phase. Documents with
+agent and remain allowed to give it task text (its owner, or the owner's
+`allowWebhookTaskOverride`); every send checks this again. Native agents do not edit documents in this phase. Documents with
 images, task lists or raw HTML open comment-only in the page, because the
 editor would rewrite them.
 

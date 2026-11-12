@@ -159,6 +159,59 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     expect(got.json).toMatchObject({ repository: "acme/docs", path: "docs/a.md" });
   });
 
+  it("links a coding agent only for its owner, or a grantee when the owner allows others' task text", async () => {
+    const base = { title: "G", markdown: "x", repository: "acme/docs", path: "docs/g.md", agentId: profiledAgentId };
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: profiledAgentId,
+        granteeKind: "principal",
+        granteePrincipalId: other.id,
+        granteeKey: `principal:${other.id}`,
+        level: "execute",
+      },
+    });
+    try {
+      const grantee = await connect(other);
+      const refused = await grantee("create_document", base);
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("document_agent_unavailable");
+      expect(await db.document.count({ where: { ownerId: other.id } })).toBe(0);
+      await db.codingAgentProfile.update({
+        where: { agentId: profiledAgentId },
+        data: { allowWebhookTaskOverride: true },
+      });
+      const allowed = await grantee("create_document", base);
+      expect(allowed.isError).toBe(false);
+    } finally {
+      await db.codingAgentProfile.update({
+        where: { agentId: profiledAgentId },
+        data: { allowWebhookTaskOverride: false },
+      });
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: profiledAgentId } });
+      await db.document.deleteMany({ where: { ownerId: other.id } });
+    }
+  });
+
+  it("refuses an unsafe path or base ref: document_repo_link_invalid", async () => {
+    const call = await connect(owner);
+    const base = { title: "P", markdown: "x", repository: "acme/docs", path: "docs/p.md", agentId: profiledAgentId };
+    for (const extra of [
+      { path: "../outside.md" },
+      { path: "/abs/p.md" },
+      { path: "docs/p.txt" },
+      { path: 'docs/"quoted".md' },
+      { path: `docs/${"a".repeat(300)}.md` },
+      { baseRef: "main..x" },
+      { baseRef: "-evil" },
+    ]) {
+      const out = await call("create_document", { ...base, ...extra });
+      expect(out.isError, JSON.stringify(extra)).toBe(true);
+      expect(out.text).toContain("document_repo_link_invalid");
+    }
+    expect((await call("create_document", { ...base, baseRef: "refs/heads/main" })).isError).toBe(false);
+  });
+
   it("lists and replies to threads with comment text wrapped as untrusted and secrets absent", async () => {
     const call = await connect(owner);
     const doc = (await call("create_document", { title: "C", markdown: "hello world" })).json;

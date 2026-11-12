@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Send comment threads to a coding agent
 
-A document can be linked, at creation, to a Markdown file in a repository and to a coding agent you can execute:
+A document can be linked, at creation, to a Markdown file in a repository and to a coding agent you own (or one whose owner granted you `execute` and set `codingProfile.allowWebhookTaskOverride`, the same rule as `trigger_agent` task text):
 
 ```json
 {
@@ -38,7 +38,8 @@ When the run ends:
 - A thread already in a running send is refused (`comment_thread_already_sent`).
 - The document must be at most 60,000 characters (`document_too_large_for_agent`).
 - Share-link guests cannot send.
-- The document owner needs `execute` on the agent (`document_agent_unavailable`).
+- The document owner needs `execute` on the agent and must own it, or the agent's owner must allow others' task text (`document_agent_unavailable`).
+- `path` must be a safe repository-relative `.md` path and `baseRef` a valid branch name (`document_repo_link_invalid`).
 
 Native agents do not edit documents yet. See [Documents](documents.md) and [Coding agent setup](../docs/coding-agent-setup.md).
 

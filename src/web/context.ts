@@ -139,6 +139,7 @@ const STATUS = {
   comment_anchor_invalid: 400,
   comment_too_long: 400,
   document_not_agent_linked: 400,
+  document_repo_link_invalid: 400,
   guest_name_invalid: 400,
   guest_email_invalid: 400,
   web_login_failed: 400,

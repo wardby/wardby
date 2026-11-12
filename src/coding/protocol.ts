@@ -244,6 +244,13 @@ function isGitHubRepository(value: string): boolean {
   }
 }
 
+const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+/** A repository-relative file path of plain segments ([A-Za-z0-9._-]), none of them `.` or `..`. */
+export function isSafeFilePath(path: string): boolean {
+  return SAFE_FILE_PATH.test(path) && !path.split("/").some((part) => part === "." || part === "..");
+}
+
 export function normalizeGitRef(value: string): string {
   let ref = value.trim();
   if (ref.startsWith("refs/heads/")) ref = ref.slice("refs/heads/".length);
