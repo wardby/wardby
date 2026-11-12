@@ -165,7 +165,6 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secrets (PostgreSQL, fake OAut
     expect(authorize.searchParams.get("client_id")).toMatch(/^fake-client-/);
     expect(outcome).toMatchObject({
       kind: "confirm",
-      signedInAs: "the account you signed in with",
       target: HOST,
       tool: "create_secret",
     });

@@ -246,7 +246,11 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         sendJson(res, 404, { error: "not_found" });
         return;
       }
-      await handleOAuthCallback(url, res, opts.oauthCallback, { target: "GitHub", tool: "link_host_account" });
+      await handleOAuthCallback(url, res, opts.oauthCallback, {
+        target: "GitHub",
+        tool: "link_host_account",
+        purposePrefix: "host-identity:",
+      });
       return;
     }
     if (url.pathname === OAUTH_CALLBACK_PATH && req.method === "GET") {

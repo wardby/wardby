@@ -54,6 +54,12 @@ export const SECRET_NOT_OAUTH =
   "secret_oauth_name_taken: a secret with this name already exists and is not an OAuth secret; choose another name";
 export const SECRET_OAUTH_CLIENT_ID_REQUIRED =
   "secret_oauth_client_id_required: the provider does not offer dynamic client registration; pass oauth.clientId (a client registered with the provider)";
+/** The resource is not a URL wardby can connect to and send a token to. */
+export const SECRET_OAUTH_RESOURCE_INVALID =
+  "secret_oauth_resource_invalid: the OAuth resource must be an https URL with a host name";
+/** A name, scope or clientId over its length limit. */
+export const SECRET_OAUTH_INPUT_TOO_LONG =
+  "secret_oauth_input_too_long: the secret name, oauth.scope or oauth.clientId is too long";
 /** Any cipher (KMS) failure on the OAuth path; the cause's text is never carried. */
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
@@ -268,10 +274,22 @@ export async function startOAuthSecretConnect(input: {
   now?: Date;
 }): Promise<{ authorizeUrl: string; expiresAt: Date }> {
   const options = input.options ?? {};
-  boundedString(input.name, 1024);
-  if (input.scope !== undefined) boundedString(input.scope, 1024);
-  if (input.clientId !== undefined) boundedString(input.clientId, 512);
-  const resource = normaliseResource(input.resource, options);
+  try {
+    boundedString(input.name, 1024);
+    if (input.scope !== undefined) boundedString(input.scope, 1024);
+    if (input.clientId !== undefined) boundedString(input.clientId, 512);
+  } catch {
+    throw new Error(SECRET_OAUTH_INPUT_TOO_LONG);
+  }
+  let resource: string;
+  try {
+    resource = normaliseResource(input.resource, options);
+    // Refuse a host the broker could not send to (an IP address) before asking it anything.
+    validatedBroker(resource);
+  } catch {
+    // Fixed wording: the URL rule's own sentence names the MCP server, not this flow.
+    throw new Error(SECRET_OAUTH_RESOURCE_INVALID);
+  }
 
   const existing = await input.db.secret.findUnique({
     where: { ownerId_name: { ownerId: input.ownerId, name: input.name } },
@@ -290,7 +308,11 @@ export async function startOAuthSecretConnect(input: {
     throw err; // Every OAuthProtocolError message is a fixed sentence.
   }
   // Fail now, not at confirm, on a resource the broker could not send to (e.g. an IP address).
-  validatedBroker(meta.resource);
+  try {
+    validatedBroker(meta.resource);
+  } catch {
+    throw new Error(SECRET_OAUTH_RESOURCE_INVALID);
+  }
 
   let client: OAuthClient;
   if (input.clientId !== undefined) {
@@ -335,7 +357,7 @@ export function oauthSecretAdapter(
     complete: async ({ code, codeVerifier, redirectUri, context, iss }) => {
       const ctx = parseContext(context);
       // RFC 9207: when the provider names the issuer, it must be the one discovered.
-      if (iss !== undefined && iss !== ctx.meta.issuer) {
+      if (iss != null && iss !== ctx.meta.issuer) {
         throw new OAuthSecretFlowError("issuer_mismatch", "The sign-in came back from a different issuer.");
       }
       const clientSecret = ctx.clientSecretCiphertext ? await decrypt(cipher, ctx.clientSecretCiphertext) : undefined;
@@ -365,7 +387,7 @@ export function oauthSecretAdapter(
     // Only fixed codes: an OAuthProtocolError's code, or this module's own reason.
     safeReason: (err) =>
       err instanceof OAuthProtocolError ? err.code : err instanceof OAuthSecretFlowError ? err.reason : "unknown",
-    describe: (r) => ({ signedInAs: "the account you signed in with", target: r.resourceHost, tool: "create_secret" }),
+    describe: (r) => ({ target: r.resourceHost, tool: "create_secret" }),
   };
 }
 

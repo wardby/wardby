@@ -43,7 +43,7 @@ function fakeDb(seed: { name: string; ownerId: string; broker: unknown }[] = [])
   }
   const outcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
-  return {
+  const fake = {
     secret: {
       findUnique: async () => null,
       findMany: async ({ where: { ownerId } }: { where: { ownerId: string } }) =>
@@ -104,6 +104,12 @@ function fakeDb(seed: { name: string; ownerId: string; broker: unknown }[] = [])
       },
     },
   } as unknown as import("#prisma").PrismaClient;
+  // The real client runs a transaction on one connection; the fake has a single store.
+  Object.assign(fake, {
+    $transaction: async (fn: (tx: unknown) => unknown) => fn(fake),
+    $queryRaw: async () => [],
+  });
+  return fake;
 }
 
 let server: Server | undefined;

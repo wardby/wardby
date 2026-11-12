@@ -48,7 +48,7 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
   let counter = 0;
   const mcpServerRows: { name: string; secretNames: string[] }[] = [];
 
-  return {
+  const fake = {
     resourceGrant: fakeResourceGrants(grants),
     hostProvider: { count: async () => 0, findMany: async () => [] },
     hostProviderCredential: { findMany: async () => [] },
@@ -179,6 +179,12 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
       },
     },
   } as unknown as import("#prisma").PrismaClient;
+  // The real client runs a transaction on one connection; the fake has a single store.
+  Object.assign(fake, {
+    $transaction: async (fn: (tx: unknown) => unknown) => fn(fake),
+    $queryRaw: async () => [],
+  });
+  return fake;
 }
 
 function fakeCtx(

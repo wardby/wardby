@@ -121,37 +121,39 @@ export async function createSecret(
 ): Promise<Secret> {
   boundedString(name, 1024);
   boundedString(value, 65_536);
-  const named = await db.secret.findUnique({
-    where: { ownerId_name: { ownerId, name } },
-    select: { oauth: true },
-  });
-  if (named?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
-  if (value.length < MIN_WEBHOOK_SECRET_LENGTH) {
-    const current = await db.secret.findUnique({ where: { ownerId_name: { ownerId, name } }, select: { id: true } });
-    if (current && (await db.hostProvider.count({ where: { webhookSecretId: current.id } })) > 0) {
-      throw new Error(WEBHOOK_SECRET_SHORT);
-    }
-  }
   const broker = options.broker ? parseSecretBrokerConfig(options.broker) : undefined;
   if (broker) assertBrokerableValue(broker, value);
   const ciphertext = await cipher.encrypt(value);
   const keyId = cipher.keyId();
   if (!broker) {
-    // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
-    const existing = await db.secret.findUnique({
-      where: { ownerId_name: { ownerId, name } },
-      select: { broker: true },
-    });
-    if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
-    return db.secret.upsert({
-      where: { ownerId_name: { ownerId, name } },
-      create: { name, ciphertext, keyId, ownerId },
-      update: { ciphertext, keyId },
+    // One transaction: the OAuth check, the brokerable check and the write see the same row, which is
+    // locked so a connect finishing at the same moment cannot be overwritten by a plain value.
+    return db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "ownerId" = ${ownerId} AND "name" = ${name} FOR UPDATE`;
+      const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
+      if (existing?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+      if (value.length < MIN_WEBHOOK_SECRET_LENGTH && existing) {
+        if ((await tx.hostProvider.count({ where: { webhookSecretId: existing.id } })) > 0) {
+          throw new Error(WEBHOOK_SECRET_SHORT);
+        }
+      }
+      // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
+      if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
+      return tx.secret.upsert({
+        where: { ownerId_name: { ownerId, name } },
+        create: { name, ciphertext, keyId, ownerId },
+        update: { ciphertext, keyId },
+      });
     });
   }
   return db.$transaction(async (tx) => {
     const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
     if (existing?.oauth != null) throw new Error(SECRET_OAUTH_MANAGED);
+    if (existing && value.length < MIN_WEBHOOK_SECRET_LENGTH) {
+      if ((await tx.hostProvider.count({ where: { webhookSecretId: existing.id } })) > 0) {
+        throw new Error(WEBHOOK_SECRET_SHORT);
+      }
+    }
     const before = existing ? brokerOf(existing) : null;
     const secret = await tx.secret.upsert({
       where: { ownerId_name: { ownerId, name } },

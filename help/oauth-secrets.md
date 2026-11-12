@@ -52,6 +52,7 @@ still used by an MCP server or host provider is not deleted until you update or 
   [`secret_oauth_discovery_failed`](errors/secret-oauth-discovery-failed.md).
 - If the provider cannot be reached while you connect, you get
   [`secret_oauth_provider_unavailable`](errors/secret-oauth-provider-unavailable.md); try again.
+- A resource that is not an https URL with a host name fails with `secret_oauth_resource_invalid`, and an over-long name, scope or client id with `secret_oauth_input_too_long` (0.9.12 and later; see the secrets guide).
 - If tokens cannot be encrypted or decrypted you get
   [`secret_oauth_encryption_failed`](errors/secret-oauth-encryption-failed.md); check the secret key.
 

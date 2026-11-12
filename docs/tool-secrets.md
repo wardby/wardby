@@ -116,6 +116,11 @@ Provider requirements:
   URI `https://<your-wardby-host>/oauth/callback` and pass its id as
   `oauth.clientId`; without it the call fails with
   [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md).
+- `oauth.resource` must be an `https` URL with a host name (not an IP address); otherwise the call fails with
+  [`secret_oauth_resource_invalid`](../help/errors/secret-oauth-resource-invalid.md). A secret name, scope or
+  client id over its length limit fails with
+  [`secret_oauth_input_too_long`](../help/errors/secret-oauth-input-too-long.md).
+- Send `confirmationCode` on its own with the name; combining it with `value`, `broker` or `oauth` is refused.
 - `oauth.scope` asks for specific scopes. Omit it to use what the provider
   grants by default; pick the narrowest scope that does the job, since the
   signed-in user's access is what every agent gets.

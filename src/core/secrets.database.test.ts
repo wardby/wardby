@@ -178,4 +178,40 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets (database)", () => 
       setSecretBroker(db, cipher, { ownerId: owner, name: "NOPE", broker, actorId: owner, via: "mcp" }),
     ).rejects.toThrow("secret_not_found");
   });
+  it("createSecret's OAuth check holds against a connect committing at the same moment", async () => {
+    const owner = "oauth-race-" + randomUUID();
+    await db.principal.create({ data: { id: owner, subject: owner } });
+    try {
+      const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+      await db.secret.create({ data: { ownerId: owner, name: "racy", ciphertext: "old", keyId: "test" } });
+      let release!: () => void;
+      const hold = new Promise<void>((r) => (release = r));
+      let locked!: () => void;
+      const lockedP = new Promise<void>((r) => (locked = r));
+      // A "connect" holds the row, turns it into an OAuth secret, then commits.
+      const connecting = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Secret" WHERE "ownerId" = ${owner} AND "name" = 'racy' FOR UPDATE`;
+        locked();
+        await hold;
+        await tx.secret.update({
+          where: { ownerId_name: { ownerId: owner, name: "racy" } },
+          data: { oauth: { status: "connected" } },
+        });
+      });
+      await lockedP;
+      const plain = createSecret("racy", "plain-value", owner, cipher, db);
+      const outcome = plain.then(
+        () => "written",
+        (e: Error) => e.message,
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      release();
+      await connecting;
+      expect(await outcome).toContain("secret_oauth_managed");
+      expect((await db.secret.findFirstOrThrow({ where: { ownerId: owner, name: "racy" } })).ciphertext).toBe("old");
+    } finally {
+      await db.secret.deleteMany({ where: { ownerId: owner } });
+      await db.principal.deleteMany({ where: { id: owner } });
+    }
+  });
 });

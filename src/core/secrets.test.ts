@@ -51,7 +51,7 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
   const agentSecrets: FakeAgentSecretRow[] = [];
   let counter = 0;
 
-  return {
+  const fake = {
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();
@@ -137,6 +137,12 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
       },
     },
   } as unknown as import("#prisma").PrismaClient;
+  // The real client runs a transaction on one connection; the fake has a single store.
+  Object.assign(fake, {
+    // $queryRaw exists only on the transaction: its presence on the client selects the SQL accessor path.
+    $transaction: async (fn: (tx: unknown) => unknown) => fn({ ...fake, $queryRaw: async () => [] }),
+  });
+  return fake;
 }
 
 describe("core/secrets", () => {

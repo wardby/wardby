@@ -219,4 +219,43 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     expect(r.text).not.toContain("x?t=");
     await close();
   });
+
+  it("refuses confirmationCode together with value, broker or oauth", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    for (const extra of [
+      { value: "x" },
+      { broker: { hosts: ["a.example"], placement: { kind: "query", name: "k" } } },
+      { oauth: { resource: fake.mcpUrl } },
+    ]) {
+      const r = await call("create_secret", { name: "bs", confirmationCode: "AAAA-AAAA", ...extra });
+      expect(r.isError).toBe(true);
+      expect(r.text).toContain("Pass confirmationCode on its own");
+    }
+    await close();
+  });
+
+  it("answers bad OAuth input with 400 and OAuth wording", async () => {
+    const p = await principal();
+    const { call, close } = await connect(p);
+    const http = await call("create_secret", { name: "bs", oauth: { resource: "ftp://x.example/mcp" } });
+    expect(http.isError).toBe(true);
+    expect(http.text).toContain(
+      "secret_oauth_resource_invalid: the OAuth resource must be an https URL with a host name",
+    );
+    const ip = await call("create_secret", { name: "bs", oauth: { resource: "https://10.1.2.3/mcp" } });
+    expect(ip.isError).toBe(true);
+    expect(ip.text).toContain("secret_oauth_resource_invalid");
+    expect(ip.text).not.toContain("MCP server URL");
+    const longName = await call("create_secret", { name: "n".repeat(2000), oauth: { resource: fake.mcpUrl } });
+    expect(longName.isError).toBe(true);
+    expect(longName.text).toContain("secret_oauth_input_too_long");
+    expect(longName.text).not.toContain("bridge_input_limit");
+    const longClient = await call("create_secret", {
+      name: "bs",
+      oauth: { resource: fake.mcpUrl, clientId: "c".repeat(600) },
+    });
+    expect(longClient.text).toContain("secret_oauth_input_too_long");
+    await close();
+  });
 });

@@ -23,6 +23,8 @@ import {
   SECRET_NOT_OAUTH,
   SECRET_OAUTH_CIPHER_FAILED,
   SECRET_OAUTH_CLIENT_ID_REQUIRED,
+  SECRET_OAUTH_INPUT_TOO_LONG,
+  SECRET_OAUTH_RESOURCE_INVALID,
   SECRET_OAUTH_DISCOVERY_FAILED,
   SECRET_OAUTH_MANAGED,
   SECRET_OAUTH_PROVIDER_UNAVAILABLE,
@@ -76,6 +78,9 @@ function mapSecretError(err: unknown): never {
   throw err;
 }
 
+const CONFIRMATION_CODE_ALONE =
+  "Pass confirmationCode on its own with the name; do not combine it with value, broker or oauth.";
+
 const OAUTH_NEEDS_HTTP =
   "Connecting an OAuth secret needs wardby's HTTP transport (the sign-in callback is served at MCP_CANONICAL_URI); " +
   "use an MCP client connected over HTTP.";
@@ -102,6 +107,8 @@ function mapOAuthSecretError(err: unknown): never {
   }
   const message = err instanceof Error ? err.message : "";
   if (message.startsWith("secret_oauth_discovery_failed")) throw new McpError(400, SECRET_OAUTH_DISCOVERY_FAILED);
+  if (message.startsWith("secret_oauth_resource_invalid")) throw new McpError(400, SECRET_OAUTH_RESOURCE_INVALID);
+  if (message.startsWith("secret_oauth_input_too_long")) throw new McpError(400, SECRET_OAUTH_INPUT_TOO_LONG);
   if (message.startsWith("secret_oauth_client_id_required")) throw new McpError(400, SECRET_OAUTH_CLIENT_ID_REQUIRED);
   if (message.startsWith("secret_oauth_name_taken")) throw new McpError(409, SECRET_NOT_OAUTH);
   if (message.startsWith("secret_oauth_encryption_failed")) throw new McpError(500, SECRET_OAUTH_CIPHER_FAILED);
@@ -236,6 +243,9 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     ) => {
       const hostManager = await requireHostsAdminIfProviderSecret(ctx, args.name);
       if (args.confirmationCode !== undefined) {
+        if (args.value !== undefined || args.broker !== undefined || args.oauth !== undefined) {
+          throw new McpError(400, CONFIRMATION_CODE_ALONE);
+        }
         try {
           return textResult(
             await finishOAuthSecretConnect({

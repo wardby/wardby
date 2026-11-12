@@ -439,4 +439,28 @@ describe.skipIf(!process.env.DATABASE_URL)("shared OAuth link flow (PostgreSQL)"
     expect(ok.kind).toBe("confirm");
     expect(calls[0]).toMatchObject({ iss: "https://idp.invalid" });
   });
+
+  it("fails closed on a present-but-empty iss (it is forwarded, not dropped)", async () => {
+    const p = await principal();
+    const started = await startOAuthLink({
+      db,
+      adapter: testAdapter,
+      principalId: p.id,
+      context: { label: "iss-empty" },
+      redirectUri: REDIRECT,
+    });
+    const state = new URL(started.authorizeUrl).searchParams.get("state");
+    calls.length = 0;
+    const done = await completeOAuthCallback({
+      db,
+      adapters,
+      cipher,
+      state,
+      code: "idp-code",
+      iss: "",
+      redirectUri: REDIRECT,
+    });
+    expect(done.kind).toBe("confirm");
+    expect(calls[0]).toHaveProperty("iss", "");
+  });
 });
