@@ -1,0 +1,9 @@
+{
+  "title": "Little Fern Coffee",
+  "boards": [
+    { "id": "home",  "name": "Home",  "file": "boards/home.html",  "width": 1280 },
+    { "id": "menu",  "name": "Menu",  "file": "boards/menu.html",  "width": 1280 },
+    { "id": "about", "name": "About", "file": "boards/about.html", "width": 1280 },
+    { "id": "visit", "name": "Visit", "file": "boards/visit.html", "width": 1280 }
+  ]
+}

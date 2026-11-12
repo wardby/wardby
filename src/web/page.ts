@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { ServerResponse } from "node:http";
+import { escapeHtml } from "../core/html-escape.js";
 import { pageHeaders } from "./security.js";
 import { STATIC_PREFIX, type AssetManifest } from "./static.js";
 
@@ -26,12 +27,7 @@ export interface PageBootstrap {
   logoutUrl: string;
 }
 
-const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-
-/** Escapes text for HTML content and attribute values. */
-export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
-}
+export { escapeHtml };
 
 /**
  * JSON that is safe inside an inline <script>: "<", ">", "&" and the JS line
