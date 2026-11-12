@@ -2470,6 +2470,16 @@ describe("GitHubAppClient.resolveCommit", () => {
     expect(JSON.parse(bodyText(calls[1].init?.body)).permissions).toEqual({ contents: "read" });
   });
 
+  it.each([
+    ["feature/x", "feature/x"],
+    ["release/1.0", "release/1.0"],
+    ["fix/a#b c?d%e", "fix/a%23b%20c%3Fd%25e"],
+  ])("keeps the slashes of ref %s and encodes each segment", async (ref, encoded) => {
+    const { calls, client } = setup({ installed: true });
+    await client.resolveCommit("upstream-org/upstream", ref, "write");
+    expect(commitCall(calls).url).toMatch(new RegExp(`/repos/upstream-org/upstream/commits/${encoded}$`));
+  });
+
   it.each([404, 422])("returns null on %i", async (status) => {
     const { client } = setup({ installed: true, status });
     await expect(client.resolveCommit("upstream-org/upstream", "nope", "read")).resolves.toBeNull();

@@ -44,6 +44,12 @@ describe("LocalRemote.resolveCommit", () => {
   it("returns what git rev-parse names", async () => {
     await expect(remote().resolveCommit(`local:${repo}`, "main")).resolves.toBe(await git("rev-parse", "main"));
   });
+  it("resolves a slashed branch name", async () => {
+    await git("branch", "feature/x");
+    await expect(remote().resolveCommit(`local:${repo}`, "feature/x")).resolves.toBe(
+      await git("rev-parse", "feature/x"),
+    );
+  });
   it("returns null for a ref that does not exist", async () => {
     await expect(remote().resolveCommit(`local:${repo}`, "nope")).resolves.toBeNull();
   });

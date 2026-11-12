@@ -941,7 +941,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   async resolveCommit(repository: string, ref: string, access: "read" | "write"): Promise<string | null> {
     const normalized = normalizeGitHubRepository(repository);
     const [owner, name] = normalized.split("/");
-    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(ref)}`;
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${ref.split("/").map(encodeURIComponent).join("/")}`;
     const read = async (bearer: string | null) => {
       const response = await this.requestJson(
         path,
