@@ -121,7 +121,17 @@ Wardby roles:
 ```dotenv
 AUTH_ROLE_CLAIM=groups   # claim name or dotted path
 AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
+# Optional: browser sign-in for document pages (OIDC authorization code + PKCE).
+WEB_OIDC_CLIENT_ID=your-web-client-id
+# WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
+# WEB_OIDC_SCOPES=openid profile email  (the default)
 ```
+
+For browser sign-in, register a web client at the provider with the redirect
+URI `https://wardby.example.com/web/callback` (the origin of
+`MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
+access tokens MCP clients receive, so both sign-ins map to the same Wardby
+principal.
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
 
@@ -243,7 +253,17 @@ AUTH_AUDIENCE=https://wardby.example.com/mcp
 # Optional: Wardby roles (see "Wardby roles" above).
 AUTH_ROLE_CLAIM=groups
 AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
+# Optional: browser sign-in for document pages (OIDC authorization code + PKCE).
+WEB_OIDC_CLIENT_ID=your-web-client-id
+# WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
+# WEB_OIDC_SCOPES=openid profile email  (the default)
 ```
+
+For browser sign-in, register a web client at the provider with the redirect
+URI `https://wardby.example.com/web/callback` (the origin of
+`MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
+access tokens MCP clients receive, so both sign-ins map to the same Wardby
+principal.
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's
 metadata. Copy `AUTH_JWKS_URI` from the provider's metadata rather than

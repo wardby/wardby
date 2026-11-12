@@ -761,6 +761,26 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   };
 }
 
+export interface WebOidcConfig {
+  /** WEB_OIDC_CLIENT_ID: the IdP client the document pages sign in with (delegating mode). Unset: browser sign-in is off. */
+  clientId?: string;
+  /** WEB_OIDC_CLIENT_SECRET: only for a confidential client; a public client uses PKCE alone. */
+  clientSecret?: string;
+  /** WEB_OIDC_SCOPES: space-separated; `openid` is always requested. */
+  scopes: string;
+}
+
+export const DEFAULT_WEB_OIDC_SCOPES = "openid profile email";
+
+/** Browser sign-in (OIDC authorization code + PKCE) against the delegating-mode issuer, AUTH_ISSUER. */
+export function loadWebOidcConfig(env: NodeJS.ProcessEnv = process.env): WebOidcConfig {
+  return {
+    clientId: env.WEB_OIDC_CLIENT_ID?.trim() || undefined,
+    clientSecret: env.WEB_OIDC_CLIENT_SECRET || undefined,
+    scopes: env.WEB_OIDC_SCOPES?.trim() || DEFAULT_WEB_OIDC_SCOPES,
+  };
+}
+
 export interface SecretConfig {
   /** app-key mode: 32-byte hex-encoded AES-256-GCM master key. */
   appKey?: string;
