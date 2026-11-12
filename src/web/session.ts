@@ -55,6 +55,10 @@ export async function createWebSession(
   if (Boolean(owner.principalId) === Boolean(owner.guestId)) {
     throw new Error("web session needs exactly one of principal or guest");
   }
+  // A member's session is principal-only: a share link raises their access per request, never by session,
+  // so revoking a link never signs a member out and opening a second link never drops the first.
+  if (owner.principalId && owner.shareLinkId) throw new Error("a member web session carries no share link");
+  if (owner.guestId && !owner.shareLinkId) throw new Error("a guest web session needs its share link");
   const token = randomBytes(32).toString("base64url");
   const csrf = csrfFor(token);
   const now = Date.now();

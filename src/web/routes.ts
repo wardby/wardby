@@ -8,9 +8,15 @@
  *   means no session.
  * - Every state-changing request needs Origin = the canonical origin and the
  *   session's CSRF value in `x-wardby-csrf` (logout included, R9b).
- * - Sign-in, the self-hosted bridge, guest registration and the share-link
- *   upgrade end the request's existing web session before creating a new one
- *   (R9c).
+ * - Sign-in, the self-hosted bridge and guest registration end the request's
+ *   existing web session before creating a new one (R9c).
+ * - A member's web session is principal-only. A share link raises a member's
+ *   access per request: the page served at /s/<token> hands the token to the
+ *   app, which sends it as `x-wardby-share`; access is then the higher of the
+ *   member's own grant and the live link's permission, on that link's
+ *   document only. Opening a link never changes the session.
+ * - Guests are rate-limited (rate-limits.ts): registrations per link and per
+ *   client address, comments per guest.
  * - Responses carry fixed error codes only (R10); unknown errors are logged
  *   by name, never by message.
  *
@@ -30,7 +36,6 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { accessRank } from "../core/grants.js";
 import { documentAccess, type Viewer } from "../core/documents/access.js";
 import { registerGuest, resolveShareToken } from "../core/documents/share-links.js";
 import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
@@ -58,6 +63,7 @@ import {
 } from "./context.js";
 import { clearLoginStateCookie } from "./oidc-login.js";
 import { sendDocumentPage, sendErrorPage, type PageBootstrap, type PageViewer } from "./page.js";
+import { clientAddress, GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
 import { isSafeReturnTo } from "./return-to.js";
 import { assertCsrf, assertSameOrigin } from "./security.js";
 import {
@@ -231,21 +237,6 @@ async function sharePage(req: IncomingMessage, res: ServerResponse, token: strin
   // A guest of another link is a stranger here (their session is left alone).
   if (ctx.kind === "guest" && ctx.shareLinkId !== link.id) ctx = { kind: "none" };
 
-  if (ctx.kind === "member" && ctx.viewer.shareLinkId !== link.id) {
-    const own = await documentAccess(deps.db, document.id, { kind: "principal", principalId: ctx.principalId });
-    if (accessRank("document", linkLevel(link.permission)) > accessRank("document", own)) {
-      // Carry the link in a fresh session (R9c: the old one ends first).
-      await endWebSession(deps.db, req.headers.cookie, options);
-      const created = await createWebSession(deps.db, { principalId: ctx.principalId, shareLinkId: link.id }, options);
-      addCookie(res, created.cookie);
-      ctx = {
-        ...ctx,
-        csrf: created.csrf,
-        viewer: { kind: "principal", principalId: ctx.principalId, shareLinkId: link.id },
-      };
-    }
-  }
-
   const manifest = await readManifest(deps.assetsRoot ?? DEFAULT_ASSETS_ROOT);
   if (!manifest) throw new Error("web_assets_missing");
   let csrf: string;
@@ -256,7 +247,10 @@ async function sharePage(req: IncomingMessage, res: ServerResponse, token: strin
     viewer = { kind: "anonymous", name: null, access: linkLevel(link.permission) };
   } else {
     csrf = ctx.csrf;
-    viewer = await describeViewer(deps, document.id, ctx.viewer);
+    // A member is shown the higher of their grant and this link; the session is not touched (the app
+    // sends the token with each request to get the same access).
+    const shown: Viewer = ctx.kind === "member" ? { ...ctx.viewer, shareLinkId: link.id } : ctx.viewer;
+    viewer = await describeViewer(deps, document.id, shown);
   }
   sendDocumentPage(res, {
     title: document.title,
@@ -287,6 +281,10 @@ async function registerGuestRoute(
   if (!sessionCsrfMatches(req, ctx) && !preCsrfMatches(req, options)) throw new Error("web_csrf_failed");
   if (!isJsonObject(body)) throw new Error("expected_json_object");
   if (resolved.link.permission !== "comment") throw new Error("document_access_denied");
+  const limits = { ...GUEST_RATE_LIMITS, ...deps.guestLimits };
+  const limiter = deps.rateLimiter ?? webRateLimiter(deps.db);
+  await limiter.check(WEB_RATE_BUCKETS.registrationPerAddress, clientAddress(req), limits.registrationsPerAddress);
+  await limiter.check(WEB_RATE_BUCKETS.registrationPerLink, resolved.link.id, limits.registrationsPerLink);
   const name = body.name;
   const email = body.email;
   if (typeof name !== "string" || (email !== undefined && email !== null && typeof email !== "string")) {
@@ -423,5 +421,13 @@ async function handleApi(
     assertCsrf(req, ctx.session);
     if (method !== "DELETE" && !isJsonObject(body)) throw new Error("expected_json_object");
   }
-  return route.run(ctx.viewer, false, isJsonObject(body) ? body : {});
+  let viewer: Viewer = ctx.viewer;
+  const shareToken = req.headers[SHARE_HEADER];
+  if (ctx.kind === "member" && typeof shareToken === "string") {
+    // Per-request link elevation for a member; accessTo applies it only on the link's own document,
+    // and only while the link is live. A dead or unknown token leaves the member's own access.
+    const resolved = await resolveShareToken(deps.db, shareToken);
+    if (resolved) viewer = { ...ctx.viewer, shareLinkId: resolved.link.id };
+  }
+  return route.run(viewer, false, isJsonObject(body) ? body : {});
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../db.js";
@@ -14,6 +14,8 @@ import {
   revokeShareLink,
   validateSessionLink,
 } from "./share-links.js";
+
+const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
 
 describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
   const db = createPrismaClient();
@@ -152,18 +154,14 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
     expect(await validateSessionLink(db, { guestId, shareLinkId: link.id })).toEqual({ kind: "dead" });
   });
 
-  it("revalidates a signed-in member's link session (principalId + shareLinkId)", async () => {
+  it("never binds a member's session to a link, so revoking a link leaves members signed in", async () => {
     const link = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "comment" });
     const live = await validateSessionLink(db, { shareLinkId: link.id });
     expect(live.kind === "link" && live.permission).toBe("comment");
-    const memberSession = await createWebSession(db, { principalId: owner.id, shareLinkId: link.id });
-    await db.documentShareLink.update({ where: { id: link.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await expect(createWebSession(db, { principalId: owner.id, shareLinkId: link.id })).rejects.toThrow();
+    const memberSession = await createWebSession(db, { principalId: owner.id });
+    await revokeShareLink(db, { shareLinkId: link.id, viewer: view(owner) });
     expect(await validateSessionLink(db, { shareLinkId: link.id })).toEqual({ kind: "dead" });
-    const link2 = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "view" });
-    const s2 = await createWebSession(db, { principalId: owner.id, shareLinkId: link2.id });
-    await revokeShareLink(db, { shareLinkId: link2.id, viewer: view(owner) });
-    expect(await validateSessionLink(db, { shareLinkId: link2.id })).toEqual({ kind: "dead" });
-    expect(await db.webSession.count({ where: { shareLinkId: link2.id } })).toBe(0);
-    expect(memberSession.token).not.toBe(s2.token);
+    expect(await db.webSession.count({ where: { tokenHash: sha256Hex(memberSession.token) } })).toBe(1);
   });
 });

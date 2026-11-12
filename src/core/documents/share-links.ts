@@ -78,8 +78,8 @@ export type SessionLinkState =
 
 /**
  * Revalidates, on every request, the share link behind a web session (R9a).
- * Applies to any session carrying a shareLinkId: guest sessions and signed-in
- * members who entered via /s/<token>.
+ * Only guest sessions carry a shareLinkId (a member's session is
+ * principal-only; members get link access per request).
  * - `none`: the session has no shareLinkId; this helper is not concerned.
  * - `dead`: the link is revoked, expired or gone, its document is gone, or a
  *   guestId is present and that guest is missing or belongs to another link.

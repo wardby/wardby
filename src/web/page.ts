@@ -16,7 +16,11 @@ export interface PageBootstrap {
   /** This session's CSRF value (or, on a share-link page without a session, the pre-session one). */
   csrf: string;
   viewer: PageViewer;
-  /** Present on /s/<token> pages: the app sends it to read as an anonymous visitor and to register a guest. */
+  /**
+   * Present on /s/<token> pages. The app sends it as `x-wardby-share` on every API request from this
+   * page: an anonymous visitor reads with it, and a signed-in member gets the link's permission with it
+   * (their session never carries the link). It also addresses guest registration.
+   */
   shareToken?: string;
   loginUrl: string;
   logoutUrl: string;

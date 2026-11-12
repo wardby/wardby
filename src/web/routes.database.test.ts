@@ -16,6 +16,7 @@ import { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { IdentityService } from "../mcp/auth/self-hosted/credentials.js";
 import { setLogLineFilter } from "../core/logger.js";
 import type { OidcLogin } from "./oidc-login.js";
+import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, WEB_RATE_WINDOW_MS, webRateKeyHasher } from "./rate-limits.js";
 import { createWebSession } from "./session.js";
 import type { WebDeps } from "./routes.js";
 
@@ -118,11 +119,16 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
   async function startServer(extra: Partial<WebDeps> = {}) {
     port = await freePort();
     origin = `http://127.0.0.1:${port}`;
-    const canonicalUri = `${origin}/mcp`;
+    return startServerAt(port, extra);
+  }
+
+  async function startServerAt(atPort: number, extra: Partial<WebDeps> = {}) {
+    const base = `http://127.0.0.1:${atPort}`;
+    const canonicalUri = `${base}/mcp`;
     const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri } });
     return startHttpServer({
       mcp,
-      config: { canonicalUri, httpBind: { host: "127.0.0.1", port }, authProviderKind: "delegating" },
+      config: { canonicalUri, httpBind: { host: "127.0.0.1", port: atPort }, authProviderKind: "delegating" },
       auth: { authProvider: {} as AuthProvider, db, providers: {} as never },
       web: {
         db,
@@ -141,24 +147,40 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
     return { jar: new Jar({ "wardby-dev-web": created.token }), csrf: created.csrf, token: created.token };
   };
 
-  const call = (
-    path: string,
-    init: { method?: string; jar?: Jar; csrf?: string; body?: unknown; origin?: string | null; headers?: object } = {},
-  ) =>
-    fetch(origin + path, {
+  type CallInit = {
+    method?: string;
+    jar?: Jar;
+    csrf?: string;
+    body?: unknown;
+    origin?: string | null;
+    headers?: object;
+  };
+  const call = (path: string, init: CallInit = {}) => callAt(origin, path, init);
+  const callAt = (base: string, path: string, init: CallInit = {}) =>
+    fetch(base + path, {
       method: init.method ?? "GET",
       redirect: "manual",
       headers: {
         ...(init.jar ? { cookie: init.jar.header() } : {}),
         ...(init.csrf ? { "x-wardby-csrf": init.csrf } : {}),
         ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
-        ...(init.origin === null ? {} : init.method && init.method !== "GET" ? { origin: init.origin ?? origin } : {}),
+        ...(init.origin === null ? {} : init.method && init.method !== "GET" ? { origin: init.origin ?? base } : {}),
         ...(init.headers ?? {}),
       },
       body: init.body === undefined ? undefined : typeof init.body === "string" ? init.body : JSON.stringify(init.body),
     });
 
+  /** Clears this window's per-address guest registration counts for loopback (tests all come from it). */
+  const clearAddressCounts = async () => {
+    const window = Math.floor(Date.now() / WEB_RATE_WINDOW_MS);
+    const keys = ["127.0.0.1", "::ffff:127.0.0.1", "::1"].map((a) =>
+      webRateKeyHasher.hash(`${WEB_RATE_BUCKETS.registrationPerAddress}:${a}:${window}`),
+    );
+    await db.authRateLimit.deleteMany({ where: { key: { in: keys } } });
+  };
+
   beforeAll(async () => {
+    await clearAddressCounts();
     setLogLineFilter((line) => {
       logged.push(line);
       return line;
@@ -589,30 +611,80 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect((await call(`/s/not-a-real-token`)).status).toBe(404);
     });
 
-    it("gives a signed-in outsider the link's permission, and takes it away with the link", async () => {
+    it("gives a signed-in outsider the link's permission per request, without touching their session", async () => {
       const link = await createShareLink(db, {
         documentId: docId,
         viewer: { kind: "principal", principalId: owner.id },
         permission: "comment",
       });
-      const { jar, token: before } = await session(outsider.id);
+      const { jar, csrf, token: before } = await session(outsider.id);
+      const sessionsBefore = await db.webSession.count({ where: { principalId: outsider.id } });
       const page = await call(`/s/${link.token}`, { jar });
       expect(page.status).toBe(200);
       jar.take(page);
       const boot = bootstrapOf(await page.text());
       expect(boot.viewer).toMatchObject({ kind: "member", access: "comment" });
-      // The session was replaced by one that carries the link (R9c), and the old one ended.
-      expect(jar.values.get("wardby-dev-web")).not.toBe(before);
-      expect(await db.webSession.count({ where: { tokenHash: sha(before) } })).toBe(0);
+      expect(boot).toMatchObject({ shareToken: link.token, csrf });
+      // No new session, no rotation: the member's session stays principal-only.
+      expect(jar.values.get("wardby-dev-web")).toBe(before);
+      expect(page.headers.getSetCookie().some((c) => c.startsWith("wardby-dev-web="))).toBe(false);
+      expect(await db.webSession.count({ where: { principalId: outsider.id } })).toBe(sessionsBefore);
+      const row = await db.webSession.findUniqueOrThrow({ where: { tokenHash: sha(before) } });
+      expect(row.shareLinkId).toBeNull();
+
+      const share = { "x-wardby-share": link.token };
+      const anchor = { type: "text", quote: "hello", prefix: "", suffix: "" };
+      // With the header: the link's permission. Without it: only their own (none).
+      const read = await call(`/d/api/${docId}`, { jar, headers: share });
+      expect(read.status).toBe(200);
+      expect(((await read.json()) as { me: { access: string } }).me.access).toBe("comment");
+      expect((await call(`/d/api/${docId}`, { jar })).status).toBe(404);
       const c = await call(`/d/api/${docId}/threads`, {
         method: "POST",
         jar,
-        csrf: boot.csrf as string,
-        body: { anchor: { type: "text", quote: "hello", prefix: "", suffix: "" }, body: "outsider via link" },
+        csrf,
+        headers: share,
+        body: { anchor, body: "outsider via link" },
       });
       expect(c.status).toBe(201);
+      const noHeader = await call(`/d/api/${docId}/threads`, {
+        method: "POST",
+        jar,
+        csrf,
+        body: { anchor, body: "outsider without link" },
+      });
+      expect(noHeader.status).toBe(404);
+      // A link never lifts a member past its own permission (comment, not write).
+      const w = await call(`/d/api/${docId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        headers: share,
+        body: { markdown: "x", baseNumber: 1 },
+      });
+      expect(w.status).toBe(403);
+      // A token for this document confers nothing on another one.
+      const otherDoc = (await createDocument(db, cipher, { ownerId: owner.id, title: "Other2", markdown: "z" })).id;
+      expect((await call(`/d/api/${otherDoc}`, { jar, headers: share })).status).toBe(404);
+
+      // Opening a second link does not drop the first.
+      const linkB = await createShareLink(db, {
+        documentId: docId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      expect((await call(`/s/${linkB.token}`, { jar })).status).toBe(200);
+      const afterB = await call(`/d/api/${docId}`, { jar, headers: share });
+      expect(((await afterB.json()) as { me: { access: string } }).me.access).toBe("comment");
+
+      // Revoking the link takes the access away but never signs the member out.
       await revokeShareLink(db, { shareLinkId: link.id, viewer: { kind: "principal", principalId: owner.id } });
-      expect((await call(`/d/api/${docId}`, { jar })).status).toBe(401);
+      expect(await db.webSession.count({ where: { tokenHash: sha(before) } })).toBe(1);
+      const revoked = await call(`/d/api/${docId}`, { jar, headers: share });
+      expect(revoked.status).toBe(404);
+      expect(await revoked.json()).toEqual({ error: "document_not_found" });
+      const stillB = await call(`/d/api/${docId}`, { jar, headers: { "x-wardby-share": linkB.token } });
+      expect(((await stillB.json()) as { me: { access: string } }).me.access).toBe("read");
     });
 
     it("keeps a member's own higher access when they open a weaker link", async () => {
@@ -626,6 +698,187 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       jar.take(page);
       expect(bootstrapOf(await page.text()).viewer).toMatchObject({ kind: "member", access: "write" });
       expect(jar.values.get("wardby-dev-web")).toBe(before);
+    });
+  });
+
+  describe("guest rate limits and sending from a new thread", () => {
+    /** Runs `fn` against a second server built with extra web deps (lower limits, a wired sender). */
+    async function withServer(extra: Partial<WebDeps>, fn: (base: string) => Promise<void>) {
+      const p = await freePort();
+      const h = await startServerAt(p, extra);
+      try {
+        await fn(`http://127.0.0.1:${p}`);
+      } finally {
+        await h.close();
+      }
+    }
+    const commentLink = () =>
+      createShareLink(db, {
+        documentId: docId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "comment",
+      });
+    async function registerAt(base: string, token: string, name: string) {
+      const jar = new Jar();
+      const page = await callAt(base, `/s/${token}`, { jar });
+      jar.take(page);
+      const pre = bootstrapOf(await page.text()).csrf as string;
+      const res = await callAt(base, `/s/${token}/guest`, { method: "POST", jar, csrf: pre, body: { name } });
+      jar.take(res);
+      return { res, jar };
+    }
+    const anchor = { type: "text", quote: "hello", prefix: "", suffix: "" };
+
+    it("ships the documented hourly guest limits", () => {
+      expect(GUEST_RATE_LIMITS).toEqual({
+        registrationsPerLink: 20,
+        registrationsPerAddress: 10,
+        commentsPerGuest: 30,
+      });
+      expect(WEB_RATE_WINDOW_MS).toBe(60 * 60 * 1000);
+    });
+
+    it("answers 429 web_rate_limited past the per-address registration limit, and creates no guest", async () => {
+      await clearAddressCounts();
+      const link = await commentLink();
+      await withServer({ guestLimits: { registrationsPerAddress: 2, registrationsPerLink: 100 } }, async (base) => {
+        expect((await registerAt(base, link.token, "Ana")).res.status).toBe(200);
+        expect((await registerAt(base, link.token, "Ben")).res.status).toBe(200);
+        const third = (await registerAt(base, link.token, "Cy")).res;
+        expect(third.status).toBe(429);
+        expect(await third.json()).toEqual({ error: "web_rate_limited" });
+        // The address limit spans links.
+        const other = await commentLink();
+        expect((await registerAt(base, other.token, "Dee")).res.status).toBe(429);
+      });
+      expect(await db.documentGuest.count({ where: { shareLinkId: link.id } })).toBe(2);
+      await clearAddressCounts();
+    });
+
+    it("answers 429 web_rate_limited past the per-link registration limit; other links are unaffected", async () => {
+      await clearAddressCounts();
+      const link = await commentLink();
+      const other = await commentLink();
+      await withServer({ guestLimits: { registrationsPerAddress: 100, registrationsPerLink: 2 } }, async (base) => {
+        expect((await registerAt(base, link.token, "Eve")).res.status).toBe(200);
+        expect((await registerAt(base, link.token, "Fay")).res.status).toBe(200);
+        const third = (await registerAt(base, link.token, "Gil")).res;
+        expect(third.status).toBe(429);
+        expect(await third.json()).toEqual({ error: "web_rate_limited" });
+        expect((await registerAt(base, other.token, "Hal")).res.status).toBe(200);
+      });
+      expect(await db.documentGuest.count({ where: { shareLinkId: link.id } })).toBe(2);
+      await clearAddressCounts();
+    });
+
+    it("limits a guest's threads and replies together, and never limits members", async () => {
+      await clearAddressCounts();
+      const link = await commentLink();
+      await withServer({ guestLimits: { commentsPerGuest: 2 } }, async (base) => {
+        const { res, jar } = await registerAt(base, link.token, "Ida");
+        const { csrf } = (await res.json()) as { csrf: string };
+        const t = await callAt(base, `/d/api/${docId}/threads`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { anchor, body: "g1" },
+        });
+        expect(t.status).toBe(201);
+        const { threadId } = (await t.json()) as { threadId: string };
+        const r1 = await callAt(base, `/d/api/threads/${threadId}/replies`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { body: "g2" },
+        });
+        expect(r1.status).toBe(201);
+        const r2 = await callAt(base, `/d/api/threads/${threadId}/replies`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { body: "g3" },
+        });
+        expect(r2.status).toBe(429);
+        expect(await r2.json()).toEqual({ error: "web_rate_limited" });
+        const t2 = await callAt(base, `/d/api/${docId}/threads`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { anchor, body: "g4" },
+        });
+        expect(t2.status).toBe(429);
+        expect(await db.comment.count({ where: { body: { in: ["g3", "g4"] } } })).toBe(0);
+
+        const m = await session(member.id);
+        for (const body of ["m1", "m2", "m3", "m4"]) {
+          const res2 = await callAt(base, `/d/api/threads/${threadId}/replies`, {
+            method: "POST",
+            jar: m.jar,
+            csrf: m.csrf,
+            body: { body },
+          });
+          expect(res2.status).toBe(201);
+        }
+      });
+      await clearAddressCounts();
+    });
+
+    it("refuses a new thread with sendToAgent from a viewer below write (403), and stores nothing", async () => {
+      await clearAddressCounts();
+      const link = await commentLink();
+      const sends: unknown[] = [];
+      const sendThreads = async (input: unknown) => {
+        sends.push(input);
+        return { runId: "run-1" };
+      };
+      await withServer({ sendThreads }, async (base) => {
+        // A guest (comment at most).
+        const { res, jar } = await registerAt(base, link.token, "Jo");
+        const { csrf } = (await res.json()) as { csrf: string };
+        const g = await callAt(base, `/d/api/${docId}/threads`, {
+          method: "POST",
+          jar,
+          csrf,
+          body: { anchor, body: "guest send", sendToAgent: true },
+        });
+        expect(g.status).toBe(403);
+        expect(await g.json()).toEqual({ error: "document_access_denied" });
+        // A member at comment level through the link.
+        const o = await session(outsider.id);
+        const viaLink = await callAt(base, `/d/api/${docId}/threads`, {
+          method: "POST",
+          jar: o.jar,
+          csrf: o.csrf,
+          headers: { "x-wardby-share": link.token },
+          body: { anchor, body: "outsider send", sendToAgent: true },
+        });
+        expect(viaLink.status).toBe(403);
+        expect(await viaLink.json()).toEqual({ error: "document_access_denied" });
+        expect(await db.comment.count({ where: { body: { in: ["guest send", "outsider send"] } } })).toBe(0);
+        expect(sends).toEqual([]);
+        // A writer creates the thread and sends it.
+        const m = await session(member.id);
+        const ok = await callAt(base, `/d/api/${docId}/threads`, {
+          method: "POST",
+          jar: m.jar,
+          csrf: m.csrf,
+          body: { anchor, body: "writer send", sendToAgent: true },
+        });
+        expect(ok.status).toBe(201);
+        expect(await ok.json()).toMatchObject({ sent: { runId: "run-1" } });
+        expect(sends).toHaveLength(1);
+      });
+      // Not wired: the whole request is refused with 501 and nothing is stored.
+      const m = await session(member.id);
+      const unwired = await call(`/d/api/${docId}/threads`, {
+        method: "POST",
+        jar: m.jar,
+        csrf: m.csrf,
+        body: { anchor, body: "unwired send", sendToAgent: true },
+      });
+      expect(unwired.status).toBe(501);
+      expect(await db.comment.count({ where: { body: "unwired send" } })).toBe(0);
+      await clearAddressCounts();
     });
   });
 

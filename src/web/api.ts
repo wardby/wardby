@@ -24,6 +24,7 @@ import {
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
 import type { PageViewer } from "./page.js";
+import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
 
 const invalid = (): never => {
   throw new WebError("invalid_request");
@@ -32,6 +33,13 @@ const invalid = (): never => {
 function str(body: Record<string, unknown>, key: string): string {
   const v = body[key];
   return typeof v === "string" ? v : invalid();
+}
+
+/** Counts a guest's comment (thread or reply) against the hourly limit; members are not counted. */
+async function countGuestComment(deps: WebDeps, viewer: Viewer): Promise<void> {
+  if (viewer.kind !== "guest") return;
+  const limit = deps.guestLimits?.commentsPerGuest ?? GUEST_RATE_LIMITS.commentsPerGuest;
+  await (deps.rateLimiter ?? webRateLimiter(deps.db)).check(WEB_RATE_BUCKETS.commentsPerGuest, viewer.guestId, limit);
 }
 
 /** The name and access a viewer is shown as (to themselves). */
@@ -109,9 +117,17 @@ export async function postThread(
 ): Promise<void> {
   const text = str(body, "body");
   if (body.sendToAgent !== undefined && typeof body.sendToAgent !== "boolean") invalid();
+  const send = body.sendToAgent === true;
+  // Sending needs write, exactly as POST /send does. Checked before anything is stored: a request that
+  // cannot be carried out in full is refused in full (no thread is created).
+  if (send) {
+    await requireDocumentAccess(deps.db, documentId, viewer, "write");
+    if (!deps.sendThreads) throw new Error("document_send_not_available");
+  }
+  await countGuestComment(deps, viewer);
   const t = await createThread(deps.db, deps.cipher, { documentId, viewer, anchor: body.anchor, body: text });
   let sent: unknown;
-  if (body.sendToAgent === true && deps.sendThreads) {
+  if (send && deps.sendThreads) {
     sent = await deps.sendThreads({ documentId, threadIds: [t.threadId], viewer });
   }
   sendWebJson(res, 201, {
@@ -129,7 +145,9 @@ export async function postReply(
   viewer: Viewer,
   body: Record<string, unknown>,
 ): Promise<void> {
-  const r = await reply(deps.db, deps.cipher, { threadId, viewer, body: str(body, "body") });
+  const text = str(body, "body");
+  await countGuestComment(deps, viewer);
+  const r = await reply(deps.db, deps.cipher, { threadId, viewer, body: text });
   sendWebJson(res, 201, { commentId: r.commentId, mentionsWithoutAccess: r.mentionsWithoutAccess });
 }
 
@@ -188,8 +206,8 @@ export async function postSend(
 ): Promise<void> {
   const ids = body.threadIds;
   if (!Array.isArray(ids) || ids.length > 100 || !ids.every((id) => typeof id === "string")) invalid();
-  if (!deps.sendThreads) throw new Error("document_send_not_available");
   await requireDocumentAccess(deps.db, documentId, viewer, "write");
+  if (!deps.sendThreads) throw new Error("document_send_not_available");
   const result = await deps.sendThreads({ documentId, threadIds: ids as string[], viewer });
   sendWebJson(res, 200, result ?? { ok: true });
 }

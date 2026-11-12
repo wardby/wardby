@@ -5,7 +5,9 @@ import type { loadAgentSecretValues } from "../core/secret-guard.js";
 import type { Viewer } from "../core/documents/access.js";
 import { validateSessionLink } from "../core/documents/share-links.js";
 import { logger } from "../core/logger.js";
+import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
 import type { OidcLogin } from "./oidc-login.js";
+import type { GuestRateLimits } from "./rate-limits.js";
 import {
   readWebSession,
   webCookieOptions,
@@ -19,7 +21,12 @@ const webLog = logger.child({ module: "web" });
 
 export type WebCipher = Parameters<typeof loadAgentSecretValues>[1];
 
-/** Sends threads to the document's agent (wired by the send-to-agent feature); absent = 501. */
+/**
+ * Sends threads to the document's agent (wired by the send-to-agent feature);
+ * absent = 501. Contract: every caller has already required `write` access
+ * on the document for this viewer (requireDocumentAccess), and an
+ * implementation re-checks it before starting a run.
+ */
 export type SendThreads = (input: { documentId: string; threadIds: string[]; viewer: Viewer }) => Promise<unknown>;
 
 export interface WebDeps {
@@ -36,6 +43,10 @@ export interface WebDeps {
   /** Where the browser bundle and manifest.json live; default dist/web-assets. */
   assetsRoot?: string;
   sendThreads?: SendThreads;
+  /** Counts guest registrations and comments; default: the Postgres limiter (rate-limits.ts). */
+  rateLimiter?: RateLimiter;
+  /** Tests only: lower or raise individual guest limits; operators always get GUEST_RATE_LIMITS. */
+  guestLimits?: Partial<GuestRateLimits>;
 }
 
 /** Who a request is from, after the session and its share link are re-validated. */
@@ -93,11 +104,8 @@ export async function resolveContext(req: IncomingMessage, deps: WebDeps): Promi
     session,
     csrf,
     principalId: session.principalId,
-    viewer: {
-      kind: "principal",
-      principalId: session.principalId,
-      ...(state.kind === "link" ? { shareLinkId: state.link.id } : {}),
-    },
+    // A member's session is principal-only: link elevation is per request (x-wardby-share).
+    viewer: { kind: "principal", principalId: session.principalId },
   };
 }
 
@@ -149,6 +157,7 @@ const STATUS = {
   expected_json_object: 415,
   document_send_not_available: 501,
   web_login_not_configured: 503,
+  web_rate_limited: 429,
   web_assets_missing: 503,
 } satisfies Record<string, number>;
 
@@ -157,6 +166,7 @@ export function errorCode(
   err: unknown,
   fallback?: keyof typeof STATUS,
 ): { code: string; status: number; requestId?: string } {
+  if (err instanceof RateLimitError) return { code: "web_rate_limited", status: STATUS.web_rate_limited };
   const message = err instanceof Error ? err.message : "";
   if (Object.hasOwn(STATUS, message)) return { code: message, status: (STATUS as Record<string, number>)[message] };
   const requestId = randomUUID();
