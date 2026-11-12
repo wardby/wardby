@@ -316,6 +316,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       pendingRefresh = true;
       return;
     }
+    // A guest who commented since the page loaded becomes mentionable, so the @-list is refreshed with the threads.
+    void comments.loadMentions();
     if (act === "load") return loadVersion(next);
     if (act === "banner") changedBanner.hidden = false;
     comments.apply(next);
