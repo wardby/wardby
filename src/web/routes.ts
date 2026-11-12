@@ -43,6 +43,8 @@ import {
   describeViewer,
   getDocumentJson,
   getMentions,
+  getVersionJson,
+  listVersionsJson,
   patchComment,
   postReply,
   postSend,
@@ -50,6 +52,7 @@ import {
   postThread,
   putContent,
   removeComment,
+  restoreVersionJson,
 } from "./api.js";
 import {
   addCookie,
@@ -87,6 +90,7 @@ const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
 const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions))?$`);
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
+const API_VERSIONS = new RegExp(`^/d/api/(${ID})/versions(?:/([1-9][0-9]{0,8})(/restore)?)?$`);
 const API_EVENTS = new RegExp(`^/d/api/(${ID})/events$`);
 const WEB_PREFIXES = /^\/(?:d|s|web)\//;
 const LOGOUT_URL = "/web/logout";
@@ -147,7 +151,7 @@ export async function handleWebRequest(
     return true;
   }
   if (path.startsWith("/d/api/")) {
-    await guardJson(res, () => handleApi(req, res, path, method, body, deps));
+    await guardJson(res, () => handleApi(req, res, url, method, body, deps));
     return true;
   }
   if (method === "GET" && path.startsWith(STATIC_PREFIX)) {
@@ -365,13 +369,27 @@ async function logout(req: IncomingMessage, res: ServerResponse, deps: WebDeps):
 
 type ApiRoute = {
   write: boolean;
-  /** GET /d/api/<id> may also be read with a share token by a visitor without a session. */
+  /** GET /d/api/<id> (and its version history) may also be read with a share token by a visitor without a session. */
   shareReadable?: string;
   run(viewer: Viewer, anonymous: boolean, body: Record<string, unknown>): Promise<void>;
 };
 
-function matchApi(res: ServerResponse, path: string, method: string, deps: WebDeps): ApiRoute | null {
+function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps): ApiRoute | null {
+  const path = url.pathname;
   let m: RegExpExecArray | null;
+  if ((m = API_VERSIONS.exec(path))) {
+    const [, id, n, restore] = m;
+    if (!n && method === "GET") {
+      return { write: false, shareReadable: id, run: (v) => listVersionsJson(res, deps, id, v, url.searchParams) };
+    }
+    if (n && !restore && method === "GET") {
+      return { write: false, shareReadable: id, run: (v) => getVersionJson(res, deps, id, v, Number(n)) };
+    }
+    if (n && restore && method === "POST") {
+      return { write: true, run: (v, _a, b) => restoreVersionJson(res, deps, id, v, Number(n), b) };
+    }
+    return null;
+  }
   if ((m = API_THREAD.exec(path)) && method === "POST") {
     const [, id, action] = m;
     return {
@@ -403,12 +421,12 @@ function matchApi(res: ServerResponse, path: string, method: string, deps: WebDe
 async function handleApi(
   req: IncomingMessage,
   res: ServerResponse,
-  path: string,
+  url: URL,
   method: string,
   body: unknown,
   deps: WebDeps,
 ): Promise<void> {
-  const route = matchApi(res, path, method, deps);
+  const route = matchApi(res, url, method, deps);
   if (!route) throw new Error("not_found");
   if (route.write) assertSameOrigin(req, deps.canonicalUri);
   const ctx = await resolveContext(req, deps);

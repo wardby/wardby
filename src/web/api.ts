@@ -25,6 +25,7 @@ import {
 } from "../core/documents/comments.js";
 import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
+import { getVersion, listVersions, MAX_VERSIONS_PAGE, restoreVersion } from "../core/documents/versions.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
 import type { PageViewer } from "./page.js";
 import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
@@ -233,4 +234,64 @@ export async function postSend(
   if (!deps.sendThreads) throw new Error("document_send_not_available");
   const result = await deps.sendThreads({ documentId, threadIds: ids as string[], viewer });
   sendWebJson(res, 200, result ?? { ok: true });
+}
+
+/** A positive integer query parameter, or undefined when absent; anything else is invalid_request. */
+function intParam(params: URLSearchParams, key: string, max: number): number | undefined {
+  const raw = params.get(key);
+  if (raw === null) return undefined;
+  if (!/^[1-9][0-9]{0,8}$/.test(raw)) invalid();
+  return Math.min(Number(raw), max);
+}
+
+/** The version history, newest first. Items carry no content (no Markdown). */
+export async function listVersionsJson(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  params: URLSearchParams,
+): Promise<void> {
+  const before = intParam(params, "before", Number.MAX_SAFE_INTEGER);
+  const limit = intParam(params, "limit", MAX_VERSIONS_PAGE);
+  const list = await listVersions(deps.db, {
+    documentId,
+    viewer,
+    ...(before !== undefined ? { before } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  });
+  sendWebJson(res, 200, list);
+}
+
+/** One version's Markdown (redacted when it was published). */
+export async function getVersionJson(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  number: number,
+): Promise<void> {
+  const v = await getVersion(deps.db, { documentId, viewer, number });
+  sendWebJson(res, 200, { version: v });
+}
+
+/** Publishes version <n>'s Markdown as a new version; baseNumber must still be the latest. */
+export async function restoreVersionJson(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  number: number,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const baseNumber = body.baseNumber;
+  if (typeof baseNumber !== "number" || !Number.isInteger(baseNumber) || baseNumber < 1) invalid();
+  const out = await restoreVersion(deps.db, deps.cipher, {
+    documentId,
+    viewer,
+    number,
+    baseNumber: baseNumber as number,
+    via: "editor",
+  });
+  sendWebJson(res, 200, { version: { number: out.number }, reanchored: out.reanchored });
 }

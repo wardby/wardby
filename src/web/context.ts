@@ -187,6 +187,7 @@ const STATUS = {
   web_origin_rejected: 403,
   not_found: 404,
   document_not_found: 404,
+  document_version_not_found: 404,
   comment_not_found: 404,
   share_link_invalid: 404,
   document_version_conflict: 409,

@@ -387,6 +387,97 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(await bad.json()).toEqual({ error: "invalid_request" });
     });
 
+    it("lists versions without content, reads one, and restores one as a new version", async () => {
+      const own = (await createDocument(db, cipher, { ownerId: owner.id, title: "V", markdown: "version one" })).id;
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: own,
+          granteeKind: "principal",
+          granteePrincipalId: outsider.id,
+          granteeKey: `principal:${outsider.id}`,
+          level: "read",
+        },
+      });
+      const { jar, csrf } = await session(owner.id);
+      const saved = await call(`/d/api/${own}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { markdown: "version two", baseNumber: 1 },
+      });
+      expect(saved.status).toBe(200);
+
+      const list = await call(`/d/api/${own}/versions`, { jar });
+      expect(list.status).toBe(200);
+      const listed = (await list.json()) as { versions: Record<string, unknown>[]; nextBefore?: number };
+      expect(listed.versions.map((v) => v.number)).toEqual([2, 1]);
+      expect(listed.versions[0]).toMatchObject({
+        via: "editor",
+        author: { kind: "member", name: "Olive Owner" },
+        answeredThreads: [],
+      });
+      expect(JSON.stringify(listed)).not.toContain("version one");
+      expect(JSON.stringify(listed)).not.toContain(OWNER_EMAIL);
+      const paged = (await (await call(`/d/api/${own}/versions?limit=1`, { jar })).json()) as { nextBefore: number };
+      expect(paged.nextBefore).toBe(2);
+      const older = (await (await call(`/d/api/${own}/versions?before=2`, { jar })).json()) as { versions: unknown[] };
+      expect(older.versions).toHaveLength(1);
+      for (const bad of ["limit=0", "limit=x", "before=-1", "before=1.5"]) {
+        const r = await call(`/d/api/${own}/versions?${bad}`, { jar });
+        expect(r.status).toBe(400);
+        expect(await r.json()).toEqual({ error: "invalid_request" });
+      }
+
+      const one = await call(`/d/api/${own}/versions/1`, { jar });
+      expect(await one.json()).toMatchObject({ version: { number: 1, markdown: "version one" } });
+      const missing = await call(`/d/api/${own}/versions/9`, { jar });
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toEqual({ error: "document_version_not_found" });
+
+      const restore = (init: CallInit) => call(`/d/api/${own}/versions/1/restore`, { method: "POST", ...init });
+      expect((await restore({ jar, body: { baseNumber: 2 } })).status).toBe(403); // no CSRF
+      expect((await restore({ jar, csrf, origin: "https://evil.example", body: { baseNumber: 2 } })).status).toBe(403);
+      const noBase = await restore({ jar, csrf, body: {} });
+      expect(await noBase.json()).toEqual({ error: "invalid_request" });
+      const stale = await restore({ jar, csrf, body: { baseNumber: 1 } });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ error: "document_version_conflict" });
+      const reader = await session(outsider.id);
+      expect((await call(`/d/api/${own}/versions`, { jar: reader.jar })).status).toBe(200);
+      const denied = await restore({ jar: reader.jar, csrf: reader.csrf, body: { baseNumber: 2 } });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: "document_access_denied" });
+
+      const ok = await restore({ jar, csrf, body: { baseNumber: 2 } });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ version: { number: 3 } });
+      const doc = (await (await call(`/d/api/${own}`, { jar })).json()) as { version: { markdown: string } };
+      expect(doc.version.markdown).toBe("version one");
+      const after = (await (await call(`/d/api/${own}/versions`, { jar })).json()) as {
+        versions: { number: number; summary?: string; via: string }[];
+      };
+      expect(after.versions[0]).toMatchObject({ number: 3, summary: "Restored v1", via: "editor" });
+
+      // A view-only share link reads the history without a session, but cannot restore.
+      const link = await createShareLink(db, {
+        documentId: own,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      const viaLink = await call(`/d/api/${own}/versions`, { headers: { "x-wardby-share": link.token } });
+      expect(viaLink.status).toBe(200);
+      const v1 = await call(`/d/api/${own}/versions/1`, { headers: { "x-wardby-share": link.token } });
+      expect(v1.status).toBe(200);
+      const anon = await call(`/d/api/${own}/versions/1/restore`, {
+        method: "POST",
+        headers: { "x-wardby-share": link.token },
+        body: { baseNumber: 3 },
+      });
+      expect(anon.status).toBe(401);
+      expect((await call(`/d/api/${docId}/versions`, { headers: { "x-wardby-share": link.token } })).status).toBe(401);
+    });
+
     it("accepts a document body over 1 MiB on /d/api/ but refuses one over 2 MiB with 413", async () => {
       const { jar, csrf } = await session(member.id);
       const big = await call(`/d/api/${docId}/content`, {
