@@ -28,6 +28,17 @@ export interface AnchorSurface {
   }): void;
   /** Viewport point to open a popover at, for a thread id or "draft"; null when its mark is not shown. */
   point(id: string): { x: number; y: number } | null;
+  /**
+   * Whether an open thread's anchor is found (the panel marks the rest "outdated"). Cheap: the panel
+   * asks it for every row, so it must not measure layout.
+   */
+  located(id: string): boolean;
+  /** Whether a mousedown target is one of the surface's marks (clicking one opens its thread, so the popover stays). */
+  isMark(target: Element): boolean;
+  /** How to start a comment here, for the empty threads panel ("Select some text and click 💬 Comment."). */
+  emptyHint(): string;
+  /** The surface's own keys, before the dialog's J / K and Esc in the panel's help line. */
+  keysHint(): string;
   /** Brings a thread's anchor into view (designs also switch board). */
   reveal(thread: ThreadView): void;
   /** The anchor as the threads panel and popover header name it. */

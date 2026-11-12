@@ -140,6 +140,22 @@ export class TextSurface implements AnchorSurface {
     return { x: start.left, y: end.bottom + 8 };
   }
 
+  located(id: string): boolean {
+    return this.rangeOf(id) !== null;
+  }
+
+  isMark(target: Element): boolean {
+    return !!target.closest?.(".mbadge, [data-comment-id]");
+  }
+
+  emptyHint(): string {
+    return "Select some text and click 💬 Comment.";
+  }
+
+  keysHint(): string {
+    return "Select text → 💬 Comment (⌘⌥M)";
+  }
+
   /** Scrolls a thread's highlight into view. */
   reveal(thread: ThreadView): void {
     const r = this.rangeOf(thread.id);

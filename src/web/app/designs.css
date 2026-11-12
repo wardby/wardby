@@ -146,6 +146,66 @@
   height: 100%;
 }
 
+/* ---- comment pins (design-surface.ts), over the canvas ---- */
+.pins {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 5;
+}
+/* A pin's tip (its square corner) sits on the point; it turns about the tip, so it stays put. */
+.pin {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin-top: -22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50% 50% 50% 0;
+  transform-origin: 0 100%;
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+  background: var(--pin);
+  color: #fff;
+  font:
+    700 11px/22px system-ui,
+    sans-serif;
+  text-align: center;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.pin span {
+  display: inline-block;
+  transform: rotate(45deg);
+}
+.pin.on {
+  transform: rotate(-45deg) scale(1.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pin) 35%, transparent);
+}
+.pin.draft {
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: default;
+}
+.pin.resolved {
+  background: var(--muted);
+}
+.pin-mode-hint {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
 /* ---- checks (version warnings) ---- */
 .checks {
   margin: 0.6rem 0.9rem 0;

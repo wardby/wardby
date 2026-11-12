@@ -20,15 +20,14 @@ import {
   readBootstrap,
   type Bootstrap,
   type DocumentPayload,
-  type ThreadView,
   type Viewer,
 } from "./api.js";
 import { createBoardsEditor, ManifestUnreadableError, type BoardsEditor, type DeviceId } from "./boards-editor.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { measureFidelity } from "./fidelity.js";
+import { DesignSurface } from "./design-surface.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
-import type { AnchorSurface, DraftStart } from "./surface.js";
 
 const SAVE_DELAY_MS = 1500;
 /** After a writer's own save, the new version's fidelity check waits for this long with no edits. */
@@ -115,24 +114,6 @@ function askDialog(opts: {
   });
 }
 
-/**
- * Comments on boards (pins) arrive with the design surface (Task 14). Until then the dialog runs on a
- * surface with no marks that says why no comment can start; the threads panel works as for documents.
- */
-function placeholderSurface(boardName: (id: string) => string): AnchorSurface {
-  return {
-    draft: () => "Comments on boards arrive in the next step.",
-    mark: () => undefined,
-    point: () => null,
-    reveal: () => undefined,
-    label(thread: ThreadView | DraftStart): string {
-      const a = thread.anchor;
-      return a.type === "element" ? `“${a.words}” · ${boardName(a.board)}` : "";
-    },
-    connect: () => undefined,
-  };
-}
-
 function mount(
   root: HTMLElement,
   boot: Bootstrap,
@@ -183,7 +164,9 @@ function mount(
   const selectorsPanel = h("div", { class: "gjs-host selectors" });
   const traitsPanel = h("div", { class: "gjs-host traits" });
   const canvasEl = h("div", { class: "canvas" });
-  const canvasWrap = h("div", { class: "canvas-wrap" }, canvasEl);
+  // Comment pins over the canvas (design-surface.ts).
+  const pinsLayer = h("div", { class: "pins" });
+  const canvasWrap = h("div", { class: "canvas-wrap" }, canvasEl, pinsLayer);
 
   const checks = h("div", { class: "checks", hidden: true, role: "note" });
   const commentsPanel = h("div", { class: "panel" });
@@ -279,7 +262,7 @@ function mount(
     if (err instanceof ManifestUnreadableError) return fatal(root, MANIFEST_UNREADABLE);
     throw err;
   }
-  const boardName = (id: string) => boards.manifest().boards.find((b) => b.id === id)?.name ?? id;
+  const boardNames = () => new Map(boards.manifest().boards.map((b) => [b.id, b.name]));
 
   deviceButtons.forEach((btn, i) =>
     btn.addEventListener("click", () => {
@@ -305,7 +288,8 @@ function mount(
   renderChecks();
 
   // ---- the boards list ----
-  let threads: ThreadView[] = [];
+  /** Comment pins; it also puts the 💬 counts in the boards list (set below, before any board loads). */
+  let surface: DesignSurface | null = null;
   /** The fidelity pass switches boards: saves, live reloads and the boards list wait until it is done. */
   let measuring = false;
   /** Runs a board change from a dialog once no fidelity pass is running (one can start while it is open). */
@@ -322,15 +306,11 @@ function mount(
     addBoardBtn.disabled = measuring;
     const list = boards.manifest().boards;
     list.forEach((b, i) => {
-      const n = threads.filter(
-        (t) => t.status === "open" && t.anchor.type === "element" && t.anchor.board === b.id,
-      ).length;
       const on = b.id === boards.currentBoard();
       const pick = h(
         "button",
         { type: "button", class: "pick", disabled: measuring, aria: { current: String(on) } },
         h("span", { class: "name" }, b.name),
-        n ? h("span", { class: "bcount", title: `${n} open comment${n === 1 ? "" : "s"}` }, `💬 ${n}`) : null,
       );
       pick.addEventListener("click", () => {
         if (!measuring) boards.selectBoard(b.id);
@@ -396,6 +376,7 @@ function mount(
       }
       boardsList.append(li);
     });
+    surface?.refreshCounts();
   };
   document.addEventListener("mousedown", (e) => {
     if (!(e.target as Element).closest?.(".boards li")) closeMenus();
@@ -448,10 +429,18 @@ function mount(
 
   // ---- comments ----
   let startLive: () => void = () => undefined;
-  const comments = new CommentsUI(
+  // One surface for the page: board switches and new versions reuse it (no listeners pile up).
+  const pins: DesignSurface = new DesignSurface(
+    boards,
+    { pins: pinsLayer, commentButton: commentBtn, boardsList },
+    boardNames,
+    (body: string): string => comments.preview(body),
+  );
+  surface = pins;
+  const comments: CommentsUI = new CommentsUI(
     {
       api,
-      surface: placeholderSurface(boardName),
+      surface: pins,
       shareToken: boot.shareToken,
       stage: canvasWrap,
       page: canvasWrap,
@@ -465,13 +454,10 @@ function mount(
     },
     viewer,
   );
-  commentBtn.addEventListener("click", () => {
-    showTab("comments");
-    comments.startComment();
-  });
+  // The button also toggles pin mode (design-surface.ts); the threads show while commenting.
+  commentBtn.addEventListener("click", () => showTab("comments"));
   const applyPayload = (p: DocumentPayload) => {
     comments.apply(p);
-    threads = p.threads;
     commentBtn.hidden = !comments.canComment;
     renderBoards();
   };

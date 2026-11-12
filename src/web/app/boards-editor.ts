@@ -101,6 +101,13 @@ export interface BoardsEditor {
   baseStyle(): HTMLStyleElement | null;
   /** The GrapesJS wrapper element: the root that element anchors are built and located against (PF-H5). */
   root(): HTMLElement | null;
+  /**
+   * The ids in the board in the canvas as last stored (its saved file, not the editor's state): only
+   * these can be an element anchor's id, since an id GrapesJS added while editing is not in the file.
+   */
+  storedIds(): ReadonlySet<string>;
+  /** Whether the editor edits (writers); commenters and readers get a locked board. */
+  editable: boolean;
   setDevice(id: DeviceId): void;
   /** Called when the content or the boards change (not debounced). */
   onChange(cb: () => void): void;
@@ -210,7 +217,29 @@ export function createBoardsEditor(opts: {
   };
   reset(opts.files);
 
+  // GrapesJS 0.23.9 lists its selector manager in both of its module lists, so init makes two; each
+  // renders a class picker into selectorManager.appendTo, and both stay live. Only editor.Selectors is
+  // the editor's own: the other one is destroyed, which removes its picker and its listeners.
+  const liveSelectors = editor.Selectors;
+  for (const m of editor.getModel().modules as { name?: string; destroy?(): void }[]) {
+    if (m !== (liveSelectors as unknown) && m.name === "SelectorManager") m.destroy?.();
+  }
+
   const wrapper = () => editor.getWrapper();
+
+  /** Ids per stored board text (the parts object changes when a board is saved or reloaded). */
+  const idsOf = new WeakMap<BoardParts, ReadonlySet<string>>();
+  const storedIds = (parts: BoardParts): ReadonlySet<string> => {
+    let ids = idsOf.get(parts);
+    if (!ids) {
+      const doc = new DOMParser().parseFromString(`<body>${parts.bodyHtml}</body>`, "text/html");
+      const found = new Set(Array.from(doc.body.querySelectorAll("[id]"), (el) => el.id));
+      if (parts.bodyAttrs.id) found.add(parts.bodyAttrs.id);
+      ids = found;
+      idsOf.set(parts, ids);
+    }
+    return ids;
+  };
 
   /** The board in the canvas, serialised as a board file. */
   const serializeLive = (): string => {
@@ -446,6 +475,11 @@ export function createBoardsEditor(opts: {
     canvasWindow: () => editor.Canvas.getWindow() ?? null,
     baseStyle: () => editor.Canvas.getDocument()?.querySelector<HTMLStyleElement>("style[data-wardby-base]") ?? null,
     root: () => wrapper()?.getEl() ?? null,
+    storedIds() {
+      const state = boards.get(current);
+      return state ? storedIds(state.parts) : new Set<string>();
+    },
+    editable: opts.editable,
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),
     onBoard: (cb) => void boardListeners.push(cb),

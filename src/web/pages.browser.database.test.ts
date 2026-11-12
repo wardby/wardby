@@ -4,13 +4,34 @@
  * read-only access. Skipped without DATABASE_URL or a Playwright Chromium.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { chromium, type Browser, type ConsoleMessage, type Page } from "playwright";
+import { chromium, type Browser, type ConsoleMessage, type Locator, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishVersion } from "../core/documents/service.js";
 import { startTestWebServer, TEST_CIPHER, type TestWebServer } from "./test-server.test-support.js";
 
 /** GrapesJS 0.23.9's canvas iframe. */
 const CANVAS = "iframe.gjs-frame";
+/** The composer's send key (⌘↵; Ctrl+Enter elsewhere). */
+const SUBMIT = process.platform === "darwin" ? "Meta+Enter" : "Control+Enter";
+const PIN_HINT = "Click anything on the board to comment · Esc to cancel";
+
+/** The point a pin marks: the bottom centre of its box (the pin's tip). */
+async function tipOf(pin: Locator): Promise<{ x: number; y: number }> {
+  const b = (await pin.boundingBox())!;
+  return { x: b.x + b.width / 2, y: b.y + b.height };
+}
+/** Whether a pin's tip is inside an element's box (1 px of rounding). */
+async function tipInside(pin: Locator, el: Locator): Promise<boolean> {
+  const b = await el.boundingBox();
+  if (!b || (await pin.count()) !== 1) return false;
+  const t = await tipOf(pin);
+  return t.x >= b.x - 1 && t.x <= b.x + b.width + 1 && t.y >= b.y - 1 && t.y <= b.y + b.height + 1;
+}
+const pinNumbered = (page: Page, n: number) => page.locator(".pin").filter({ hasText: new RegExp(`^${n}$`) });
+async function pickBoard(page: Page, name: string): Promise<void> {
+  await page.locator(".boards li", { hasText: name }).locator(".pick").click();
+  await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe(name);
+}
 
 const coffee = (p: string) =>
   readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
@@ -242,7 +263,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const input = sector.locator(".gjs-sm-property__width input").first();
       await input.fill(value);
       await input.press("Enter");
-      await page.locator("[data-sync-style]:visible").first().click();
+      // One class picker (GrapesJS 0.23.9 loads its selector manager twice; the stale one is removed).
+      expect(await page.locator("[data-sync-style]").count()).toBe(1);
+      await page.locator("[data-sync-style]").click();
     };
     // Each `.btn` rule keeps its own edits, and the Style Manager edits are on the right elements.
     const check = async (edited = true) => {
@@ -411,6 +434,176 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     expect(await h1.textContent()).toBe(before);
     expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
     expect(await page.locator(".badge.version").textContent()).toContain("v1");
+    await context.close();
+  }, 60_000);
+  it("drops a comment pin on an element; it follows the element, survives a reload, and hides when resolved", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "comment" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const canvas = page.frameLocator(CANVAS);
+    await pickBoard(page, "Menu");
+    const hint = page.getByText(PIN_HINT);
+    await page.keyboard.press("c");
+    await expect.poll(() => hint.isVisible()).toBe(true);
+    const h1 = canvas.locator("h1", { hasText: "A short list" });
+    const box = (await h1.boundingBox())!;
+    const created = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/threads"));
+    await h1.click({ position: { x: 30, y: 10 } });
+    await expect.poll(() => hint.isVisible()).toBe(false);
+    await expect.poll(() => page.locator(".cpop .quote b").textContent()).toBe("“A short list, made well.” · Menu");
+    expect(await page.locator(".pin.draft").count()).toBe(1); // the blue + draft pin
+    await page.locator(".cpop textarea").fill("Make the prices bigger");
+    await page.locator(".cpop textarea").press(SUBMIT);
+    const sent = JSON.parse((await created).postData() ?? "{}") as { anchor: Record<string, unknown> };
+    expect(sent.anchor).toMatchObject({ type: "element", board: "menu", tag: "h1", words: "A short list, made well." });
+    const pin1 = pinNumbered(page, 1);
+    await expect.poll(() => pin1.count(), { timeout: 10_000 }).toBe(1);
+    expect(await page.locator(".pin.draft").count()).toBe(0);
+    const tip = await tipOf(pin1);
+    expect(Math.abs(tip.x - (box.x + 30))).toBeLessThanOrEqual(6);
+    expect(Math.abs(tip.y - (box.y + 10))).toBeLessThanOrEqual(6);
+    // C does nothing while typing in the composer (the thread's reply box is focused now).
+    await page.locator(".cpop textarea").press("c");
+    expect(await page.locator(".cpop textarea").inputValue()).toBe("c");
+    expect(await hint.isVisible()).toBe(false);
+    await page.locator(".cpop textarea").fill("");
+    // The pin stays on the h1 on a narrower device.
+    await page.getByRole("button", { name: "Phone" }).click();
+    await expect.poll(async () => (await h1.boundingBox())!.width, { timeout: 10_000 }).toBeLessThanOrEqual(390);
+    await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
+    // Esc closes the popover.
+    await page.keyboard.press("Escape");
+    await expect.poll(() => page.locator(".cpop").count()).toBe(0);
+    await page.getByRole("button", { name: "Desktop" }).click();
+
+    // A second thread, on another board.
+    await pickBoard(page, "Home");
+    await page.keyboard.press("c");
+    await expect.poll(() => hint.isVisible()).toBe(true);
+    await canvas.locator("h1").first().click();
+    await page.locator(".cpop textarea").fill("Second");
+    await page.locator(".cpop textarea").press(SUBMIT);
+    await expect.poll(() => pinNumbered(page, 2).count(), { timeout: 10_000 }).toBe(1);
+    await page.keyboard.press("Escape");
+    await expect.poll(() => page.locator(".cpop").count()).toBe(0);
+    // J and K move between threads, switching boards. An opened thread focuses its reply box, where
+    // J and K are typed: focus moves to the popover's close button (not a text field) before each key.
+    const head = page.locator(".cpop .quote");
+    const leaveReplyBox = () => page.locator(".cpop [data-act=close]").focus();
+    await page.keyboard.press("j");
+    await expect.poll(() => head.textContent()).toContain("#1 on");
+    await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");
+    await expect.poll(() => pin1.count()).toBe(1);
+    await leaveReplyBox();
+    await page.keyboard.press("j");
+    await expect.poll(() => head.textContent()).toContain("#2 on");
+    await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Home");
+    await expect.poll(() => pinNumbered(page, 2).count()).toBe(1);
+    await leaveReplyBox();
+    await page.keyboard.press("k");
+    await expect.poll(() => head.textContent()).toContain("#1 on");
+    await page.keyboard.press("Escape");
+
+    // After a reload the pins are back, and the boards list counts open threads per board.
+    await page.reload();
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const count = (name: string) => page.locator(".boards li", { hasText: name }).locator(".bcount");
+    await expect.poll(() => count("Menu").textContent()).toBe("💬 1");
+    expect(await count("Home").textContent()).toBe("💬 1");
+    await expect.poll(() => pinNumbered(page, 2).count(), { timeout: 10_000 }).toBe(1);
+    expect(await pin1.count()).toBe(0); // another board's pin is not drawn
+    await pickBoard(page, "Menu");
+    await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
+    // Resolve from the ⋯ menu: the pin hides; selecting the thread in the panel shows it again.
+    await pin1.click();
+    await expect.poll(() => head.textContent()).toContain("#1 on");
+    await page.locator(".cpop [data-act=menu]").click();
+    await page.getByRole("menuitem", { name: "✓ Resolve" }).click();
+    await expect.poll(() => pin1.count()).toBe(0);
+    await expect.poll(() => count("Menu").count()).toBe(0);
+    await page.getByRole("tab", { name: /^Resolved/ }).click();
+    await page.locator(".tp-row", { hasText: "Make the prices bigger" }).click();
+    await expect.poll(() => pin1.count()).toBe(1);
+    expect(await pin1.getAttribute("class")).toContain("resolved");
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    expect(seen.external).toEqual([]);
+    await context.close();
+  }, 120_000);
+
+  it("anchors a writer's toolbar comment to the stored element and keeps it on a republish of the same files", async () => {
+    const { documentId, cookie, principalIds } = await server.design({
+      title: "Coffee",
+      files: files(),
+      access: "write",
+    });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await pickBoard(page, "Menu");
+    const h1 = page.frameLocator(CANVAS).locator("h1", { hasText: "A short list" });
+    // Selecting gives the h1 an id GrapesJS made up; it is not in the stored file, so it is not the anchor.
+    await h1.click();
+    const created = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/threads"));
+    await page.locator(".gjs-toolbar [title=Comment]").click();
+    await expect.poll(() => page.locator(".cpop .quote b").textContent()).toBe("“A short list, made well.” · Menu");
+    await page.locator(".cpop textarea").fill("Bigger please");
+    await page.locator(".cpop textarea").press(SUBMIT);
+    const anchor = (JSON.parse((await created).postData() ?? "{}") as { anchor: Record<string, unknown> }).anchor;
+    expect(anchor).toMatchObject({ type: "element", board: "menu", tag: "h1", dx: 0.5, dy: 0.5 });
+    expect(anchor.elementId).toBeUndefined();
+    const pin1 = pinNumbered(page, 1);
+    await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
+    // The same files published again (as an agent or MCP would): the server finds the thread's element.
+    const out = await publishVersion(server.db, TEST_CIPHER, {
+      documentId,
+      files: files(),
+      via: "editor",
+      createdById: principalIds.second,
+      expectedNumber: 1,
+    });
+    expect(out.reanchored).toEqual({ kept: 1, outdated: 0 });
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 90_000);
+
+  it("lets a guest on a comment link pin a comment under their name, with no @-list", async () => {
+    const { sharePath } = await server.design({ title: "Coffee", files: files(), access: "read", share: "comment" });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}${sharePath!}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await page.keyboard.press("c");
+    await expect.poll(() => page.getByText(PIN_HINT).isVisible()).toBe(true);
+    await page.frameLocator(CANVAS).locator("h1").first().click();
+    const name = page.locator(".cpop input[data-name]");
+    await expect.poll(() => name.isVisible()).toBe(true);
+    await name.fill("Gus");
+    const ta = page.locator(".cpop textarea");
+    expect(await ta.getAttribute("placeholder")).not.toContain("@");
+    await ta.fill("@");
+    await ta.press("Backspace");
+    await ta.pressSequentially("@G");
+    expect(await page.locator(".cpop .suggest").count()).toBe(0);
+    await ta.fill("Looks good");
+    await ta.press(SUBMIT);
+    await expect
+      .poll(() => page.locator(".cpop .msg .who").first().textContent(), { timeout: 10_000 })
+      .toContain("Gus (guest)");
+    await expect.poll(() => pinNumbered(page, 1).count()).toBe(1);
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
     await context.close();
   }, 60_000);
 });

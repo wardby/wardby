@@ -4,7 +4,15 @@
  * commented on (highlights or pins, the gesture that starts a comment, margin
  * badges) is the anchoring surface's (surface.ts): text-surface.ts for documents.
  */
-import { ApiError, errorMessage, type Api, type DocumentPayload, type ThreadView, type Viewer } from "./api.js";
+import {
+  ApiError,
+  errorMessage,
+  type Anchor,
+  type Api,
+  type DocumentPayload,
+  type ThreadView,
+  type Viewer,
+} from "./api.js";
 import {
   candidateFrom,
   decodeMentions,
@@ -202,7 +210,8 @@ export class CommentsUI {
         if (this.pop.menuOpen && !target.closest(".menu, [data-act=menu]")) this.setMenu(false);
         return;
       }
-      if (target.closest(".mbadge, .tp-row, [data-comment-id]")) return;
+      // The panel's rows and the surface's marks open a thread themselves: no close, then reopen.
+      if (target.closest?.(".tp-row") || this.surface.isMark(target)) return;
       this.closePop();
     });
 
@@ -755,10 +764,11 @@ export class CommentsUI {
       if (send && err instanceof ApiError && SEND_AFTER_CREATE.has(err.code)) {
         // The thread was stored; only the send failed. Show it with the reason.
         await this.reload().catch(() => undefined);
-        const label = this.surface.label(pop.start!);
-        const created = this.threads.find(
-          (t) => !before.has(t.id) && this.surface.label(t) === label && t.comments[0]?.mine,
-        );
+        // Matched on the anchor itself: labels can repeat (two pins on elements with the same words).
+        // The server redacts secret values out of an anchor, so failing that, the one new thread of mine.
+        const anchor = anchorKey(pop.start!.anchor);
+        const mine = this.threads.filter((t) => !before.has(t.id) && t.comments[0]?.mine);
+        const created = mine.find((t) => anchorKey(t.anchor) === anchor) ?? (mine.length === 1 ? mine[0] : undefined);
         if (created) return this.afterCreate(created.id, errorMessage(err));
       }
       throw err;
@@ -963,7 +973,7 @@ export class CommentsUI {
           { class: "tp-empty" },
           this.filter === "open"
             ? this.canComment
-              ? "No open comments. Select some text and click 💬 Comment."
+              ? `No open comments. ${this.surface.emptyHint()}`
               : "No open comments."
             : "Nothing here.",
         ),
@@ -972,7 +982,7 @@ export class CommentsUI {
     for (const t of list) {
       const first = t.comments[0];
       const last = t.comments[t.comments.length - 1];
-      const located = t.status === "open" && !!this.surface.point(t.id);
+      const located = t.status === "open" && this.surface.located(t.id);
       const row = h(
         "div",
         {
@@ -1030,7 +1040,7 @@ export class CommentsUI {
         "div",
         { class: "tp-help" },
         this.canComment
-          ? "Select text → 💬 Comment (⌘⌥M) · J / K: next / previous · Esc: close"
+          ? `${this.surface.keysHint()} · J / K: next / previous · Esc: close`
           : "J / K: next / previous · Esc: close",
       ),
     );
@@ -1048,6 +1058,16 @@ export class CommentsUI {
   private layout(): void {
     if (this.pop) this.positionPop();
   }
+}
+
+/** An anchor as text with its keys sorted: equal anchors give equal keys, whatever the key order. */
+function anchorKey(anchor: Anchor): string {
+  const a = anchor as unknown as Record<string, unknown>;
+  return JSON.stringify(
+    Object.keys(a)
+      .sort()
+      .map((k) => [k, a[k]]),
+  );
 }
 
 /**

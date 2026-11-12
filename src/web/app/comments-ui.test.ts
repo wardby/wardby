@@ -23,6 +23,7 @@ const thread = (id: string, status = "open"): ThreadView => ({
 });
 
 function setup(threads: ThreadView[]) {
+  document.body.replaceChildren(); // each test reads only its own dialog
   let handlers!: Parameters<AnchorSurface["connect"]>[0];
   const surface: AnchorSurface = {
     draft: vi.fn(() => ({ anchor: { type: "text" as const, quote: "new", prefix: "", suffix: "" }, quote: "new" })),
@@ -34,9 +35,17 @@ function setup(threads: ThreadView[]) {
       handlers = h;
     },
     suspend: vi.fn(),
+    emptyHint: () => "Press C to comment.",
+    keysHint: () => "C: new comment",
+    isMark: (target) => !!target.closest(".fake-mark"),
+    located: vi.fn(() => true),
   };
   const el = () => document.body.appendChild(document.createElement("div"));
-  const api = { mentions: async () => ({ candidates: [] }), load: async () => payload } as unknown as Api;
+  const api = {
+    mentions: async () => ({ candidates: [] }),
+    load: async () => payload,
+    createThread: vi.fn(),
+  } as unknown as Api;
   const payload = {
     document: { canSend: false },
     me: { kind: "member", name: "Ana", access: "comment" },
@@ -48,7 +57,7 @@ function setup(threads: ThreadView[]) {
     payload.me,
   );
   ui.apply(payload);
-  return { ui, surface, handlers: () => handlers };
+  return { ui, surface, api, payload, handlers: () => handlers };
 }
 
 describe("CommentsUI with a surface", () => {
@@ -86,5 +95,62 @@ describe("CommentsUI with a surface", () => {
     expect(document.querySelector(".cpop")).toBeNull();
     ui.suspend(false);
     expect(surface.suspend).toHaveBeenLastCalledWith(false);
+  });
+
+  it("takes the panel's how-to text and key help from the surface", () => {
+    const { ui } = setup([]);
+    ui.render();
+    expect(document.body.textContent).toContain("No open comments. Press C to comment.");
+    expect(document.body.textContent).toContain("C: new comment · J / K: next / previous · Esc: close");
+    expect(document.body.textContent).not.toContain("Select some text");
+  });
+
+  it("asks the surface whether a thread is located, never for its point, when drawing the panel", () => {
+    const { surface } = setup([thread("1")]);
+    expect(surface.located).toHaveBeenCalledWith("1");
+    expect(surface.point).not.toHaveBeenCalled();
+  });
+
+  it("keeps the popover open on a mousedown on one of the surface's marks", () => {
+    const { handlers } = setup([thread("1")]);
+    handlers().activate("1");
+    const mark = document.body.appendChild(document.createElement("button"));
+    mark.className = "fake-mark";
+    mark.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(document.querySelector(".cpop")).not.toBeNull();
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(document.querySelector(".cpop")).toBeNull();
+  });
+
+  it("finds a thread created before a failed send by its anchor, not its label", async () => {
+    const element = (path: string) => ({
+      type: "element" as const,
+      board: "home",
+      path,
+      tag: "p",
+      words: "Same words",
+      dx: 0.5,
+      dy: 0.5,
+    });
+    const other: ThreadView = { ...thread("1"), anchor: element("main:nth-of-type(1)>p:nth-of-type(1)") };
+    const { ui, surface, api, payload } = setup([]);
+    (payload as { document: { canSend: boolean } }).document.canSend = true;
+    ui.apply(payload);
+    const mine = element("main:nth-of-type(1)>p:nth-of-type(2)");
+    vi.mocked(surface.draft).mockReturnValueOnce({ anchor: mine, quote: "Same words" });
+    // Both threads have the same label; only the anchor tells them apart.
+    surface.label = () => "“Same words” · Home";
+    const created: ThreadView = { ...thread("2"), anchor: mine };
+    vi.mocked(api.createThread).mockImplementationOnce(async () => {
+      (payload as { threads: ThreadView[] }).threads = [other, created];
+      const { ApiError } = await import("./api.js");
+      throw new ApiError("document_agent_unavailable", 409);
+    });
+    ui.startComment();
+    const pop = document.querySelector(".cpop")!;
+    pop.querySelector("textarea")!.value = "Hello";
+    pop.querySelector<HTMLInputElement>("input[data-send]")!.checked = true;
+    pop.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await vi.waitFor(() => expect(document.querySelector(".cpop")?.textContent).toContain("#2 on"));
   });
 });
