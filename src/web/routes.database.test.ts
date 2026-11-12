@@ -9,6 +9,8 @@ import type { Principal } from "#prisma";
 import { createPrismaClient } from "../core/db.js";
 import { createDocument } from "../core/documents/service.js";
 import { createShareLink, revokeShareLink } from "../core/documents/share-links.js";
+import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
+import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { loggablePath, startHttpServer, type HttpServerHandle } from "../mcp/transport/streamable-http.js";
 import type { AuthProvider } from "../providers/auth/types.js";
@@ -845,6 +847,85 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       });
       expect(unwired.status).toBe(501);
       expect(await db.comment.count({ where: { body: "unwired send" } })).toBe(0);
+    });
+  });
+
+  describe("sending with the real sender (agent loop)", () => {
+    const anchor = { type: "text", quote: "hello", prefix: "", suffix: "" };
+    it("answers the agent loop's codes: not linked 400, rate limited 429, too many threads 400", async () => {
+      const executor = { start: async () => {}, stop: async () => {} };
+      const limited = {
+        check: async () => {
+          throw new RateLimitError("Rate limited.");
+        },
+      };
+      const p = await freePort();
+      const real =
+        (rateLimiter?: RateLimiter): NonNullable<WebDeps["sendThreads"]> =>
+        (input) =>
+          sendThreadsToAgent(db, { executor, cipher, ...(rateLimiter ? { rateLimiter } : {}) }, input);
+      const m = await session(member.id);
+      const created = await call(`/d/api/${docId}/threads`, {
+        method: "POST",
+        jar: m.jar,
+        csrf: m.csrf,
+        body: { anchor, body: "real send" },
+      });
+      const { threadId } = (await created.json()) as { threadId: string };
+      const h = await startServerAt(p, { sendThreads: real() });
+      try {
+        const base = `http://127.0.0.1:${p}`;
+        const res = await callAt(base, `/d/api/${docId}/send`, {
+          method: "POST",
+          jar: m.jar,
+          csrf: m.csrf,
+          body: { threadIds: [threadId] },
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "document_not_agent_linked" });
+        const many = await callAt(base, `/d/api/${docId}/send`, {
+          method: "POST",
+          jar: m.jar,
+          csrf: m.csrf,
+          body: { threadIds: Array.from({ length: 51 }, (_, i) => `t${i}`) },
+        });
+        expect(many.status).toBe(400);
+      } finally {
+        await h.close();
+      }
+      // The rate limit is checked only for a send that could start a run, so link the document for it.
+      const agent = await db.agent.create({
+        data: {
+          name: `web-coding-${s}`,
+          systemPrompt: "p",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          kind: "coding",
+          ownerId: owner.id,
+          codingProfile: { create: { provider: "codex", repository: "acme/web-docs", protectedPaths: [] } },
+        },
+      });
+      await db.document.update({
+        where: { id: docId },
+        data: { agentId: agent.id, repository: "acme/web-docs", path: "docs/plan.md" },
+      });
+      const p2 = await freePort();
+      const h2 = await startServerAt(p2, { sendThreads: real(limited) });
+      try {
+        const res = await callAt(`http://127.0.0.1:${p2}`, `/d/api/${docId}/send`, {
+          method: "POST",
+          jar: m.jar,
+          csrf: m.csrf,
+          body: { threadIds: [threadId] },
+        });
+        expect(res.status).toBe(429);
+        expect(await res.json()).toEqual({ error: "comment_send_rate_limited" });
+      } finally {
+        await h2.close();
+        await db.document.update({ where: { id: docId }, data: { agentId: null, repository: null, path: null } });
+        await db.codingAgentProfile.deleteMany({ where: { agentId: agent.id } });
+        await db.agent.delete({ where: { id: agent.id } });
+      }
     });
   });
 

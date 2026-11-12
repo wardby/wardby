@@ -21,6 +21,7 @@ import {
   reply,
   setThreadStatus,
 } from "../core/documents/comments.js";
+import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
 import type { PageViewer } from "./page.js";
@@ -205,7 +206,9 @@ export async function postSend(
   body: Record<string, unknown>,
 ): Promise<void> {
   const ids = body.threadIds;
-  if (!Array.isArray(ids) || ids.length > 100 || !ids.every((id) => typeof id === "string")) invalid();
+  if (!Array.isArray(ids) || ids.length > MAX_THREADS_PER_SEND || !ids.every((id) => typeof id === "string")) {
+    invalid();
+  }
   await requireDocumentAccess(deps.db, documentId, viewer, "write");
   if (!deps.sendThreads) throw new Error("document_send_not_available");
   const result = await deps.sendThreads({ documentId, threadIds: ids as string[], viewer });

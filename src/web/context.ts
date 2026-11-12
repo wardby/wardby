@@ -22,8 +22,8 @@ const webLog = logger.child({ module: "web" });
 export type WebCipher = Parameters<typeof loadAgentSecretValues>[1];
 
 /**
- * Sends threads to the document's agent (wired by the send-to-agent feature);
- * absent = 501. Contract: every caller has already required `write` access
+ * Sends threads to the document's agent (src/core/documents/agent-loop.ts
+ * sendThreadsToAgent, wired in src/mcp/index.ts); absent = 501. Contract: every caller has already required `write` access
  * on the document for this viewer (requireDocumentAccess), and an
  * implementation re-checks it before starting a run.
  */
@@ -138,6 +138,7 @@ const STATUS = {
   invalid_request: 400,
   comment_anchor_invalid: 400,
   comment_too_long: 400,
+  document_not_agent_linked: 400,
   guest_name_invalid: 400,
   guest_email_invalid: 400,
   web_login_failed: 400,
@@ -158,6 +159,7 @@ const STATUS = {
   document_send_not_available: 501,
   web_login_not_configured: 503,
   web_rate_limited: 429,
+  comment_send_rate_limited: 429,
   web_assets_missing: 503,
 } satisfies Record<string, number>;
 

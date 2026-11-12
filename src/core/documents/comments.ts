@@ -1,8 +1,10 @@
 import { Prisma } from "#prisma";
 import type { PrismaClient } from "#prisma";
+import { redactSecrets } from "../../coding/redact.js";
 import { atLeast } from "../grants.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
+import { cutUntrustedText } from "../untrusted-content.js";
 import { documentAccess, requireDocumentAccess } from "./access.js";
 import type { Viewer } from "./access.js";
 import { parseTextAnchor } from "./anchors.js";
@@ -251,4 +253,22 @@ export async function mentionCandidates(
   }
   const names = await principalNames(db, [...ids]);
   return [...ids].filter((id) => names.has(id)).map((principalId) => ({ principalId, name: names.get(principalId)! }));
+}
+
+/**
+ * A reply by an agent run on a thread it was sent, shown as "Agent · via
+ * <sender>". The body is the agent's own text: it is redacted here by exact
+ * value against `secretValues` (the agent's secrets) and token shape, then
+ * cut to MAX_COMMENT_CHARS. No access check: only the agent loop calls this,
+ * for threads whose sentRunId is this run.
+ */
+export async function postAgentReply(
+  db: CommentDb,
+  input: { threadId: string; runId: string; viaId: string | null; body: string; secretValues: readonly string[] },
+): Promise<{ commentId: string }> {
+  const body = cutUntrustedText(redactSecrets(input.body, input.secretValues), MAX_COMMENT_CHARS).text;
+  const c = await db.comment.create({
+    data: { threadId: input.threadId, runId: input.runId, viaId: input.viaId, body },
+  });
+  return { commentId: c.id };
 }

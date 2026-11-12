@@ -30,6 +30,7 @@ import {
   loadWebOidcConfig,
 } from "../config/providers.js";
 import { createOidcLogin } from "../web/oidc-login.js";
+import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
 import type { WebDeps } from "../web/routes.js";
 import { prisma } from "../core/db.js";
 import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
@@ -566,6 +567,17 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     canonicalUri: canonicalHref,
     authMode: authProviderKind,
     ...(selfHosted ? { selfHosted } : {}),
+    // The callers have required write on the document; sendThreadsToAgent checks it again.
+    sendThreads: (input) =>
+      sendThreadsToAgent(
+        prisma,
+        {
+          executor: providers.executor,
+          cipher: providers.secrets,
+          selfDefects: { db: prisma, issueTrackers: providers.issueTrackers },
+        },
+        input,
+      ),
     ...(authProviderKind === "delegating"
       ? {
           oidc: createOidcLogin({

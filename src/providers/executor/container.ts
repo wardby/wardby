@@ -513,8 +513,23 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxConcurrent?: number;
       /** Configured issue trackers: a coding run this store ends failed/lost/budget_exhausted files a self-defect. */
       issueTrackers?: IssueTrackerRegistry;
+      /**
+       * Called with the run id after the write that made a run terminal (complete or terminate),
+       * once per run. Fire-and-forget: it must not throw or block; composition.ts wires the
+       * document send-to-agent completion here (src/core/documents/agent-loop.ts).
+       */
+      onTerminal?: (runId: string) => void;
     } = {},
   ) {}
+
+  /** Runs the onTerminal hook; nothing it throws reaches the terminal path. */
+  private notifyTerminal(runId: string): void {
+    try {
+      this.options.onTerminal?.(runId);
+    } catch (err) {
+      containerLog.warn({ err, runId }, "coding run terminal hook failed");
+    }
+  }
 
   /** Best effort (bounded, never throws): only called by the write that made the row terminal, so it files once. */
   private async selfDefect(run: {
@@ -954,7 +969,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       await this.selfDefect({ ...finished, status, error: null, finishedAt });
     }
     // Only the write that made the row terminal emits (never throws).
-    if (finished) await emitRunCompletedEvent(this.db, runId);
+    if (finished) {
+      await emitRunCompletedEvent(this.db, runId);
+      this.notifyTerminal(runId);
+    }
   }
 
   async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
@@ -1009,7 +1027,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
     // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
     if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
-    if (changed) await emitRunCompletedEvent(this.db, runId);
+    if (changed) {
+      await emitRunCompletedEvent(this.db, runId);
+      this.notifyTerminal(runId);
+    }
     return changed;
   }
 }

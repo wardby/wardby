@@ -18,6 +18,7 @@ import { prismaServiceStateReporter } from "../../core/coding-service-status.js"
 import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
+import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
@@ -71,6 +72,26 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
         .then(() => startDeferredForRequest(deps(), runId))
         .catch((err: unknown) =>
           compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
+        );
+    });
+}
+
+/** The document send-to-agent completion, outside the finishing run's async context. Never throws. */
+export function documentRunFinishedHook(
+  deps: () => { db: PrismaClient; executor: Executor; cipher: Parameters<typeof loadAgentSecretValues>[1] },
+): (runId: string) => void {
+  return (runId) =>
+    outsideRunContext(() => {
+      void Promise.resolve()
+        .then(() => {
+          const { db, ...rest } = deps();
+          return onDocumentRunFinished(db, rest, runId);
+        })
+        .catch((err: unknown) =>
+          compositionLog.warn(
+            { runId, errorName: err instanceof Error ? err.name : typeof err },
+            "document hook failed",
+          ),
         );
     });
 }
@@ -233,7 +254,15 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   });
   const coding = new ContainerExecutor({
     transcripts,
-    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
+    store: new PrismaContainerExecutionStore(options.db, {
+      maxConcurrent: concurrency.maxConcurrent,
+      issueTrackers,
+      // Threads sent from a document: publish the run's edit and post its replies (never throws).
+      // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
+      ...(cipher
+        ? { onTerminal: documentRunFinishedHook(() => ({ db: options.db, executor: composed, cipher })) }
+        : {}),
+    }),
     jobs,
     vcs,
     sessions,
