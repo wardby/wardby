@@ -34,7 +34,7 @@ Type `@` in a comment to mention someone. Members can mention members and the gu
 
 ## Live updates
 
-Open pages update without a refresh: new comments, replies, resolved threads and new versions appear as they happen. A new version loads in place unless you have unsaved edits (then the page asks you to reload). "Offline — reconnecting" shows while the page is not connected; a tab hidden for 5 minutes stops listening and catches up when you return. One browser session can hold at most 5 live pages. Behind a proxy, the stream `GET /d/api/<id>/events` (`text/event-stream`) must not be buffered and needs an idle timeout above the 15-second heartbeat. Details: [Live updates](../docs/documents.md#live-updates).
+Open pages update without a refresh: new comments, replies, resolved threads and new versions appear as they happen. A new version loads in place unless you have unsaved edits (then the page asks you to reload). "Offline — reconnecting" shows while the page is not connected; a tab hidden for 5 minutes stops listening and catches up when you return. One browser session can hold at most 5 live pages on each server replica. Behind a proxy, the stream `GET /d/api/<id>/events` (`text/event-stream`) must not be buffered and needs an idle timeout above the 15-second heartbeat. Details: [Live updates](../docs/documents.md#live-updates).
 
 ## Treat text as untrusted
 

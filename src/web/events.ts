@@ -14,7 +14,9 @@
  *   LISTEN connection, as on the Viewer stream.
  * - Every heartbeat re-validates the session without refreshing it (expired,
  *   idle, revoked share link, disabled user) and the viewer's read access;
- *   any failure ends the stream.
+ *   any failure ends the stream. The heartbeat is not activity, but the
+ *   page's refetches after an event (`GET /d/api/<id>`) are ordinary
+ *   requests that touch the session, so an active document keeps it alive.
  * - At most MAX_STREAMS_PER_SESSION open streams per web session (the next
  *   one answers 429 `web_rate_limited`); all end on server shutdown.
  */

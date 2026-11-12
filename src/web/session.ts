@@ -88,9 +88,11 @@ export function webSessionCsrf(cookieHeader: string | undefined, options: WebCoo
 
 /**
  * The live session for this Cookie header, or null (missing, unknown, expired
- * or idle). `touch: false` checks without refreshing lastSeenAt: an open
- * event stream re-checks its session but is not activity, so it never keeps
- * an idle session alive.
+ * or idle). `touch: false` checks without refreshing lastSeenAt: the
+ * heartbeat of an open event stream re-checks its session but does not count
+ * as activity itself. (A tab with a stream open can still keep the session
+ * alive: its refetches through `GET /d/api/<id>` are ordinary requests and
+ * touch it.)
  */
 export async function readWebSession(
   db: PrismaClient,

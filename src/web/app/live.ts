@@ -19,6 +19,7 @@ export const HIDDEN_STOP_MS = 5 * 60_000;
 export const DEFAULT_RETRY_MS = 3000;
 /** Reconnect delay after the server refused the stream for too many open tabs (429). */
 export const BUSY_RETRY_MS = 30_000;
+export const MAX_BACKOFF_MS = 60_000;
 
 export interface SseMessage {
   event: string;
@@ -75,6 +76,7 @@ export function liveAction(message: SseMessage): LiveAction {
       return "version";
     case "resync":
       return "resync";
+    case "hello":
     case "status":
       return "status";
     default:
@@ -82,7 +84,7 @@ export function liveAction(message: SseMessage): LiveAction {
   }
 }
 
-/** `status` data: whether the server is hearing changes (its LISTEN connection is up). */
+/** `hello` and `status` data: whether the server is hearing changes (its LISTEN connection is up). */
 export function statusConnected(data: string): boolean | null {
   try {
     const v = (JSON.parse(data) as { connected?: unknown }).connected;
@@ -175,6 +177,8 @@ export class LiveConnection {
   private opened = false;
   private running = false;
   private retryMs = DEFAULT_RETRY_MS;
+  /** Delay before the next retry after a failed open; doubles per failure, reset by a successful open. */
+  private failMs = DEFAULT_RETRY_MS;
 
   constructor(
     private readonly url: string,
@@ -206,6 +210,13 @@ export class LiveConnection {
     }, ms);
   }
 
+  /** Back off 3 s, 6 s, 12 s … up to MAX_BACKOFF_MS while the server keeps failing to open the stream. */
+  private scheduleFailure(): void {
+    const ms = Math.max(this.retryMs, this.failMs);
+    this.failMs = Math.min(this.failMs * 2, MAX_BACKOFF_MS);
+    this.schedule(Math.min(ms, MAX_BACKOFF_MS));
+  }
+
   private async connect(): Promise<void> {
     if (!this.running) return;
     const controller = new AbortController();
@@ -220,7 +231,7 @@ export class LiveConnection {
       });
     } catch {
       if (controller.signal.aborted) return;
-      return this.schedule(this.retryMs);
+      return this.scheduleFailure();
     }
     if (res.status === 401 || res.status === 403 || res.status === 404) {
       this.running = false;
@@ -228,8 +239,9 @@ export class LiveConnection {
       return;
     }
     if (!res.ok || !res.body) {
-      return this.schedule(res.status === 429 ? BUSY_RETRY_MS : this.retryMs);
+      return res.status === 429 ? this.schedule(BUSY_RETRY_MS) : this.scheduleFailure();
     }
+    this.failMs = DEFAULT_RETRY_MS;
     const reconnect = this.opened;
     this.opened = true;
     this.handlers.onState("live");

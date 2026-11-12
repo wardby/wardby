@@ -105,7 +105,7 @@ the kind of change, never its content, so access checks stay on the page API.
   Every 15 seconds the server re-checks the session and access, and ends the
   stream when the session has expired, the share link is revoked, the user is
   disabled or access is gone.
-- One browser session can hold at most 5 open streams (one per open tab); a
+- One browser session can hold at most 5 open streams on each server replica (one per open tab); a
   sixth is refused with `web_rate_limited` until a tab is closed, and that tab
   falls back to refreshing threads only while an agent is working.
 
@@ -180,20 +180,20 @@ published.
 
 ## Limits
 
-| Limit                        | Value                   |
-| ---------------------------- | ----------------------- |
-| Markdown per version         | 1 MiB (UTF-8 bytes)     |
-| Comment or reply             | 10,000 characters       |
-| Quoted anchor text           | 500 characters          |
-| Guest name                   | 1-40 characters         |
-| Share link lifetime          | 1-90 days, default 14   |
-| Threads per send             | 50                      |
-| Sends per document           | 30 an hour              |
-| Guest comments and replies   | 30 an hour per guest    |
-| Guest registrations per link | 20 an hour              |
-| Document sent to an agent    | 60,000 characters       |
-| Mentions checked per comment | 20 (members and guests) |
-| Live-update streams          | 5 per browser session   |
+| Limit                        | Value                                        |
+| ---------------------------- | -------------------------------------------- |
+| Markdown per version         | 1 MiB (UTF-8 bytes)                          |
+| Comment or reply             | 10,000 characters                            |
+| Quoted anchor text           | 500 characters                               |
+| Guest name                   | 1-40 characters                              |
+| Share link lifetime          | 1-90 days, default 14                        |
+| Threads per send             | 50                                           |
+| Sends per document           | 30 an hour                                   |
+| Guest comments and replies   | 30 an hour per guest                         |
+| Guest registrations per link | 20 an hour                                   |
+| Document sent to an agent    | 60,000 characters                            |
+| Mentions checked per comment | 20 (members and guests)                      |
+| Live-update streams          | 5 per browser session on each server replica |
 
 ## Security headers
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BUSY_RETRY_MS,
   coalesce,
+  MAX_BACKOFF_MS,
   HIDDEN_STOP_MS,
   HiddenStopper,
   liveAction,
@@ -37,7 +38,13 @@ describe("what the page does for a message", () => {
     expect(liveAction(m("version"))).toBe("version");
     expect(liveAction(m("resync"))).toBe("resync");
     expect(liveAction(m("status"))).toBe("status");
-    expect(liveAction(m("hello"))).toBeNull();
+    expect(liveAction(m("hello"))).toBe("status");
+    expect(liveAction(m("ping"))).toBeNull();
+  });
+  it("reads hello data like status data, so a replica that is not listening is not live", () => {
+    expect(statusConnected('{"connected":false}')).toBe(false);
+    expect(statusConnected('{"connected":true}')).toBe(true);
+    expect(statusConnected("{}")).toBeNull();
   });
   it("reads status data", () => {
     expect(statusConnected('{"connected":false}')).toBe(false);
@@ -189,5 +196,45 @@ describe("LiveConnection", () => {
     expect(states.at(-1)).toBe("stopped");
     await vi.advanceTimersByTimeAsync(BUSY_RETRY_MS * 2);
     expect(f.calls).toHaveLength(2);
+  });
+
+  it("backs off 3 s, 6 s, 12 s ... up to 60 s on server errors, and resets after a successful open", async () => {
+    vi.useFakeTimers();
+    const f = fakeFetch();
+    const fail = () => new Response("{}", { status: 503 });
+    for (let i = 0; i < 8; i++) f.queue.push(fail);
+    const ok = f.stream();
+    f.queue.push(ok.response, fail);
+    const live = new LiveConnection(
+      "/d/api/doc/events",
+      {},
+      { onMessage: () => undefined, onReconnect: () => undefined, onState: () => undefined },
+      f.impl,
+    );
+    live.start();
+    await vi.advanceTimersByTimeAsync(0);
+    let calls = 1;
+    expect(f.calls).toHaveLength(calls);
+    for (const wait of [3000, 6000, 12_000, 24_000, 48_000, MAX_BACKOFF_MS, MAX_BACKOFF_MS]) {
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(f.calls).toHaveLength(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      calls++;
+      expect(f.calls).toHaveLength(calls);
+    }
+    // the 8th attempt is the successful open; ending the stream retries after the base delay again
+    await vi.advanceTimersByTimeAsync(MAX_BACKOFF_MS);
+    calls++;
+    expect(f.calls).toHaveLength(calls);
+    ok.end();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    calls++;
+    expect(f.calls).toHaveLength(calls);
+    // that attempt failed (503): the delay restarted at 3 s, not at 60 s
+    await vi.advanceTimersByTimeAsync(3000);
+    calls++;
+    expect(f.calls).toHaveLength(calls);
+    live.stop();
   });
 });

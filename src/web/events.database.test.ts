@@ -5,7 +5,7 @@
  * any frame. Skipped without DATABASE_URL.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "#prisma";
@@ -17,7 +17,7 @@ import { createShareLink, registerGuest, revokeShareLink } from "../core/documen
 import { buildMcpServer } from "../mcp/server.js";
 import { startHttpServer, type HttpServerHandle } from "../mcp/transport/streamable-http.js";
 import type { AuthProvider } from "../providers/auth/types.js";
-import { createDocumentStreams, type DocumentStreams } from "./events.js";
+import { createDocumentStreams, openDocumentStream, type DocumentStreams } from "./events.js";
 import { createWebSession } from "./session.js";
 
 const DEV = { secure: false };
@@ -56,9 +56,14 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
   let base: string;
   const open: Stream[] = [];
 
-  async function stream(cookie: string | null, docPath = docId, headers: Record<string, string> = {}): Promise<Stream> {
+  async function stream(
+    cookie: string | null,
+    docPath = docId,
+    headers: Record<string, string> = {},
+    origin = base,
+  ): Promise<Stream> {
     const controller = new AbortController();
-    const res = await fetch(`${base}/d/api/${docPath}/events`, {
+    const res = await fetch(`${origin}/d/api/${docPath}/events`, {
       headers: { accept: "text/event-stream", ...(cookie ? { cookie } : {}), ...headers },
       signal: controller.signal,
     });
@@ -206,6 +211,71 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
     await st.waitFor(/: ping\n/);
     await db.webSession.updateMany({ where: { principalId: owner.id }, data: { expiresAt: new Date(Date.now() - 1) } });
     expect(await st.ended()).toBe(true);
+  });
+
+  it("ends the stream at the next heartbeat when a self-hosted user is disabled", async () => {
+    const user = await db.principal.create({ data: { subject: `events-sh-${s}` } });
+    await db.authUser.create({ data: { principalId: user.id } });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: docId,
+        granteeKind: "principal",
+        granteePrincipalId: user.id,
+        granteeKey: `principal:${user.id}`,
+        level: "read",
+      },
+    });
+    const deps = {
+      db,
+      cipher,
+      canonicalUri: base,
+      authMode: "self-hosted" as const,
+      events: streams,
+    };
+    const server: Server = createServer((req, res) => {
+      openDocumentStream(req, res, docId, deps).catch(() => res.destroy());
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const st = await stream(await memberCookie(user.id), docId, {}, origin);
+      expect(st.status).toBe(200);
+      await st.waitFor(/: ping\n/);
+      await db.authUser.update({ where: { principalId: user.id }, data: { status: "disabled" } });
+      expect(await st.ended()).toBe(true);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      await db.webSession.deleteMany({ where: { principalId: user.id } });
+      await db.resourceGrant.deleteMany({ where: { granteePrincipalId: user.id } });
+      await db.authUser.deleteMany({ where: { principalId: user.id } });
+      await db.principal.delete({ where: { id: user.id } });
+    }
+  });
+
+  it("ends the stream at the next heartbeat when a member loses their grant", async () => {
+    const member = await db.principal.create({ data: { subject: `events-mem-${s}` } });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: docId,
+        granteeKind: "principal",
+        granteePrincipalId: member.id,
+        granteeKey: `principal:${member.id}`,
+        level: "read",
+      },
+    });
+    try {
+      const st = await liveStream(await memberCookie(member.id));
+      await st.waitFor(/: ping\n/);
+      await db.resourceGrant.deleteMany({ where: { granteePrincipalId: member.id } });
+      expect(await st.ended()).toBe(true);
+    } finally {
+      await db.webSession.deleteMany({ where: { principalId: member.id } });
+      await db.resourceGrant.deleteMany({ where: { granteePrincipalId: member.id } });
+      await db.principal.delete({ where: { id: member.id } });
+    }
   });
 
   it("does not refresh the session on heartbeats", async () => {

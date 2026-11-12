@@ -342,6 +342,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         onMessage: (message) => {
           const act = liveAction(message);
           if (act === "status") {
+            // `hello` carries the same `connected` field as `status`.
             const up = statusConnected(message.data);
             if (up !== null) serverHears = up;
             showLive(liveState);
