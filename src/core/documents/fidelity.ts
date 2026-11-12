@@ -64,7 +64,7 @@ export async function recordFidelity(
   // One conditional statement: appends only while no fidelity entry exists (no read-then-write race).
   await db.$executeRaw`
     UPDATE "DocumentVersion"
-    SET "warnings" = COALESCE("warnings", '[]'::jsonb) || ${JSON.stringify(entries)}::jsonb
+    SET "warnings" = (CASE jsonb_typeof("warnings") WHEN 'array' THEN "warnings" ELSE '[]'::jsonb END) || ${JSON.stringify(entries)}::jsonb
     WHERE "id" = ${version.id}
-      AND NOT (COALESCE("warnings", '[]'::jsonb) @> '[{"kind":"fidelity"}]'::jsonb)`;
+      AND NOT ((CASE jsonb_typeof("warnings") WHEN 'array' THEN "warnings" ELSE '[]'::jsonb END) @> '[{"kind":"fidelity"}]'::jsonb)`;
 }

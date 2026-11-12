@@ -38,4 +38,27 @@ describe("frameHtml", () => {
     expect(area2.hasAttribute("href")).toBe(false);
     expect(d.querySelectorAll("a")[1].hasAttribute("href")).toBe(false);
   });
+
+  it("SVG links: an external xlink:href is removed in both modes; a #board: xlink link is rewritten", () => {
+    const html =
+      '<!doctype html><html><body><svg xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">' +
+      '<a xlink:href="https://evil.example/"><text>out</text></a>' +
+      '<a xlink:href="#board:menu"><text>menu</text></a>' +
+      '<a href="https://evil.example/" xlink:href="https://evil.example/2"><text>both</text></a></svg></body></html>';
+    for (const mode of ["play", "overview"] as const) {
+      const out = frameHtml(html, mode, new Set(["menu"]));
+      expect(out).not.toContain("evil.example");
+      expect(out).not.toContain("xlink:href");
+      const links = Array.from(new JSDOM(out).window.document.querySelectorAll("a"));
+      expect(links).toHaveLength(3);
+      if (mode === "play") {
+        expect(links[1].getAttribute("href")).toBe("#board-menu");
+        expect(links[1].getAttribute("target")).toBe("_top");
+      } else {
+        expect(links.some((a) => a.hasAttribute("href"))).toBe(false);
+      }
+      expect(links[0].hasAttribute("href")).toBe(false);
+      expect(links[2].hasAttribute("href")).toBe(false);
+    }
+  });
 });

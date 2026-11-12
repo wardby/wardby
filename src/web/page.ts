@@ -34,6 +34,9 @@ export { escapeHtml, scriptJson };
 
 const pageLog = logger.child({ module: "web" });
 
+/** Bundles already warned about: the missing-integrity warning is logged once per process per bundle. */
+const warnedIntegrity = new Set<string>();
+
 const newNonce = () => randomBytes(18).toString("base64");
 
 /** The `integrity` and `crossorigin` attributes for a bundle file, or nothing without a digest. */
@@ -62,7 +65,10 @@ export function sendDocumentPage(
   const jsDigest = input.integrity?.[`${bundle}.js`];
   const cssDigest = input.integrity?.[`${bundle}.css`];
   if ((js && !jsDigest) || (css && !cssDigest)) {
-    pageLog.warn({ bundle }, "web asset integrity missing; serving the page without integrity attributes");
+    if (!warnedIntegrity.has(bundle)) {
+      warnedIntegrity.add(bundle);
+      pageLog.warn({ bundle }, "web asset integrity missing; serving the page without integrity attributes");
+    }
   }
   const html =
     '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +

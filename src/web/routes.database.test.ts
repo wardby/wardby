@@ -355,10 +355,11 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       }
     });
 
-    it("serves the page without integrity attributes, and logs one warning, when integrity.json is missing or malformed", async () => {
+    it("serves the page without integrity attributes, and logs the warning once, when integrity.json is missing or malformed", async () => {
       const { jar } = await session(member.id);
       const original = readFileSync(join(assets, "integrity.json"), "utf8");
       try {
+        let first = true;
         for (const text of [null, "{not json", JSON.stringify({ "documents.js": "sha256-abc", "documents.css": 5 })]) {
           if (text === null) await rm(join(assets, "integrity.json"));
           else await writeFile(join(assets, "integrity.json"), text);
@@ -369,9 +370,13 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
           expect(html).toContain(`<script src="/web/static/${JS}"></script>`);
           expect(html).not.toContain("integrity=");
           const warnings = logged.slice(before).filter((l) => l.includes("web asset integrity"));
-          expect(warnings.length).toBe(1);
-          expect(warnings[0]).not.toContain("not json");
-          expect(warnings[0]).not.toContain("sha256-abc");
+          // Logged once per process per bundle: the first render warns, later renders stay quiet.
+          expect(warnings.length).toBe(first ? 1 : 0);
+          first = false;
+          for (const w of warnings) {
+            expect(w).not.toContain("not json");
+            expect(w).not.toContain("sha256-abc");
+          }
         }
       } finally {
         await writeFile(join(assets, "integrity.json"), original);
@@ -1418,6 +1423,42 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(guestPut.status).toBe(403);
       expect(await guestPut.json()).toEqual({ error: "document_access_denied" });
       expect(await currentNumber(designId, jar)).toBe(base + 1);
+    });
+
+    it("a save can delete a board and update the manifest in the same PUT", async () => {
+      const { jar, csrf } = await session(member.id);
+      const files = coffee();
+      type Manifest = { boards: Array<{ id: string; name: string; file: string; width: number }> };
+      const original = JSON.parse(files["manifest.json"]) as Manifest;
+      // Add a throwaway board first, so later tests keep the four-board fixture.
+      const withExtra: Manifest = {
+        ...original,
+        boards: [...original.boards, { id: "extra", name: "Extra", file: "boards/extra.html", width: 1280 }],
+      };
+      const add = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: {
+          files: { "boards/extra.html": files["boards/menu.html"], "manifest.json": JSON.stringify(withExtra) },
+          baseNumber: await currentNumber(designId, jar),
+        },
+      });
+      expect(add.status).toBe(200);
+      const base = await currentNumber(designId, jar);
+      const before = await fileHashes(designId, base);
+      expect(before).toHaveProperty(["boards/extra.html"]);
+      const res = await call(`/d/api/${designId}/content`, {
+        method: "PUT",
+        jar,
+        csrf,
+        body: { files: { "boards/extra.html": null, "manifest.json": JSON.stringify(original) }, baseNumber: base },
+      });
+      expect(res.status).toBe(200);
+      const after = await fileHashes(designId, base + 1);
+      expect(after).not.toHaveProperty(["boards/extra.html"]);
+      expect(after["boards/home.html"]).toBe(before["boards/home.html"]);
+      expect(after["manifest.json"]).not.toBe(before["manifest.json"]);
     });
 
     it("stores fidelity warnings once per version, from a writer only", async () => {

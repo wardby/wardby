@@ -12,6 +12,8 @@ import { BOARD_ID } from "./ids.js";
 /** `#board:<id>`, the id by the board-id pattern (ids.ts). */
 const BOARD_LINK = new RegExp(`^#board:(${BOARD_ID.source.replace(/^\^|\$$/g, "")})$`);
 
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+
 export type FrameMode = "play" | "overview";
 
 export function frameHtml(boardHtml: string, mode: FrameMode, boardIds: ReadonlySet<string>): string {
@@ -19,8 +21,11 @@ export function frameHtml(boardHtml: string, mode: FrameMode, boardIds: Readonly
   try {
     const doc = dom.window.document;
     for (const a of Array.from(doc.querySelectorAll("a, area"))) {
-      const m = BOARD_LINK.exec(a.getAttribute("href") ?? "");
+      // An SVG link may carry its target as xlink:href; it counts as the link's href (same rule).
+      const href = a.getAttribute("href") ?? a.getAttributeNS(XLINK_NS, "href") ?? "";
+      const m = BOARD_LINK.exec(href);
       a.removeAttribute("target");
+      a.removeAttributeNS(XLINK_NS, "href");
       if (mode === "play" && m && boardIds.has(m[1])) {
         a.setAttribute("href", `#board-${m[1]}`);
         a.setAttribute("target", "_top");

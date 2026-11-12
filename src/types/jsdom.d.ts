@@ -34,6 +34,8 @@ declare module "jsdom" {
     hasAttribute(name: string): boolean;
     setAttribute(name: string, value: string): void;
     removeAttribute(name: string): void;
+    getAttributeNS(namespace: string | null, localName: string): string | null;
+    removeAttributeNS(namespace: string | null, localName: string): void;
     closest(selectors: string): DomElement | null;
     /** A template element's contents (a document fragment). Other elements differ: meta's is a string. */
     readonly content?: unknown;
