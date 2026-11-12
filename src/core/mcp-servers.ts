@@ -19,6 +19,7 @@ import { OAuthSecretFlowError } from "./oauth-secrets.js";
 import {
   decryptEntry,
   type SecretEntry,
+  type SecretCallOptions,
   type SecretFetchSettings,
   type SecretsAccessor,
   type StoredSecretRow,
@@ -145,7 +146,7 @@ export function redactForServer(text: string, values: string[]): string {
 export function redactError(error: unknown, values: string[]): Error {
   const message = redactForServer(error instanceof Error ? error.message : "The MCP server call failed.", values);
   if (error instanceof McpClientError) return new McpClientError(error.code, message);
-  if (error instanceof McpServerInputError) return new McpServerInputError(message);
+  if (error instanceof McpServerInputError) return new McpServerInputError(message, error.retryable);
   // Its message is fixed and carries no value: keep it (and its ids) as it is.
   if (error instanceof McpCredentialsUnavailableError) return error;
   const out = new Error(message);
@@ -161,7 +162,7 @@ const STORED_SECRET_SELECT = { id: true, name: true, ciphertext: true, broker: t
  * Loads the owner's secrets for the server; each must exist, be owned by ownerId, be brokered, and list
  * the URL's host (McpServerInputError otherwise). A stored value that can't be decrypted throws
  * McpCredentialsUnavailableError. An OAuth secret that needs connecting again, or whose refresh
- * failed, throws McpServerInputError with the fixed OAuth message.
+ * failed, throws McpServerInputError with the fixed OAuth message, `retryable` when trying again may work.
  *
  * `values` is live: an OAuth secret's resolve and refresh re-read the stored row through
  * decryptEntry (so the newest token is always sent) and add what they return to `values` before
@@ -200,30 +201,43 @@ export async function loadServerSecrets(
     if (!broker.hosts.includes(host))
       throw new McpServerInputError(`Secret "${name}" is not brokered to host ${host}; add it to the secret's hosts.`);
   };
-  const entryOf = async (stored: StoredSecretRow, name: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+  const entryOf = async (
+    stored: StoredSecretRow,
+    name: string,
+    call?: SecretCallOptions,
+    forceRefreshIfStill?: string,
+  ): Promise<SecretEntry> => {
     let entry: SecretEntry;
+    const signal = call?.signal ?? fetch.signal;
     try {
       entry = await decryptEntry(db, cipher, stored, {
         ...fetch,
+        ...(signal ? { signal } : {}),
         ...(forceRefreshIfStill !== undefined ? { forceRefreshIfStill } : {}),
+        ...(call?.attributable ? { attributable: true } : {}),
       });
     } catch (err) {
       const isOAuth = stored.oauth !== null && stored.oauth !== undefined;
       // The cipher's error is dropped: it is not an input problem, and its text is not ours to pass on.
       if (!isOAuth || (err instanceof OAuthSecretFlowError && err.reason === "cipher_failed"))
         throw new McpCredentialsUnavailableError(server.id, server.name, name);
-      // Its message is fixed (reconnect, or try again) and names only the secret.
-      if (err instanceof OAuthSecretFlowError) throw new McpServerInputError(err.message);
+      // Its message is fixed (reconnect, or try again) and names only the secret; `retryable` says which.
+      if (err instanceof OAuthSecretFlowError) throw new McpServerInputError(err.message, err.retryable);
       throw err;
     }
     addValues(entry);
     return entry;
   };
-  const reload = async (name: string, id: string, forceRefreshIfStill?: string): Promise<SecretEntry> => {
+  const reload = async (
+    name: string,
+    id: string,
+    call?: SecretCallOptions,
+    forceRefreshIfStill?: string,
+  ): Promise<SecretEntry> => {
     const stored = await db.secret.findUnique({ where: { id }, select: STORED_SECRET_SELECT });
     if (!stored) throw new McpServerInputError(`Secret "${name}" was not found among your secrets.`);
     checkBroker(stored, name);
-    return entryOf(stored, name, forceRefreshIfStill);
+    return entryOf(stored, name, call, forceRefreshIfStill);
   };
   for (const name of server.secretNames) {
     const stored = await db.secret.findUnique({
@@ -239,13 +253,13 @@ export async function loadServerSecrets(
     get: async () => {
       throw new Error("secret_brokered: this secret is brokered; it is never readable");
     },
-    resolve: async (name) => {
+    resolve: async (name, call) => {
       const id = oauthIds.get(name);
-      return id === undefined ? entries.get(name) : reload(name, id);
+      return id === undefined ? entries.get(name) : reload(name, id, call);
     },
-    refresh: async (name, usedValue) => {
+    refresh: async (name, usedValue, call) => {
       const id = oauthIds.get(name);
-      return id === undefined ? undefined : reload(name, id, usedValue);
+      return id === undefined ? undefined : reload(name, id, call, usedValue);
     },
   };
   return { accessor, values };

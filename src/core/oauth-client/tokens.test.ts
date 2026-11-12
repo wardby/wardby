@@ -324,6 +324,24 @@ describe("refreshTokens", () => {
     });
   });
 
+  it("maps invalid_target (a resource the server does not know) to a fixed bad_response without the provider text", async () => {
+    fake = await startFakeOAuthServer();
+    const m = await discoverOAuth(fake.mcpUrl, opts);
+    const err = await refreshTokens(
+      { ...m, resource: `${fake.url}/not-this-resource` },
+      { clientId: "x" },
+      "fake-refresh-CCCC",
+      opts,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OAuthProtocolError);
+    expect((err as OAuthProtocolError).code).toBe("bad_response");
+    expect((err as Error).message).toBe("The OAuth provider refused the token request.");
+    expect((err as Error).cause).toBeUndefined();
+    expect(JSON.stringify(err, Object.getOwnPropertyNames(err))).not.toMatch(/unknown resource|invalid_target|CCCC/);
+    // The server rejected it before looking at the refresh token.
+    expect(fake.tokenRequests).toBe(0);
+  });
+
   it("treats an unrecognised 4xx as bad_response", async () => {
     const s = await stub(400, { error: "weird" });
     await expect(refreshTokens(meta(s.url), { clientId: "c" }, "r", opts)).rejects.toMatchObject({

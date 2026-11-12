@@ -116,6 +116,13 @@ Provider requirements:
   URI `https://<your-wardby-host>/oauth/callback` and pass its id as
   `oauth.clientId`; without it the call fails with
   [`secret_oauth_client_id_required`](../help/errors/secret-oauth-client-id-required.md).
+- `oauth.resource` must be an `https` URL with a host name (not an IP address); otherwise the call fails with
+  [`secret_oauth_resource_invalid`](../help/errors/secret-oauth-resource-invalid.md). A secret name, scope or
+  client id over its length limit fails with
+  [`secret_oauth_input_too_long`](../help/errors/secret-oauth-input-too-long.md).
+- If the provider sends the browser back with an `iss` (issuer) that differs from the provider's own issuer,
+  the sign-in is refused ("The sign-in came back from a different issuer."); start again from step 1.
+- Send `confirmationCode` on its own with the name; combining it with `value`, `broker` or `oauth` is refused.
 - `oauth.scope` asks for specific scopes. Omit it to use what the provider
   grants by default; pick the narrowest scope that does the job, since the
   signed-in user's access is what every agent gets.
@@ -127,14 +134,34 @@ Provider requirements:
   used within 60 seconds of its expiry or after it has expired (there is no background
   refresher), and once more, with a single retry of the request, when a
   brokered request to the service gets a 401. Refresh tokens that rotate are
-  stored as they change.
+  stored as they change. Uses of one secret that need a refresh at the same time
+  on one Wardby server share a single refresh (from 0.9.12). A call that is
+  stopped (its run stopped, or its MCP call timed out) stops waiting for the
+  refresh at once: a tool's brokered `fetch` fails with
+  [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md),
+  and an MCP tool call stopped while its secrets load fails with
+  [`mcp_call_timeout`](../help/errors/mcp-call-timeout.md) ("The call was
+  stopped."). A refresh no call still waits for is cancelled if it has not yet contacted the
+  provider, leaving the secret unchanged, and the log records the reason
+  `aborted`. A refresh already sent to the provider still completes and is
+  saved, even if every call waiting for it was stopped.
 - **When it cannot refresh.** If the provider refuses the grant or the client
-  (`invalid_grant`, `invalid_client`), or the token is past its expiry with no
-  refresh token (`expired`), the secret becomes `reauth_required` and uses of
-  it fail with [`secret_reauth_required`](../help/errors/secret-reauth-required.md).
+  (`invalid_grant`, `invalid_client`), the token is past its expiry with no
+  refresh token (`expired`), or (from 0.9.12) the service refuses the token
+  before its expiry with an attributable 401 and there is no refresh token
+  (`rejected`), the secret becomes `reauth_required` and uses of it fail with
+  [`secret_reauth_required`](../help/errors/secret-reauth-required.md). A 401 is
+  attributable only when the request carried that one OAuth secret and the
+  response has `WWW-Authenticate: Bearer` with `error="invalid_token"`
+  (RFC 6750). Any other 401 changes no secret with no refresh token: the request
+  is not retried and the call gets the 401 back. A secret with a refresh token
+  is still refreshed once, and the request retried once, on any 401.
   A provider that is only unreachable or answers badly leaves the secret as it
   was; see [`secret_oauth_refresh_unavailable`](../help/errors/secret-oauth-refresh-unavailable.md)
   and [`secret_oauth_refresh_failed`](../help/errors/secret-oauth-refresh-failed.md).
+  If the provider issued new tokens but Wardby could not store them, the log
+  records the reason `rotated_unsaved`: a provider that rotates refresh tokens
+  may then refuse the stored one, and the secret will need connecting again.
 - **Reconnect** by running the connect steps again under the **same name**. The
   secret is updated in place, so attachments and MCP servers that use it keep
   working.
@@ -163,7 +190,10 @@ Provider requirements:
   credentials otherwise can't be used), a user the server is shared with sees only
   "The MCP server's credentials can't be used; ask its owner to check it." They
   never see the owner's secret name or `secret_reauth_required`; only the owner
-  sees the specific error and can reconnect.
+  sees the specific error and can reconnect. When the refresh only failed for
+  now (the provider could not be reached, or another request held the secret
+  too long), they see "The MCP server's credentials could not be refreshed just
+  now; try again shortly." instead.
 
 To use an OAuth secret with a remote MCP server, see
 [OAuth-only servers](mcp-servers.md#oauth-only-servers).

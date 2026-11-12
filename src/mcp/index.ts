@@ -525,15 +525,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     providers.sandboxFetch,
   ) as OAuthLinkAdapter<unknown, unknown>;
   oauthAdapters.set(secretAdapter.purpose, secretAdapter);
-  const oauthCallback =
-    oauthAdapters.size > 0
-      ? {
-          db: prisma,
-          cipher: providers.secrets,
-          adapters: oauthAdapters,
-          redirectUri: (purpose: string) => oauthRedirectUri(httpOrigin, purpose),
-        }
-      : undefined;
+  const oauthCallback = {
+    db: prisma,
+    cipher: providers.secrets,
+    adapters: oauthAdapters,
+    redirectUri: (purpose: string) => oauthRedirectUri(httpOrigin, purpose),
+  };
   mcpLog.info({ enabled: Boolean(githubAuthorizer) }, "GitHub account linking");
 
   const canonicalHref = canonicalUrl(mcpConfig.canonicalUri).href;

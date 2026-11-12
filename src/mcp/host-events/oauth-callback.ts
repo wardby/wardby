@@ -28,6 +28,8 @@ export interface OAuthCallbackDeps {
 export interface OAuthCallbackRoute {
   target?: string;
   tool?: string;
+  /** Only requests of these purposes are completed here; any other state is "not valid". */
+  purposePrefix?: string;
 }
 
 function escape(value: string): string {
@@ -93,7 +95,9 @@ export async function handleOAuthCallback(
       ? ({ kind: "invalid" } as const)
       : await completeOAuthCallback({
           db: deps.db,
-          adapters: deps.adapters,
+          adapters: route.purposePrefix
+            ? new Map([...deps.adapters].filter(([purpose]) => purpose.startsWith(route.purposePrefix!)))
+            : deps.adapters,
           cipher: deps.cipher,
           state: url.searchParams.get("state"),
           code: url.searchParams.get("code"),
@@ -122,8 +126,11 @@ export async function handleOAuthCallback(
     res,
     200,
     "Confirm the link",
-    `<p>Signed in to ${escape(outcome.target)} as <strong>${escape(outcome.signedInAs)}</strong>, to be linked to the wardby account ` +
-      `<strong>${escape(outcome.subject)}</strong>.</p>` +
+    (outcome.signedInAs === undefined
+      ? `<p>Signed in to ${escape(outcome.target)}, to be connected to the wardby account ` +
+        `<strong>${escape(outcome.subject)}</strong>.</p>`
+      : `<p>Signed in to ${escape(outcome.target)} as <strong>${escape(outcome.signedInAs)}</strong>, to be linked to the wardby account ` +
+        `<strong>${escape(outcome.subject)}</strong>.</p>`) +
       `<p>Give your MCP client this code (call <code>${escape(outcome.tool)}</code> with <code>confirmationCode</code>):</p>` +
       `<p style="font-size:2em;font-family:monospace;letter-spacing:.1em"><strong>${escape(outcome.code)}</strong></p>` +
       `<p>It works once, within 10 minutes. <strong>If you did not start this, close this page</strong> and do not ` +

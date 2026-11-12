@@ -153,7 +153,7 @@ export async function completeHostIdentityCallback(input: {
   });
   if (outcome.kind !== "confirm") return outcome;
   // The adapter shows the login as `@login`.
-  return { kind: "confirm", code: outcome.code, login: outcome.signedInAs.slice(1), subject: outcome.subject };
+  return { kind: "confirm", code: outcome.code, login: (outcome.signedInAs ?? "").slice(1), subject: outcome.subject };
 }
 
 export async function confirmHostIdentityLink(input: {

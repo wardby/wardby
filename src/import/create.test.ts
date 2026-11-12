@@ -40,7 +40,7 @@ function fakeDb() {
     agentTool: [],
     resourceGrant: [],
   };
-  return {
+  const fake: any = {
     calls,
     $queryRaw: vi.fn(async () => [{ now: new Date() }]),
     tool: {
@@ -88,7 +88,10 @@ function fakeDb() {
     budgetGroup: { upsert: vi.fn(async () => ({ id: "b" })) },
     webhook: { findFirst: vi.fn(async () => null), update: vi.fn(async () => ({})) },
     datastoreEntry: { upsert: vi.fn(async () => ({})) },
-  } as any;
+  };
+  // createSecret writes inside db.$transaction and locks the row with $queryRaw on the transaction.
+  fake.$transaction = async (fn: (tx: unknown) => unknown) => fn({ ...fake, $queryRaw: async () => [] });
+  return fake;
 }
 const emptyRecon: Reconciliation = {
   nameRemap: new Map(),

@@ -54,6 +54,12 @@ export const SECRET_NOT_OAUTH =
   "secret_oauth_name_taken: a secret with this name already exists and is not an OAuth secret; choose another name";
 export const SECRET_OAUTH_CLIENT_ID_REQUIRED =
   "secret_oauth_client_id_required: the provider does not offer dynamic client registration; pass oauth.clientId (a client registered with the provider)";
+/** The resource is not a URL wardby can connect to and send a token to. */
+export const SECRET_OAUTH_RESOURCE_INVALID =
+  "secret_oauth_resource_invalid: the OAuth resource must be an https URL with a host name";
+/** A name, scope or clientId over its length limit. */
+export const SECRET_OAUTH_INPUT_TOO_LONG =
+  "secret_oauth_input_too_long: the secret name, oauth.scope or oauth.clientId is too long";
 /** Any cipher (KMS) failure on the OAuth path; the cause's text is never carried. */
 export const SECRET_OAUTH_CIPHER_FAILED =
   "secret_oauth_encryption_failed: the OAuth secret could not be encrypted or decrypted; try again";
@@ -99,11 +105,14 @@ export interface OAuthSecretMeta {
   expiresAt: string | null;
   status: "connected" | "reauth_required";
   connectedAt: string;
-  /** A fixed code, never provider text. `expired`: past expiresAt with no refresh token. */
+  /**
+   * A fixed code, never provider text. `expired`: past expiresAt with no refresh token. `rejected`:
+   * the resource refused (401) the access token before its expiry, and there is no refresh token.
+   */
   reauthReason?: ReauthReason;
 }
 
-type ReauthReason = "invalid_grant" | "invalid_client" | "expired";
+type ReauthReason = "invalid_grant" | "invalid_client" | "expired" | "rejected";
 
 /** The `oauth` JSON of a Secret: what is not secret about the connection. */
 export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
@@ -119,7 +128,7 @@ export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
     expiresAt: z.string().nullable(),
     status: z.enum(["connected", "reauth_required"]),
     connectedAt: z.string(),
-    reauthReason: z.enum(["invalid_grant", "invalid_client", "expired"]).optional(),
+    reauthReason: z.enum(["invalid_grant", "invalid_client", "expired", "rejected"]).optional(),
   })
   .strict();
 
@@ -265,10 +274,22 @@ export async function startOAuthSecretConnect(input: {
   now?: Date;
 }): Promise<{ authorizeUrl: string; expiresAt: Date }> {
   const options = input.options ?? {};
-  boundedString(input.name, 1024);
-  if (input.scope !== undefined) boundedString(input.scope, 1024);
-  if (input.clientId !== undefined) boundedString(input.clientId, 512);
-  const resource = normaliseResource(input.resource, options);
+  try {
+    boundedString(input.name, 1024);
+    if (input.scope !== undefined) boundedString(input.scope, 1024);
+    if (input.clientId !== undefined) boundedString(input.clientId, 512);
+  } catch {
+    throw new Error(SECRET_OAUTH_INPUT_TOO_LONG);
+  }
+  let resource: string;
+  try {
+    resource = normaliseResource(input.resource, options);
+    // Refuse a host the broker could not send to (an IP address) before asking it anything.
+    validatedBroker(resource);
+  } catch {
+    // Fixed wording: the URL rule's own sentence names the MCP server, not this flow.
+    throw new Error(SECRET_OAUTH_RESOURCE_INVALID);
+  }
 
   const existing = await input.db.secret.findUnique({
     where: { ownerId_name: { ownerId: input.ownerId, name: input.name } },
@@ -287,7 +308,11 @@ export async function startOAuthSecretConnect(input: {
     throw err; // Every OAuthProtocolError message is a fixed sentence.
   }
   // Fail now, not at confirm, on a resource the broker could not send to (e.g. an IP address).
-  validatedBroker(meta.resource);
+  try {
+    validatedBroker(meta.resource);
+  } catch {
+    throw new Error(SECRET_OAUTH_RESOURCE_INVALID);
+  }
 
   let client: OAuthClient;
   if (input.clientId !== undefined) {
@@ -332,7 +357,7 @@ export function oauthSecretAdapter(
     complete: async ({ code, codeVerifier, redirectUri, context, iss }) => {
       const ctx = parseContext(context);
       // RFC 9207: when the provider names the issuer, it must be the one discovered.
-      if (iss !== undefined && iss !== ctx.meta.issuer) {
+      if (iss != null && iss !== ctx.meta.issuer) {
         throw new OAuthSecretFlowError("issuer_mismatch", "The sign-in came back from a different issuer.");
       }
       const clientSecret = ctx.clientSecretCiphertext ? await decrypt(cipher, ctx.clientSecretCiphertext) : undefined;
@@ -362,7 +387,7 @@ export function oauthSecretAdapter(
     // Only fixed codes: an OAuthProtocolError's code, or this module's own reason.
     safeReason: (err) =>
       err instanceof OAuthProtocolError ? err.code : err instanceof OAuthSecretFlowError ? err.reason : "unknown",
-    describe: (r) => ({ signedInAs: "the account you signed in with", target: r.resourceHost, tool: "create_secret" }),
+    describe: (r) => ({ target: r.resourceHost, tool: "create_secret" }),
   };
 }
 
@@ -482,13 +507,41 @@ export interface StoredOAuthSecret {
 export interface OAuthResolveOptions {
   /** Refresh even when not due, unless the stored access token is no longer this one (another caller refreshed). */
   forceRefreshIfStill?: string;
+  /**
+   * With `forceRefreshIfStill`: the refusal is this secret's own (sole OAuth secret in the request,
+   * RFC 6750 `invalid_token`). Only then is a secret with no refresh token marked `rejected`; a
+   * forced refresh without it leaves such a secret unchanged and returns its current token.
+   */
+  attributable?: boolean;
   /** The fetch policy the caller's brokered fetches use; the refresh adds its own 15 s timeout. */
   options?: SafeFetchOptions;
   fetchImpl?: typeof safeFetch;
   now?: Date;
   /** Milliseconds on a monotonic clock, for the transaction's time budget; tests replace it. */
   clock?: () => number;
+  /**
+   * The caller's stop signal (`options.signal` counts too). An aborted caller stops waiting at once
+   * with the retryable error. Once no caller still waits, a shared refresh that has not yet sent its
+   * token request rolls back and releases the row lock; one already sent runs to the end and is stored.
+   */
+  signal?: AbortSignal;
+  /** The single-flight table; defaults to this process's. Tests give separate tables to act as separate processes. */
+  flights?: RefreshFlights;
 }
+
+/** One refresh in flight, shared by every caller in this process that wants the same secret refreshed. */
+interface RefreshFlight {
+  promise: Promise<OAuthSecretPayload>;
+  /** Stops the refresh before its token request is sent, so the transaction rolls back; never cuts a sent request. */
+  controller: AbortController;
+  /** Callers still waiting that can abort; a caller with no signal pins the flight for good. */
+  abortable: number;
+  pinned: boolean;
+}
+export type RefreshFlights = Map<string, RefreshFlight>;
+
+/** Per process, so only one database connection here waits on a secret's row lock at a time. */
+const processFlights: RefreshFlights = new Map();
 
 /** The connected meta; reauth_required (or meta that can't be read) throws SECRET_REAUTH_REQUIRED. */
 function connectedMeta(oauth: unknown, name: string): OAuthSecretMeta {
@@ -510,13 +563,23 @@ async function storedPayload(cipher: Pick<SecretCipher, "decrypt">, ciphertext: 
   return parsed.data;
 }
 
+/** The caller saw the stored access token refused (a 401) and asks for a new one. */
+function isForced(payload: OAuthSecretPayload, opts: OAuthResolveOptions): boolean {
+  return opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill;
+}
+
+/** A forced refresh whose 401 is attributable to this secret alone: the only case `rejected` is marked. */
+function isAttributablyRejected(payload: OAuthSecretPayload, opts: OAuthResolveOptions): boolean {
+  return opts.attributable === true && isForced(payload, opts);
+}
+
 function wantsRefresh(
   meta: OAuthSecretMeta,
   payload: OAuthSecretPayload,
   opts: OAuthResolveOptions,
   now: Date,
 ): boolean {
-  if (opts.forceRefreshIfStill !== undefined && payload.accessToken === opts.forceRefreshIfStill) return true;
+  if (isForced(payload, opts)) return true;
   return meta.expiresAt !== null && Date.parse(meta.expiresAt) - now.getTime() <= REFRESH_EARLY_MS;
 }
 
@@ -529,9 +592,11 @@ function isExpired(meta: OAuthSecretMeta, now: Date): boolean {
  * The OAuth secret's current tokens. When the access token is due (expires within 60 s) or is the
  * one `forceRefreshIfStill` names, it is refreshed first, under a row lock, so concurrent callers
  * spend a refresh token once. A provider that refuses the grant or the client marks the secret
- * reauth_required, and so does an access token past its expiry with no refresh token; one inside
- * the early window with no refresh token is sent as is. Every error is an OAuthSecretFlowError with
- * a fixed message and no cause.
+ * reauth_required, and so does an access token past its expiry with no refresh token (`expired`) or
+ * one the resource refused with no refresh token to replace it (`rejected`: a forced refresh whose
+ * 401 is attributable, see `attributable`); a forced refresh that is not attributable leaves a
+ * secret with no refresh token unchanged. One inside the early window with no refresh token is sent as is. Every error is an
+ * OAuthSecretFlowError with a fixed message and no cause.
  */
 export async function currentOAuthPayload(
   db: Pick<PrismaClient, "$transaction" | "secret">,
@@ -543,8 +608,79 @@ export async function currentOAuthPayload(
   const meta = connectedMeta(row.oauth, row.name);
   const payload = await storedPayload(cipher, row.ciphertext);
   if (!wantsRefresh(meta, payload, opts, now)) return payload;
-  if (!payload.refreshToken && !isExpired(meta, now)) return payload;
-  return refreshLocked(db, cipher, row, opts, now);
+  if (!payload.refreshToken && !isExpired(meta, now) && !isAttributablyRejected(payload, opts)) return payload;
+  return refreshShared(db, cipher, row, opts, now);
+}
+
+/** The caller's signal and its fetch policy's, as one; undefined when it gave neither. */
+function callerSignal(opts: OAuthResolveOptions): AbortSignal | undefined {
+  const signals = [opts.signal, opts.options?.signal].filter((s): s is AbortSignal => s !== undefined);
+  return signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+}
+
+/**
+ * Single-flight in front of refreshLocked: concurrent callers in this process that want the same
+ * secret refreshed share one transaction and one token request. The key is the secret id, plus the
+ * refused token for a forced refresh (a forced caller must not take an unforced caller's answer,
+ * which might be the very token it saw refused). The entry goes when the refresh settles, success
+ * or failure, so a failure is never handed to a later caller. The row lock stays, for other processes.
+ * A caller that joins a flight gets the first caller's fetch settings (policy, fetchImpl, clock);
+ * every caller in this process passes the same ones in production (Ruling OS-5).
+ */
+function refreshShared(
+  db: Pick<PrismaClient, "$transaction">,
+  cipher: SecretCipher,
+  row: StoredOAuthSecret,
+  opts: OAuthResolveOptions,
+  now: Date,
+): Promise<OAuthSecretPayload> {
+  const signal = callerSignal(opts);
+  // No transaction is opened for a caller that has already stopped.
+  if (signal?.aborted) return Promise.reject(refreshUnavailable());
+  const flights = opts.flights ?? processFlights;
+  // An attributable forced caller may mark `rejected`; one that is not must never share its flight.
+  const key =
+    opts.forceRefreshIfStill === undefined
+      ? row.id
+      : `${row.id}\n${opts.forceRefreshIfStill}\n${opts.attributable === true ? "a" : "-"}`;
+  let flight = flights.get(key);
+  if (!flight) {
+    const controller = new AbortController();
+    const promise = refreshLocked(db, cipher, row, opts, now, controller.signal).finally(() => {
+      if (flights.get(key) === started) flights.delete(key);
+    });
+    const started: RefreshFlight = { promise, controller, abortable: 0, pinned: false };
+    // Every caller may have stopped waiting: the outcome is then nobody's, and not unhandled.
+    started.promise.catch(() => {});
+    flights.set(key, started);
+    flight = started;
+  }
+  if (!signal) {
+    flight.pinned = true;
+    return flight.promise;
+  }
+  const joined = flight;
+  joined.abortable += 1;
+  return new Promise<OAuthSecretPayload>((resolve, reject) => {
+    let waiting = true;
+    const onAbort = () => {
+      if (!waiting) return;
+      waiting = false;
+      joined.abortable -= 1;
+      if (joined.abortable === 0 && !joined.pinned) {
+        // Nobody waits any more: a new caller starts afresh rather than joining a stopping refresh.
+        if (flights.get(key) === joined) flights.delete(key);
+        joined.controller.abort();
+      }
+      reject(refreshUnavailable());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    // An abort that lands after the flight settled changes nothing: the promise has already settled.
+    void joined.promise.then(resolve, reject).finally(() => {
+      waiting = false;
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
 }
 
 type LockedOutcome =
@@ -596,14 +732,20 @@ function isLockTimeout(err: unknown): boolean {
   return false;
 }
 
+/** Thrown inside the transaction when the flight stopped before its token request was sent. */
+class StoppedBeforeSend extends Error {}
+
 async function refreshLocked(
   db: Pick<PrismaClient, "$transaction">,
   cipher: SecretCipher,
   row: StoredOAuthSecret,
   opts: OAuthResolveOptions,
   now: Date,
+  signal: AbortSignal,
 ): Promise<OAuthSecretPayload> {
   let outcome: LockedOutcome;
+  // Set once the provider has answered with new tokens: a failure after that loses a rotation.
+  let rotated = false;
   const clock = opts.clock ?? (() => performance.now());
   // Measured from before the transaction starts, so the budget errs short, never long.
   const startedAt = clock();
@@ -622,13 +764,19 @@ async function refreshLocked(
         // Another caller may have refreshed while this one waited for the lock.
         if (!wantsRefresh(meta, payload, opts, now)) return { kind: "current", payload };
         if (!payload.refreshToken) {
-          return isExpired(meta, now) ? markReauth(tx, row, locked[0], meta, "expired") : { kind: "current", payload };
+          if (isExpired(meta, now)) return markReauth(tx, row, locked[0], meta, "expired");
+          // The resource refused the token, and there is nothing to replace it with.
+          // Only when the 401 is this secret's own; any other 401 changes nothing.
+          if (isAttributablyRejected(payload, opts)) return markReauth(tx, row, locked[0], meta, "rejected");
+          return { kind: "current", payload };
         }
         // The request gets what is left of the transaction less a margin to commit what it returns,
         // so a rotated refresh token is never spent by a request whose result can't be stored.
         const left = REFRESH_TRANSACTION_TIMEOUT_MS - (clock() - startedAt);
         const timeoutMs = Math.min(REFRESH_TIMEOUT_MS, left - REFRESH_COMMIT_MARGIN_MS);
         if (timeoutMs < REFRESH_MIN_REQUEST_MS) throw refreshUnavailable();
+        // Stopped while waiting for the lock: roll back now rather than spend the refresh token.
+        if (signal.aborted) throw new StoppedBeforeSend();
         const client: OAuthClient = {
           clientId: meta.clientId,
           ...(payload.clientSecret ? { clientSecret: payload.clientSecret } : {}),
@@ -640,7 +788,10 @@ async function refreshLocked(
             meta,
             client,
             payload.refreshToken,
-            { ...opts.options, timeoutMs },
+            // No stop signal once sent, the flight's or a caller's: the provider may spend a rotating
+            // refresh token as soon as it has the request, so the request runs to its timeout and
+            // whatever it returns is stored. Callers that stopped were already released.
+            { ...sendOptions(opts.options), timeoutMs },
             opts.fetchImpl,
             now,
           );
@@ -652,6 +803,7 @@ async function refreshLocked(
             ? refreshUnavailable()
             : new OAuthSecretFlowError("refresh_failed", SECRET_OAUTH_REFRESH_FAILED);
         }
+        rotated = true;
         const next: OAuthSecretPayload = {
           accessToken: tokens.accessToken,
           // A provider that doesn't rotate leaves refresh_token out: the old one stays good.
@@ -672,6 +824,17 @@ async function refreshLocked(
       { timeout: REFRESH_TRANSACTION_TIMEOUT_MS },
     );
   } catch (err) {
+    if (rotated) {
+      // The provider refreshed, but the new tokens were not stored (encrypt or commit failed): a
+      // rotating provider may have spent the stored refresh token. The caller's error is unchanged.
+      log.warn({ secretId: row.id, reason: "rotated_unsaved" }, "OAuth secret refresh failed");
+      throw err instanceof OAuthSecretFlowError ? err : refreshUnavailable();
+    }
+    if (err instanceof StoppedBeforeSend) {
+      // Every caller stopped before the token request was sent: rolled back, lock released, nothing changed.
+      log.info({ secretId: row.id, reason: "aborted" }, "OAuth secret refresh stopped");
+      throw refreshUnavailable();
+    }
     if (err instanceof OAuthSecretFlowError) {
       if (err.reason !== "reauth_required")
         log.warn({ secretId: row.id, reason: err.reason }, "OAuth secret refresh failed");
@@ -691,6 +854,13 @@ async function refreshLocked(
   }
   if (outcome.kind === "refreshed") log.info({ secretId: row.id }, "OAuth secret refreshed");
   return outcome.payload;
+}
+
+/** The fetch policy for the token request, without any stop signal (see refreshLocked). */
+function sendOptions(options: SafeFetchOptions | undefined): SafeFetchOptions {
+  if (!options) return {};
+  const { signal: _signal, ...rest } = options;
+  return rest;
 }
 
 /**

@@ -268,7 +268,10 @@ When the server's secrets can't be loaded (a secret was deleted, or its
 broker config no longer lists the server's host), the owner's own agents get
 an `mcp_server_error` that names the secret. An agent using the server through
 a grant gets only "The MCP server's credentials can't be used; ask its owner
-to check it.", never the owner's secret names.
+to check it.", never the owner's secret names. When an OAuth secret's refresh
+failed only for now (the provider could not be reached, or another request held
+the secret too long), that agent gets "The MCP server's credentials could not
+be refreshed just now; try again shortly." instead.
 
 When a secret exists but the Wardby process making the call can't decrypt its
 stored value, the call returns `mcp_server_credentials_unavailable`, and

@@ -157,4 +157,49 @@ describe("GitHub user callback page", () => {
     expect(out.status).toBe(400);
     expect(completeOAuthCallback).not.toHaveBeenCalled();
   });
+
+  it("forwards an empty iss, so the issuer compare can fail it", async () => {
+    vi.mocked(completeOAuthCallback).mockClear();
+    vi.mocked(completeOAuthCallback).mockResolvedValue({ kind: "invalid" });
+    await handleOAuthCallback(url("code=c&state=s&iss="), fakeRes().res, deps);
+    expect(vi.mocked(completeOAuthCallback).mock.calls[0][0].iss).toBe("");
+  });
+
+  it("drops the account line when the adapter has no account name", async () => {
+    vi.mocked(completeOAuthCallback).mockResolvedValueOnce({
+      kind: "confirm",
+      code: "ABCD-EFGH",
+      target: "mcp.example",
+      tool: "create_secret",
+      subject: "alice",
+    });
+    const { res, out } = fakeRes();
+    await handleOAuthCallback(url("code=c&state=s"), res, deps);
+    expect(out.body).toContain(
+      "<p>Signed in to mcp.example, to be connected to the wardby account <strong>alice</strong>.</p>",
+    );
+    expect(out.body).not.toContain("account you signed in with");
+    expect(out.body).toContain("<code>create_secret</code> with <code>confirmationCode</code>");
+  });
+
+  it("completes only the route's purposes when a purposePrefix is set", async () => {
+    vi.mocked(completeOAuthCallback).mockClear();
+    vi.mocked(completeOAuthCallback).mockResolvedValue({ kind: "invalid" });
+    const adapters = new Map([
+      ["host-identity:github", {} as never],
+      ["secret-oauth", {} as never],
+    ]);
+    await handleOAuthCallback(
+      url("code=c&state=s"),
+      fakeRes().res,
+      { ...deps, adapters },
+      { purposePrefix: "host-identity:" },
+    );
+    expect([...vi.mocked(completeOAuthCallback).mock.calls[0][0].adapters.keys()]).toEqual(["host-identity:github"]);
+    await handleOAuthCallback(url("code=c&state=s"), fakeRes().res, { ...deps, adapters });
+    expect([...vi.mocked(completeOAuthCallback).mock.calls[1][0].adapters.keys()]).toEqual([
+      "host-identity:github",
+      "secret-oauth",
+    ]);
+  });
 });

@@ -63,7 +63,8 @@ export interface OAuthLinkAdapter<Ctx, Result> {
   /** A fixed code for why `complete` failed, safe to log (never the error's own text). Omit to log none. */
   safeReason?(err: unknown): string;
   /** Shown on the callback page: what was signed in to, never a token. */
-  describe(result: Result): { signedInAs: string; target: string; tool: string };
+  /** `signedInAs` is the provider's account name; an adapter that has none leaves it out. */
+  describe(result: Result): { signedInAs?: string; target: string; tool: string };
 }
 
 export type OAuthLinkDb = Pick<PrismaClient, "oAuthLinkRequest" | "$transaction">;
@@ -118,7 +119,7 @@ export async function startOAuthLink<Ctx>(input: {
 }
 
 export type OAuthCallbackOutcome =
-  | { kind: "confirm"; code: string; signedInAs: string; target: string; tool: string; subject: string }
+  | { kind: "confirm"; code: string; signedInAs?: string; target: string; tool: string; subject: string }
   /** Unknown, used, or expired state: nothing was sent to the provider. */
   | { kind: "invalid" }
   /** The provider refused the exchange; the request is spent. */
@@ -138,7 +139,7 @@ export async function completeOAuthCallback(input: {
 }): Promise<OAuthCallbackOutcome> {
   const now = input.now ?? new Date();
   if (!input.state || !input.code || input.state.length > 256 || input.code.length > 256) return { kind: "invalid" };
-  if (input.iss && input.iss.length > OAUTH_ISS_MAX_LENGTH) return { kind: "invalid" };
+  if (input.iss != null && input.iss.length > OAUTH_ISS_MAX_LENGTH) return { kind: "invalid" };
   const stateHash = sha256(input.state);
   // Single use: only the first callback for a live state wins.
   const { count } = await input.db.oAuthLinkRequest.updateMany({
@@ -162,7 +163,7 @@ export async function completeOAuthCallback(input: {
       codeVerifier: request.codeVerifier,
       redirectUri: typeof input.redirectUri === "string" ? input.redirectUri : input.redirectUri(request.purpose),
       context: request.context,
-      ...(input.iss ? { iss: input.iss } : {}),
+      ...(input.iss != null ? { iss: input.iss } : {}),
     });
     const code = confirmationCode();
     const payloadCiphertext = done.payload ? await input.cipher.encrypt(done.payload) : null;
