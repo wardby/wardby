@@ -618,6 +618,46 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 90_000);
 
+  it("gives a commenter 💬 in the element toolbar, and a reader none", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "comment" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await pickBoard(page, "Menu");
+    const h1 = page.frameLocator(CANVAS).locator("h1", { hasText: "A short list" });
+    await h1.click();
+    // Only what works on a locked board: no move, copy or delete.
+    await expect.poll(() => page.locator(".gjs-toolbar [title=Comment]").count()).toBe(1);
+    expect(await page.locator(".gjs-toolbar .gjs-toolbar-item").count()).toBeLessThanOrEqual(2);
+    const created = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/threads"));
+    await page.locator(".gjs-toolbar [title=Comment]").click();
+    await expect.poll(() => page.locator(".cpop .quote b").textContent()).toBe("“A short list, made well.” · Menu");
+    await page.locator(".cpop textarea").fill("Bigger please");
+    await page.locator(".cpop textarea").press(SUBMIT);
+    const anchor = (JSON.parse((await created).postData() ?? "{}") as { anchor: Record<string, unknown> }).anchor;
+    expect(anchor).toMatchObject({ type: "element", board: "menu", tag: "h1", dx: 0.5, dy: 0.5 });
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+
+    // A reader cannot comment: the element toolbar has no 💬.
+    const read = await server.design({ title: "Coffee", files: files(), access: "read" });
+    const readerContext = await browser.newContext();
+    await readerContext.addCookies([read.cookie]);
+    const reader = await readerContext.newPage();
+    await reader.goto(`${server.origin}/d/${read.documentId}`);
+    await expect.poll(() => reader.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await pickBoard(reader, "Menu");
+    await reader.frameLocator(CANVAS).locator("h1", { hasText: "A short list" }).click();
+    await reader.waitForTimeout(500);
+    expect(await reader.locator(".gjs-toolbar [title=Comment]").count()).toBe(0);
+    expect(await reader.locator(".gjs-toolbar .gjs-toolbar-item").count()).toBeLessThanOrEqual(1);
+    await readerContext.close();
+  }, 90_000);
+
   it("lets a guest on a comment link pin a comment under their name, with no @-list", async () => {
     const { sharePath } = await server.design({ title: "Coffee", files: files(), access: "read", share: "comment" });
     const context = await browser.newContext();

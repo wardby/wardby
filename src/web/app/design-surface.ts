@@ -28,6 +28,8 @@ export const PIN_HINT = "Click anything on the board to comment · Esc to cancel
 /** Shown in the panel when a comment is started with no element picked. */
 export const PICK_ELEMENT = "Click an element on the board to comment.";
 const COMMENT_COMMAND = "wardby:comment";
+/** GrapesJS's own toolbar commands that change the board; removed from a read-only viewer's toolbar. */
+const EDIT_ONLY_COMMANDS = new Set(["tlb-move", "tlb-clone", "tlb-delete"]);
 /**
  * Keys pressed in the canvas that the page's own key handlers (dialog and surface) get too. Only lower
  * j / k: the dialog's J / K keys are lower-case only, on document pages as here.
@@ -113,18 +115,24 @@ export class DesignSurface implements AnchorSurface {
       moved();
     });
 
-    if (this.boards.editable) {
-      // Writers: 💬 in the selected component's toolbar comments on it, at its centre.
-      editor.Commands.add(COMMENT_COMMAND, () => this.startOnSelected());
-      editor.on("component:selected", (c: Component) => {
-        const toolbar = c.get("toolbar") ?? [];
-        if (toolbar.some((t) => t.command === COMMENT_COMMAND)) return;
-        // Silent: the toolbar is not board content (no undo step, no change to save).
-        c.set("toolbar", [...toolbar, { label: "💬", command: COMMENT_COMMAND, attributes: { title: "Comment" } }], {
-          silent: true,
-        });
-      });
-    }
+    // 💬 in the selected component's toolbar comments on it, at its centre: for anyone who can comment
+    // (the same people the top bar's 💬 is shown to). Read-only viewers keep only what works there:
+    // GrapesJS still adds move, copy and delete, which do nothing on a locked board.
+    editor.Commands.add(COMMENT_COMMAND, () => this.startOnSelected());
+    editor.on("component:selected", (c: Component) => {
+      const current = c.get("toolbar") ?? [];
+      const kept = this.boards.editable ? current : current.filter((t) => !EDIT_ONLY_COMMANDS.has(String(t.command)));
+      const withComment = kept.some((t) => t.command === COMMENT_COMMAND);
+      const canComment = !this.els.commentButton.hidden;
+      const next =
+        canComment && !withComment
+          ? [...kept, { label: "💬", command: COMMENT_COMMAND, attributes: { title: "Comment" } }]
+          : !canComment && withComment
+            ? kept.filter((t) => t.command !== COMMENT_COMMAND)
+            : kept;
+      // Silent: the toolbar is not board content (no undo step, no change to save).
+      if (next !== current) c.set("toolbar", next, { silent: true });
+    });
   }
 
   /** Listeners on the canvas window: once per window (a reloaded frame has a new one). */
