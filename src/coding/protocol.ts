@@ -549,6 +549,31 @@ export const RunRepositoryInputSchema = z
   .refine((value) => value.path === `/repos/${value.name}`, { path: ["path"], message: "must be /repos/<name>" });
 export type RunRepositoryInput = z.infer<typeof RunRepositoryInputSchema>;
 
+/**
+ * Git history in the workspace (CodingAgentProfile.gitHistory, #536): each repository that keeps its
+ * `.git`, the commit it was prepared at, and the remote tips whose commits are already in the control
+ * plane (a result bundle excludes them). Written only on a run with history, so every other input is
+ * unchanged for workers that predate it (their strict schema would refuse the key).
+ */
+export const GitHistoryInputSchema = z
+  .object({
+    repositories: z
+      .array(
+        z
+          .object({
+            /** "/workspace" or "/repos/<name>". */
+            path: z.string(),
+            baseCommit: z.string().regex(COMMIT_SHA),
+            excludeCommits: z.array(z.string().regex(COMMIT_SHA)).max(17),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(17),
+  })
+  .strict();
+export type GitHistoryInput = z.infer<typeof GitHistoryInputSchema>;
+
 export const CodingTaskInputSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
@@ -645,6 +670,8 @@ export const CodingTaskInputSchema = z
       .optional(),
     /** Extra repositories (#537), mounted at /repos/<name>; written only when the run has some. */
     repositories: z.array(RunRepositoryInputSchema).min(1).max(MAX_RUN_REPOSITORIES_IN_INPUT).optional(),
+    /** Git history (#536); written only when the run has it. */
+    gitHistory: GitHistoryInputSchema.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

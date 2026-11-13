@@ -76,6 +76,50 @@ describe("runClaudeCodingWorker", () => {
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("wardby_tools MCP tool");
   });
 
+  it("changes the git rule, and says so in the task note, only on a run with git history", async () => {
+    const history = { repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] }] };
+    const run = async (task: CodingTaskInput) => {
+      let captured: ClaudeQueryOptions | undefined;
+      const createQuery: ClaudeQueryFactory = (options) => {
+        captured = options;
+        return (async function* () {
+          yield { type: "system" };
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify({
+              schemaVersion: 1,
+              runId: input.runId,
+              outcome: "no_changes",
+              summary: "None.",
+              tests: [],
+            }),
+          };
+        })();
+      };
+      await runClaudeCodingWorker({
+        input: task,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery,
+      });
+      return captured!;
+    };
+    const off = await run(input);
+    expect(off.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+    expect(off.developerInstructions).toContain("Never modify Git metadata.");
+    const on = await run({ ...input, gitHistory: history });
+    expect(on.developerInstructions).not.toContain("Never modify Git metadata.");
+    expect(on.developerInstructions).toBe(
+      CLAUDE_WORKER_SECURITY_INSTRUCTIONS.replace(
+        "Never modify Git metadata.",
+        "Use git only to commit your work; never fetch, push, or change Git configuration or hooks.",
+      ),
+    );
+    expect(on.prompt).toContain(workerTaskNote(undefined, undefined, history));
+  });
+
   it("keeps the session and reports its id only on a session-resume run", async () => {
     const persist: boolean[] = [];
     const createQuery: ClaudeQueryFactory = (options) => {

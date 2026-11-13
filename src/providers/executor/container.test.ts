@@ -5721,6 +5721,64 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     });
   });
 
+  describe("git history in input.json (#536)", () => {
+    const history = {
+      repositories: [
+        { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] as string[] },
+        { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: ["c".repeat(40)] },
+      ],
+    };
+    const wording = { depth: 20, remotes: [{ ref: "upstream/pinned", commit: "c".repeat(40) }] };
+    type WriteInput = (
+      run: ContainerRunSnapshot,
+      deadlineAt: Date,
+      workspaces: unknown,
+      history?: unknown,
+    ) => Promise<string>;
+    async function written(withHistory: boolean) {
+      const created = await harness(
+        { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      const workspaces = {
+        main: { workspacePath: join(created.root, "ws"), baseCommit: "a".repeat(40) },
+        writable: new Map([["tools", { baseCommit: "b".repeat(40) }]]),
+        readOnly: [],
+      };
+      const write = (created.executor as unknown as { writeInput: WriteInput }).writeInput.bind(created.executor);
+      const path = await write(
+        created.store.run,
+        new Date("2026-11-13T00:00:00Z"),
+        workspaces,
+        withHistory ? { input: history, wording } : undefined,
+      );
+      return JSON.parse(readFileSync(path, "utf8")) as { task: string; gitHistory?: unknown };
+    }
+
+    it("writes the key and the history wording when given history", async () => {
+      const parsed = await written(true);
+      expect(parsed.gitHistory).toEqual(history);
+      expect(parsed.task).toContain(
+        `Base commit: ${"a".repeat(40)} (the workspace has git history to depth 20; remotes: upstream/pinned at ${"c".repeat(40)}; fetching and pushing are not possible \u2014 commit your work).`,
+      );
+      expect(parsed.task).toContain(
+        `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable, with git history.`,
+      );
+      expect(parsed.task).toContain(`Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`);
+      expect(parsed.task).not.toContain("no git metadata");
+    });
+
+    it("writes no key and today's wording without history", async () => {
+      const parsed = await written(false);
+      expect("gitHistory" in parsed).toBe(false);
+      expect(parsed.task).toContain("the workspace has no git metadata");
+      expect(parsed.task).toContain(`openai/tools at ${"b".repeat(40)}, writable.`);
+    });
+  });
+
   it("gives a job without extras no repositories key at all", async () => {
     const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
     await created.executor.start("run-1");

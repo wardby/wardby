@@ -35,13 +35,21 @@ const TOOL_RULE = "Use only the wardby_tools MCP tool to inspect or modify the r
 const TOOL_RULE_WITH_MCP =
   "Use only Wardby's MCP tools: the wardby_tools tool to inspect or modify the repository, and the wardby_mcp server's tools.";
 
+/** The git rule of CLAUDE_WORKER_SECURITY_INSTRUCTIONS, and its wording on a run with git history. */
+const GIT_RULE = "Never modify Git metadata.";
+const GIT_RULE_WITH_HISTORY =
+  "Use git only to commit your work; never fetch, push, or change Git configuration or hooks.";
+
 /**
  * The security instructions for this run. Without MCP tools, exactly CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
  * with them, the tool rule also names wardby_mcp, and the shared MCP note follows.
  */
-export function claudeWorkerSecurityInstructions(mcp: boolean): string {
-  if (!mcp) return CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
-  return `${CLAUDE_WORKER_SECURITY_INSTRUCTIONS.replace(TOOL_RULE, TOOL_RULE_WITH_MCP)}\n${WARDBY_MCP_INSTRUCTIONS}`;
+export function claudeWorkerSecurityInstructions(mcp: boolean, gitHistory = false): string {
+  let text = CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
+  // A run with git history (#536) commits its work, so "never modify Git metadata" gives way to a narrower rule.
+  if (gitHistory) text = text.replace(GIT_RULE, GIT_RULE_WITH_HISTORY);
+  if (!mcp) return text;
+  return `${text.replace(TOOL_RULE, TOOL_RULE_WITH_MCP)}\n${WARDBY_MCP_INSTRUCTIONS}`;
 }
 
 export const CLAUDE_OUTPUT_JSON_SCHEMA = {
@@ -341,13 +349,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   // Only on a run with MCP tools; the token goes into the wardby_mcp server's header (sdk.ts), never
   // into an environment.
   const mcp = options.mcpToken ? { url: wardbyMcpUrl(options.proxyBaseUrl), token: options.mcpToken } : undefined;
-  const security = claudeWorkerSecurityInstructions(mcp !== undefined);
+  const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
   const stream = options.createQuery({
     prompt: boundedPrompt(
       options.input.task,
       options.input.runId,
-      workerTaskNote(dependencyCache, options.input.repositories),
+      workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
       mcp !== undefined,
     ),
     model: options.input.model,

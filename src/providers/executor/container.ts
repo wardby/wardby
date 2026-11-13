@@ -11,7 +11,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
-import { withBaseCommit, withExtraRepositories } from "../../coding/base-commit.js";
+import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
@@ -96,6 +96,7 @@ import {
   type CodingRunResult,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  type GitHistoryInput,
   type PullRequestNote,
 } from "../../coding/protocol.js";
 import { parseStoredEntry } from "../llm/catalog-types.js";
@@ -482,6 +483,17 @@ export interface RunRepositorySnapshot {
 }
 
 /** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
+/**
+ * What writeInput needs to put git history into a run's input (#536): the `gitHistory` input key as it
+ * is written, and the facts the task text states (depth or full, the remote refs and their commits).
+ * Both come from the prepared workspaces. Left out, the input and task are exactly what a run without
+ * history gets.
+ */
+export interface GitHistoryForInput {
+  input: GitHistoryInput;
+  wording: GitHistoryWording;
+}
+
 export interface RunWorkspaces {
   main: PreparedWorkspace;
   writable: Map<string, PreparedWorkspace>;
@@ -3805,7 +3817,12 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspaces: RunWorkspaces): Promise<string> {
+  private async writeInput(
+    run: ContainerRunSnapshot,
+    deadlineAt: Date,
+    workspaces: RunWorkspaces,
+    history?: GitHistoryForInput,
+  ): Promise<string> {
     const workspace = workspaces.main;
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
@@ -3823,8 +3840,9 @@ export class ContainerExecutor implements Executor {
       repository: r.repository,
       access: r.access,
       commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+      ...(history?.input.repositories.some((h) => h.path === `/repos/${r.name}`) ? { history: true } : {}),
     }));
-    const withBase = withBaseCommit(run.task, workspace.baseCommit);
+    const withBase = withBaseCommit(run.task, workspace.baseCommit, history?.wording);
     const withCommit = withExtraRepositories(withBase, extras);
     if (extras.length > 0 && withCommit === withBase) {
       containerLog.warn(
@@ -3898,6 +3916,8 @@ export class ContainerExecutor implements Executor {
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
         ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
+        // Only on a run with git history: every other run's input stays exactly what older workers expect.
+        ...(history ? { gitHistory: history.input } : {}),
         // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
         ...(run.repositories.length > 0
           ? {

@@ -60,6 +60,55 @@ function clientFor(values: WorkerEvent[], capture: { config?: WorkerClientConfig
   };
 }
 
+describe("runCodingWorker git rule", () => {
+  it("lets the agent commit, and only fetch/push/config are off limits, on a run with git history", async () => {
+    const history = { repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] }] };
+    const run = async (task: CodingTaskInput) => {
+      const capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {};
+      await runCodingWorker({
+        input: task,
+        workspace: await tempWorkspace(),
+        proxyBaseUrl: "http://proxy:8080",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: clientFor(
+          [
+            {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                status: "completed",
+                text: JSON.stringify({
+                  schemaVersion: 1,
+                  runId: input.runId,
+                  outcome: "no_changes",
+                  summary: "None.",
+                  tests: [],
+                }),
+              },
+            },
+            { type: "turn.completed" },
+          ],
+          capture,
+        ),
+      });
+      return capture;
+    };
+    const off = await run(input);
+    expect(off.config?.developerInstructions).toBe(WORKER_SECURITY_INSTRUCTIONS);
+    expect(off.config?.developerInstructions).toContain("never modify Git metadata");
+    const on = await run({ ...input, gitHistory: history });
+    expect(on.config?.developerInstructions).not.toContain("never modify Git metadata");
+    expect(on.config?.developerInstructions).toBe(
+      WORKER_SECURITY_INSTRUCTIONS.replace(
+        "never modify Git metadata",
+        "use git only to commit your work; never fetch, push, or change Git configuration or hooks",
+      ),
+    );
+    expect(on.prompt).toContain(workerTaskNote(undefined, undefined, history));
+  });
+});
+
 describe("runCodingWorker", () => {
   it("pins the model, workspace sandbox, proxy capability, and immutable developer policy", async () => {
     const capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {};

@@ -294,12 +294,19 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     : undefined;
   const withCache = <T extends CodingAgentOutput>(output: T): T & Pick<CodingWorkerOutput, "dependencyCache"> =>
     dependencyCache ? { ...output, dependencyCache } : output;
+  // A run with git history (#536) commits its work, so "never modify Git metadata" gives way to a narrower rule.
+  const securityInstructions = options.input.gitHistory
+    ? WORKER_SECURITY_INSTRUCTIONS.replace(
+        "never modify Git metadata",
+        "use git only to commit your work; never fetch, push, or change Git configuration or hooks",
+      )
+    : WORKER_SECURITY_INSTRUCTIONS;
   const client = options.createClient({
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
     developerInstructions: options.mcpToken
-      ? `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`
-      : WORKER_SECURITY_INSTRUCTIONS,
+      ? `${securityInstructions}\n${WARDBY_MCP_INSTRUCTIONS}`
+      : securityInstructions,
     environment: { ...agentEnvironment },
     disabledSkills: await disabledCodexSkills(options.workspace, options.input.repoSkills !== false),
     // Only on a run with MCP tools. sdk.ts puts it in the Codex process env, never the shells' env,
@@ -318,7 +325,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     webSearchMode: "disabled",
     approvalPolicy: "never",
   });
-  const note = workerTaskNote(dependencyCache, options.input.repositories);
+  const note = workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory);
   const streamed = await thread.runStreamed(boundedPrompt(options.input.task, options.input.runId, note), {
     outputSchema: codingOutputJsonSchema(Boolean(options.input.repositories)),
     signal: options.signal,
