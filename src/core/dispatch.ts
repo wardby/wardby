@@ -403,6 +403,8 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
+  /** A continuation's git history setting, copied from its root run like its repository rows (#536). */
+  gitHistory?: { depth: number | null; full: boolean };
   /** The pull request's effective mergeOrder (effectiveMergeOrder), inherited unless this dispatch sets its own. Undefined for a fresh branch. */
   mergeOrder?: number | null;
 }
@@ -509,11 +511,16 @@ async function resolveCodingBranch(
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
   const root = await continuationRoot(reader, options.continuesCodingRunId, profile.repository, ownerId);
+  const rootHistory = await reader.codingRun.findUniqueOrThrow({
+    where: { runId: root.runId },
+    select: { gitHistoryDepth: true, gitHistoryFull: true },
+  });
   return {
     baseRef: root.baseRef,
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
+    gitHistory: { depth: rootHistory.gitHistoryDepth, full: rootHistory.gitHistoryFull },
     mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
 }
@@ -1141,7 +1148,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
 
           // Resolved once: before the transaction when the declaration was read from it.
           const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, target, agent.ownerId));
-          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
+          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder, gitHistory } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
           const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
@@ -1206,8 +1213,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               claudeBareMode: agent.codingProfile.claudeBareMode,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
-              gitHistoryDepth: agent.codingProfile.gitHistoryDepth,
-              gitHistoryFull: agent.codingProfile.gitHistoryFull,
+              // A continuation keeps its root's setting, matching the rows copied from it.
+              gitHistoryDepth: gitHistory ? gitHistory.depth : agent.codingProfile.gitHistoryDepth,
+              gitHistoryFull: gitHistory ? gitHistory.full : agent.codingProfile.gitHistoryFull,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,

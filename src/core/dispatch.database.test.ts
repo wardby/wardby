@@ -576,6 +576,37 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     });
   });
 
+  describe("a continuation's git history comes from its root run (#536, #537)", () => {
+    it.each([
+      ["history switched off", { gitHistoryDepth: null, gitHistoryFull: false }],
+      ["history switched to full", { gitHistoryDepth: null, gitHistoryFull: true }],
+    ])("keeps the root's depth when the profile has %s", async (_label, switched) => {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({
+        where: { agentId },
+        data: { gitHistoryDepth: 50, gitHistoryFull: false },
+      });
+      const { runId } = await rootWithTools(agentId, "opened");
+      await db.codingRun.update({ where: { runId }, data: { gitHistoryDepth: 50, gitHistoryFull: false } });
+      await db.codingRunRepository.updateMany({ where: { runId, name: "upstream" }, data: { asRemote: true } });
+      await db.codingAgentProfile.update({ where: { agentId }, data: switched });
+      const continuation = await dispatchRun({
+        db,
+        executor: fakeExecutor().executor,
+        agentId,
+        codingTask: "again",
+        continuesCodingRunId: runId,
+      });
+      const run = await db.codingRun.findUniqueOrThrow({ where: { runId: continuation!.run.id } });
+      expect(run).toMatchObject({ gitHistoryDepth: 50, gitHistoryFull: false });
+      expect((await rowsOf(continuation!.run.id)).map((r) => [r.name, r.asRemote])).toEqual([
+        ["base", false],
+        ["upstream", true],
+        ["tools", false],
+      ]);
+    });
+  });
+
   describe("a scheduled dispatch (no caller waiting for the error)", () => {
     const NOW = new Date("2026-09-05T12:16:00.000Z");
     const WINDOW = new Date("2026-09-05T12:15:00.000Z");
