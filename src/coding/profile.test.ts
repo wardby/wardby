@@ -22,6 +22,7 @@ describe("CodingProfileSchema", () => {
       toolchainVersion: null,
       workerImageRef: null,
       workspaceDiskMb: null,
+      gitHistory: null,
       maxTurns: null,
       maxOutputTokens: null,
       collectExclude: [],
@@ -251,5 +252,28 @@ describe("hosted repositories", () => {
     const validProfile = { repository: "OpenAI/Example.git" };
     expect(CodingProfileSchema.safeParse(validProfile).success).toBe(true);
     expect(CodingProfileSchema.safeParse({ ...validProfile, repository: "bitbucket:acme/api" }).success).toBe(false);
+  });
+});
+
+describe("gitHistory (#536)", () => {
+  const base = { repository: "openai/example" };
+  it("accepts a depth or full, and defaults to off", () => {
+    expect(CodingProfileSchema.parse(base).gitHistory).toBeNull();
+    expect(CodingProfileSchema.parse({ ...base, gitHistory: { depth: 50 } }).gitHistory).toEqual({ depth: 50 });
+    expect(CodingProfileSchema.parse({ ...base, gitHistory: { depth: "full" } }).gitHistory).toEqual({ depth: "full" });
+    expect(CodingProfileSchema.parse({ ...base, gitHistory: { depth: 100000 } }).gitHistory).toEqual({ depth: 100000 });
+  });
+  it.each([{ depth: 0 }, { depth: 100001 }, { depth: "all" }, { depth: 1.5 }, { depth: 5, extra: true }, {}])(
+    "rejects %j",
+    (gitHistory) => {
+      expect(CodingProfileSchema.safeParse({ ...base, gitHistory }).success).toBe(false);
+    },
+  );
+  it("lets a patch clear it with null", () => {
+    expect(CodingProfilePatchSchema.parse({ gitHistory: null })).toEqual({ gitHistory: null });
+    expect(CodingProfilePatchSchema.parse({ gitHistory: { depth: "full" } })).toEqual({
+      gitHistory: { depth: "full" },
+    });
+    expect(CodingProfilePatchSchema.safeParse({ gitHistory: { depth: 0 } }).success).toBe(false);
   });
 });

@@ -189,6 +189,7 @@ export const RunDetailSchema = GraphRunSchema.extend({
           z.object({
             name: z.string(),
             access: z.enum(["read", "write"]),
+            asRemote: z.boolean(),
             repository: z.string(),
             requestedRef: z.string().nullable(),
             resolvedSha: z.string().nullable(),

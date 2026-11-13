@@ -754,7 +754,7 @@ async function planExtras(
   reader: Pick<DispatchTx, "agentRepository">,
   options: DispatchRunOptions,
   target: CodingRepositoryTarget,
-  profileBaseRef: string,
+  profile: { baseRef: string; gitHistoryDepth: number | null; gitHistoryFull: boolean },
 ): Promise<PlannedRunRepository[]> {
   const links = await reader.agentRepository.findMany({
     where: { agentId: options.agentId, ...CODING_SET_LINK_FILTER },
@@ -768,6 +768,7 @@ async function planExtras(
       ref: true,
       refFromFile: true,
       inDefaultSet: true,
+      asRemote: true,
       createdAt: true,
     },
   });
@@ -776,13 +777,14 @@ async function planExtras(
     workspace: { provider: codeProviderOf(target.repository), repository: target.repository },
     requested: options.codingRepositories,
     limit: loadCodingRunRepositoryLimit(),
-    profileBaseRef,
+    profileBaseRef: profile.baseRef,
+    historyOn: profile.gitHistoryFull || profile.gitHistoryDepth !== null,
   });
 }
 
 /** What a plan is compared by: a link changed between the preview and the transaction refuses the dispatch. */
 function planKey(plan: readonly PlannedRunRepository[]): string {
-  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile]));
+  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile, r.asRemote]));
 }
 
 /**
@@ -868,6 +870,7 @@ export async function copyRootRepositoryRows(
       refFromFile: r.refFromFile,
       resolvedSha: r.resolvedSha,
       viaRepositoryLink: r.viaRepositoryLink,
+      asRemote: r.asRemote,
       linkId: r.linkId,
       baseRef: r.baseRef,
       headRef: r.headRef,
@@ -901,7 +904,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       kind: true,
       ownerId: true,
       budgetGroupId: true,
-      codingProfile: { select: { repository: true, baseRef: true, services: true } },
+      codingProfile: {
+        select: { repository: true, baseRef: true, services: true, gitHistoryDepth: true, gitHistoryFull: true },
+      },
     },
   });
   const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
@@ -931,7 +936,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   let extrasRefusal: string | undefined;
   if (!deferCoding && preview?.codingProfile && previewTarget && options.continuesCodingRunId === undefined) {
     try {
-      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile.baseRef);
+      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile);
       extrasRefusal = await authorizeRunRepositories(
         options.db,
         options.executor,
@@ -1016,7 +1021,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             // Planned again inside the transaction: a link changed since the preview refuses the dispatch.
             // A scheduled run's set refusal commits as a refused run (see the preview above).
             try {
-              inTxPlan = await planExtras(tx, options, target, agent.codingProfile.baseRef);
+              inTxPlan = await planExtras(tx, options, target, agent.codingProfile);
             } catch (err) {
               inTxSetRefusal = setRefusalOf(err);
               if (inTxSetRefusal === undefined) throw err;
@@ -1201,6 +1206,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               claudeBareMode: agent.codingProfile.claudeBareMode,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
+              gitHistoryDepth: agent.codingProfile.gitHistoryDepth,
+              gitHistoryFull: agent.codingProfile.gitHistoryFull,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
@@ -1231,6 +1238,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                   requestedRef: r.requestedRef,
                   refFromFile: r.refFromFile,
                   resolvedSha: r.resolvedSha,
+                  asRemote: r.asRemote,
                   linkId: r.linkId,
                   baseRef: r.access === "write" ? r.baseRef : null,
                   headRef: r.access === "write" ? headRef : null,

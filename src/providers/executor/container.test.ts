@@ -5173,6 +5173,7 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       id: `row-${overrides.name}`,
       position: 1,
       access: "read",
+      asRemote: false,
       accessKnown: true,
       provider: "github",
       repository: `openai/${overrides.name}`,

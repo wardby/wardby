@@ -494,6 +494,10 @@ model CodingAgentProfile {
   workerImageRef           String?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb          Int?
+  /// Git history in runs (#536): the clone depth (1..100000) when gitHistoryFull is false. Null with full false = off.
+  gitHistoryDepth          Int?
+  /// Git history in runs: the full history; overrides gitHistoryDepth.
+  gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
   packagePolicy            Json              @default("{}")
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
@@ -578,6 +582,10 @@ model CodingRun {
   queuedAt              DateTime?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb       Int?
+  /// Fixed at dispatch from the profile's gitHistoryDepth (null with full false = history off).
+  gitHistoryDepth       Int?
+  /// Fixed at dispatch from the profile's gitHistoryFull.
+  gitHistoryFull        Boolean             @default(false)
   packageAllowlist      Json                @default("{}")
   packagePolicy         Json                @default("{}")
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
@@ -1569,6 +1577,9 @@ model AgentRepository {
   refFromFile          String?
   /// Coding links only: part of the agent's default set (every run gets it unless the run names its own list).
   inDefaultSet         Boolean  @default(false)
+  /// Read coding links only (#536): the repository is fetched as a git remote named `name` in the run's /workspace
+  /// history instead of mounted as a folder. Needs the agent's gitHistory on.
+  asRemote             Boolean  @default(false)
   createdAt            DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
@@ -1606,6 +1617,8 @@ model CodingRunRepository {
   /// The commit requestedRef resolved to at dispatch (null until a deferred run's start resolves it).
   resolvedSha          String?
   viaRepositoryLink    Boolean   @default(true)
+  /// Copied from the link (#536): fetched as a git remote named `name` instead of mounted as a folder.
+  asRemote             Boolean   @default(false)
   /// The AgentRepository row this came from (audit and re-check; no FK: the link may be removed).
   linkId               String?
   /// Writable rows only.

@@ -55,8 +55,13 @@ type LinkArgs = {
   name?: string;
   ref?: string | { fromFile: string };
   inDefaultSet?: boolean;
+  as?: "folder" | "remote";
   adminOverride?: boolean;
 };
+
+function remoteInvalid(reason: string): McpError {
+  return new McpError(400, `repository_remote_invalid: ${reason}`);
+}
 
 function normalizeRepository(provider: string, repository: string): string {
   try {
@@ -144,6 +149,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       'On a coding agent, access "read" adds a read-only repository mounted at /repos/<name> (needs ref: a branch, tag or commit SHA, ' +
       'or ref: { fromFile: "<path>" } read from the default repository at dispatch); write adds a writable one. ' +
       "name (default the repository's short name, lower-cased) is the folder under /repos/ and unique per agent; " +
+      "as: \"remote\" (read links only) fetches the repository into /workspace's git history as a remote named <name> instead of mounting a folder; needs the agent's codingProfile.gitHistory on at run time. " +
       "inDefaultSet: true puts the link in the set every run gets unless trigger_agent, a webhook or a delegation names its own repositories list.",
     inputSchema: {
       type: "object",
@@ -194,6 +200,14 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           ],
         },
         inDefaultSet: { type: "boolean" },
+        as: {
+          type: "string",
+          enum: ["folder", "remote"],
+          description:
+            'Coding agents, read links only. "folder" (default) mounts the repository read-only at /repos/<name>. "remote" ' +
+            "fetches the resolved commit into the run's /workspace git history as a remote named <name> (not origin), so the agent " +
+            "can diff and cherry-pick from it; needs codingProfile.gitHistory on, and the same host as the default repository.",
+        },
         adminOverride: {
           type: "boolean",
           description:
@@ -297,6 +311,23 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         }
       }
       const inDefaultSet = coding && args.inDefaultSet === true;
+      const asRemote = args.as === "remote";
+      if (asRemote) {
+        if (!coding) throw remoteInvalid('as: "remote" applies only to a coding agent\'s repository link.');
+        if (args.access !== "read") throw remoteInvalid('as: "remote" applies only to a read link.');
+        const remoteName = args.name ?? defaultRepositoryName(repository);
+        if (remoteName === "origin") {
+          throw remoteInvalid(
+            'a remote link cannot be named "origin" (the default repository\'s remote); pass another name.',
+          );
+        }
+        const defaultRepository = agent.codingProfile?.repository;
+        if (defaultRepository && codeProviderOf(defaultRepository) !== provider) {
+          throw remoteInvalid(
+            `a remote link must be on the same host as the default repository (${defaultRepository}); ${repository} is on ${provider}.`,
+          );
+        }
+      }
       if (provider === "local") {
         if (triggers.length > 0) throw new McpError(400, "local repositories support manual review only");
         // A check is only published for a dispatched host PR; a local link has none.
@@ -401,6 +432,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               ref,
               refFromFile,
               inDefaultSet,
+              asRemote,
               ...authorization,
             };
             return tx.agentRepository.upsert({

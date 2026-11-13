@@ -1205,6 +1205,8 @@ components:
                         enum:
                           - read
                           - write
+                      asRemote:
+                        type: boolean
                       repository:
                         type: string
                       requestedRef:
@@ -1234,6 +1236,7 @@ components:
                     required:
                       - name
                       - access
+                      - asRemote
                       - repository
                       - requestedRef
                       - resolvedSha

@@ -460,6 +460,8 @@ export interface RunRepositorySnapshot {
   position: number;
   name: string;
   access: "read" | "write";
+  /** Fetched as a git remote in the run's history instead of mounted as a folder (CodingRunRepository.asRemote, #536). */
+  asRemote: boolean;
   /** False when the stored access is neither "read" nor "write": such a row is refused, never treated as read. */
   accessKnown: boolean;
   provider: string;
@@ -610,6 +612,10 @@ export interface ContainerRunSnapshot {
   dependencyCache?: boolean;
   /** Session resume, fixed at dispatch (CodingRun.sessionResume); absent on older snapshots = false. */
   sessionResume?: boolean;
+  /** Git history depth, fixed at dispatch (CodingRun.gitHistoryDepth); null with gitHistoryFull false = history off. */
+  gitHistoryDepth?: number | null;
+  /** Full git history, fixed at dispatch (CodingRun.gitHistoryFull); absent on older snapshots = false. */
+  gitHistoryFull?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -856,6 +862,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       claudeBareMode: row.codingRun.claudeBareMode,
       dependencyCache: row.codingRun.dependencyCache,
       sessionResume: row.codingRun.sessionResume,
+      gitHistoryDepth: row.codingRun.gitHistoryDepth,
+      gitHistoryFull: row.codingRun.gitHistoryFull,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -908,6 +916,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         name: r.name,
         access: r.access === "write" ? "write" : "read",
         accessKnown: r.access === "read" || r.access === "write",
+        asRemote: r.asRemote,
         provider: r.provider,
         repository: r.repository,
         requestedRef: r.requestedRef,

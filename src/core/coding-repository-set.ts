@@ -18,7 +18,12 @@ export const CODING_SET_LINK_FILTER = {
 } as const satisfies Prisma.AgentRepositoryWhereInput;
 
 export type RepositorySetRefusalCode =
-  "repository_not_listed" | "repository_set_too_large" | "invalid_repositories" | "coding_repositories_unsupported";
+  | "repository_not_listed"
+  | "repository_set_too_large"
+  | "invalid_repositories"
+  | "coding_repositories_unsupported"
+  | "repository_remote_invalid"
+  | "repository_remote_needs_history";
 export class RepositorySetRefusedError extends Error {
   constructor(
     readonly code: RepositorySetRefusalCode,
@@ -78,6 +83,8 @@ export interface RepositorySetLink {
   ref: string | null;
   refFromFile: string | null;
   inDefaultSet: boolean;
+  /** Fetched as a git remote in the run's history (#536) instead of mounted as a folder. */
+  asRemote: boolean;
   createdAt: Date;
 }
 export interface PlannedRunRepository {
@@ -90,6 +97,7 @@ export interface PlannedRunRepository {
   refFromFile: string | null;
   linkId: string | null;
   baseRef: string | null;
+  asRemote: boolean;
 }
 export interface ResolvedRunRepository extends PlannedRunRepository {
   requestedRef: string;
@@ -105,6 +113,8 @@ export function planRepositorySet(input: {
   requested?: readonly string[];
   limit: number;
   profileBaseRef: string;
+  /** The agent's gitHistory is on (depth or full): remote links need it (#536). */
+  historyOn: boolean;
 }): PlannedRunRepository[] {
   const eligible = [...input.links]
     .filter((l) => l.access === "read" || l.access === "write")
@@ -136,6 +146,22 @@ export function planRepositorySet(input: {
       `this run would have ${chosen.length + 1} repositories; the limit is ${input.limit} (CODING_MAX_RUN_REPOSITORIES).`,
     );
   }
+  for (const l of chosen) {
+    if (!l.asRemote) continue;
+    if (l.access !== "read" || l.provider !== input.workspace.provider) {
+      throw new RepositorySetRefusedError(
+        "repository_remote_invalid",
+        `link "${l.name}" is a remote link; it must be a read link on the same host as the default repository.`,
+      );
+    }
+  }
+  const remote = chosen.find((l) => l.asRemote);
+  if (remote && !input.historyOn) {
+    throw new RepositorySetRefusedError(
+      "repository_remote_needs_history",
+      `link "${remote.name}" is a remote link; turn on codingProfile.gitHistory for this agent or leave the link out of the run's repositories.`,
+    );
+  }
   return chosen.map((l, position) => ({
     position,
     name: l.name,
@@ -146,6 +172,7 @@ export function planRepositorySet(input: {
     refFromFile: l.access === "read" ? l.refFromFile : null,
     linkId: l.id,
     baseRef: l.access === "write" ? (l.baseRef ?? input.profileBaseRef) : null,
+    asRemote: l.asRemote,
   }));
 }
 
