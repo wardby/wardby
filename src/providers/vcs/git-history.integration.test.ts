@@ -96,8 +96,17 @@ interface Fixture {
   provider: GitVcsProvider;
 }
 
-/** upstream: 5 commits on main. fork: upstream's first 2, then 3 of its own on main. */
-async function fixture(): Promise<Fixture> {
+interface Shape {
+  shared?: number;
+  upstreamAhead?: number;
+  forkAhead?: number;
+}
+
+/**
+ * upstream: `shared` + `upstreamAhead` commits on main (default 2 + 3). fork: upstream's first
+ * `shared`, then `forkAhead` (default 3) of its own on main.
+ */
+async function fixture({ shared = 2, upstreamAhead = 3, forkAhead = 3 }: Shape = {}): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wardby-git-history-")));
   cleanup.push(root);
   home = join(root, "home");
@@ -106,18 +115,19 @@ async function fixture(): Promise<Fixture> {
   await mkdir(upstream, { recursive: true });
   await git(upstream, ["init", "-q", "--initial-branch=main"]);
   const upstreamCommits: string[] = [];
-  for (let n = 1; n <= 5; n += 1) upstreamCommits.push(await commit(upstream, "up.txt", `${n}\n`, `upstream ${n}`));
+  for (let n = 1; n <= shared + upstreamAhead; n += 1)
+    upstreamCommits.push(await commit(upstream, "up.txt", `${n}\n`, `upstream ${n}`));
   const fork = join(root, "repos", "fork");
   await git(join(root, "repos"), ["clone", "-q", upstream, fork]);
-  await git(fork, ["reset", "-q", "--hard", upstreamCommits[1]]);
+  await git(fork, ["reset", "-q", "--hard", upstreamCommits[shared - 1]]);
   await git(fork, ["remote", "remove", "origin"]);
-  for (let n = 1; n <= 3; n += 1) await commit(fork, "fork.txt", `${n}\n`, `fork ${n}`);
+  for (let n = 1; n <= forkAhead; n += 1) await commit(fork, "fork.txt", `${n}\n`, `fork ${n}`);
   const remote = new TokenRemote({ roots: () => [join(root, "repos")] });
   return {
     upstream,
     fork,
-    upstreamTip: upstreamCommits[4],
-    forkPoint: upstreamCommits[1],
+    upstreamTip: upstreamCommits[shared + upstreamAhead - 1],
+    forkPoint: upstreamCommits[shared - 1],
     remote,
     provider: new GitVcsProvider({ rootDir: join(root, "vcs"), remote }),
   };
@@ -221,5 +231,43 @@ describe("git history runs: prepare (real git, #536)", { timeout: 30_000 }, () =
     expect(await git(ws, ["status", "--porcelain"])).toBe("");
     expect(await readFile(join(ws, "main.txt"), "utf8")).toBe("main moved\n");
     await expect(f.provider.recoverWorkspace(continuation)).resolves.toEqual(prepared);
+  });
+
+  it("keeps the head's full depth when a remote is further ahead than the fork but closer than the depth", async () => {
+    // Upstream 6 past the shared base, the fork 3 past it, depth 10: a depth-10 fetch of upstream
+    // alone would cut the fork's own history to 7 commits (the shallow boundary is repository-wide).
+    const f = await fixture({ shared: 12, upstreamAhead: 6, forkAhead: 3 });
+    const prepared = await f.provider.prepareWorkspace(input(f, { gitHistory: { depth: 10 } }));
+    const ws = prepared.workspacePath;
+    expect(await workerGit(ws, ["rev-list", "--count", "HEAD"])).toBe("10");
+    expect(await git(ws, [`--git-dir=${prepared.gitMetadataPath}`, "rev-list", "--count", "HEAD"])).toBe("10");
+    expect(await workerGit(ws, ["rev-parse", "refs/remotes/upstream/main"])).toBe(f.upstreamTip);
+    expect(await workerGit(ws, ["rev-parse", "HEAD"])).toBe(prepared.baseCommit);
+    expect(await git(ws, [`--git-dir=${prepared.gitMetadataPath}`, "rev-parse", "refs/remotes/origin/main"])).toBe(
+      prepared.baseCommit,
+    );
+  });
+
+  it("keeps the head's full depth when a continuation's target is further ahead than the head's branch", async () => {
+    // The branch is 2 past main's old tip, main then moves 6; depth 10 from the target would cut the branch's history.
+    const f = await fixture({ shared: 12, upstreamAhead: 0, forkAhead: 0 });
+    await git(f.fork, ["checkout", "-q", "-b", "wardby/run-root"]);
+    await commit(f.fork, "pr.txt", "1\n", "pr 1");
+    const branchTip = await commit(f.fork, "pr.txt", "2\n", "pr 2");
+    await git(f.fork, ["checkout", "-q", "main"]);
+    for (let n = 1; n <= 6; n += 1) await commit(f.fork, "main.txt", `${n}\n`, `main ${n}`);
+    const prepared = await f.provider.prepareWorkspace(
+      input(f, {
+        runId: "r2",
+        headRef: "wardby/run-root",
+        continuation: { rootRunId: "root" },
+        gitHistory: { depth: 10 },
+        remotes: [],
+      }),
+    );
+    expect(prepared.baseCommit).toBe(branchTip);
+    const count = (dir: string) => git(prepared.workspacePath, [`--git-dir=${dir}`, "rev-list", "--count", branchTip]);
+    expect(await count(join(prepared.workspacePath, ".git"))).toBe("10");
+    expect(await count(prepared.gitMetadataPath)).toBe("10");
   });
 });

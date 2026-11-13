@@ -551,6 +551,13 @@ export class GitVcsProvider implements VcsProvider {
       for (const remote of normalized.remotes ?? []) {
         await this.fetchRemoteLink(gitMetadataPath, workspacePath, remote, normalized.gitHistory);
       }
+      if (
+        normalized.gitHistory &&
+        normalized.gitHistory.depth !== "full" &&
+        (normalized.remotes?.length || mergeFetched)
+      ) {
+        await this.restoreHeadDepth(gitMetadataPath, workspacePath, cloneBranch, normalized);
+      }
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
         gitMetadataPath,
@@ -1258,6 +1265,54 @@ export class GitVcsProvider implements VcsProvider {
     };
     if (this.remote.withReadAccess) await this.remote.withReadAccess(remote.repository, fetch);
     else await this.remote.withAccess(remote.repository, fetch);
+  }
+
+  /**
+   * Git's shallow boundary is shared by the whole repository: a depth-n fetch of a remote (or of a
+   * continuation's target) whose tip is nearer the shared merge base than n can mark the head's own
+   * commits shallow, leaving the head with less history than configured. Fetching the head again
+   * at depth n makes git send unshallow lines and restore its window; the other tips only gain history.
+   *
+   * It fetches the recorded baseCommit SHA (never the branch name), into a scratch ref under
+   * refs/wardby, so a branch that moved on the host meanwhile cannot move refs/remotes/origin/<branch>
+   * or baseCommit. (Fetching a SHA is what the remote links already do.)
+   */
+  private async restoreHeadDepth(
+    gitMetadataPath: string,
+    workspacePath: string,
+    cloneBranch: string,
+    input: { repository: string; gitHistory?: GitHistorySetting },
+  ): Promise<void> {
+    const depth = input.gitHistory?.depth;
+    if (typeof depth !== "number") return;
+    const sha = await this.revParseRaw(gitMetadataPath, workspacePath, `refs/remotes/origin/${cloneBranch}^{commit}`);
+    await this.remote.withAccess(input.repository, async (token) => {
+      try {
+        await this.gitForPaths(
+          gitMetadataPath,
+          workspacePath,
+          [
+            ...this.remote.gitConfig,
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--depth",
+            String(depth),
+            "origin",
+            `${sha}:${MERGE_HEAD_REF}`,
+          ],
+          this.gitAuth(token),
+        );
+        if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${MERGE_HEAD_REF}^{commit}`)) !== sha) {
+          throw new Error("vcs_head_commit_mismatch");
+        }
+      } catch (error) {
+        // Redacted text only; the raw error chain never leaves here.
+        const detail = redactGitOutput(error instanceof Error ? error.message : "unknown", token ? [token] : []);
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error("vcs_remote_fetch_failed:origin", { cause: new Error(detail) });
+      }
+    });
   }
 
   /**
