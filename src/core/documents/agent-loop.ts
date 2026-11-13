@@ -17,6 +17,12 @@
  * (a newer edit is never overwritten); then it posts the agent's replies
  * (redacted with the agent's secret values) and resolves only the threads the
  * agent flagged.
+ *
+ * When the document moved on while the agent worked, three layers in order:
+ * the edit merged file by file with the newer version (merge.ts) and the merge
+ * published; else one reconcile run as the original sender on the latest
+ * version, every send check made again (at most one per send:
+ * CommentThread.reconcileOfRunId); else the fixed conflict reply.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -33,17 +39,13 @@ import { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
-import {
-  agentEditFormat,
-  REPLIES_FENCE,
-  THREADS_HEADING,
-  type AgentEditFormat,
-  type SendContext,
-} from "./agent-formats.js";
+import { agentEditFormat, REPLIES_FENCE, THREADS_HEADING, type AgentEditFormat } from "./agent-formats.js";
 import { assertAgentRepository, assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
 import { authorLabel, listThreads, postAgentReply } from "./comments.js";
-import { contentHash } from "./content.js";
+import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
+import { loadContent } from "./files.js";
+import { mergeContent } from "./merge.js";
 import { getDocument, publishVersion } from "./service.js";
 import { withHtmlEscapedForms } from "./formats/boards.js";
 import { formatFor, type DocumentFormat } from "./formats/index.js";
@@ -67,7 +69,7 @@ export const AGENT_NO_REPLY = "The agent did not reply to this thread.";
 export const AGENT_EDITED_NO_REPLY = "The agent edited the document but did not reply to this thread.";
 /** Appended to the agent's reply when its edit could not be read or published (threads stay open). */
 export const EDIT_NOT_APPLIED_NOTE = "(The edit could not be applied.)";
-/** The reply when the document got a newer version after the send: the agent's edit is not published. */
+/** The reply when the document got a newer version after the send and neither a merge nor a reconcile run applied the edit. */
 export function versionConflictReply(branch: string): string {
   return `The document changed after this was sent, so the agent's edit was not applied. It is on branch ${branch}.`;
 }
@@ -91,7 +93,9 @@ const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 export interface DocumentSweepDeps {
   db: PrismaClient;
   cipher: Cipher;
-  executor: Pick<Executor, "readCodingRepositoryFile">;
+  /** A whole executor: answering a conflicted run can start its reconcile run. */
+  executor: Executor;
+  rateLimiter?: RateLimiter;
 }
 
 export interface DocumentAgentDeps {
@@ -128,8 +132,9 @@ function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: Docu
 
 /**
  * The run's task: the adapter's instructions, then the untrusted context
- * holding the adapter's part (whole) and the threads (cut to the room left in
- * the coding task). A document that leaves too little room is refused.
+ * holding the document part (whole: the current version, and for a reconcile
+ * run the agent's earlier edit) and the threads (cut to the room left in the
+ * coding task). A document that leaves too little room is refused.
  *
  * The task is stored in the run record (Run and CodingRun request), so every
  * part of it is redacted by exact value against the agent's current secret
@@ -138,27 +143,19 @@ function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: Docu
  * never reaches the record or the agent.
  */
 function buildTask(
-  ef: AgentEditFormat,
-  doc: { path: string; baseRef: string | null; kind: string },
-  versionNumber: number,
-  context: SendContext,
+  instructions: string,
+  documentText: string,
+  kind: string,
   threads: Awaited<ReturnType<typeof listThreads>>,
   agentInstructions: string,
   redact: (text: string) => string,
 ): string {
-  const task = redact(
-    ef.instructions(
-      doc,
-      versionNumber,
-      threads.map((t) => t.number),
-      context,
-    ),
-  );
-  const documentPart = redact(`${context.heading}\n${context.body}\n\n${THREADS_HEADING}\n`);
+  const task = redact(instructions);
+  const documentPart = redact(`${documentText}\n\n${THREADS_HEADING}\n`);
   const used = byteLength(composeTaskOverride(task, documentPart)) + byteLength(agentInstructions.trim());
   const room = MAX_CODING_TASK_BYTES - TASK_RESERVE_BYTES - used;
   if (room < MIN_THREADS_BYTES) throw new Error("document_too_large_for_agent");
-  const text = redact(threadsText(threads, formatFor(doc.kind)));
+  const text = redact(threadsText(threads, formatFor(kind)));
   const byChars = text.length > MAX_UNTRUSTED_BODY_CHARS ? text.slice(0, MAX_UNTRUSTED_BODY_CHARS) : text;
   const fitted = truncateText(byChars, room, byteLength, THREADS_CUT_MARKER);
   const threadsPart =
@@ -190,18 +187,27 @@ async function stillSent(
   return { running, unanswered: runs.filter((r) => TERMINAL.has(r.status)).map((r) => r.id) };
 }
 
-export async function sendThreadsToAgent(
-  db: PrismaClient,
-  deps: DocumentAgentDeps,
-  input: { documentId: string; viewer: Viewer; threadIds: string[] },
-): Promise<{ runId: string; status: string }> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "write");
-  if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
-  const senderId = input.viewer.principalId;
+/** A document whose agent link a sender may use now (sendableLink). */
+type SendableLink = {
+  doc: Awaited<ReturnType<typeof requireDocumentAccess>> & { repository: string; path: string; agentId: string };
+  senderId: string;
+  agent: { systemPrompt: string };
+  ef: AgentEditFormat;
+  path: string;
+  baseRef: string | null;
+};
+
+/**
+ * Everything a send checks before it reads the document, and a reconcile run re-checks as the
+ * original sender: write access, a linked coding agent the document's owner still holds execute on
+ * (and may give task text), the agent still authorised for the repository, and a safe stored link.
+ */
+async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer): Promise<SendableLink> {
+  const doc = await requireDocumentAccess(db, documentId, viewer, "write");
+  if (viewer.kind !== "principal") throw new Error("document_access_denied");
   if (!doc.agentId || !doc.repository || !doc.path) throw new Error("document_not_agent_linked");
-  const agentId = doc.agentId;
   const agent = await db.agent.findUnique({
-    where: { id: agentId },
+    where: { id: doc.agentId },
     select: {
       id: true,
       kind: true,
@@ -228,6 +234,128 @@ export async function sendThreadsToAgent(
   const ef = agentEditFormat(doc.kind);
   const path = ef.validLinkPath(doc.path);
   const baseRef = doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
+  return {
+    doc: { ...doc, agentId: doc.agentId, repository: doc.repository, path: doc.path },
+    senderId: viewer.principalId,
+    agent,
+    ef,
+    path,
+    baseRef,
+  };
+}
+
+/**
+ * The agent's current secret values with their JSON- and HTML-escaped forms (board bodies are
+ * serialised HTML, the manifest JSON). A failed read refuses the send: the task is not built unchecked.
+ */
+async function taskSecretValues(db: PrismaClient, cipher: Cipher, agentId: string): Promise<string[]> {
+  try {
+    return withHtmlEscapedForms((await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values));
+  } catch (err) {
+    throw new Error("document_send_failed", { cause: err });
+  }
+}
+
+/**
+ * Counts the send against the hourly limit, then starts the run (trigger `comment`, as the sender)
+ * and marks the threads sent in the run's own transaction. A send marks open threads none of whose
+ * runs is still going or to be answered; a reconcile (`reconcileOf`: the run whose conflicted edit it
+ * re-applies) re-stamps the threads that run sent and was answered, open or outdated, only when none
+ * is a reconcile already. Live pages are told.
+ */
+async function startDocumentRun(
+  db: PrismaClient,
+  deps: DocumentAgentDeps,
+  input: { link: SendableLink; ids: string[]; versionNumber: number; task: string; reconcileOf: string | null },
+): Promise<{ id: string; status: string }> {
+  const { link, ids, versionNumber, reconcileOf } = input;
+  const { doc, senderId } = link;
+  // Counted last: a send refused for any other reason uses none of the hourly allowance.
+  try {
+    await (deps.rateLimiter ?? defaultLimiter(db)).check(SEND_RATE_BUCKET, doc.id, MAX_SENDS_PER_DOCUMENT_HOUR);
+  } catch (err) {
+    if (err instanceof RateLimitError) throw new Error("comment_send_rate_limited", { cause: err });
+    throw err;
+  }
+
+  let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+  try {
+    dispatched = await dispatchRun({
+      db,
+      executor: deps.executor,
+      selfDefects: deps.selfDefects,
+      agentId: doc.agentId,
+      trigger: "comment",
+      triggeredById: senderId,
+      codingTask: input.task,
+      codingRepository: doc.repository,
+      ...(link.baseRef ? { codingBaseRef: link.baseRef } : {}),
+      // In the run's own transaction: the threads are marked sent only with the run.
+      afterPersist: async (tx, run) => {
+        let marked: { count: number };
+        if (reconcileOf === null) {
+          // Only while still open, and only when no earlier run of theirs is still going or still to be answered.
+          const current = await tx.commentThread.findMany({
+            where: { id: { in: ids }, documentId: doc.id },
+            select: { status: true, sentRunId: true, answeredRunId: true },
+          });
+          if (current.some((r) => r.sentRunId !== null && r.answeredRunId !== r.sentRunId)) {
+            throw new Error("comment_thread_already_sent");
+          }
+          marked = await tx.commentThread.updateMany({
+            where: { id: { in: ids }, documentId: doc.id, status: "open" },
+            data: {
+              sentAt: new Date(),
+              sentById: senderId,
+              sentRunId: run.id,
+              sentVersionNumber: versionNumber,
+              answeredRunId: null,
+              reconcileOfRunId: null,
+            },
+          });
+        } else {
+          // Only threads the conflicted run sent and this caller answered, still not closed, and not
+          // already a reconcile's (one reconcile per send).
+          marked = await tx.commentThread.updateMany({
+            where: {
+              id: { in: ids },
+              documentId: doc.id,
+              sentRunId: reconcileOf,
+              answeredRunId: reconcileOf,
+              reconcileOfRunId: null,
+              status: { in: ["open", "outdated"] },
+            },
+            data: {
+              sentRunId: run.id,
+              sentVersionNumber: versionNumber,
+              answeredRunId: null,
+              reconcileOfRunId: reconcileOf,
+            },
+          });
+        }
+        if (marked.count !== ids.length) throw new Error("comment_thread_closed");
+      },
+    });
+  } catch (err) {
+    if (err instanceof RepositoryChoiceRefusedError) throw new Error("document_not_agent_linked", { cause: err });
+    if (err instanceof Error && CODING_TASK_LIMIT.test(err.message)) {
+      throw new Error("document_too_large_for_agent", { cause: err });
+    }
+    throw err;
+  }
+  if (!dispatched) throw new Error("document_send_failed");
+  // The threads are marked sent (committed with the run).
+  await notifyDocumentChange(db, doc.id, "thread");
+  return dispatched.run;
+}
+
+export async function sendThreadsToAgent(
+  db: PrismaClient,
+  deps: DocumentAgentDeps,
+  input: { documentId: string; viewer: Viewer; threadIds: string[] },
+): Promise<{ runId: string; status: string }> {
+  const link = await sendableLink(db, input.documentId, input.viewer);
+  const { doc, ef, path, baseRef } = link;
 
   const ids = [...new Set(input.threadIds)];
   if (ids.length === 0 || ids.length > MAX_THREADS_PER_SEND) throw new Error("comment_not_found");
@@ -240,6 +368,8 @@ export async function sendThreadsToAgent(
     // An earlier run ended but its answer is still due: give it now, so this send cannot replace it.
     for (const runId of previous.unanswered) await onDocumentRunFinished(db, deps, runId);
     rows = await db.commentThread.findMany({ where: { id: { in: ids }, documentId: doc.id }, select });
+    // Answering it may have started a reconcile run for these threads.
+    if ((await stillSent(db, rows)).running) throw new Error("comment_thread_already_sent");
   }
   if (rows.some((r) => r.status !== "open")) throw new Error("comment_thread_closed");
 
@@ -255,83 +385,112 @@ export async function sendThreadsToAgent(
     { repository: doc.repository, path, baseRef },
     { number: version.number, content },
   );
-  // The agent's current secret values, with the JSON- and HTML-escaped forms (board bodies are
-  // serialised HTML, the manifest JSON). A failed read refuses the send: the task is not built unchecked.
-  let secretValues: string[];
-  try {
-    secretValues = withHtmlEscapedForms(
-      (await loadAgentSecretValues(db, deps.cipher, agentId)).flatMap((e) => e.values),
-    );
-  } catch (err) {
-    throw new Error("document_send_failed", { cause: err });
-  }
+  const secretValues = await taskSecretValues(db, deps.cipher, doc.agentId);
   const task = buildTask(
-    ef,
-    { path, baseRef, kind: doc.kind },
-    version.number,
-    context,
+    ef.instructions(
+      { path, baseRef },
+      version.number,
+      threads.map((t) => t.number),
+      context,
+    ),
+    `${context.heading}\n${context.body}`,
+    doc.kind,
     threads,
-    agent.systemPrompt,
+    link.agent.systemPrompt,
     (text) => redactExactSecretValues(text, secretValues),
   );
 
-  // Counted last: a send refused for any other reason uses none of the hourly allowance.
-  try {
-    await (deps.rateLimiter ?? defaultLimiter(db)).check(SEND_RATE_BUCKET, doc.id, MAX_SENDS_PER_DOCUMENT_HOUR);
-  } catch (err) {
-    if (err instanceof RateLimitError) throw new Error("comment_send_rate_limited", { cause: err });
-    throw err;
-  }
-
-  let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
-  try {
-    dispatched = await dispatchRun({
-      db,
-      executor: deps.executor,
-      selfDefects: deps.selfDefects,
-      agentId,
-      trigger: "comment",
-      triggeredById: senderId,
-      codingTask: task,
-      codingRepository: doc.repository,
-      ...(baseRef ? { codingBaseRef: baseRef } : {}),
-      // In the run's own transaction: the threads are marked sent only with the run, only while still
-      // open, and only when no earlier run of theirs is still going or still to be answered.
-      afterPersist: async (tx, run) => {
-        const current = await tx.commentThread.findMany({
-          where: { id: { in: ids }, documentId: doc.id },
-          select: { status: true, sentRunId: true, answeredRunId: true },
-        });
-        if (current.some((r) => r.sentRunId !== null && r.answeredRunId !== r.sentRunId)) {
-          throw new Error("comment_thread_already_sent");
-        }
-        const marked = await tx.commentThread.updateMany({
-          where: { id: { in: ids }, documentId: doc.id, status: "open" },
-          data: {
-            sentAt: new Date(),
-            sentById: senderId,
-            sentRunId: run.id,
-            sentVersionNumber: version.number,
-            answeredRunId: null,
-          },
-        });
-        if (marked.count !== ids.length) throw new Error("comment_thread_closed");
-      },
-    });
-  } catch (err) {
-    if (err instanceof RepositoryChoiceRefusedError) throw new Error("document_not_agent_linked", { cause: err });
-    if (err instanceof Error && CODING_TASK_LIMIT.test(err.message)) {
-      throw new Error("document_too_large_for_agent", { cause: err });
-    }
-    throw err;
-  }
-  if (!dispatched) throw new Error("document_send_failed");
-  const { run } = dispatched;
-  // The threads are marked sent (committed with the run).
-  await notifyDocumentChange(db, doc.id, "thread");
+  const run = await startDocumentRun(db, deps, { link, ids, versionNumber: version.number, task, reconcileOf: null });
   // Refused or failed at dispatch: the run is already over, so the threads get their reply now.
   if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
   return { runId: run.id, status: run.status };
+}
+
+/** The note posted on each thread when a reconcile run starts on version `n`. */
+export function reconcilingReply(n: number): string {
+  return `The document changed while the agent worked, so it is re-applying its edit on version ${n}.`;
+}
+
+/**
+ * Layer 2 of a conflicted edit: one follow-up run, as the original sender, on the latest version,
+ * holding the current content and the agent's earlier edit. Everything a send checks is checked
+ * again; a refusal of any kind (including a second reconcile for the same send, or a task that does
+ * not fit) answers false and starts nothing. Never throws.
+ */
+async function startReconcileRun(
+  db: PrismaClient,
+  deps: DocumentAgentDeps,
+  input: {
+    runId: string;
+    threads: ClaimedThread[];
+    sentVersion: number;
+    base: VersionContent;
+    ours: VersionContent;
+    secretValues: readonly string[];
+  },
+): Promise<boolean> {
+  const { runId, threads } = input;
+  const documentId = threads[0].documentId;
+  try {
+    // One reconcile per send: these threads were sent by a reconcile run already.
+    if (threads.some((t) => t.reconcileOfRunId !== null)) return false;
+    const senderId = threads[0].sentById;
+    if (senderId === null || threads.some((t) => t.sentById !== senderId)) return false;
+    const viewer: Viewer = { kind: "principal", principalId: senderId };
+    const link = await sendableLink(db, documentId, viewer);
+    const { doc, ef, path, baseRef } = link;
+    const { version, content } = await getDocument(db, documentId);
+    const ids = threads.map((t) => t.id);
+    const idSet = new Set(ids);
+    const views = (await listThreads(db, { documentId, viewer, filter: "all" })).filter((t) => idSet.has(t.id));
+    if (views.length !== ids.length || views.some((t) => t.status !== "open" && t.status !== "outdated")) {
+      return false;
+    }
+    const context = await ef.sendContext(
+      deps,
+      { repository: doc.repository, path, baseRef },
+      { number: version.number, content },
+    );
+    const earlier = ef.earlierEdit({ path }, input.base, input.ours, input.sentVersion);
+    const secretValues = await taskSecretValues(db, deps.cipher, doc.agentId);
+    const task = buildTask(
+      ef.reconcileInstructions(
+        { path, baseRef },
+        version.number,
+        views.map((t) => t.number),
+        context,
+        earlier,
+      ),
+      `${context.heading}\n${context.body}\n\n${earlier.heading}\n${earlier.body}`,
+      doc.kind,
+      views,
+      link.agent.systemPrompt,
+      (text) => redactExactSecretValues(text, secretValues),
+    );
+    const run = await startDocumentRun(db, deps, {
+      link,
+      ids,
+      versionNumber: version.number,
+      task,
+      reconcileOf: runId,
+    });
+    // Said first, so people see why the threads are still going (the conflicted run's answer).
+    for (const t of threads) {
+      await postAgentReply(db, {
+        threadId: t.id,
+        runId,
+        viaId: senderId,
+        body: reconcilingReply(version.number),
+        secretValues: input.secretValues,
+      });
+    }
+    // Refused or failed at dispatch: the reconcile run is already over, so it is answered now.
+    if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
+    return true;
+  } catch (err) {
+    log.info({ runId, documentId, code: codeOf(err) }, "no reconcile run for the conflicted document edit");
+    return false;
+  }
 }
 
 const replyEntry = z.object({
@@ -378,18 +537,16 @@ function codeOf(err: unknown): string {
  * so a run is answered exactly once however many callers see it end.
  *
  * Succeeded: the file at the run's pushed commit is published as the next
- * version only while the document is still at the version that was sent;
- * then the agent's replies are posted and the threads it flagged resolved.
- * A newer version in between: nothing is published and each thread gets the
- * fixed conflict reply. An edit that could not be read or published: the
- * agent's replies get a note and no thread is resolved. Any other ending
- * posts the failure reply on each thread. Never throws.
+ * version while the document is still at the version that was sent; then the
+ * agent's replies are posted and the threads it flagged resolved. A newer
+ * version in between: the edit is merged file by file with it (merge.ts) and
+ * the merge published when no file conflicts; else one reconcile run starts
+ * on the latest version (startReconcileRun: at most one per send); else each
+ * thread gets the fixed conflict reply. An edit that could not be read or
+ * published: the agent's replies get a note and no thread is resolved. Any
+ * other ending posts the failure reply on each thread. Never throws.
  */
-export async function onDocumentRunFinished(
-  db: PrismaClient,
-  deps: Pick<DocumentAgentDeps, "cipher"> & { executor: Pick<Executor, "readCodingRepositoryFile"> },
-  runId: string,
-): Promise<void> {
+export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgentDeps, runId: string): Promise<void> {
   try {
     const run = await db.run.findUnique({
       where: { id: runId },
@@ -409,7 +566,10 @@ export async function onDocumentRunFinished(
 
     const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
     if (edit.kind === "conflict") {
-      for (const t of threads) await reply(t, versionConflictReply(edit.branch));
+      const reconciling =
+        edit.reconcile !== null &&
+        (await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues }));
+      if (!reconciling) for (const t of threads) await reply(t, versionConflictReply(edit.branch));
       return;
     }
     const replies = parseThreadReplies(run.finalText);
@@ -436,6 +596,7 @@ type ClaimedThread = {
   documentId: string;
   sentById: string | null;
   sentVersionNumber: number | null;
+  reconcileOfRunId: string | null;
 };
 
 /** The run's sent threads this caller claimed (answeredRunId set by it); none when another caller got there first. */
@@ -444,7 +605,14 @@ async function claimThreads(db: PrismaClient, runId: string): Promise<ClaimedThr
     const candidates = await tx.commentThread.findMany({
       where: { sentRunId: runId, answeredRunId: null },
       orderBy: { number: "asc" },
-      select: { id: true, number: true, documentId: true, sentById: true, sentVersionNumber: true },
+      select: {
+        id: true,
+        number: true,
+        documentId: true,
+        sentById: true,
+        sentVersionNumber: true,
+        reconcileOfRunId: true,
+      },
     });
     const claimed: ClaimedThread[] = [];
     for (const t of candidates) {
@@ -458,11 +626,31 @@ async function claimThreads(db: PrismaClient, runId: string): Promise<ClaimedThr
   });
 }
 
-type RunEdit = { kind: "published" | "unchanged" | "failed" } | { kind: "conflict"; branch: string };
+/**
+ * A conflicted edit: the branch it is on, and what a reconcile run needs (the sent version's content
+ * as `base`, the agent's prepared edit as `ours`), null when there is no edit to re-apply.
+ */
+type RunEdit =
+  | { kind: "published" | "unchanged" | "failed" }
+  | {
+      kind: "conflict";
+      branch: string;
+      reconcile: { sentVersion: number; base: VersionContent; ours: VersionContent } | null;
+    };
+
+/** A document version's stored content by number. */
+async function versionContent(db: PrismaClient, documentId: string, number: number): Promise<VersionContent> {
+  const version = await db.documentVersion.findUnique({ where: { documentId_number: { documentId, number } } });
+  if (!version) throw new Error("document_version_not_found");
+  return loadContent(db, version);
+}
 
 /**
- * Publishes the linked file or design at the run's pushed commit as the next version,
- * only while the document is still at the version the threads were sent with.
+ * Publishes the linked file or design at the run's pushed commit as the next version while the
+ * document is still at the version the threads were sent with. When it moved on, the edit is merged
+ * file by file with the current version (base: the sent version) and the merge published while the
+ * document is still at that current version; a conflicting file, or a newer version again, is a
+ * conflict. Both publishes go through publishVersion (normalising and redaction).
  * Never throws: an error is reported as `failed`.
  */
 async function publishRunEdit(
@@ -483,7 +671,9 @@ async function publishRunEdit(
     if (result?.outcome === "no_changes") return { kind: "unchanged" };
     const doc = await db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
     const ref = result?.commitSha ?? result?.headRef;
-    if (!doc?.repository || !doc.path || !ref || !deps.executor.readCodingRepositoryFile) return { kind: "failed" };
+    if (!doc?.repository || !doc.path || !doc.currentVersion || !ref || !deps.executor.readCodingRepositoryFile) {
+      return { kind: "failed" };
+    }
     const sentVersion = threads[0].sentVersionNumber;
     if (sentVersion === null || threads.some((t) => t.sentVersionNumber !== sentVersion)) return { kind: "failed" };
     const ef = agentEditFormat(doc.kind);
@@ -495,24 +685,50 @@ async function publishRunEdit(
     // redaction again. A refusal (board_format_invalid, an external reference, too large) is `failed`.
     const prepared = formatFor(doc.kind).prepare(edited, secretValues).content;
     const branch = result?.headRef ?? ref;
-    if (doc.currentVersion && contentHash(prepared) === doc.currentVersion.contentHash) {
-      return doc.currentVersion.number === sentVersion ? { kind: "unchanged" } : { kind: "conflict", branch };
+    const numbers = threads.map((t) => `#${t.number}`).join(", ");
+    const publish = async (content: VersionContent, expectedNumber: number, summary: string) => {
+      try {
+        await publishVersion(db, deps.cipher, {
+          documentId,
+          ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
+          via: "agent",
+          runId,
+          summary,
+          expectedNumber,
+        });
+        return true;
+      } catch (err) {
+        if (err instanceof Error && err.message === "document_version_conflict") return false;
+        throw err;
+      }
+    };
+
+    let current = doc.currentVersion;
+    if (current.number === sentVersion) {
+      if (contentHash(prepared) === current.contentHash) return { kind: "unchanged" };
+      if (await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`)) {
+        return { kind: "published" };
+      }
+      // Someone published first: merge with what they published.
+      const latest = await getDocument(db, documentId);
+      current = latest.version;
     }
-    const numbers = threads.map((t) => `#${t.number}`);
+    // Layer 1: the per-file three-way merge with the version the threads were sent with.
+    const base = await versionContent(db, documentId, sentVersion);
+    const reconcile = { sentVersion, base, ours: prepared };
+    const theirs = await loadContent(db, current);
+    const merged = mergeContent(ef, base, theirs, prepared);
+    if (merged.kind === "conflict") return { kind: "conflict", branch, reconcile };
+    // The current version already holds the agent's edit.
+    if (contentHash(merged.content) === current.contentHash) return { kind: "unchanged" };
     try {
-      await publishVersion(db, deps.cipher, {
-        documentId,
-        ...(prepared.format === "markdown" ? { markdown: prepared.markdown } : { files: prepared.files }),
-        via: "agent",
-        runId,
-        summary: `Agent edit for comment threads ${numbers.join(", ")}`,
-        expectedNumber: sentVersion,
-      });
+      const summary = `Agent edit for comment threads ${numbers} (merged with v${current.number})`;
+      if (await publish(merged.content, current.number, summary)) return { kind: "published" };
     } catch (err) {
-      if (err instanceof Error && err.message === "document_version_conflict") return { kind: "conflict", branch };
-      throw err;
+      // A merge the store refuses (a manifest and boards that no longer agree) is a conflict too.
+      log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit could not be stored");
     }
-    return { kind: "published" };
+    return { kind: "conflict", branch, reconcile };
   } catch (err) {
     log.warn({ runId, documentId, code: codeOf(err) }, "could not publish the agent's edit");
     return { kind: "failed" };

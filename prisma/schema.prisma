@@ -2387,6 +2387,8 @@ model CommentThread {
   sentVersionNumber Int?
   /// the sent run whose ending was answered on this thread (claimed once per run)
   answeredRunId     String?
+  /// set when sentRunId is a reconcile run: the earlier run whose conflicted edit it re-applies (one reconcile per send)
+  reconcileOfRunId  String?
   resolvedById      String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt

@@ -324,8 +324,9 @@ Then a person with `write` access sends open threads (up to 50) from the page or
 with `send_threads_to_agent`. Wardby starts one coding run (run trigger
 `comment`) with the document, the threads and the file path; when it ends, the
 file at the run's head ref becomes the next version if the document has not
-changed meanwhile (otherwise the agent's reply names the branch holding its
-edit), and the agent replies on each thread and resolves those it addressed.
+changed meanwhile (see [When the document changed while the agent
+worked](#when-the-document-changed-while-the-agent-worked)), and the agent
+replies on each thread and resolves those it addressed.
 
 Limits: 30 sends per document per hour, a document up to 60,000 characters,
 one run per thread at a time. The document owner must keep `execute` on the
@@ -362,6 +363,38 @@ and sanitising as any publish (a result that breaks the format counts as a
 failed run: the threads get the failed reply and the design is not changed). If the design in the
 repository cannot be read (a board missing or too large), the send fails with
 `document_send_failed` and no thread changes.
+
+### When the document changed while the agent worked
+
+A newer version published while the run worked is never overwritten. Wardby
+tries three things in order:
+
+1. **A per-file merge.** The agent's edit, the newer version and the version
+   that was sent are compared file by file (a design's `manifest.json` and each
+   board, a missing file meaning deleted; a Markdown document is one file). A
+   file only one side changed takes that side's text; a file both changed the
+   same way is kept. If no file was changed both ways, the merge is published
+   through the normal publish path (normalising, sanitising and redaction) with
+   the summary `Agent edit for comment threads #2 (merged with v3)`, and the
+   replies and resolving follow as for any send.
+2. **One reconcile run.** Otherwise Wardby starts one more coding run, trigger
+   `comment`, as the person who sent the threads, on the latest version. Its
+   task holds the current content (built as for a send) and the agent's earlier
+   edit (a design's changed files, or the whole edited Markdown), all redacted
+   against the agent's current secret values and wrapped as untrusted content,
+   and asks the agent to re-apply its change on top of the current version and
+   reply on the threads. Every check a send makes is made again: the sender's
+   `write` access, the owner's `execute` on the agent, the agent's link and
+   authorisation for the repository, the hourly send limit and the task size.
+   Each thread first gets the agent note "The document changed while the agent
+   worked, so it is re-applying its edit on version N." The reconcile run is a
+   fresh run for every coding agent kind, not a resumed session; its result is
+   published like a send's, merge included.
+3. **The conflict note.** If a reconcile run cannot start, or a reconcile run's
+   own edit conflicts and cannot be merged, each thread gets "The document
+   changed after this was sent, so the agent's edit was not applied. It is on
+   branch …" and stays open. There is at most one reconcile run per send; a
+   person can send the threads again.
 
 ## Exports
 

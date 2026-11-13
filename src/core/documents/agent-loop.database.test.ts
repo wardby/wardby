@@ -26,6 +26,7 @@ import {
   MAX_SENDS_PER_DOCUMENT_HOUR,
   onDocumentRunFinished,
   parseThreadReplies,
+  reconcilingReply,
   sendThreadsToAgent,
   sweepUnansweredDocumentRuns,
   versionConflictReply,
@@ -479,7 +480,8 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
   const repliesBlock = (entries: { thread: number; reply: string; resolved?: boolean }[]) =>
     `Edited.\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(entries)}\n\`\`\``;
 
-  it("a newer version after the send: publishes nothing, posts the fixed reply, threads stay open", async () => {
+  /** Sends one thread, then publishes `editor` as a person would while the run works; the run's file is `agent`. */
+  async function conflicted(editor: string, agent: string, replies?: { reply: string; resolved?: boolean }) {
     const docId = await linkedDoc();
     const t1 = await thread(docId, "hello", "Warmer");
     const { runId } = await sendThreadsToAgent(db, deps, {
@@ -487,26 +489,234 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       viewer: asWriter(),
       threadIds: [t1.threadId],
     });
-    // A person edits the document while the run works.
-    await publishVersion(db, cipher, {
-      documentId: docId,
-      markdown: "hello there world\n\nsecond para",
-      via: "editor",
-    });
-    const sha = await finish(runId, "succeeded", repliesBlock([{ thread: t1.number, reply: "Done.", resolved: true }]));
-    files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+    await publishVersion(db, cipher, { documentId: docId, markdown: editor, via: "editor" });
+    const summary = repliesBlock([
+      { thread: t1.number, reply: replies?.reply ?? "Done.", resolved: replies?.resolved },
+    ]);
+    const sha = await finish(runId, "succeeded", summary);
+    files.set(`${sha}:${path}`, agent);
+    return { docId, t1, runId };
+  }
+  const runsOf = async () => db.run.count({ where: { agentId: codingAgentId } });
 
+  it("a Markdown edit after an unrelated publish of identical content is published, merged with it", async () => {
+    const { docId, t1, runId } = await conflicted("hello world\n\nsecond para", "hello lovely world\n\nsecond para", {
+      reply: "Warmer now.",
+      resolved: true,
+    });
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({
+      number: 3,
+      via: "agent",
+      runId,
+      markdown: "hello lovely world\n\nsecond para",
+      summary: `Agent edit for comment threads #${t1.number} (merged with v2)`,
+    });
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("resolved");
+    expect(v.comments.at(-1)!.body).toBe("Warmer now.");
+    expect(await runsOf()).toBe(before);
+  });
+
+  it("a Markdown document both changed starts one reconcile run as the sender, on the latest version", async () => {
+    const { docId, t1, runId } = await conflicted(
+      "hello there world\n\nsecond para",
+      "hello lovely world\n\nsecond para",
+    );
     await onDocumentRunFinished(db, deps, runId);
 
     const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
     expect(doc.currentVersion).toMatchObject({ number: 2, markdown: "hello there world\n\nsecond para" });
     expect(await db.documentVersion.count({ where: { documentId: docId, runId } })).toBe(0);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+    expect(row.sentRunId).not.toBe(runId);
+    expect(row).toMatchObject({
+      sentVersionNumber: 2,
+      answeredRunId: null,
+      reconcileOfRunId: runId,
+      sentById: writer.id,
+    });
+    const run = await db.run.findUniqueOrThrow({ where: { id: row.sentRunId! }, include: { codingRun: true } });
+    expect(run).toMatchObject({ trigger: "comment", triggeredById: writer.id, agentId: codingAgentId });
+    const task = run.codingRun!.request!;
+    const [instructions, context] = task.split(`<${UNTRUSTED_CONTEXT_TAG}>`);
+    expect(instructions).toMatch(/newer version of the document \(version 2\)/);
+    expect(instructions.trimEnd().split("\n\n").at(-1)).toMatch(/summary field[\s\S]*wardby-thread-replies/);
+    expect(instructions).not.toContain("lovely");
+    expect(context.indexOf("CURRENT DOCUMENT (version 2):\nhello there world\n\nsecond para")).toBe(1);
+    expect(context).toContain("YOUR EARLIER EDIT (made against version 1):\nhello lovely world\n\nsecond para");
+    expect(context.indexOf("COMMENT THREADS:")).toBeGreaterThan(context.indexOf("YOUR EARLIER EDIT"));
+    expect(context).toContain("Warmer");
+    expect(task.match(new RegExp(`</${UNTRUSTED_CONTEXT_TAG}>`, "g"))).toHaveLength(1);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(versionConflictReply(`wardby/run-${runId}`));
+    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+    expect(reconcilingReply(3)).toBe(
+      "The document changed while the agent worked, so it is re-applying its edit on version 3.",
+    );
+    expect(await db.comment.count({ where: { threadId: t1.threadId, runId } })).toBe(1);
+  });
+
+  it("a reconcile run that succeeds publishes normally, replies and resolves", async () => {
+    const { docId, t1, runId } = await conflicted(
+      "hello there world\n\nsecond para",
+      "hello lovely world\n\nsecond para",
+    );
+    await onDocumentRunFinished(db, deps, runId);
+    const reconcile = (await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).sentRunId!;
+    const sha = await finish(
+      reconcile,
+      "succeeded",
+      repliesBlock([{ thread: t1.number, reply: "Re-applied.", resolved: true }]),
+    );
+    files.set(`${sha}:${path}`, "hello there lovely world\n\nsecond para");
+    await onDocumentRunFinished(db, deps, reconcile);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({
+      number: 3,
+      via: "agent",
+      runId: reconcile,
+      markdown: "hello there lovely world\n\nsecond para",
+      summary: `Agent edit for comment threads #${t1.number}`,
+    });
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("resolved");
+    expect(v.comments.map((c) => c.body).slice(-2)).toEqual([reconcilingReply(2), "Re-applied."]);
+  });
+
+  it("a reconcile run that conflicts again tries the merge, then gets the conflict reply: no third run", async () => {
+    const { docId, t1, runId } = await conflicted(
+      "hello there world\n\nsecond para",
+      "hello lovely world\n\nsecond para",
+    );
+    await onDocumentRunFinished(db, deps, runId);
+    const reconcile = (await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).sentRunId!;
+    await publishVersion(db, cipher, {
+      documentId: docId,
+      markdown: "hello again world\n\nsecond para",
+      via: "editor",
+    });
+    const sha = await finish(reconcile, "succeeded", repliesBlock([{ thread: t1.number, reply: "Re-applied." }]));
+    files.set(`${sha}:${path}`, "hello there lovely world\n\nsecond para");
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, reconcile);
+    expect(await runsOf()).toBe(before);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({ number: 3, via: "editor" });
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(versionConflictReply(`wardby/run-${reconcile}`));
     expect(versionConflictReply("b")).toBe(
       "The document changed after this was sent, so the agent's edit was not applied. It is on branch b.",
     );
+    // A person can send the thread again: a fresh send, which may reconcile once more.
+    const again = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    expect(await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).toMatchObject({
+      sentRunId: again.runId,
+      reconcileOfRunId: null,
+    });
+  });
+
+  it("a reconcile run that conflicts again still merges when the newer version left its text alone", async () => {
+    const { docId, t1, runId } = await conflicted(
+      "hello there world\n\nsecond para",
+      "hello lovely world\n\nsecond para",
+    );
+    await onDocumentRunFinished(db, deps, runId);
+    const reconcile = (await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).sentRunId!;
+    // An unrelated publish of the same content.
+    await publishVersion(db, cipher, {
+      documentId: docId,
+      markdown: "hello there world\n\nsecond para",
+      via: "editor",
+    });
+    const sha = await finish(reconcile, "succeeded", repliesBlock([{ thread: t1.number, reply: "Re-applied." }]));
+    files.set(`${sha}:${path}`, "hello there lovely world\n\nsecond para");
+    await onDocumentRunFinished(db, deps, reconcile);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({
+      number: 4,
+      runId: reconcile,
+      markdown: "hello there lovely world\n\nsecond para",
+      summary: `Agent edit for comment threads #${t1.number} (merged with v3)`,
+    });
+  });
+
+  it("no reconcile run when the sender lost write, the hourly limit is reached, or the task does not fit", async () => {
+    const editor = "hello there world\n\nsecond para";
+    // Lost write access.
+    const a = await conflicted(editor, "hello lovely world\n\nsecond para");
+    await db.resourceGrant.deleteMany({
+      where: { resourceType: "document", resourceId: a.docId, granteePrincipalId: writer.id },
+    });
+    // Rate limited.
+    const b = await conflicted(editor, "hello lovely world\n\nsecond para");
+    const limited: RateLimiter = {
+      check: async () => {
+        throw new RateLimitError("Rate limited.");
+      },
+    };
+    // Too large: the earlier edit is over the send limit.
+    const c = await conflicted(editor, `hello ${"x".repeat(MAX_SEND_MARKDOWN_CHARS)}`);
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, a.runId);
+    await onDocumentRunFinished(db, { ...deps, rateLimiter: limited }, b.runId);
+    await onDocumentRunFinished(db, deps, c.runId);
+    expect(await runsOf()).toBe(before);
+    for (const { docId, runId, t1 } of [a, b, c]) {
+      const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+      expect(row).toMatchObject({ sentRunId: runId, answeredRunId: runId, reconcileOfRunId: null });
+      const [v] = await db.comment.findMany({ where: { threadId: t1.threadId, runId } });
+      expect(v.body).toBe(versionConflictReply(`wardby/run-${runId}`));
+      expect(await db.comment.count({ where: { threadId: t1.threadId, runId } })).toBe(1);
+      expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
+    }
+  });
+
+  it("redacts a value that became an agent secret from the reconcile task, the earlier edit included", async () => {
+    const late = `FAKE-late-reconcile-${s.slice(0, 6)}`;
+    const name = `AL_REC_${s.slice(0, 8)}`;
+    const { t1, runId } = await conflicted(`hello there world\n\nkey ${late}`, `hello lovely world\n\nkey ${late}`);
+    await createSecret(name, late, owner.id, cipher, db);
+    await attachSecret(codingAgentId, name, owner.id, db);
+    try {
+      await onDocumentRunFinished(db, deps, runId);
+      const { sentRunId } = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+      expect(sentRunId).not.toBe(runId);
+      const run = await db.run.findUniqueOrThrow({ where: { id: sentRunId! }, include: { codingRun: true } });
+      const task = run.codingRun!.request!;
+      expect(task).not.toContain(late);
+      expect(task).toContain("hello there world\n\nkey [REDACTED]");
+      expect(task).toContain("hello lovely world\n\nkey [REDACTED]");
+    } finally {
+      await detachSecret(codingAgentId, name, db);
+      await db.secret.deleteMany({ where: { name, ownerId: owner.id } });
+    }
+  });
+
+  it("starts at most one reconcile run when the completion hook and the sweep both answer the run", async () => {
+    const { t1, runId } = await conflicted("hello there world\n\nsecond para", "hello lovely world\n\nsecond para");
+    await db.run.update({
+      where: { id: runId },
+      data: { finishedAt: new Date(Date.now() - DOCUMENT_SWEEP_GRACE_MS - 1000) },
+    });
+    const before = await runsOf();
+    const now = new Date();
+    await Promise.all([
+      onDocumentRunFinished(db, deps, runId),
+      sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow }, now),
+      onDocumentRunFinished(db, deps, runId),
+    ]);
+    await sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow }, now);
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await runsOf()).toBe(before + 1);
+    expect(await db.comment.count({ where: { threadId: t1.threadId, runId } })).toBe(1);
   });
 
   it("an edit that cannot be read is not applied: the replies say so and no thread is resolved", async () => {
@@ -1051,7 +1261,43 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", () => {
     expect(v.comments.at(-1)!.body).toBe(`Added a photo.\n\n${EDIT_NOT_APPLIED_NOTE}`);
   });
 
-  it("an editor publish after the send wins: the conflict reply, nothing published", async () => {
+  const HOME_H1 = "Good coffee, a quiet corner, and pastries worth setting an alarm for.";
+  const ABOUT_H1 = "Named after a plant that asks for very little.";
+  const withBoardText = (board: string, from: string, to: string, design = coffee()) => ({
+    ...design,
+    [board]: design[board].replace(from, to),
+  });
+
+  it("an editor publish of another board after the send: the agent's board is merged with it and published", async () => {
+    const docId = await linkedDesign();
+    serve("main", coffee());
+    const t = await menuThread(docId, "New home heading please");
+    const { runId } = await send(docId, [t.threadId]);
+    await publishVersion(db, cipher, {
+      documentId: docId,
+      files: withBoardText("boards/about.html", ABOUT_H1, "An editor's about heading."),
+      via: "editor",
+    });
+    const sha = await finish(runId, repliesBlock([{ thread: t.number, reply: "New heading.", resolved: true }]));
+    serve(sha, withBoardText("boards/home.html", HOME_H1, "The agent's home heading."));
+    const runsBefore = await db.run.count({ where: { agentId } });
+    await onDocumentRunFinished(db, deps, runId);
+    const { version, files: stored } = await currentFiles(docId);
+    expect(version).toMatchObject({
+      number: 3,
+      via: "agent",
+      runId,
+      summary: `Agent edit for comment threads #${t.number} (merged with v2)`,
+    });
+    expect(stored["boards/home.html"]).toContain("The agent's home heading.");
+    expect(stored["boards/about.html"]).toContain("An editor's about heading.");
+    expect(await db.run.count({ where: { agentId } })).toBe(runsBefore);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
+    expect(v.status).toBe("resolved");
+    expect(v.comments.at(-1)).toMatchObject({ author: { kind: "agent" }, body: "New heading." });
+  });
+
+  it("an editor publish of the same board after the send: one reconcile run with the current files and the earlier edit", async () => {
     const docId = await linkedDesign();
     serve("main", coffee());
     const t = await menuThread(docId, "New intro please");
@@ -1061,13 +1307,76 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", () => {
     serve(sha, withMenuIntro("The agent's intro."));
     await onDocumentRunFinished(db, deps, runId);
     const { version, files: stored } = await currentFiles(docId);
-    expect(version.number).toBe(2);
-    expect(version.via).toBe("editor");
+    expect(version).toMatchObject({ number: 2, via: "editor" });
     expect(stored["boards/menu.html"]).toContain("An editor's intro.");
     expect(await db.documentVersion.count({ where: { documentId: docId, runId } })).toBe(0);
+
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row).toMatchObject({
+      sentVersionNumber: 2,
+      answeredRunId: null,
+      reconcileOfRunId: runId,
+      sentById: owner.id,
+    });
+    const run = await db.run.findUniqueOrThrow({ where: { id: row.sentRunId! }, include: { codingRun: true } });
+    expect(run).toMatchObject({ trigger: "comment", triggeredById: owner.id });
+    const [instructions, context] = splitTask(run.codingRun!.request!);
+    expect(instructions).toMatch(/newer version of the design \(version 2\)/);
+    expect(instructions.trimEnd().split("\n\n").at(-1)).toMatch(/summary field[\s\S]*wardby-thread-replies/);
+    // The current files to write, then the earlier edit's files (reference only), all named in the trusted text.
+    expect(fileLists(instructions).write).toEqual([`${dir}/boards/menu.html`, `${dir}/boards/menu.html`]);
+    expect(instructions).not.toContain("An editor's intro.");
+    expect(instructions).not.toContain("The agent's intro.");
+    expect(context).toContain("DESIGN FILES THAT DIFFER FROM THE REPOSITORY (version 2):");
+    expect(context.indexOf("An editor's intro.")).toBeLessThan(
+      context.indexOf("YOUR EARLIER EDIT (made against version 1):"),
+    );
+    expect(context.indexOf("The agent's intro.")).toBeGreaterThan(context.indexOf("YOUR EARLIER EDIT"));
+    expect(context.indexOf("COMMENT THREADS:")).toBeGreaterThan(context.indexOf("The agent's intro."));
+    // Only the files the agent changed are in its earlier edit.
+    expect(context.split("YOUR EARLIER EDIT")[1]).not.toContain(ABOUT_H1);
+    expect(context).toContain("New intro please");
     const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
-    expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(versionConflictReply(`wardby/run-${runId}`));
+    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+
+    // The reconcile run's own edit publishes normally.
+    const sha2 = await finish(
+      row.sentRunId!,
+      repliesBlock([{ thread: t.number, reply: "Re-applied.", resolved: true }]),
+    );
+    serve(sha2, withMenuIntro("The agent's intro, after the editor's."));
+    await onDocumentRunFinished(db, deps, row.sentRunId!);
+    const after = await currentFiles(docId);
+    expect(after.version).toMatchObject({ number: 3, via: "agent", runId: row.sentRunId });
+    expect(after.files["boards/menu.html"]).toContain("The agent's intro, after the editor's.");
+  });
+
+  it("redacts a value that became an agent secret from the design reconcile task, the earlier edit's files included", async () => {
+    const late = `FAKE-late&reconcile-${s.slice(0, 6)}`;
+    const escaped = late.replace("&", "&amp;");
+    const name = `ALD_REC_${s.slice(0, 8)}`;
+    const docId = await linkedDesign();
+    serve("main", coffee());
+    const t = await menuThread(docId, "x");
+    const { runId } = await send(docId, [t.threadId]);
+    await publishVersion(db, cipher, { documentId: docId, files: withMenuIntro(`Editor ${escaped}.`), via: "editor" });
+    const sha = await finish(runId, repliesBlock([{ thread: t.number, reply: "Done." }]));
+    serve(sha, withMenuIntro(`Agent ${escaped}.`));
+    await createSecret(name, late, owner.id, cipher, db);
+    await attachSecret(agentId, name, owner.id, db);
+    try {
+      await onDocumentRunFinished(db, deps, runId);
+      const { sentRunId } = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+      expect(sentRunId).not.toBe(runId);
+      const task = await taskOf(sentRunId!);
+      expect(task).not.toContain(late);
+      expect(task).not.toContain(escaped);
+      expect(task).toContain("Editor [REDACTED].");
+      expect(task).toContain("Agent [REDACTED].");
+    } finally {
+      await detachSecret(agentId, name, db);
+      await db.secret.deleteMany({ where: { name, ownerId: owner.id } });
+    }
   });
 
   it("redacts the agent's secret values the run wrote into a board and into its reply", async () => {

@@ -3,7 +3,7 @@ id: comment-threads-and-agents
 title: Send comment threads to a coding agent
 summary: Link a document (or a design) to a repository and a coding agent, then send open comment threads to it; the agent edits the file or design directory, Wardby publishes the next version and replies on each thread.
 audience: operator
-tags: [documents, designs, pins, comments, send_threads_to_agent, coding agent, comment trigger, repository]
+tags: [documents, designs, comments, send_threads_to_agent, coding agent, repository, version conflict, reconcile]
 appliesTo: ">=0.10.0"
 ---
 
@@ -33,10 +33,20 @@ A person with `write` access selects open threads in the page and chooses "send 
 
 When the run ends:
 
-1. Wardby reads the file at the run's head ref and publishes it as the next version, only if the document is still at the version that was sent. If someone published meanwhile, the edit is not applied and the agent's reply names the branch it is on.
+1. Wardby reads the file at the run's head ref and publishes it as the next version, if the document is still at the version that was sent. If someone published meanwhile, see [When the document changed while the agent worked](#when-the-document-changed-while-the-agent-worked).
 2. The agent replies on each thread, and resolves the ones it addressed. A failed run posts one fixed reply; the threads stay open.
 
 Open pages show the new version, the agent's replies and the resolved threads as they land, without a refresh (see [live updates](documents.md#live-updates)).
+
+## When the document changed while the agent worked
+
+If someone published a newer version while the run worked, Wardby never overwrites it. It tries, in order:
+
+1. **Merge.** File by file (a design's `manifest.json` and each board; a Markdown document is one file), against the version that was sent: a file only the agent changed takes the agent's text, a file only the newer version changed keeps it, a file both changed the same way is kept. If no file was changed both ways, the merge is published as the next version, with the summary `Agent edit for comment threads #2 (merged with v3)`, and the replies and resolving happen as usual.
+2. **One reconcile run.** If a file was changed both ways, Wardby starts one more coding run (trigger `comment`, as the person who sent the threads) on the latest version. Its task holds the current content and the agent's earlier edit (for a design, only the files it changed), and asks it to re-apply its change on top of the current version, then reply. Each thread first gets the note "The document changed while the agent worked, so it is re-applying its edit on version 3." The reconcile run is checked like a send: the sender still needs `write`, the agent must still be usable for the document and its repository, the hourly limit counts it, and the task must fit. Its result is published like any send's, merge included.
+3. **The note.** If the reconcile run cannot start, or it too finds a newer version it cannot merge with (only one reconcile run per send), each thread gets "The document changed after this was sent, so the agent's edit was not applied. It is on branch …", naming the branch with the agent's edit. The threads stay open; send them again to retry.
+
+The same applies to designs and to Codex and Claude Code agents alike.
 
 ## Limits
 
