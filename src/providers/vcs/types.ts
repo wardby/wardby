@@ -4,6 +4,23 @@ import type { PackageAuditReport } from "../../coding/registry/audit-mode.js";
 /** What happened to a pull request description: wardby just wrote it (a new PR) or updated a fix round's. */
 export type DescriptionWriteOutcome = { kind: "written"; sha256: string } | DescriptionUpdateResult;
 
+/** A run's git history (#536): the clone depth, or the full history. Unset = no history (a depth-1 clone, no worker .git). */
+export interface GitHistorySetting {
+  depth: number | "full";
+}
+
+/**
+ * A read link fetched as a git remote into the default repository's history (#536). Its commit is
+ * stored at `refs/remotes/<name>/<label>`; `label` is the requested branch or tag name, else
+ * "pinned" (a SHA, a fromFile ref, or a name that is not a valid ref component).
+ */
+export interface RemoteLinkInput {
+  name: string;
+  repository: string;
+  resolvedSha: string;
+  label: string;
+}
+
 export interface VcsPrepareInput {
   runId: string;
   repository: string;
@@ -38,6 +55,10 @@ export interface VcsPrepareInput {
    * continuation it must equal continuation.rootRunId.
    */
   branchRunId?: string;
+  /** Git history (#536): a deeper (or full) clone and a fresh worker `.git` in the workspace. Unset = off. */
+  gitHistory?: GitHistorySetting;
+  /** The default repository's remote links (#536), fetched into its history. Needs gitHistory; never on a slot. */
+  remotes?: readonly RemoteLinkInput[];
 }
 
 /** One repository's files at one commit, for a run to read: no git metadata, never collected. */
@@ -90,6 +111,17 @@ export interface PreparedWorkspace {
    * from worker output.
    */
   targetMerge?: TargetMerge;
+  /** See VcsPrepareInput.gitHistory. */
+  gitHistory?: GitHistorySetting;
+  /** See VcsPrepareInput.remotes, as validated (a label that is not a valid ref component becomes "pinned"). */
+  remotes?: readonly RemoteLinkInput[];
+  /**
+   * History runs only: the worker's HEAD and the comparison base for the agent's commits -- baseCommit,
+   * or M0, the merge commit (parents baseCommit and the target) when a target merge was committed.
+   */
+  historyBase?: string;
+  /** History runs only: the resolvedSha of each remote, in order. */
+  remoteTips?: readonly string[];
 }
 
 export interface TargetMerge {

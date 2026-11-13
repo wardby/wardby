@@ -516,6 +516,7 @@ class FakeVcs implements VcsProvider {
         baseCommit: "b".repeat(40),
         workspacePath: join(this.root, input.runId, "repos", input.slot.name, "workspace"),
         gitMetadataPath: join(this.root, input.runId, "repos", input.slot.name, "git"),
+        ...(input.gitHistory ? { historyBase: "b".repeat(40), remoteTips: [] } : {}),
       };
       await mkdir(slot.workspacePath, { recursive: true });
       this.slots.set(input.slot.name, slot);
@@ -670,6 +671,9 @@ class FakeVcs implements VcsProvider {
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
       ...(input.continuation && this.targetMerge ? { targetMerge: structuredClone(this.targetMerge) } : {}),
+      ...(input.gitHistory
+        ? { historyBase: "a".repeat(40), remoteTips: (input.remotes ?? []).map((remote) => remote.resolvedSha) }
+        : {}),
     };
   }
 }
@@ -5718,6 +5722,100 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(taskOf(text)).toBe(
         `${created.store.run.task}\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
       );
+    });
+  });
+
+  describe("git history at prepare (#536)", () => {
+    const SHA_C = "c".repeat(40);
+    async function launchedWith(overrides: Partial<ContainerRunSnapshot>) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, input: input! };
+    }
+
+    it("fetches remote rows as remotes: no folder, no copy, no mount, and their tips are the excluded commits", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryDepth: 20,
+        repositories: [
+          readRow("upstream", { position: 1, asRemote: true, repository: "openai/upstream", resolvedSha: SHA_C }),
+          writeRow("tools", { position: 2 }),
+        ],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.copyInputs).toEqual([]);
+      expect(created.events.some((event) => event === "copy:upstream")).toBe(false);
+      const [main, tools] = created.vcs.prepareInputs;
+      expect(main.gitHistory).toEqual({ depth: 20 });
+      expect(main.remotes).toEqual([
+        { name: "upstream", repository: "openai/upstream", resolvedSha: SHA_C, label: "main" },
+      ]);
+      // A writable extra gets history but never remotes.
+      expect(tools.slot).toEqual({ name: "tools" });
+      expect(tools.gitHistory).toEqual({ depth: 20 });
+      expect(tools).not.toHaveProperty("remotes");
+      expect(created.jobs.lastSpec!.repositories).toEqual([
+        { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      ]);
+      expect(input.gitHistory).toEqual({
+        repositories: [
+          { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] },
+          { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: [] },
+        ],
+      });
+      expect((input.repositories as { name: string }[]).map((r) => r.name)).toEqual(["tools"]);
+      expect(input.task).toContain(`remotes: upstream/main at ${SHA_C}`);
+      expect(input.task).not.toContain("/repos/upstream");
+    });
+
+    it("gives a run with only remote rows no repositories at all, and full history as depth full", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryFull: true,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: SHA_C })],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.prepareInputs[0].gitHistory).toEqual({ depth: "full" });
+      expect(created.jobs.lastSpec).not.toHaveProperty("repositories");
+      expect(input).not.toHaveProperty("repositories");
+      expect(input.gitHistory).toEqual({
+        repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] }],
+      });
+    });
+
+    it("labels a remote pinned for a SHA or a fromFile ref, else by its requested ref", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [
+          readRow("bysha", { position: 1, asRemote: true, requestedRef: SHA_C, resolvedSha: SHA_C }),
+          readRow("byfile", { position: 2, asRemote: true, requestedRef: "v2.0", refFromFile: ".upstream-ref" }),
+          readRow("bytag", { position: 3, asRemote: true, requestedRef: "v2.0" }),
+        ],
+      });
+      expect(created.vcs.prepareInputs[0].remotes?.map((remote) => [remote.name, remote.label])).toEqual([
+        ["bysha", "pinned"],
+        ["byfile", "pinned"],
+        ["bytag", "v2.0"],
+      ]);
+    });
+
+    it("refuses a remote row dispatch never resolved, before anything is cloned", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: null })],
+      });
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.prepareInputs).toEqual([]);
+    });
+
+    it("passes no history fields without history", async () => {
+      const { created, input } = await launchedWith({ repositories: [writeRow("tools")] });
+      expect(
+        created.vcs.prepareInputs.every((prepared) => !("gitHistory" in prepared) && !("remotes" in prepared)),
+      ).toBe(true);
+      expect(input).not.toHaveProperty("gitHistory");
     });
   });
 

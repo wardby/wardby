@@ -37,6 +37,7 @@ import {
 } from "../../coding/protocol.js";
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
+import { buildWorkerGitDir } from "./worker-git.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -44,9 +45,11 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  GitHistorySetting,
   PreparedReadOnlyCopy,
   PreparedWorkspace,
   ReadOnlyCopyInput,
+  RemoteLinkInput,
   TargetMerge,
   VcsPrepareInput,
   VcsProvider,
@@ -103,6 +106,15 @@ const MERGE_HEAD_REF = "refs/wardby/merge-head";
  */
 const MERGE_STATE_REF = "refs/wardby/merge-state";
 const MERGE_STATE_SUBJECT = "wardby merge state";
+/**
+ * History runs (#536): the commit the worker's HEAD starts at, recorded at prepare time so recovery
+ * reads it back -- baseCommit, or M0, the merge commit of a continuation's target-branch merge.
+ */
+const HISTORY_BASE_REF = "refs/wardby/history-base";
+/** The most history a run may ask for (codingProfile.gitHistory.depth). */
+const MAX_GIT_HISTORY_DEPTH = 100_000;
+/** The label a remote's commit is filed under when its requested ref is not a branch or tag name. */
+const PINNED_REMOTE_LABEL = "pinned";
 /** How far `fetch --deepen` goes, step by step, looking for a merge base in a depth-1 clone. */
 const MERGE_BASE_DEEPEN_STEPS = [64, 256, 1024, 4096] as const;
 /** A conflict marker pair at the start of a line: git writes 7 characters (any longer run counts too), then a space or the line end. */
@@ -348,6 +360,61 @@ function safeGitRef(value: string): string | null {
   }
 }
 
+const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
+
+/** A repository config with no credential, transport, filter or token-shaped content (see assertSafeLocalConfig). */
+function isSafeLocalConfig(config: string): boolean {
+  return !(
+    Buffer.byteLength(config, "utf8") > MAX_LOCAL_CONFIG_BYTES ||
+    /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config) ||
+    /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config) ||
+    redactTokenShapedValues(config) !== config
+  );
+}
+
+/** A value that is exactly one valid git ref component sequence, untouched by normalization. */
+function isExactGitRef(value: string): boolean {
+  return safeGitRef(value) === value;
+}
+
+/**
+ * A remote's name (#536): a repository link name that is also one valid ref component, and never
+ * `origin` (the default repository's own). Link creation checks this too; this is the backstop.
+ */
+function isRemoteName(name: string): boolean {
+  return isCodingRepositoryName(name) && name !== "origin" && isExactGitRef(name) && !name.endsWith(".lock");
+}
+
+/** A remote's label as filed: the given branch or tag name when it is a valid ref below the remote's name, else "pinned". */
+function remoteLabel(label: string): string {
+  if (label === "HEAD" || label.startsWith("refs/") || !isExactGitRef(label)) return PINNED_REMOTE_LABEL;
+  return label;
+}
+
+/** The clone (and fetch) depth arguments: depth 1 without history, the setting's depth, or none for full history. */
+function depthArgs(gitHistory: GitHistorySetting | undefined): string[] {
+  if (!gitHistory) return ["--depth", "1"];
+  return gitHistory.depth === "full" ? [] : ["--depth", String(gitHistory.depth)];
+}
+
+function sameGitHistory(left: GitHistorySetting | undefined, right: GitHistorySetting | undefined): boolean {
+  return left?.depth === right?.depth;
+}
+
+function sameRemotes(left: readonly RemoteLinkInput[] | undefined, right: readonly RemoteLinkInput[] | undefined) {
+  const [a, b] = [left ?? [], right ?? []];
+  return (
+    a.length === b.length &&
+    a.every(
+      (remote, index) =>
+        remote.name === b[index].name &&
+        remote.repository === b[index].repository &&
+        remote.resolvedSha === b[index].resolvedSha &&
+        remote.label === b[index].label,
+    )
+  );
+}
+
 /** The merge state's message: a fixed subject, then the target ref and conflicted paths as JSON. */
 function mergeStateMessage(targetMerge: Pick<TargetMerge, "ref" | "conflictedPaths">): string {
   return `${MERGE_STATE_SUBJECT}\n\n${JSON.stringify({ ref: targetMerge.ref, conflicted: targetMerge.conflictedPaths })}\n`;
@@ -455,12 +522,12 @@ export class GitVcsProvider implements VcsProvider {
             "--no-checkout",
             "--single-branch",
             "--no-tags",
-            // History is never needed: the worker gets no Git metadata, the
-            // finalizer compares only against baseCommit and the new commit's
-            // parent, and pushOnce compares SHAs. Depth 1 keeps large
-            // repositories' history off the control plane's disk.
-            "--depth",
-            "1",
+            // Without git history (#536) history is never needed: the worker
+            // gets no Git metadata, the finalizer compares only against
+            // baseCommit and the new commit's parent, and pushOnce compares
+            // SHAs. Depth 1 keeps large repositories' history off the control
+            // plane's disk. A history run clones to its depth, or in full.
+            ...depthArgs(normalized.gitHistory),
             "--branch",
             cloneBranch,
             "--separate-git-dir",
@@ -471,9 +538,19 @@ export class GitVcsProvider implements VcsProvider {
           { cwd: base, ...auth },
         );
         if (mergeRef && mergeRef !== normalized.headRef) {
-          mergeFetched = await this.fetchMergeTarget(gitMetadataPath, workspacePath, cloneBranch, mergeRef, auth);
+          mergeFetched = await this.fetchMergeTarget(
+            gitMetadataPath,
+            workspacePath,
+            cloneBranch,
+            mergeRef,
+            auth,
+            normalized.gitHistory,
+          );
         }
       });
+      for (const remote of normalized.remotes ?? []) {
+        await this.fetchRemoteLink(gitMetadataPath, workspacePath, remote, normalized.gitHistory);
+      }
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
         gitMetadataPath,
@@ -508,13 +585,38 @@ export class GitVcsProvider implements VcsProvider {
         mergeFetched && mergeRef
           ? await this.mergeTargetBranch(gitMetadataPath, workspacePath, baseCommit, mergeRef)
           : null;
+      // A history run's merge is committed now, as M0 (parents baseCommit and the target): the
+      // worker starts at it, and its own commits are measured against it.
+      const historyBase =
+        normalized.gitHistory && merged
+          ? await this.commitTwoParentMerge(
+              { gitMetadataPath, workspacePath, baseCommit, headRef: normalized.headRef, runId: normalized.runId },
+              merged.tree,
+              merged.targetMerge,
+            )
+          : baseCommit;
       await this.gitForPaths(gitMetadataPath, workspacePath, [
         "read-tree",
         "--reset",
         "-u",
         merged?.tree ?? baseCommit,
       ]);
-      await this.inspectWorkspace(workspacePath);
+      if (normalized.gitHistory) {
+        await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", HISTORY_BASE_REF, historyBase]);
+        await buildWorkerGitDir({
+          git: this.git,
+          gitMetadataPath,
+          workspacePath,
+          headRef: normalized.headRef,
+          head: historyBase,
+          remotes: (normalized.remotes ?? []).map((remote) => ({
+            name: remote.name,
+            label: remote.label,
+            commit: remote.resolvedSha,
+          })),
+        });
+      }
+      await this.inspectWorkspace(workspacePath, { allowRootGit: Boolean(normalized.gitHistory) });
 
       return {
         id: workspaceId(normalized),
@@ -523,6 +625,9 @@ export class GitVcsProvider implements VcsProvider {
         workspacePath,
         gitMetadataPath,
         ...(merged ? { targetMerge: merged.targetMerge } : {}),
+        ...(normalized.gitHistory
+          ? { historyBase, remoteTips: (normalized.remotes ?? []).map((remote) => remote.resolvedSha) }
+          : {}),
       };
     } catch (error) {
       // Never the run root for a slot: the default workspace (and any other slot) lives there.
@@ -555,8 +660,9 @@ export class GitVcsProvider implements VcsProvider {
       workspacePath: expected.workspacePath,
       gitMetadataPath: expected.gitMetadataPath,
     };
-    const prepared = await this.validatePrepared(recovered);
-    await this.inspectWorkspace(prepared.workspacePath);
+    const history = normalized.gitHistory ? await this.readHistoryFields(normalized, expected) : undefined;
+    const prepared = await this.validatePrepared({ ...recovered, ...history });
+    await this.inspectWorkspace(prepared.workspacePath, { allowRootGit: Boolean(prepared.gitHistory) });
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
@@ -570,9 +676,66 @@ export class GitVcsProvider implements VcsProvider {
         throw new Error("vcs_commit_history_invalid");
       }
     }
+    if (prepared.historyBase !== undefined && prepared.historyBase !== prepared.baseCommit) {
+      // M0: the recorded merge state's tree, on baseCommit and the target, and nothing else.
+      if (!merge) throw new Error("vcs_commit_history_invalid");
+      const parents = await this.commitParents(prepared, prepared.historyBase);
+      const [mergeTree, stateTree] = await Promise.all([
+        this.revParse(prepared, `${prepared.historyBase}^{tree}`),
+        this.revParse(prepared, `${merge.stateCommit}^{tree}`),
+      ]);
+      if (
+        parents.length !== 2 ||
+        parents[0] !== prepared.baseCommit ||
+        parents[1] !== merge.targetCommit ||
+        mergeTree !== stateTree
+      ) {
+        throw new Error("vcs_commit_history_invalid");
+      }
+    }
     if (!merge) return prepared;
     const { stateCommit: _stateCommit, ...targetMerge } = merge;
     return { ...prepared, targetMerge };
+  }
+
+  /**
+   * A history run's recorded fields, read back from the control plane's own git dir (never the
+   * worker's): the history base, and each remote's tip, which must still be the commit dispatch
+   * resolved.
+   */
+  private async readHistoryFields(
+    normalized: Pick<PreparedWorkspace, "remotes">,
+    paths: { gitMetadataPath: string; workspacePath: string },
+  ): Promise<Pick<PreparedWorkspace, "historyBase" | "remoteTips">> {
+    const historyBase = await this.revParseRaw(
+      paths.gitMetadataPath,
+      paths.workspacePath,
+      `${HISTORY_BASE_REF}^{commit}`,
+    ).catch((error: unknown) => {
+      throw new Error("vcs_commit_history_invalid", { cause: error });
+    });
+    const remoteTips: string[] = [];
+    for (const remote of normalized.remotes ?? []) {
+      const tip = await this.revParseRaw(
+        paths.gitMetadataPath,
+        paths.workspacePath,
+        `refs/remotes/${remote.name}/${remote.label}^{commit}`,
+      );
+      if (tip !== remote.resolvedSha) throw new Error("vcs_workspace_handle_invalid");
+      remoteTips.push(tip);
+    }
+    return { historyBase, remoteTips };
+  }
+
+  /** A commit's parents, in order, from its raw object. */
+  private async commitParents(workspace: PreparedWorkspace, commit: string): Promise<string[]> {
+    const raw = (await this.gitFor(workspace, ["cat-file", "commit", commit])).stdout;
+    const split = raw.indexOf("\n\n");
+    const header = split < 0 ? raw : raw.slice(0, split);
+    return header
+      .split("\n")
+      .filter((line) => line.startsWith("parent "))
+      .map((line) => line.slice("parent ".length));
   }
 
   async finalizeChanges(
@@ -580,7 +743,7 @@ export class GitVcsProvider implements VcsProvider {
     details?: FinalizeChangesDetails,
   ): Promise<FinalizeChangesResult> {
     const prepared = await this.validatePrepared(workspace);
-    await this.inspectWorkspace(prepared.workspacePath);
+    await this.inspectWorkspace(prepared.workspacePath, { allowRootGit: Boolean(prepared.gitHistory) });
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     // The merge state on disk is the trusted record; the handle must agree with it.
@@ -701,20 +864,38 @@ export class GitVcsProvider implements VcsProvider {
   private async commitMerge(prepared: PreparedWorkspace, merge: TargetMerge): Promise<string> {
     const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
     if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    return this.commitTwoParentMerge(prepared, tree, merge);
+  }
+
+  /**
+   * Commits `tree` with the parents baseCommit and the target's commit, as the Wardby identity, and
+   * moves headRef from baseCommit to it: the merge a finalize commits, and a history run's M0 (#536).
+   */
+  private async commitTwoParentMerge(
+    workspace: Pick<PreparedWorkspace, "gitMetadataPath" | "workspacePath" | "baseCommit" | "headRef" | "runId">,
+    tree: string,
+    merge: Pick<TargetMerge, "ref" | "targetCommit">,
+  ): Promise<string> {
+    const { gitMetadataPath, workspacePath } = workspace;
     const commitSha = (
-      await this.gitFor(prepared, [
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
         "commit-tree",
         tree,
         "-p",
-        prepared.baseCommit,
+        workspace.baseCommit,
         "-p",
         merge.targetCommit,
         "-m",
-        `Merge ${merge.ref} into ${prepared.headRef} (Wardby run ${prepared.runId})`,
+        `Merge ${merge.ref} into ${workspace.headRef} (Wardby run ${workspace.runId})`,
       ])
     ).stdout.trim();
     if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
-    await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha, prepared.baseCommit]);
+    await this.gitForPaths(gitMetadataPath, workspacePath, [
+      "update-ref",
+      `refs/heads/${workspace.headRef}`,
+      commitSha,
+      workspace.baseCommit,
+    ]);
     return commitSha;
   }
 
@@ -918,6 +1099,33 @@ export class GitVcsProvider implements VcsProvider {
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
     if (!protectsSomePath(protectedPaths)) throw new Error("vcs_protected_paths_invalid");
     const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
+    let gitHistory: GitHistorySetting | undefined;
+    if (input.gitHistory !== undefined) {
+      const { depth } = input.gitHistory;
+      if (depth !== "full" && !(Number.isSafeInteger(depth) && depth >= 1 && depth <= MAX_GIT_HISTORY_DEPTH)) {
+        throw new Error("vcs_git_history_invalid");
+      }
+      gitHistory = { depth };
+    }
+    let remotes: RemoteLinkInput[] | undefined;
+    if (input.remotes !== undefined && input.remotes.length > 0) {
+      // Dispatch refuses these first (repository_remote_needs_history / _invalid); this is the backstop.
+      if (!gitHistory) throw new Error("repository_remote_needs_history");
+      if (input.slot !== undefined) throw new Error("repository_remote_invalid");
+      const names = new Set<string>();
+      remotes = input.remotes.map((remote) => {
+        if (!isRemoteName(remote.name) || names.has(remote.name) || !COMMIT_SHA.test(remote.resolvedSha)) {
+          throw new Error("repository_remote_invalid");
+        }
+        names.add(remote.name);
+        return {
+          name: remote.name,
+          repository: this.remote.normalizeRepository(remote.repository),
+          resolvedSha: remote.resolvedSha,
+          label: remoteLabel(remote.label),
+        };
+      });
+    }
     return {
       runId: input.runId,
       repository,
@@ -928,6 +1136,8 @@ export class GitVcsProvider implements VcsProvider {
       continuation,
       ...(input.slot ? { slot: { name: input.slot.name } } : {}),
       ...(input.branchRunId !== undefined ? { branchRunId: input.branchRunId } : {}),
+      ...(gitHistory ? { gitHistory } : {}),
+      ...(remotes ? { remotes } : {}),
     };
   }
 
@@ -964,7 +1174,10 @@ export class GitVcsProvider implements VcsProvider {
       workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index]) ||
       workspace.collectExclude.length !== normalized.collectExclude.length ||
       workspace.collectExclude.some((path, index) => path !== normalized.collectExclude[index]) ||
-      workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId
+      workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId ||
+      !sameGitHistory(workspace.gitHistory, normalized.gitHistory) ||
+      !sameRemotes(workspace.remotes, normalized.remotes) ||
+      !this.validHistoryFields(workspace, normalized)
     ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
@@ -987,6 +1200,66 @@ export class GitVcsProvider implements VcsProvider {
     return { ...workspace, ...normalized };
   }
 
+  /** A history run's historyBase and remoteTips are set and well formed; no other run has either. */
+  private validHistoryFields(
+    workspace: PreparedWorkspace,
+    normalized: Pick<PreparedWorkspace, "gitHistory" | "remotes">,
+  ): boolean {
+    if (!normalized.gitHistory) return workspace.historyBase === undefined && workspace.remoteTips === undefined;
+    const tips = (normalized.remotes ?? []).map((remote) => remote.resolvedSha);
+    return (
+      workspace.historyBase !== undefined &&
+      COMMIT_SHA.test(workspace.historyBase) &&
+      workspace.remoteTips !== undefined &&
+      workspace.remoteTips.length === tips.length &&
+      workspace.remoteTips.every((tip, index) => tip === tips[index])
+    );
+  }
+
+  /**
+   * Fetches one remote link's resolved commit (#536) into the control plane's git dir at
+   * `refs/remotes/<name>/<label>`, to the run's history depth (or in full), under the remote's read
+   * access. Any failure is vcs_remote_fetch_failed:<name>, its git output redacted by the token.
+   */
+  private async fetchRemoteLink(
+    gitMetadataPath: string,
+    workspacePath: string,
+    remote: RemoteLinkInput,
+    gitHistory: GitHistorySetting | undefined,
+  ): Promise<void> {
+    const ref = `refs/remotes/${remote.name}/${remote.label}`;
+    const url = this.remote.cloneUrl(remote.repository);
+    const fetch = async (token: string | undefined) => {
+      try {
+        await this.gitForPaths(
+          gitMetadataPath,
+          workspacePath,
+          [
+            ...this.remote.gitConfig,
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            ...depthArgs(gitHistory),
+            url,
+            `${remote.resolvedSha}:${ref}`,
+          ],
+          this.gitAuth(token),
+        );
+        if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${ref}^{commit}`)) !== remote.resolvedSha) {
+          throw new Error("vcs_remote_commit_mismatch");
+        }
+      } catch (error) {
+        // Only the redacted text goes on: the raw error (and its chain) never leaves here, so a
+        // runner that did not redact its own output cannot carry the token out either.
+        const detail = redactGitOutput(error instanceof Error ? error.message : "unknown", token ? [token] : []);
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error(`vcs_remote_fetch_failed:${remote.name}`, { cause: new Error(detail) });
+      }
+    };
+    if (this.remote.withReadAccess) await this.remote.withReadAccess(remote.repository, fetch);
+    else await this.remote.withAccess(remote.repository, fetch);
+  }
+
   /**
    * Fetches a continuation's target branch from the same `origin` the clone
    * came from (never another URL, so never a fork) and deepens the depth-1
@@ -1000,6 +1273,7 @@ export class GitVcsProvider implements VcsProvider {
     cloneBranch: string,
     ref: string,
     auth: { authToken?: string; authUsername?: string },
+    gitHistory?: GitHistorySetting,
   ): Promise<boolean> {
     const fetch = (depth: readonly string[], refspec: string) =>
       this.gitForPaths(
@@ -1013,8 +1287,11 @@ export class GitVcsProvider implements VcsProvider {
     // refs/remotes/origin/<head> (baseCommit) never moves.
     const head = `+refs/heads/${cloneBranch}:${MERGE_HEAD_REF}`;
     try {
-      await fetch(["--depth", "1"], target);
-      for (const step of [0, ...MERGE_BASE_DEEPEN_STEPS]) {
+      // The target comes at the clone's own depth: 1, a history run's depth, or in full (#536).
+      await fetch(depthArgs(gitHistory), target);
+      // A full clone has nothing to deepen: a merge base is there at once, or not at all.
+      const steps = gitHistory?.depth === "full" ? [] : MERGE_BASE_DEEPEN_STEPS;
+      for (const step of [0, ...steps]) {
         if (step > 0) {
           // One fetch per side: newer git deepens only the refs a fetch names
           // (older git deepened every shallow boundary), and a fetch naming
@@ -1187,14 +1464,25 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
-  private async inspectWorkspace(workspacePath: string): Promise<void> {
+  /**
+   * `allowRootGit` (history runs, #536): the workspace root's own `.git` directory is allowed. It is
+   * never walked and never run git against (the worker can write it); only its config is read, as
+   * text, and must pass the local-config checks. Any other `.git` is a nested repository.
+   */
+  private async inspectWorkspace(workspacePath: string, options: { allowRootGit?: boolean } = {}): Promise<void> {
     const rootStat = await lstat(workspacePath);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     let entries = 0;
     await walkEntries(workspacePath, async (entry, fullPath, directory) => {
       entries += 1;
       if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
-      if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
+      if (entry.name.toLowerCase() === ".git") {
+        if (!options.allowRootGit || entry.name !== ".git" || directory !== workspacePath) {
+          throw new Error("vcs_nested_repository");
+        }
+        await this.assertSafeWorkerGit(fullPath);
+        return false;
+      }
       const stat = await lstat(fullPath);
       if (stat.isSymbolicLink()) {
         const target = await readlink(fullPath);
@@ -1250,14 +1538,35 @@ export class GitVcsProvider implements VcsProvider {
    */
   private async assertSafeLocalConfig(gitMetadataPath: string): Promise<void> {
     const config = await readFile(resolve(gitMetadataPath, "config"), "utf8");
-    if (
-      Buffer.byteLength(config, "utf8") > 64 * 1024 ||
-      /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config) ||
-      /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config) ||
-      redactTokenShapedValues(config) !== config
-    ) {
-      throw new Error("vcs_git_config_unsafe");
+    if (!isSafeLocalConfig(config)) throw new Error("vcs_git_config_unsafe");
+  }
+
+  /**
+   * The worker's `.git` (#536), which the worker can write: a real directory (not a symlink, not a
+   * gitdir file), whose config is a regular file read without following a symlink, at most 64 KiB,
+   * passing the same checks as the control plane's own. Anything else is vcs_git_config_unsafe.
+   */
+  private async assertSafeWorkerGit(gitDir: string): Promise<void> {
+    const stat = await lstat(gitDir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("vcs_nested_repository");
+    let handle: FileHandle;
+    try {
+      handle = await open(resolve(gitDir, "config"), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    } catch (error) {
+      throw new Error("vcs_git_config_unsafe", { cause: error });
     }
+    let config: string;
+    try {
+      const configStat = await handle.stat();
+      if (!configStat.isFile() || configStat.size > MAX_LOCAL_CONFIG_BYTES) throw new Error("vcs_git_config_unsafe");
+      const buffer = Buffer.alloc(MAX_LOCAL_CONFIG_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead > MAX_LOCAL_CONFIG_BYTES) throw new Error("vcs_git_config_unsafe");
+      config = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+    if (!isSafeLocalConfig(config)) throw new Error("vcs_git_config_unsafe");
   }
 
   /** The git credentials for a remote's access token; none when the remote needs no token. */

@@ -84,6 +84,8 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
+  COMMIT_SHA,
+  GitHistoryInputSchema,
   MAX_CODING_INPUT_BYTES,
   RESERVED_REPOSITORY_NAME,
   isLocalRepository,
@@ -127,9 +129,11 @@ import type {
   ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
+  GitHistorySetting,
   PreparedReadOnlyCopy,
   PreparedWorkspace,
   ReadOnlyCopyInput,
+  RemoteLinkInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
@@ -468,6 +472,8 @@ export interface RunRepositorySnapshot {
   provider: string;
   repository: string;
   requestedRef: string | null;
+  /** The link's refFromFile when the ref came from a file (a remote row is then filed as "pinned"); absent = none. */
+  refFromFile?: string | null;
   resolvedSha: string | null;
   baseRef: string | null;
   headRef: string | null;
@@ -514,7 +520,7 @@ function jobRepositories(
   rows: readonly RunRepositorySnapshot[],
   workspaces: RunWorkspaces | null,
 ): JobRepositoryMount[] {
-  return rows.map((row) => {
+  return folderRows(rows).map((row) => {
     const prepared =
       row.access === "read"
         ? workspaces?.readOnly.find((copy) => copy.name === row.name)
@@ -522,6 +528,97 @@ function jobRepositories(
     if (!prepared) throw new Error("coding_workspace_lost");
     return { name: row.name, access: row.access, hostPath: prepared.workspacePath };
   });
+}
+
+/** The rows that are folders under /repos/: every row but the remote ones (#536), which are never mounted or prepared. */
+function folderRows(rows: readonly RunRepositorySnapshot[]): RunRepositorySnapshot[] {
+  return rows.filter((row) => !row.asRemote);
+}
+
+/** A run's git history setting (#536), fixed at dispatch: full overrides depth; neither = off. */
+function gitHistoryOf(
+  run: Pick<ContainerRunSnapshot, "gitHistoryDepth" | "gitHistoryFull">,
+): GitHistorySetting | undefined {
+  if (run.gitHistoryFull) return { depth: "full" };
+  return typeof run.gitHistoryDepth === "number" ? { depth: run.gitHistoryDepth } : undefined;
+}
+
+/**
+ * The label a remote row's commit is filed under (refs/remotes/<name>/<label>): the requested
+ * branch or tag name, or "pinned" for a commit SHA or a ref read from a file. The VCS files a label
+ * that is not a valid ref component under "pinned" too.
+ */
+function remoteLinkLabel(row: RunRepositorySnapshot): string {
+  if (row.refFromFile || !row.requestedRef || COMMIT_SHA.test(row.requestedRef)) return "pinned";
+  return row.requestedRef;
+}
+
+/**
+ * The default repository's remote links (#536), from the run's remote rows. `strict` (a run being
+ * prepared): a row dispatch never resolved, or that is not a read row, refuses the run. Otherwise
+ * (cleanup) such a row is left out.
+ */
+function remoteLinksOf(run: ContainerRunSnapshot, strict: boolean): RemoteLinkInput[] {
+  const links: RemoteLinkInput[] = [];
+  for (const row of run.repositories) {
+    if (!row.asRemote) continue;
+    if (!row.accessKnown || row.access !== "read" || !row.resolvedSha) {
+      if (strict) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+      continue;
+    }
+    links.push({
+      name: row.name,
+      repository: row.repository,
+      resolvedSha: row.resolvedSha,
+      label: remoteLinkLabel(row),
+    });
+  }
+  return links;
+}
+
+/** The history keys of a VcsPrepareInput, written only when set (a run without history gets neither). */
+function historyPrepareFields(
+  run: ContainerRunSnapshot,
+  options: { remotes: boolean; strict: boolean },
+): Pick<VcsPrepareInput, "gitHistory" | "remotes"> {
+  const gitHistory = gitHistoryOf(run);
+  const remotes = options.remotes ? remoteLinksOf(run, options.strict) : [];
+  return { ...(gitHistory ? { gitHistory } : {}), ...(remotes.length > 0 ? { remotes } : {}) };
+}
+
+/** The commit a workspace's worker starts at: a history run's history base (M0 after a committed merge), else its base. */
+function startCommit(workspace: PreparedWorkspace): string {
+  return workspace.historyBase ?? workspace.baseCommit;
+}
+
+/**
+ * What a history run's input says about git (#536), from the prepared workspaces only: for the
+ * default repository and each writable extra with history (in the run's order), its start commit and
+ * the commits its result must not include (the default repository's remote tips). Undefined without
+ * history, so the input and task stay what they were.
+ */
+function gitHistoryForInput(run: ContainerRunSnapshot, workspaces: RunWorkspaces): GitHistoryForInput | undefined {
+  const main = workspaces.main;
+  if (!main.gitHistory) return undefined;
+  const repositories: GitHistoryInput["repositories"] = [
+    { path: "/workspace", baseCommit: startCommit(main), excludeCommits: [...(main.remoteTips ?? [])] },
+  ];
+  for (const row of folderRows(run.repositories)) {
+    const extra = row.access === "write" ? workspaces.writable.get(row.name) : undefined;
+    if (extra?.gitHistory) {
+      repositories.push({ path: `/repos/${row.name}`, baseCommit: startCommit(extra), excludeCommits: [] });
+    }
+  }
+  return {
+    input: GitHistoryInputSchema.parse({ repositories }),
+    wording: {
+      depth: main.gitHistory.depth,
+      remotes: (main.remotes ?? []).map((remote) => ({
+        ref: `${remote.name}/${remote.label}`,
+        commit: remote.resolvedSha,
+      })),
+    },
+  };
 }
 
 /** How many extra repositories are prepared at once. */
@@ -932,6 +1029,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         provider: r.provider,
         repository: r.repository,
         requestedRef: r.requestedRef,
+        refFromFile: r.refFromFile,
         resolvedSha: r.resolvedSha,
         baseRef: r.baseRef,
         headRef: r.headRef,
@@ -1787,7 +1885,8 @@ export class ContainerExecutor implements Executor {
       // A slow clone (large repository, cold host) outlives HEARTBEAT_TIMEOUT_MS just as a launch can.
       const toPrepare = run;
       // A launched run's job already has its read-only copies; only its writable extras are recovered.
-      const pending = run.repositories.filter((extra) => !(handle && extra.access === "read"));
+      // Remote rows (#536) are never folders: preflight passes them to the default repository instead.
+      const pending = folderRows(run.repositories).filter((extra) => !(handle && extra.access === "read"));
       workspace = await this.whileHeartbeating(runId, async () => {
         // Every repository is authorized, and every extra row checked, before anything is cloned.
         await this.authorizeRepository(toPrepare, { inFlight: Boolean(handle) });
@@ -1855,7 +1954,7 @@ export class ContainerExecutor implements Executor {
         if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
         const [inputRun, inputWorkspaces] = [run, workspaces ?? { main: workspace, writable: new Map(), readOnly: [] }];
         const inputArtifact = await this.whileHeartbeating(runId, () =>
-          this.writeInput(inputRun, deadlineAt, inputWorkspaces),
+          this.writeInput(inputRun, deadlineAt, inputWorkspaces, gitHistoryForInput(inputRun, inputWorkspaces)),
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
@@ -2069,6 +2168,8 @@ export class ContainerExecutor implements Executor {
   ): { kind: "read"; input: ReadOnlyCopyInput } | { kind: "write"; input: VcsPrepareInput } {
     assertRowWellFormed(run, extra);
     if (!extra.resolvedSha) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    // A remote row (#536) is fetched into the default repository, never prepared as a folder.
+    if (extra.asRemote) throw new PreflightError("repository_remote_invalid");
     if (extra.access === "read") {
       return {
         kind: "read",
@@ -2091,6 +2192,8 @@ export class ContainerExecutor implements Executor {
         slot: { name: extra.name },
         continuation: extra.continuesBranch && root ? { rootRunId: root } : undefined,
         ...(root && !extra.continuesBranch ? { branchRunId: root } : {}),
+        // A writable extra gets the run's history too, but never remotes (#536).
+        ...historyPrepareFields(run, { remotes: false, strict: true }),
       },
     };
   }
@@ -2307,6 +2410,8 @@ export class ContainerExecutor implements Executor {
         protectedPaths: profile.protectedPaths,
         collectExclude: [...normalizeCollectExclusions(run.collectExclude).paths],
         continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+        // Git history (#536), with the run's remote rows fetched into the default repository.
+        ...historyPrepareFields(run, { remotes: true, strict: true }),
       };
     } catch (error) {
       throw new PreflightError(safeError(error), { cause: error });
@@ -3805,7 +3910,7 @@ export class ContainerExecutor implements Executor {
       labels: {},
       collectExclude: normalizeCollectExclusions(run.collectExclude),
       ...(services.length > 0 ? { services } : {}),
-      ...(run.repositories.length > 0 && !options.capacityProbe
+      ...(folderRows(run.repositories).length > 0 && !options.capacityProbe
         ? { repositories: jobRepositories(run.repositories, workspaces) }
         : {}),
     };
@@ -3835,14 +3940,16 @@ export class ContainerExecutor implements Executor {
     const services = parseStoredServices(run.services);
     // Each extra at the commit it was prepared at: the same values go into input.json's repositories
     // and, in full, into the task text (the worker's own note shortens them).
-    const extras = run.repositories.map((r) => ({
+    // Remote rows (#536) are not folders: the history wording names them instead.
+    const folders = folderRows(run.repositories);
+    const extras = folders.map((r) => ({
       name: r.name,
       repository: r.repository,
       access: r.access,
-      commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+      commit: r.access === "read" ? r.resolvedSha! : startCommit(workspaces.writable.get(r.name)!),
       ...(history?.input.repositories.some((h) => h.path === `/repos/${r.name}`) ? { history: true } : {}),
     }));
-    const withBase = withBaseCommit(run.task, workspace.baseCommit, history?.wording);
+    const withBase = withBaseCommit(run.task, startCommit(workspace), history?.wording);
     const withCommit = withExtraRepositories(withBase, extras);
     if (extras.length > 0 && withCommit === withBase) {
       containerLog.warn(
@@ -3919,7 +4026,7 @@ export class ContainerExecutor implements Executor {
         // Only on a run with git history: every other run's input stays exactly what older workers expect.
         ...(history ? { gitHistory: history.input } : {}),
         // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
-        ...(run.repositories.length > 0
+        ...(folders.length > 0
           ? {
               repositories: extras.map((r) => ({
                 name: r.name,
@@ -4045,6 +4152,8 @@ export class ContainerExecutor implements Executor {
       protectedPaths: run.protectedPaths,
       collectExclude,
       continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+      // A history workspace is recovered only as one (its root .git is allowed then).
+      ...historyPrepareFields(run, { remotes: true, strict: false }),
     };
   }
 
