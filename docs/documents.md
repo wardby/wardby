@@ -369,14 +369,20 @@ repository cannot be read (a board missing or too large), the send fails with
 A newer version published while the run worked is never overwritten. Wardby
 tries three things in order:
 
-1. **A per-file merge.** The agent's edit, the newer version and the version
-   that was sent are compared file by file (a design's `manifest.json` and each
-   board, a missing file meaning deleted; a Markdown document is one file). A
-   file only one side changed takes that side's text; a file both changed the
-   same way is kept. If no file was changed both ways, the merge is published
-   through the normal publish path (normalising, sanitising and redaction) with
-   the summary `Agent edit for comment threads #2 (merged with v3)`, and the
-   replies and resolving follow as for any send.
+1. **A merge.** The agent's edit, the newer version and the version that was
+   sent are compared file by file (a design's `manifest.json` and each board, a
+   missing file meaning deleted; a Markdown document is one file). A file only
+   one side changed takes that side's text; a file both changed the same way is
+   kept. A file both changed is merged line by line when the two sides' changes
+   neither overlap nor touch (adjacent lines count as touching): an edit to one
+   paragraph and an edit to another both land, as do edits to two separate
+   style rules of a board. Changes to the same or adjacent lines, or a file too
+   different to compare line by line, make that file a conflict; no conflict
+   markers are ever written. If no file conflicts, the merge is published
+   through the normal publish path (normalising, sanitising and redaction; a
+   merge those checks refuse counts as a conflict) with the summary
+   `Agent edit for comment threads #2 (merged with v3)`, and the replies and
+   resolving follow as for any send.
 2. **One reconcile run.** Otherwise Wardby starts one more coding run, trigger
    `comment`, as the person who sent the threads, on the latest version, for
    the threads still open or outdated (a thread closed meanwhile is left out and

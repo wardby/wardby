@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { markdownAgentFormat, designAgentFormat } from "./agent-formats.js";
-import { editedFiles, mergeContent, mergeFiles } from "./merge.js";
+import { editedFiles, mergeContent, mergeFiles, mergeLines } from "./merge.js";
+import { MAX_EDITS } from "./text-diff.js";
 
 describe("mergeFiles (per-file three-way merge)", () => {
   const base = { "manifest.json": "m", "boards/home.html": "h", "boards/about.html": "a" };
@@ -17,7 +18,7 @@ describe("mergeFiles (per-file three-way merge)", () => {
     expect(mergeFiles(base, same, same)).toEqual({ kind: "merged", files: same });
   });
 
-  it("is a conflict when both sides changed a file differently", () => {
+  it("is a conflict when both sides changed the same line of a file differently", () => {
     expect(
       mergeFiles(base, { ...base, "boards/home.html": "theirs" }, { ...base, "boards/home.html": "ours" }),
     ).toEqual({ kind: "conflict", paths: ["boards/home.html"] });
@@ -96,5 +97,88 @@ describe("editedFiles", () => {
       changed: { "boards/new.html": "n", "manifest.json": "m2" },
       deleted: ["boards/about.html"],
     });
+  });
+});
+
+describe("mergeLines (line-level three-way merge of one file)", () => {
+  const base = "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
+
+  it("merges edits to different paragraphs", () => {
+    expect(
+      mergeLines(
+        base,
+        base.replace("Third paragraph.", "Third, edited by them."),
+        base.replace("First paragraph.", "First, edited by us."),
+      ),
+    ).toBe("# Title\n\nFirst, edited by us.\n\nSecond paragraph.\n\nThird, edited by them.\n");
+  });
+
+  it("is a conflict when both sides changed the same line differently", () => {
+    expect(mergeLines(base, base.replace("Second", "Their second"), base.replace("Second", "Our second"))).toBeNull();
+  });
+
+  it("is a conflict when the two sides changed adjacent lines", () => {
+    const b = "a\nb\nc\nd\n";
+    expect(mergeLines(b, "a\nB\nc\nd\n", "a\nb\nC\nd\n")).toBeNull();
+    // An insertion right next to the other side's change touches it too.
+    expect(mergeLines(b, "a\nB\nc\nd\n", "a\nb\nnew\nc\nd\n")).toBeNull();
+  });
+
+  it("applies a change both sides made the same way once, alongside a change only one side made", () => {
+    const both = base.replace("First paragraph.", "First, fixed.");
+    expect(mergeLines(base, both, both.replace("Third paragraph.", "Third, ours."))).toBe(
+      "# Title\n\nFirst, fixed.\n\nSecond paragraph.\n\nThird, ours.\n",
+    );
+  });
+
+  it("merges an insertion at the start with one at the end", () => {
+    expect(mergeLines(base, `${base}Appended.\n`, `Preface.\n${base}`)).toBe(`Preface.\n${base}Appended.\n`);
+    expect(mergeLines(base, `Preface.\n${base}`, `${base}Appended.\n`)).toBe(`Preface.\n${base}Appended.\n`);
+  });
+
+  it("merges a deletion on one side with an edit elsewhere on the other", () => {
+    expect(mergeLines(base, base.replace("Second paragraph.\n\n", ""), base.replace("# Title", "# New title"))).toBe(
+      "# New title\n\nFirst paragraph.\n\nThird paragraph.\n",
+    );
+  });
+
+  it("keeps a file without a final newline exactly", () => {
+    const b = "one\n\ntwo\n\nthree";
+    expect(mergeLines(b, "one\n\ntwo\n\nthree, theirs", "one, ours\n\ntwo\n\nthree")).toBe(
+      "one, ours\n\ntwo\n\nthree, theirs",
+    );
+    expect(mergeLines(b, "ONE\n\ntwo\n\nthree", "one\n\ntwo\n\nthree\n")).toBe("ONE\n\ntwo\n\nthree\n");
+  });
+
+  it("is a conflict when a side's diff goes past the edit cap", () => {
+    const lines = (tag: string) => Array.from({ length: MAX_EDITS }, (_, i) => `${tag} ${i}\n`).join("");
+    const b = `head\n\n${lines("base")}`;
+    expect(mergeLines(b, b.replace("head", "their head"), `head\n\n${lines("ours")}`)).toBeNull();
+  });
+
+  it("merges a board file whose two sides edited separate style rules", () => {
+    const board = [
+      "<!doctype html>",
+      "<html><head><style>",
+      "  h1{color:#2C4330;}",
+      "  p{margin:0 0 1em;}",
+      "  a{color:#C1623B;}",
+      "</style></head>",
+      "<body><h1>Menu</h1></body></html>",
+      "",
+    ].join("\n");
+    const theirs = board.replace("h1{color:#2C4330;}", "h1{color:#000;}");
+    const ours = board.replace("a{color:#C1623B;}", "a{color:#3F5B45;}");
+    const want = board
+      .replace("h1{color:#2C4330;}", "h1{color:#000;}")
+      .replace("a{color:#C1623B;}", "a{color:#3F5B45;}");
+    expect(mergeLines(board, theirs, ours)).toBe(want);
+    expect(
+      mergeFiles(
+        { "manifest.json": "m", "boards/menu.html": board },
+        { "manifest.json": "m", "boards/menu.html": theirs },
+        { "manifest.json": "m", "boards/menu.html": ours },
+      ),
+    ).toEqual({ kind: "merged", files: { "manifest.json": "m", "boards/menu.html": want } });
   });
 });

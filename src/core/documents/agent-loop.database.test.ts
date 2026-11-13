@@ -529,6 +529,64 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(await runsOf()).toBe(before);
   });
 
+  const PARAS = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
+  /** A three-paragraph document at version 2, one thread sent at v2; v3 is `editor`; the run's file is `agent`. */
+  async function conflictedParas(editor: string, agent: string) {
+    const docId = await linkedDoc("Draft.\n");
+    await publishVersion(db, cipher, { documentId: docId, markdown: PARAS, via: "editor" });
+    const t1 = await thread(docId, "First", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    await publishVersion(db, cipher, { documentId: docId, markdown: editor, via: "editor" });
+    const sha = await finish(
+      runId,
+      "succeeded",
+      repliesBlock([{ thread: t1.number, reply: "Warmer.", resolved: true }]),
+    );
+    files.set(`${sha}:${path}`, agent);
+    return { docId, t1, runId };
+  }
+
+  it("a Markdown edit to one paragraph merges line by line with a newer version's edit to another", async () => {
+    const { docId, t1, runId } = await conflictedParas(
+      PARAS.replace("Third paragraph.", "Third, edited by a person."),
+      PARAS.replace("First paragraph.", "First, warmer."),
+    );
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({
+      number: 4,
+      via: "agent",
+      runId,
+      markdown: "First, warmer.\n\nSecond paragraph.\n\nThird, edited by a person.\n",
+      summary: `Agent edit for comment threads #${t1.number} (merged with v3)`,
+    });
+    expect(await runsOf()).toBe(before);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("resolved");
+    expect(v.comments.at(-1)!.body).toBe("Warmer.");
+  });
+
+  it("a Markdown paragraph both sides edited is a conflict: one reconcile run", async () => {
+    const { docId, t1, runId } = await conflictedParas(
+      PARAS.replace("First paragraph.", "First, by a person."),
+      PARAS.replace("First paragraph.", "First, warmer."),
+    );
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await runsOf()).toBe(before + 1);
+    expect(await db.documentVersion.count({ where: { documentId: docId, runId } })).toBe(0);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+    expect(row).toMatchObject({ reconcileOfRunId: runId, sentVersionNumber: 3 });
+    expect((await db.comment.findMany({ where: { threadId: t1.threadId, runId } })).map((c) => c.body)).toEqual([
+      reconcilingReply(3),
+    ]);
+  });
+
   it("a Markdown document both changed starts one reconcile run as the sender, on the latest version", async () => {
     const { docId, t1, runId } = await conflicted(
       "hello there world\n\nsecond para",

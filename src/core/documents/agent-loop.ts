@@ -19,8 +19,8 @@
  * agent flagged.
  *
  * When the document moved on while the agent worked, three layers in order:
- * the edit merged file by file with the newer version (merge.ts) and the merge
- * published; else one reconcile run as the original sender on the latest
+ * the edit merged with the newer version (merge.ts: file by file, then line by
+ * line inside a file both changed) and the merge published; else one reconcile run as the original sender on the latest
  * version, every send check made again (at most one per send:
  * CommentThread.reconcileOfRunId); else the fixed conflict reply.
  */
@@ -560,7 +560,7 @@ function codeOf(err: unknown): string {
  * Succeeded: the file at the run's pushed commit is published as the next
  * version while the document is still at the version that was sent; then the
  * agent's replies are posted and the threads it flagged resolved. A newer
- * version in between: the edit is merged file by file with it (merge.ts) and
+ * version in between: the edit is merged with it (merge.ts, file then line) and
  * the merge published when no file conflicts; else one reconcile run starts
  * on the latest version (startReconcileRun: at most one per send); else each
  * thread gets the fixed conflict reply. An edit that could not be read or
@@ -688,7 +688,7 @@ async function versionContent(db: PrismaClient, documentId: string, number: numb
 /**
  * Publishes the linked file or design at the run's pushed commit as the next version while the
  * document is still at the version the threads were sent with. When it moved on, the edit is merged
- * file by file with the current version (base: the sent version) and the merge published while the
+ * (file by file, then line by line) with the current version (base: the sent version) and published while the
  * document is still at that current version; a conflicting file, or a newer version again, is a
  * conflict. Both publishes go through publishVersion (normalising and redaction).
  * Never throws: an error is reported as `failed`.
@@ -762,11 +762,20 @@ async function publishRunEdit(
     const theirs = fmt.prepare(await loadContent(db, current), secretValues).content;
     const merged = mergeContent(ef, base, theirs, prepared);
     if (merged.kind === "conflict") return { kind: "conflict", branch, reconcile };
+    // A line-merged file is new text: it must pass the format's checks (sanitiser, board rules,
+    // redaction) as any edit does. A refusal is a conflict, so the reconcile run can redo it.
+    let mergedContent: VersionContent;
+    try {
+      mergedContent = fmt.prepare(merged.content, secretValues).content;
+    } catch (err) {
+      log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit does not pass the format checks");
+      return { kind: "conflict", branch, reconcile };
+    }
     // The current version already holds the agent's edit.
-    if (contentHash(merged.content) === contentHash(theirs)) return { kind: "unchanged" };
+    if (contentHash(mergedContent) === contentHash(theirs)) return { kind: "unchanged" };
     try {
       const summary = `Agent edit for comment threads ${numbers} (merged with v${current.number})`;
-      if (await publish(merged.content, current.number, summary)) return { kind: "published" };
+      if (await publish(mergedContent, current.number, summary)) return { kind: "published" };
     } catch (err) {
       // A merge the store refuses (a manifest and boards that no longer agree) is a conflict too.
       log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit could not be stored");
