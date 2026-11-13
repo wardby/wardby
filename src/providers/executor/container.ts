@@ -482,7 +482,6 @@ export interface RunRepositorySnapshot {
   result: unknown;
 }
 
-/** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
 /**
  * What writeInput needs to put git history into a run's input (#536): the `gitHistory` input key as it
  * is written, and the facts the task text states (depth or full, the remote refs and their commits).
@@ -494,6 +493,7 @@ export interface GitHistoryForInput {
   wording: GitHistoryWording;
 }
 
+/** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
 export interface RunWorkspaces {
   main: PreparedWorkspace;
   writable: Map<string, PreparedWorkspace>;

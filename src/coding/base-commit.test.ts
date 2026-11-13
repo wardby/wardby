@@ -42,10 +42,32 @@ describe("withBaseCommit with git history", () => {
       `T\n\nBase commit: ${SHA} (the workspace has git history to depth 1; fetching and pushing are not possible \u2014 commit your work).`,
     );
   });
-  it("still leaves the task unchanged for a bad sha or no room", () => {
+  it("leaves the task unchanged for a bad sha", () => {
     expect(withBaseCommit("T", "abc", { depth: 1, remotes: [] })).toBe("T");
+  });
+  it("cuts a task that leaves no room, rather than dropping the line", () => {
+    const out = withBaseCommit("t".repeat(MAX_CODING_TASK_BYTES - 10), SHA, { depth: "full", remotes: [] });
+    expect(out).toContain(`Base commit: ${SHA} (the workspace has full history`);
+    expect(out).toContain("[task cut to make room for the git history note]");
+    expect(Buffer.byteLength(out)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES);
+  });
+  it("keeps the base commit, history wording and all 17 remotes, even on a full task", () => {
+    const remotes = Array.from({ length: 17 }, (_, i) => ({
+      ref: `${"n".repeat(40)}${String(i).padStart(2, "0")}/${"l".repeat(40)}`,
+      commit: String(i % 10).repeat(40),
+    }));
+    for (const task of ["Fix it.", "\u00e9".repeat(MAX_CODING_TASK_BYTES / 2)]) {
+      const out = withBaseCommit(task, SHA, { depth: 50, remotes });
+      expect(Buffer.byteLength(out)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES);
+      expect(out).toContain(`Base commit: ${SHA}`);
+      expect(out).toContain("the workspace has git history to depth 50");
+      for (const r of remotes) expect(out).toContain(`${r.ref} at ${r.commit}`);
+      expect(out).not.toContain("\uFFFD");
+    }
+  });
+  it("leaves a history-off task byte-for-byte as before on a full task", () => {
     const task = "t".repeat(MAX_CODING_TASK_BYTES - 10);
-    expect(withBaseCommit(task, SHA, { depth: "full", remotes: [] })).toBe(task);
+    expect(withBaseCommit(task, SHA)).toBe(task);
   });
   it("fits the trailer reserve with a few remotes", () => {
     const added = Buffer.byteLength(withBaseCommit("", SHA, { depth: "full", remotes: [remote] }));

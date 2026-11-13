@@ -19,10 +19,30 @@ function historyClause({ depth, remotes }: GitHistoryWording): string {
  */
 export function withBaseCommit(task: string, baseCommit: string, history?: GitHistoryWording): string {
   if (!/^[0-9a-f]{40}$/.test(baseCommit)) return task;
-  const withLine = history
-    ? `${task}\n\nBase commit: ${baseCommit} (${historyClause(history)}).`
-    : `${task}\n\nBase commit: ${baseCommit} (the commit this workspace was checked out at; the workspace has no git metadata).`;
+  if (history) return withHistoryBaseCommit(task, baseCommit, history);
+  const withLine = `${task}\n\nBase commit: ${baseCommit} (the commit this workspace was checked out at; the workspace has no git metadata).`;
   return byteLength(withLine) <= MAX_CODING_TASK_BYTES ? withLine : task;
+}
+
+const HISTORY_CUT_MARKER = "\n[task cut to make room for the git history note]";
+
+/**
+ * A history run's Base commit line grows with its remotes (up to ~100 bytes
+ * each), beyond CODING_TASK_TRAILER_RESERVE_BYTES, which the upstream
+ * truncators keep without knowing about history. So this, the last composer,
+ * makes the room itself: the line is never dropped; if the task leaves too
+ * little, the task is cut at a character boundary and says so. Only history
+ * runs get this; the no-history path above is unchanged.
+ */
+function withHistoryBaseCommit(task: string, baseCommit: string, history: GitHistoryWording): string {
+  const line = `\n\nBase commit: ${baseCommit} (${historyClause(history)}).`;
+  if (byteLength(task) + byteLength(line) <= MAX_CODING_TASK_BYTES) return `${task}${line}`;
+  const room = MAX_CODING_TASK_BYTES - byteLength(line) - byteLength(HISTORY_CUT_MARKER);
+  if (room < 0) return task;
+  let kept = Buffer.from(task, "utf8").subarray(0, room).toString("utf8");
+  // A multi-byte character cut in half decodes to U+FFFD at the end; drop it.
+  while (kept.endsWith("\uFFFD")) kept = kept.slice(0, -1);
+  return `${kept}${HISTORY_CUT_MARKER}${line}`;
 }
 
 export interface ExtraRepositoryCommit {
