@@ -1,5 +1,7 @@
-import { lstat } from "node:fs/promises";
-import { isAbsolute, posix } from "node:path";
+import { constants } from "node:fs";
+import { lstat, mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
+import { dirname, isAbsolute, join, posix } from "node:path";
+import type { Readable } from "node:stream";
 import { COMMIT_SHA, redactTokenShapedValues } from "../../coding/protocol.js";
 
 /**
@@ -23,8 +25,14 @@ export const RESULT_REF = "refs/wardby/result";
 /** Who every rewritten commit is by. */
 export const WARDBY_IDENTITY = { name: "Wardby", email: "wardby@users.noreply.github.com" } as const;
 
-/** The fetch reads the whole bundle: five minutes. */
+/** The object check and the fetch each read the whole bundle: five minutes. */
 const BUNDLE_FETCH_TIMEOUT_MS = 300_000;
+/** A bundle's header: its signature, capabilities, prerequisites and one ref, then a blank line. */
+const BUNDLE_HEADER_MAX_BYTES = 1024 * 1024;
+/** One prerequisite line per boundary commit of `head --not base tips`. */
+const BUNDLE_PREREQUISITES_MAX = 10_000;
+/** `index-pack` prints one `pack\t<hash>` line. */
+const INDEX_PACK_MAX_BYTES = 4096;
 /** Any other git call on the bundle's objects. */
 const GIT_STEP_TIMEOUT_MS = 60_000;
 /** `bundle list-heads` of a one-head bundle is one short line. */
@@ -43,7 +51,7 @@ const AUTHOR_DATE = / (\d{1,15}) ([+-]\d{4})$/;
 export interface ResultGitOptions {
   maxOutputBytes?: number;
   timeoutMs?: number;
-  input?: string;
+  input?: string | Readable;
   env?: Readonly<Record<string, string>>;
 }
 
@@ -130,23 +138,42 @@ export async function importResultBundle(options: ImportResultBundleOptions): Pr
   const commits = await newCommits(git, head, historyBase, remoteTips);
   const messages = new Map<string, ParsedCommit>();
   for (const commit of commits) messages.set(commit.sha, await readCommit(git, commit.sha));
-  const tip = await rewrite(git, commits, messages, historyBase, remoteTips);
+  const tip = await rewrite(git, head, commits, messages, historyBase, remoteTips);
   const changes = await agentChanges(git, commits, options);
   return { tip, ...changes };
 }
 
-/** Step 1: exactly one head, named RESULT_BUNDLE_HEAD_REF, fetched with every object checked. */
+/**
+ * Step 1: a strict header naming exactly one head, RESULT_BUNDLE_HEAD_REF; every object of its pack
+ * checked with `index-pack --strict` (git's object checks, which a fetch from a bundle skips on older
+ * git whatever fetch.fsckObjects says); then the fetch, its own checks kept.
+ */
 async function fetchBundle(git: ResultGit, bundlePath: string): Promise<string> {
   // The collector moved it here; still never followed as a symlink.
   const stat = await lstat(bundlePath).catch(() => null);
   if (!stat || !stat.isFile()) fail("vcs_result_bundle_invalid");
-  const listed = await step("vcs_result_bundle_invalid", () =>
-    git(["bundle", "list-heads", bundlePath], { maxOutputBytes: LIST_HEADS_MAX_BYTES, timeoutMs: GIT_STEP_TIMEOUT_MS }),
-  );
-  const lines = listed.stdout.split("\n").filter((line) => line !== "");
-  if (lines.length !== 1) fail("vcs_result_bundle_invalid");
-  const [sha, ref, ...rest] = lines[0].split(" ");
-  if (rest.length > 0 || !COMMIT_SHA.test(sha) || ref !== RESULT_BUNDLE_HEAD_REF) fail("vcs_result_bundle_invalid");
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(bundlePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    fail("vcs_result_bundle_invalid");
+  }
+  let sha: string;
+  try {
+    const header = await readBundleHeader(handle);
+    sha = header.head;
+    // git's own reading of the header must agree with ours.
+    const listed = await step("vcs_result_bundle_invalid", () =>
+      git(["bundle", "list-heads", bundlePath], {
+        maxOutputBytes: LIST_HEADS_MAX_BYTES,
+        timeoutMs: GIT_STEP_TIMEOUT_MS,
+      }),
+    );
+    if (listed.stdout !== `${sha} ${RESULT_BUNDLE_HEAD_REF}\n`) fail("vcs_result_bundle_invalid");
+    await verifyPack(git, bundlePath, handle, header.packOffset);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
   await step("vcs_result_bundle_invalid", () =>
     git(
       [
@@ -173,6 +200,90 @@ async function fetchBundle(git: ResultGit, bundlePath: string): Promise<string> 
   );
   if (fetched.stdout.trim() !== sha) fail("vcs_result_bundle_invalid");
   return sha;
+}
+
+interface BundleHeader {
+  head: string;
+  /** Where the pack starts: the byte after the header's blank line. */
+  packOffset: number;
+}
+
+/**
+ * The bundle's header, read strictly (git's bundle format, v2 or v3): the signature; for v3 only the
+ * capability `@object-format=sha1`, at most once and first; prerequisite lines `-<sha>[ <comment>]`;
+ * exactly one ref line, `<sha> refs/wardby/bundle-head`; a blank line; then a pack (`PACK`). Anything
+ * else, or a header over BUNDLE_HEADER_MAX_BYTES, raises vcs_result_bundle_invalid.
+ */
+async function readBundleHeader(handle: FileHandle): Promise<BundleHeader> {
+  const buffer = Buffer.alloc(BUNDLE_HEADER_MAX_BYTES + 4);
+  let length = 0;
+  try {
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+  } catch {
+    fail("vcs_result_bundle_invalid");
+  }
+  const bytes = buffer.subarray(0, length);
+  const blank = bytes.indexOf("\n\n");
+  if (blank < 0 || blank + 1 > BUNDLE_HEADER_MAX_BYTES) fail("vcs_result_bundle_invalid");
+  const packOffset = blank + 2;
+  if (bytes.subarray(packOffset, packOffset + 4).toString("latin1") !== "PACK") fail("vcs_result_bundle_invalid");
+  const [signature, ...lines] = bytes.subarray(0, blank).toString("latin1").split("\n");
+  const version =
+    signature === "# v2 git bundle" ? 2 : signature === "# v3 git bundle" ? 3 : fail("vcs_result_bundle_invalid");
+  // 0: capabilities (v3), 1: prerequisites, 2: the ref.
+  let section = version === 3 ? 0 : 1;
+  let capabilities = 0;
+  let prerequisites = 0;
+  let head: string | undefined;
+  for (const line of lines) {
+    if (line.startsWith("@")) {
+      if (section !== 0 || line !== "@object-format=sha1" || capabilities > 0) fail("vcs_result_bundle_invalid");
+      capabilities += 1;
+    } else if (line.startsWith("-")) {
+      if (section > 1 || !/^-[0-9a-f]{40}(?: [^\0]*)?$/.test(line)) fail("vcs_result_bundle_invalid");
+      section = 1;
+      prerequisites += 1;
+      if (prerequisites > BUNDLE_PREREQUISITES_MAX) fail("vcs_result_bundle_invalid");
+    } else {
+      const ref = /^([0-9a-f]{40}) (\S+)$/.exec(line);
+      if (!ref || head !== undefined || ref[2] !== RESULT_BUNDLE_HEAD_REF) fail("vcs_result_bundle_invalid");
+      section = 2;
+      head = ref[1];
+    }
+  }
+  if (head === undefined || !COMMIT_SHA.test(head)) fail("vcs_result_bundle_invalid");
+  return { head, packOffset };
+}
+
+/**
+ * Runs the bundle's pack through `index-pack --strict --fix-thin --stdin` into a quarantine directory
+ * beside the bundle (an explicit pack path, so the control plane's object store is only read, for the
+ * thin pack's bases, never written). A malformed object fails here with nothing imported; the
+ * quarantine is removed either way and the fetch then imports the same, checked pack.
+ */
+async function verifyPack(git: ResultGit, bundlePath: string, handle: FileHandle, packOffset: number): Promise<void> {
+  let quarantine: string;
+  try {
+    quarantine = await mkdtemp(join(dirname(bundlePath), ".wardby-verify-"));
+  } catch {
+    fail("vcs_result_bundle_invalid");
+  }
+  try {
+    const pack = handle.createReadStream({ start: packOffset, autoClose: false });
+    await step("vcs_result_bundle_invalid", () =>
+      git(["index-pack", "--strict", "--fix-thin", "--stdin", join(quarantine, "result.pack")], {
+        input: pack,
+        maxOutputBytes: INDEX_PACK_MAX_BYTES,
+        timeoutMs: BUNDLE_FETCH_TIMEOUT_MS,
+      }),
+    );
+  } finally {
+    await rm(quarantine, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 /** Step 2: the new commits, oldest first; each parent is another new commit, the history base or a fetched tip. */
@@ -202,7 +313,12 @@ async function newCommits(
   );
   const lines = listed.stdout.split("\n").filter((line) => line !== "");
   if (lines.length > MAX_RESULT_COMMITS) fail("vcs_result_commit_limit");
-  if (lines.length === 0) fail("vcs_result_history_invalid");
+  if (lines.length === 0) {
+    // A fast-forward onto a fetched remote tip (historyBase is its ancestor, checked above): the tip
+    // is the result as it is, every commit in it upstream's, none the agent's.
+    if (remoteTips.includes(head)) return [];
+    fail("vcs_result_history_invalid");
+  }
   // Newest first from rev-list (--max-count applies before --reverse would), so reversed here.
   const commits = lines.reverse().map((line): NewCommit => {
     const [sha, ...parents] = line.split(" ");
@@ -278,13 +394,15 @@ async function readCommit(git: ResultGit, sha: string): Promise<ParsedCommit> {
  */
 async function rewrite(
   git: ResultGit,
+  head: string,
   commits: readonly NewCommit[],
   parsed: ReadonlyMap<string, ParsedCommit>,
   historyBase: string,
   remoteTips: readonly string[],
 ): Promise<string> {
   const mapped = new Map<string, string>([[historyBase, historyBase], ...remoteTips.map((tip) => [tip, tip] as const)]);
-  let tip = historyBase;
+  // No new commits: a fast-forward onto a remote tip, which is kept as it is.
+  let tip = head;
   for (const commit of commits) {
     const { tree, message, authorDate, committerDate } = parsed.get(commit.sha)!;
     const parents = commit.parents.flatMap((parent) => ["-p", mapped.get(parent)!]);
@@ -320,23 +438,33 @@ interface RawChange {
   path: string;
 }
 
-/** `diff-tree -r -z --raw` output: `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0`, per change. */
-function parseRaw(output: string): RawChange[] {
+/**
+ * `diff-tree -r -z --raw` output, per change: `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0`
+ * for one parent; for a merge's combined diff (-c) with N parents, N colons, N + 1 modes, N + 1 shas
+ * and N status letters. The new entry (the last mode and sha) is kept.
+ */
+function parseRaw(output: string, parents: number): RawChange[] {
   const fields = output.split("\0");
   if (fields.at(-1) === "") fields.pop();
   if (fields.length % 2 !== 0) fail("vcs_result_history_invalid");
+  const meta =
+    parents > 1
+      ? new RegExp(
+          `^:{${parents}}(?:\\d{6} ){${parents}}(\\d{6}) (?:[0-9a-f]{40} ){${parents}}([0-9a-f]{40}) [A-Z]{${parents}}$`,
+        )
+      : /^:\d{6} (\d{6}) [0-9a-f]{40} ([0-9a-f]{40}) [A-Z]\d*$/;
   const changes: RawChange[] = [];
   for (let index = 0; index < fields.length; index += 2) {
-    const meta = /^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) [A-Z]\d*$/.exec(fields[index]);
-    if (!meta) fail("vcs_result_history_invalid");
-    changes.push({ mode: meta[2], object: meta[4], path: validateChangedPath(fields[index + 1]) });
+    const entry = meta.exec(fields[index]);
+    if (!entry) fail("vcs_result_history_invalid");
+    changes.push({ mode: entry[1], object: entry[2], path: validateChangedPath(fields[index + 1]) });
   }
   return changes;
 }
 
 /**
- * Step 5: the paths where each new commit's tree differs from every parent (for a merge, the
- * intersection over its parents: a path a merge took unchanged from some parent is that parent's),
+ * Step 5: the paths where each new commit's tree differs from every parent (for a merge, its
+ * combined diff: a path a merge took unchanged from some parent is that parent's),
  * and the bytes of each commit's own diff. Each such path is checked the way a collected workspace
  * is: no `.git` part, no submodule, no symlink out of the repository.
  */
@@ -349,26 +477,27 @@ async function agentChanges(
   const mergePaths = new Set<string>();
   let agentDiffBytes = 0;
   for (const commit of commits) {
-    let own: Map<string, RawChange> | undefined;
-    for (const parent of commit.parents) {
-      const listed = await gitLimited(
-        () =>
-          git(["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-commit-id", parent, commit.sha], {
-            maxOutputBytes: NAME_LIST_MAX_BYTES,
-            timeoutMs: GIT_STEP_TIMEOUT_MS,
-          }),
-        "vcs_changed_file_limit",
-      );
-      const changes = new Map(parseRaw(listed.stdout).map((change) => [change.path, change]));
-      own = own ? new Map([...own].filter(([path]) => changes.has(path))) : changes;
-    }
-    for (const change of own!.values()) {
+    // One parent: its plain diff. A merge: the combined diff (-c), which lists only the paths that
+    // differ from every parent, so its size is the agent's resolutions, never upstream's change set.
+    const merge = commit.parents.length > 1;
+    const listed = await gitLimited(
+      () =>
+        git(
+          merge
+            ? ["diff-tree", "-c", "-r", "-z", "--raw", "--no-commit-id", commit.sha]
+            : ["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-commit-id", commit.parents[0], commit.sha],
+          { maxOutputBytes: NAME_LIST_MAX_BYTES, timeoutMs: GIT_STEP_TIMEOUT_MS },
+        ),
+      "vcs_changed_file_limit",
+    );
+    const own = new Map(parseRaw(listed.stdout, commit.parents.length).map((change) => [change.path, change]));
+    for (const change of own.values()) {
       await checkEntry(git, change);
       agentPaths.add(change.path);
       if (commit.parents.length > 1) mergePaths.add(change.path);
     }
     if (agentPaths.size > options.maxChangedFiles) fail("vcs_changed_file_limit");
-    if (own!.size === 0) continue;
+    if (own.size === 0) continue;
     const remaining = options.maxDiffBytes - agentDiffBytes;
     const diffArgs =
       commit.parents.length > 1

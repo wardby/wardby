@@ -348,12 +348,29 @@ describe("createResultBundle", () => {
     expect(await exists(bundle)).toBe(false);
   });
 
-  it("returns no_new_commits when HEAD moved only onto an excluded remote tip", async () => {
+  it("bundles a fast-forward onto an excluded remote tip as head --not base: the tip is the bundle's head", async () => {
     const { upstream, work, base } = await shallowWorkRepo();
     git(upstream, "checkout", "-q", "-b", "feature");
-    const tip = await commitFile(upstream, "u.txt", "u\n", "upstream");
+    await commitFile(upstream, "u.txt", "u\n", "upstream 1");
+    const tip = await commitFile(upstream, "u.txt", "uu\n", "upstream 2");
     git(work, "fetch", "-q", `file://${upstream}`, "feature:refs/remotes/up/feature");
-    git(work, "reset", "-q", "--hard", "refs/remotes/up/feature");
+    git(work, "merge", "-q", "--ff-only", "refs/remotes/up/feature");
+    expect(await createResultBundle({ repoPath: work, baseCommit: base, excludeCommits: [tip] })).toEqual({
+      bundled: true,
+      head: tip,
+    });
+    const bundle = join(work, ".git", RESULT_BUNDLE_NAME);
+    expect(git(work, "bundle", "list-heads", bundle)).toBe(`${tip} ${BUNDLE_HEAD_REF}`);
+    expect(await bundlePrerequisites(bundle)).toEqual([base]);
+  });
+
+  it("returns no_new_commits when HEAD is an older commit of an excluded remote, not its tip", async () => {
+    const { upstream, work, base } = await shallowWorkRepo();
+    git(upstream, "checkout", "-q", "-b", "feature");
+    const older = await commitFile(upstream, "u.txt", "u\n", "upstream 1");
+    const tip = await commitFile(upstream, "u.txt", "uu\n", "upstream 2");
+    git(work, "fetch", "-q", `file://${upstream}`, "feature:refs/remotes/up/feature");
+    git(work, "reset", "-q", "--hard", older);
     expect(await createResultBundle({ repoPath: work, baseCommit: base, excludeCommits: [tip] })).toEqual({
       bundled: false,
       reason: "no_new_commits",

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -2089,5 +2090,30 @@ describe("NodeGitCommandRunner timeoutMs, input and env (#536)", () => {
     await expect(
       runner.run(["status"], { env: { GIT_DIR: "/elsewhere" } as unknown as GitCommandOptions["env"] }),
     ).rejects.toThrow("git_env_invalid");
+  });
+
+  it("pipes a stream to stdin byte for byte, and kills the command when the stream fails", async () => {
+    const { root, executable } = await fakeGit(`od -An -tx1 | tr -d ' \\n'`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const bytes = Buffer.from([0x50, 0x41, 0x43, 0x4b, 0x00, 0xff, 0x80, 0x0a]);
+    await expect(
+      runner.run(["index-pack"], { input: Readable.from([bytes]), timeoutMs: 5_000 }),
+    ).resolves.toMatchObject({
+      stdout: bytes.toString("hex"),
+    });
+    const failing = new Readable({
+      read() {
+        this.destroy(new Error("read failed"));
+      },
+    });
+    const { executable: waiting } = await fakeGit(`cat >/dev/null; echo finished`);
+    const waitingRunner = new NodeGitCommandRunner({ gitBinary: waiting, homeDir: root, path: "/usr/bin:/bin" });
+    const error = await waitingRunner.run(["index-pack"], { input: failing, timeoutMs: 5_000 }).then(
+      () => null,
+      (caught: unknown) => caught as Error,
+    );
+    // Killed at once (not left waiting on stdin until its timeout), and never a success.
+    expect(error?.message).toMatch(/^git_command_failed:/);
+    expect(error?.message).not.toContain("timed_out");
   });
 });

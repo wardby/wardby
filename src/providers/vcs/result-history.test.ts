@@ -128,6 +128,43 @@ async function makeBundle(f: Fixture, head = "HEAD"): Promise<void> {
   await git(f.worker, ["bundle", "create", "-q", f.bundle, "refs/wardby/bundle-head", "--not", f.base, f.tip]);
 }
 
+/** A fetched remote tip: in the control plane's git dir, as the run's prepare would have fetched it. */
+async function publishTip(f: Fixture, sha: string): Promise<void> {
+  await git(f.worker, ["push", "-q", f.control, `${sha}:refs/remotes/up/main`]);
+}
+
+/** What the worker driver bundles for a fast-forward onto a remote tip: head --not base. */
+async function makeFastForwardBundle(f: Fixture): Promise<void> {
+  await git(f.worker, ["update-ref", "refs/wardby/bundle-head", "HEAD"]);
+  await git(f.worker, ["bundle", "create", "-q", f.bundle, "refs/wardby/bundle-head", "--not", f.base]);
+}
+
+/** A tree object written as raw bytes, unchecked: [mode, name] entries, each naming a.txt's blob at base. */
+async function rawTree(f: Fixture, entries: [string, string][]): Promise<string> {
+  const blob = await git(f.worker, ["rev-parse", `${f.base}:a.txt`]);
+  const bytes = Buffer.concat(
+    entries.map(([mode, name]) => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(blob, "hex")])),
+  );
+  const file = join(f.root, "raw-tree");
+  await writeFile(file, bytes);
+  return git(f.worker, ["hash-object", "-t", "tree", "-w", "--literally", file]);
+}
+
+/** base's own tree. */
+function controlTree(f: Fixture): Promise<string> {
+  return git(f.worker, ["rev-parse", `${f.base}^{tree}`]);
+}
+
+/** A commit object on base written as raw text, unchecked, with this identity on both lines. */
+async function rawCommit(f: Fixture, tree: string, identity: string): Promise<string> {
+  const file = join(f.root, "raw-commit");
+  await writeFile(
+    file,
+    `tree ${tree}\nparent ${f.base}\nauthor ${identity} 1700000000 +0000\ncommitter ${identity} 1700000000 +0000\n\nraw\n`,
+  );
+  return git(f.worker, ["hash-object", "-t", "commit", "-w", "--literally", file]);
+}
+
 function importIt(f: Fixture, overrides: Partial<Parameters<typeof importResultBundle>[0]> = {}) {
   return importResultBundle({
     git: f.git,
@@ -359,9 +396,150 @@ describe("importResultBundle (real git, #536)", { timeout: 60_000 }, () => {
     const rootTree = await git(dotgit.worker, ["mktree"], {}, `${listing}\n040000 tree ${dotGitDir}\tvendor\n`);
     const planted = await git(dotgit.worker, ["commit-tree", rootTree, "-p", dotgit.base, "-m", "planted"]);
     await makeBundle(dotgit, planted);
-    const error = await errorOf(importIt(dotgit));
-    // fsck may refuse it first; either way nothing is imported.
-    expect(["vcs_nested_repository", "vcs_result_bundle_invalid"]).toContain(error.message);
+    // The strict object check refuses it before anything is imported, whatever git version runs.
+    expect((await errorOf(importIt(dotgit))).message).toBe("vcs_result_bundle_invalid");
+    await expect(controlGit(dotgit, ["cat-file", "-e", planted])).rejects.toThrow();
+  });
+
+  it("refuses objects only an object check can see: a zero-padded mode, a duplicate tree entry, a malformed email", async () => {
+    const cases: ((f: Fixture) => Promise<string>)[] = [
+      async (f) => rawCommit(f, await rawTree(f, [["0100644", "z.txt"]]), "Person <person@example.invalid>"),
+      async (f) =>
+        rawCommit(
+          f,
+          await rawTree(f, [
+            ["100644", "z.txt"],
+            ["100644", "z.txt"],
+          ]),
+          "Person <person@example.invalid>",
+        ),
+      async (f) => rawCommit(f, await controlTree(f), "Person <person@example.invalid"),
+    ];
+    for (const make of cases) {
+      const f = await fixture();
+      const planted = await make(f);
+      await makeBundle(f, planted);
+      expect((await errorOf(importIt(f))).message).toBe("vcs_result_bundle_invalid");
+      // Nothing of it reached the control plane's object store.
+      await expect(controlGit(f, ["cat-file", "-e", planted])).rejects.toThrow();
+      await expect(controlGit(f, ["rev-parse", "--verify", "-q", "refs/wardby/result-raw"])).rejects.toThrow();
+    }
+  });
+
+  it("reads a strict bundle header: v2 or v3 with object-format=sha1, one head, then a pack", async () => {
+    const f = await fixture();
+    await commit(f.worker, { "b.txt": "b\n" }, "b");
+    await makeBundle(f);
+    const good = await readFile(f.bundle);
+    const split = good.indexOf("\n\n");
+    const header = good.subarray(0, split + 1).toString("latin1");
+    const pack = good.subarray(split + 2);
+    const body = header.slice(header.indexOf("\n") + 1);
+    const withHeader = (text: string, rest: Buffer = pack) =>
+      writeFile(f.bundle, Buffer.concat([Buffer.from(text, "latin1"), rest]));
+
+    await withHeader(`# v3 git bundle\n@object-format=sha1\n${body}\n`);
+    await expect(importIt(f)).resolves.toMatchObject({ agentPaths: ["b.txt"] });
+
+    const refused = [
+      `# v3 git bundle\n@filter=blob:none\n${body}\n`,
+      `# v3 git bundle\n@object-format=sha256\n${body}\n`,
+      `# v3 git bundle\n@unknown\n${body}\n`,
+      `# v4 git bundle\n${body}\n`,
+      `# v2 git bundle\n-nothex\n${body}\n`,
+      `# v2 git bundle\n${body}${body}\n`,
+      `# v2 git bundle\n${body.replace("refs/wardby/bundle-head", "refs/heads/main")}\n`,
+      `# v2 git bundle\n${body}`,
+      `# v2 git bundle\n${"-".concat("0".repeat(40), " x".repeat(600_000), "\n")}${body}\n`,
+    ];
+    for (const text of refused) {
+      await withHeader(text);
+      expect((await errorOf(importIt(f))).message).toBe("vcs_result_bundle_invalid");
+    }
+    await withHeader(`# v2 git bundle\n${body}\n`, Buffer.from("NOTAPACK"));
+    expect((await errorOf(importIt(f))).message).toBe("vcs_result_bundle_invalid");
+  });
+
+  it("accepts a fast-forward onto a fetched remote tip: the tip is the result, unchanged, with no agent paths", async () => {
+    const f = await fixture();
+    // Upstream moved on from base itself (its .github change included); the agent only fast-forwarded.
+    const upTip = await commit(f.worker, { ".github/workflows/ci.yml": "upstream ci\n", "up.txt": "u\n" }, "up");
+    await publishTip(f, upTip);
+    await makeFastForwardBundle(f);
+    const imported = await importIt(f, { remoteTips: [upTip] });
+    expect(imported).toEqual({ tip: upTip, agentPaths: [], agentDiffBytes: 0, mergePaths: [] });
+    expect(await controlGit(f, ["rev-parse", "refs/wardby/result-rewritten"])).toBe(upTip);
+  });
+
+  it("refuses a fast-forward onto a fetched tip that does not descend from the history base", async () => {
+    const f = await fixture();
+    await git(f.worker, ["reset", "-q", "--hard", f.tip]);
+    await makeFastForwardBundle(f);
+    expect((await errorOf(importIt(f))).message).toBe("vcs_result_history_invalid");
+  });
+
+  it("refuses a head that is an older upstream commit, not the fetched tip", async () => {
+    const f = await fixture();
+    const older = await commit(f.worker, { "up.txt": "1\n" }, "up 1");
+    const upTip = await commit(f.worker, { "up.txt": "2\n" }, "up 2");
+    await publishTip(f, upTip);
+    await git(f.worker, ["reset", "-q", "--hard", older]);
+    await makeFastForwardBundle(f);
+    expect((await errorOf(importIt(f, { remoteTips: [upTip] }))).message).toBe("vcs_result_history_invalid");
+  });
+
+  it("counts only a merge's resolved paths, however large the upstream change it merges", async () => {
+    const f = await fixture();
+    // 3,000 upstream files with long paths: one parent's full name list alone is over 2 MiB.
+    const directory = ["d".repeat(200), "e".repeat(200), "f".repeat(200)].join("/");
+    const stream = [
+      "commit refs/heads/big",
+      "committer Person <person@example.invalid> 1700000000 +0000",
+      "data 3",
+      "big",
+      `from ${f.tip}`,
+    ];
+    for (let n = 0; n < 3000; n += 1) {
+      stream.push(`M 100644 inline ${directory}/${"g".repeat(150)}${n}.txt`, "data 2", `${n % 10}`);
+    }
+    await git(f.worker, ["fast-import", "--quiet", "--force"], {}, `${stream.join("\n")}\n`);
+    const bigTip = await git(f.worker, ["rev-parse", "refs/heads/big"]);
+    await publishTip(f, bigTip);
+    // The agent's merge: upstream's tree, with a.txt and up.txt resolved to neither side.
+    const index = join(f.root, "merge.index");
+    await git(f.worker, ["read-tree", bigTip], { GIT_INDEX_FILE: index });
+    const blob = await git(f.worker, ["hash-object", "-w", "--stdin"], {}, "resolved\n");
+    for (const path of ["a.txt", "up.txt"]) {
+      await git(f.worker, ["update-index", "--cacheinfo", `100644,${blob},${path}`], { GIT_INDEX_FILE: index });
+    }
+    const tree = await git(f.worker, ["write-tree"], { GIT_INDEX_FILE: index });
+    const merge = await git(f.worker, ["commit-tree", tree, "-p", f.base, "-p", bigTip, "-m", "merge"]);
+    await git(f.worker, ["update-ref", "refs/wardby/bundle-head", merge]);
+    await git(f.worker, ["bundle", "create", "-q", f.bundle, "refs/wardby/bundle-head", "--not", f.base, bigTip]);
+
+    const imported = await importIt(f, { remoteTips: [bigTip] });
+    expect(imported.agentPaths.sort()).toEqual(["a.txt", "up.txt"]);
+    expect(imported.mergePaths.sort()).toEqual(["a.txt", "up.txt"]);
+  });
+
+  it("checks a merge's resolved paths for modes: a submodule or an escaping symlink is refused", async () => {
+    for (const [mode, code] of [
+      ["160000", "vcs_nested_repository"],
+      ["120000", "vcs_symlink_escape"],
+    ] as const) {
+      const f = await fixture();
+      const index = join(f.root, "merge.index");
+      await git(f.worker, ["read-tree", f.tip], { GIT_INDEX_FILE: index });
+      const object =
+        mode === "160000" ? f.base : await git(f.worker, ["hash-object", "-w", "--stdin"], {}, "/etc/passwd");
+      await git(f.worker, ["update-index", "--add", "--cacheinfo", `${mode},${object},a.txt`], {
+        GIT_INDEX_FILE: index,
+      });
+      const tree = await git(f.worker, ["write-tree"], { GIT_INDEX_FILE: index });
+      const merge = await git(f.worker, ["commit-tree", tree, "-p", f.base, "-p", f.tip, "-m", "merge"]);
+      await makeBundle(f, merge);
+      expect((await errorOf(importIt(f))).message).toBe(code);
+    }
   });
 
   it("refuses agent diffs over the diff limit", async () => {

@@ -258,7 +258,8 @@ async function createScratch(scratchRoot, agentObjects, shallow) {
 }
 
 /**
- * Builds <repoPath>/.git/wardby-result.bundle of head --not baseCommit ...excludeCommits.
+ * Builds <repoPath>/.git/wardby-result.bundle of head --not baseCommit ...excludeCommits, or, when
+ * HEAD is one of excludeCommits (a fast-forward onto a remote tip), of head --not baseCommit.
  * Uses a scratch repo in os.tmpdir() (or `scratchRoot`) with its own config and
  * objects/info/alternates reaching <repoPath>/.git/objects, and a validated copy of
  * <repoPath>/.git/shallow (lines of 40-hex only). Runs git with env GIT_CONFIG_NOSYSTEM=1,
@@ -322,10 +323,18 @@ async function bundleInto(bundlePath, gitDir, { baseCommit, excludeCommits, gitB
     const step = { timeoutMs: Math.min(STEP_TIMEOUT_MS, timeoutMs) };
     const exists = await runGit(gitBinary, scratch, ["cat-file", "-e", `${head}^{commit}`], step);
     if (exists.code !== 0) return { bundled: false, reason: "no_head" };
-    const excluded = ["--not", baseCommit, ...excludeCommits];
+    let excluded = ["--not", baseCommit, ...excludeCommits];
     const counted = await runGit(gitBinary, scratch, ["rev-list", "--count", head, ...excluded], step);
     if (counted.code !== 0) throw new Error("result_bundle_git_failed");
-    if (counted.stdout.trim() === "0") return { bundled: false, reason: "no_new_commits" };
+    if (counted.stdout.trim() === "0") {
+      // A fast-forward onto a remote tip (a fork sync with nothing to merge): HEAD is the tip itself.
+      // It is bundled against the base alone, and the control plane pushes the tip unchanged.
+      if (!excludeCommits.includes(head)) return { bundled: false, reason: "no_new_commits" };
+      excluded = ["--not", baseCommit];
+      const ahead = await runGit(gitBinary, scratch, ["rev-list", "--count", head, ...excluded], step);
+      if (ahead.code !== 0) throw new Error("result_bundle_git_failed");
+      if (ahead.stdout.trim() === "0") return { bundled: false, reason: "no_new_commits" };
+    }
     const updated = await runGit(gitBinary, scratch, ["update-ref", BUNDLE_HEAD_REF, head], step);
     if (updated.code !== 0) throw new Error("result_bundle_git_failed");
 

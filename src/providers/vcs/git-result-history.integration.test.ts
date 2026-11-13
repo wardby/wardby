@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitVcsProvider } from "./git.js";
+import { GitVcsProvider, NodeGitCommandRunner, type GitCommandOptions, type GitCommandRunner } from "./git.js";
 import { LocalRemote } from "./local-remote.js";
 import type { PreparedWorkspace, VcsPrepareInput } from "./types.js";
 
@@ -133,6 +133,30 @@ async function collect(f: Fixture, prepared: PreparedWorkspace): Promise<string>
   ]);
   await rm(join(prepared.workspacePath, ".git"), { recursive: true, force: true });
   return bundle;
+}
+
+/** A fork whose main is upstream's parent of the tip, so that the tip is a fast-forward of base. */
+async function forkBehindUpstream(f: Fixture): Promise<void> {
+  await git(f.fork, ["reset", "-q", "--hard", `${f.upstreamTip}^`]);
+}
+
+/** What the worker driver bundles when the agent only fast-forwarded onto a remote tip: head --not base. */
+async function collectFastForward(f: Fixture, prepared: PreparedWorkspace): Promise<string> {
+  const bundle = join(f.root, "result-bundles", "workspace.bundle");
+  await mkdir(dirname(bundle), { recursive: true, mode: 0o700 });
+  await agent(prepared, ["update-ref", "refs/wardby/bundle-head", "HEAD"]);
+  await agent(prepared, ["bundle", "create", "-q", bundle, "refs/wardby/bundle-head", "--not", prepared.historyBase!]);
+  await rm(join(prepared.workspacePath, ".git"), { recursive: true, force: true });
+  return bundle;
+}
+
+/** The git subcommand of a control-plane call: the first argument that is neither a flag nor a -c value. */
+function subcommand(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "-c") index += 1;
+    else if (!args[index].startsWith("-")) return args[index];
+  }
+  return undefined;
 }
 
 const controlGit = (prepared: PreparedWorkspace, args: string[]) =>
@@ -321,6 +345,75 @@ describe("finalizing a history run from its result bundle (real git, #536)", { t
     const finalized = await provider.finalizeChanges(prepared);
     const pushed = (finalized as { commitSha: string }).commitSha;
     expect(await git(f.fork, ["rev-list", "--parents", "-n", "1", pushed])).toBe(`${pushed} ${prepared.historyBase}`);
+  });
+
+  it("pushes a fast-forward onto the upstream tip as is: upstream's protected changes are not the agent's", async () => {
+    const f = await fixture();
+    await forkBehindUpstream(f);
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    await agent(prepared, ["merge", "-q", "--ff-only", "refs/remotes/upstream/main"]);
+    const resultBundle = await collectFastForward(f, prepared);
+    const finalized = await f.provider.finalizeChanges(prepared, { resultBundle });
+    expect(finalized).toMatchObject({ outcome: "branch_pushed", commitSha: f.upstreamTip });
+    expect(await git(f.fork, ["rev-parse", "wardby/run-r1"])).toBe(f.upstreamTip);
+    expect(await controlGit(prepared, ["rev-parse", "refs/wardby/result"])).toBe(f.upstreamTip);
+    await expect(f.provider.recoverWorkspace(input(f))).resolves.toEqual(prepared);
+  });
+
+  it("commits the uncommitted files on top of a fast-forwarded upstream tip", async () => {
+    const f = await fixture();
+    await forkBehindUpstream(f);
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    await agent(prepared, ["merge", "-q", "--ff-only", "refs/remotes/upstream/main"]);
+    await write(prepared.workspacePath, { "b.txt": "b\n" });
+    const resultBundle = await collectFastForward(f, prepared);
+    const finalized = await f.provider.finalizeChanges(prepared, { resultBundle });
+    const pushed = (finalized as { commitSha: string }).commitSha;
+    expect(await git(f.fork, ["rev-list", "--parents", "-n", "1", pushed])).toBe(`${pushed} ${f.upstreamTip}`);
+    expect(await git(f.fork, ["show", "-s", "--format=%an <%ae>|%s", pushed])).toBe(`${WARDBY}|Wardby run r1`);
+  });
+
+  it("still refuses a protected path the agent changed on top of a fast-forward", async () => {
+    const f = await fixture();
+    await forkBehindUpstream(f);
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    await agent(prepared, ["merge", "-q", "--ff-only", "refs/remotes/upstream/main"]);
+    await write(prepared.workspacePath, { ".github/workflows/ci.yml": "agent\n" });
+    const resultBundle = await collectFastForward(f, prepared);
+    expect((await errorOf(f.provider.finalizeChanges(prepared, { resultBundle }))).message).toBe(
+      "vcs_protected_path:.github/workflows/ci.yml",
+    );
+  });
+
+  it("bounds every git call that reads or writes a tree from the bundle by a timeout, on finalize and re-push", async () => {
+    const f = await fixture();
+    const inner = new NodeGitCommandRunner({ homeDir: join(f.root, "vcs", ".home") });
+    let recording = false;
+    const seen: { command: string | undefined; timeoutMs: number | undefined }[] = [];
+    const runner: GitCommandRunner = {
+      run(args: readonly string[], options?: GitCommandOptions) {
+        if (recording) seen.push({ command: subcommand(args), timeoutMs: options?.timeoutMs });
+        return inner.run(args, options);
+      },
+    };
+    const remote = new LocalRemote({ roots: () => [join(f.root, "repos")] });
+    const provider = new GitVcsProvider({ rootDir: join(f.root, "vcs"), remote, git: runner });
+    const prepared = await provider.prepareWorkspace(input(f));
+    await agentCommit(prepared, { "b.txt": "b\n" }, "add b");
+    await write(prepared.workspacePath, { "c.txt": "c\n" });
+    const resultBundle = await collect(f, prepared);
+    recording = true;
+    await provider.finalizeChanges(prepared, { resultBundle });
+    // Finalized again without a bundle: the recorded tip is pushed again.
+    await provider.finalizeChanges(prepared);
+    recording = false;
+    const treeCalls = seen.filter(({ command }) =>
+      ["read-tree", "add", "diff", "write-tree", "commit-tree"].includes(command ?? ""),
+    );
+    expect(new Set(treeCalls.map(({ command }) => command))).toEqual(
+      new Set(["read-tree", "add", "diff", "write-tree", "commit-tree"]),
+    );
+    expect(treeCalls.filter(({ timeoutMs }) => !(typeof timeoutMs === "number" && timeoutMs > 0))).toEqual([]);
   });
 
   it("finalizes a continuation's history run from a bundle on top of M0", async () => {

@@ -27,7 +27,7 @@ import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { simulatorGitEnvironment } from "../../config/test-simulators.js";
 import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
-import type { Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import {
   COMMIT_SHA,
   MAX_REDACTED_SPAN,
@@ -123,6 +123,12 @@ const HEAD_DEPTH_RESTORE_ATTEMPTS = 4;
 /** A conflict marker pair at the start of a line: git writes 7 characters (any longer run counts too), then a space or the line end. */
 const CONFLICT_MARKER_START = /^<{7,}(?: |\r?$)/m;
 const CONFLICT_MARKER_END = /^>{7,}(?: |\r?$)/m;
+/**
+ * A history run's finalize steps that read or write a tree the result bundle brought in (read-tree,
+ * add, diff, write-tree, commit-tree): bounded, since that tree is the agent's.
+ */
+const TREE_STEP_TIMEOUT_MS = 300_000;
+
 const HARDENED_GIT_CONFIG = [
   "-c",
   "core.hooksPath=/dev/null",
@@ -151,8 +157,11 @@ export interface GitCommandOptions {
    * GitCommandError `timed_out`. Unset: no limit.
    */
   timeoutMs?: number;
-  /** Written to the command's stdin (`commit-tree -F -`); unset, stdin is closed. */
-  input?: string;
+  /**
+   * Written to the command's stdin: a string (`commit-tree -F -`), or a stream piped in (a result
+   * bundle's pack, to `index-pack --stdin`); unset, stdin is closed. A stream that fails kills the command.
+   */
+  input?: string | Readable;
   /** Only the commit identity and date variables (GIT_COMMIT_ENV_NAMES); anything else is refused. */
   env?: Readonly<Partial<Record<GitCommitEnvName, string>>>;
 }
@@ -277,10 +286,6 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         rejectPromise(new GitCommandError(null, "git_stdio_unavailable"));
         return;
       }
-      if (options.input !== undefined && child.stdin) {
-        child.stdin.on("error", () => undefined);
-        child.stdin.end(options.input);
-      }
       let timedOut = false;
       const killAll = () => {
         try {
@@ -290,6 +295,18 @@ export class NodeGitCommandRunner implements GitCommandRunner {
           child.kill("SIGKILL");
         }
       };
+      const source = options.input;
+      if (source !== undefined && child.stdin) {
+        child.stdin.on("error", () => undefined);
+        if (typeof source === "string") {
+          child.stdin.end(source);
+        } else {
+          // A source that cannot be read must not look like a short, valid input.
+          source.on("error", killAll);
+          source.pipe(child.stdin);
+          child.once("close", () => source.destroy());
+        }
+      }
       const timer = timed
         ? setTimeout(() => {
             timedOut = true;
@@ -972,16 +989,18 @@ export class GitVcsProvider implements VcsProvider {
     const start = imported?.tip ?? historyBase;
     // The index starts at the start's tree, so excluded paths (never collected) keep the start's
     // version, and the staged diff is only what the agent left uncommitted.
-    await this.gitFor(prepared, ["read-tree", start]);
-    await this.gitFor(prepared, [
-      "add",
-      "--all",
-      "--",
-      ":/",
-      ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
-    ]);
+    await this.gitFor(prepared, ["read-tree", start], { timeoutMs: TREE_STEP_TIMEOUT_MS });
+    await this.gitFor(
+      prepared,
+      ["add", "--all", "--", ":/", ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude))],
+      { timeoutMs: TREE_STEP_TIMEOUT_MS },
+    );
     const staged = nullSeparated(
-      (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", start, "--"])).stdout,
+      (
+        await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", start, "--"], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout,
     );
     const changed = [...new Set([...(imported?.agentPaths ?? []).map(validateChangedPath), ...staged])];
     if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
@@ -994,6 +1013,7 @@ export class GitVcsProvider implements VcsProvider {
       diff = (
         await this.gitFor(prepared, ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", start, "--"], {
           maxOutputBytes: remaining,
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
         })
       ).stdout;
     } catch (error) {
@@ -1007,7 +1027,7 @@ export class GitVcsProvider implements VcsProvider {
     const conflicted = [...new Set([...(merge?.conflictedPaths ?? []), ...(imported?.mergePaths ?? [])])];
     if (conflicted.length > 0) await this.assertConflictsResolved(prepared.workspacePath, conflicted);
 
-    const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
+    const tree = (await this.gitFor(prepared, ["write-tree"], { timeoutMs: TREE_STEP_TIMEOUT_MS })).stdout.trim();
     if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
     let commitSha: string;
     if (tree === (await this.revParse(prepared, `${start}^{tree}`))) {
@@ -1021,7 +1041,9 @@ export class GitVcsProvider implements VcsProvider {
       commitSha = previousHead;
     } else {
       commitSha = (
-        await this.gitFor(prepared, ["commit-tree", tree, "-p", start, "-m", `Wardby run ${prepared.runId}`])
+        await this.gitFor(prepared, ["commit-tree", tree, "-p", start, "-m", `Wardby run ${prepared.runId}`], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
       ).stdout.trim();
       if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
     }
@@ -1051,28 +1073,26 @@ export class GitVcsProvider implements VcsProvider {
     details: FinalizeChangesDetails | undefined,
     commitSha: string,
   ): Promise<FinalizeChangesResult> {
-    await this.gitFor(prepared, ["read-tree", commitSha]);
-    await this.gitFor(prepared, [
-      "add",
-      "--all",
-      "--",
-      ":/",
-      ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
-    ]);
+    await this.gitFor(prepared, ["read-tree", commitSha], { timeoutMs: TREE_STEP_TIMEOUT_MS });
+    await this.gitFor(
+      prepared,
+      ["add", "--all", "--", ":/", ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude))],
+      { timeoutMs: TREE_STEP_TIMEOUT_MS },
+    );
     const afterCommitChanges = nullSeparated(
-      (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", commitSha, "--"])).stdout,
+      (
+        await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", commitSha, "--"], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout,
     );
     if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
     // Only for the pull request's notes (lockfiles): what the branch changes against where it started.
-    const changed = await this.gitFor(prepared, [
-      "diff",
-      "--name-only",
-      "-z",
-      "--no-renames",
-      prepared.baseCommit,
-      commitSha,
-      "--",
-    ]).then(
+    const changed = await this.gitFor(
+      prepared,
+      ["diff", "--name-only", "-z", "--no-renames", prepared.baseCommit, commitSha, "--"],
+      { timeoutMs: TREE_STEP_TIMEOUT_MS },
+    ).then(
       (result) => nullSeparated(result.stdout).slice(0, this.maxChangedFiles),
       () => [],
     );
