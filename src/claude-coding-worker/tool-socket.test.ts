@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/dependency-cache.mjs";
 import {
   assertToolRunnerReachable,
+  callGitCheck,
   callPrepareDependencies,
+  callResultBundle,
+  GIT_CHECK_TOOL,
+  RESULT_BUNDLE_TOOL,
   PREPARE_DEPENDENCIES_TIMEOUT_MS,
   PREPARE_DEPENDENCIES_TOOL,
   prepareDependenciesTimeoutMs,
@@ -149,5 +153,56 @@ describe("PREPARE_DEPENDENCIES_TIMEOUT_MS", () => {
     expect(PREPARE_DEPENDENCIES_TIMEOUT_MS).toBeGreaterThan(
       BUDGET_MEASURE_TIMEOUT_MS + DEFAULT_TIMEOUTS.totalMs + DEFAULT_TIMEOUTS.settleMs,
     );
+  });
+});
+
+describe("git tools (#536)", () => {
+  const answering = (payload: unknown) => (message: { method: string }) =>
+    message.method === "initialize"
+      ? mcpAnswer(message)
+      : { result: { content: [{ type: "text", text: JSON.stringify(payload) }] } };
+
+  it("calls the git check with no arguments and returns its JSON", async () => {
+    const { path, seen } = await fakeRunner(answering({ ok: true }));
+    await expect(callGitCheck({ socketPath: path })).resolves.toEqual({ ok: true });
+    expect(seen[2].params).toEqual({ name: GIT_CHECK_TOOL, arguments: {} });
+    expect(GIT_CHECK_TOOL).toBe("wardby_git_check");
+  });
+
+  it("calls the result bundle tool with the repository's path and commits", async () => {
+    const { path, seen } = await fakeRunner(answering({ ok: true, bundled: true }));
+    const repository = { path: "/repos/api", baseCommit: "a".repeat(40), excludeCommits: ["b".repeat(40)] };
+    await expect(callResultBundle(repository, { socketPath: path })).resolves.toEqual({ ok: true, bundled: true });
+    expect(seen[2].params).toEqual({
+      name: RESULT_BUNDLE_TOOL,
+      arguments: { path: "/repos/api", base_commit: "a".repeat(40), exclude_commits: ["b".repeat(40)] },
+    });
+    expect(RESULT_BUNDLE_TOOL).toBe("wardby_result_bundle");
+  });
+
+  it("fails by fixed name: an older tool runner without the tools, a dead socket, or a bad answer", async () => {
+    const older = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : { error: { code: -32602, message: "not found" } },
+    );
+    await expect(callGitCheck({ socketPath: older.path })).rejects.toThrow(/^git_tool_unavailable$/);
+    await expect(
+      callResultBundle(
+        { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] },
+        { socketPath: older.path },
+      ),
+    ).rejects.toThrow(/^git_tool_unavailable$/);
+    const missing = join(await socketDir(), "runner.sock");
+    await expect(callGitCheck({ socketPath: missing })).rejects.toThrow(/^git_tool_failed$/);
+    const text = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : { result: { content: [{ type: "text", text: "nope" }] } },
+    );
+    await expect(
+      callResultBundle(
+        { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] },
+        { socketPath: text.path },
+      ),
+    ).rejects.toThrow(/^git_tool_failed$/);
+    const silent = await fakeRunner((message) => (message.method === "initialize" ? mcpAnswer(message) : undefined));
+    await expect(callGitCheck({ socketPath: silent.path, timeoutMs: 200 })).rejects.toThrow(/^git_tool_failed$/);
   });
 });

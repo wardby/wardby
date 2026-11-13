@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -14,7 +15,14 @@ import {
   runCodingWorker,
   WORKER_SECURITY_INSTRUCTIONS,
 } from "./driver.js";
-import type { DependencyCacheModule, WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
+import type {
+  DependencyCacheModule,
+  ResultBundleModule,
+  WorkerClientConfig,
+  WorkerEvent,
+  WorkerThread,
+} from "./types.js";
+import { resolveHistoryPath, type ResultBundleOutcome } from "./result-bundle.mjs";
 import {
   BUDGET_MEASURE_TIMEOUT_MS,
   DEFAULT_TIMEOUTS,
@@ -958,6 +966,221 @@ describe("several repositories (#537)", () => {
     expect(codingOutputJsonSchema(false)).toBe(CODING_OUTPUT_JSON_SCHEMA);
     expect(single.prompt).toBe(
       `Complete this software-engineering task in the current workspace.\n\nTask:\n${input.task}\n\n${workerTaskNote(undefined)}\n\nThe final JSON runId must be ${input.runId}.`,
+    );
+  });
+});
+
+describe("runCodingWorker git history (#536)", () => {
+  const BASE = "a".repeat(40);
+  const TIP = "b".repeat(40);
+  const OTHER_BASE = "c".repeat(40);
+  const history = {
+    repositories: [
+      { path: "/workspace", baseCommit: BASE, excludeCommits: [TIP] },
+      { path: "/repos/api", baseCommit: OTHER_BASE, excludeCommits: [] },
+    ],
+  };
+  const output = (outcome: "changes_ready" | "no_changes" | "budget_exhausted") =>
+    JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] });
+  const answer = (outcome: "changes_ready" | "no_changes" | "budget_exhausted"): WorkerEvent[] => [
+    { type: "item.completed", item: { type: "agent_message", text: output(outcome) } },
+    { type: "turn.completed" },
+  ];
+
+  type BundleCall = Parameters<ResultBundleModule["createResultBundle"]>[0];
+
+  function fakeBundle(order: string[], behaviour: (call: BundleCall) => Promise<ResultBundleOutcome>) {
+    const calls: BundleCall[] = [];
+    const module: ResultBundleModule = {
+      resolveHistoryPath,
+      gitAvailable: async (gitBinary) => {
+        order.push(`git_check:${gitBinary ?? "git"}`);
+        return true;
+      },
+      createResultBundle: async (call) => {
+        order.push("bundle");
+        calls.push(call);
+        return behaviour(call);
+      },
+    };
+    return { module, calls };
+  }
+
+  async function run(
+    runInput: CodingTaskInput,
+    values: WorkerEvent[],
+    extra: Partial<Parameters<typeof runCodingWorker>[0]> = {},
+    order: string[] = [],
+  ) {
+    const workspace = await tempWorkspace();
+    const createClient = clientFor(values, {});
+    const result = await runCodingWorker({
+      input: runInput,
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: (config) => {
+        order.push("client");
+        return createClient(config);
+      },
+      reposRoot: "/fake-repos",
+      operatorLog: () => undefined,
+      ...extra,
+    });
+    return { result, workspace };
+  }
+
+  it("checks git before the agent starts, then bundles every history repository for changes_ready", async () => {
+    const order: string[] = [];
+    const { module, calls } = fakeBundle(order, async () => ({ bundled: true, head: "d".repeat(40) }));
+    const { result, workspace } = await run(
+      { ...input, gitHistory: history },
+      answer("changes_ready"),
+      { loadResultBundle: async () => module, gitBinary: "/opt/git" },
+      order,
+    );
+    expect(result.outcome).toBe("changes_ready");
+    expect(order).toEqual(["git_check:/opt/git", "client", "bundle", "bundle"]);
+    expect(calls).toEqual([
+      { repoPath: workspace, baseCommit: BASE, excludeCommits: [TIP], gitBinary: "/opt/git" },
+      { repoPath: "/fake-repos/api", baseCommit: OTHER_BASE, excludeCommits: [], gitBinary: "/opt/git" },
+    ]);
+    // The output is unchanged: the bundle travels as a file, never in the result.
+    expect(JSON.stringify(result)).not.toContain("d".repeat(40));
+  });
+
+  it("bundles budget_exhausted output too, whether the agent said so or the proxy refused", async () => {
+    for (const values of [
+      answer("budget_exhausted"),
+      [{ type: "turn.failed", error: { message: "wardby_budget_exhausted" } }] as WorkerEvent[],
+    ]) {
+      const { module, calls } = fakeBundle([], async () => ({ bundled: false, reason: "no_new_commits" }));
+      const { result } = await run({ ...input, gitHistory: history }, values, { loadResultBundle: async () => module });
+      expect(result.outcome).toBe("budget_exhausted");
+      expect(calls.map((call) => call.baseCommit)).toEqual([BASE, OTHER_BASE]);
+    }
+  });
+
+  it("makes no bundle for no_changes", async () => {
+    const { module, calls } = fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) }));
+    const { result } = await run({ ...input, gitHistory: history }, answer("no_changes"), {
+      loadResultBundle: async () => module,
+    });
+    expect(result.outcome).toBe("no_changes");
+    expect(calls).toEqual([]);
+  });
+
+  it("never loads the module, checks git or bundles when history is off", async () => {
+    const load = vi.fn(async () => fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) })).module);
+    const { result } = await run(input, answer("changes_ready"), { loadResultBundle: load, gitBinary: "/nope" });
+    expect(result.outcome).toBe("changes_ready");
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("fails with worker_git_unavailable, before the agent starts, when git is missing", async () => {
+    const order: string[] = [];
+    await expect(
+      run(
+        { ...input, gitHistory: history },
+        answer("changes_ready"),
+        { gitBinary: join(tmpdir(), "wardby-no-such-git") },
+        order,
+      ),
+    ).rejects.toThrow(/^worker_git_unavailable$/);
+    expect(order).toEqual([]);
+  });
+
+  it("never fails the run on a bundle failure: logs a fixed code and keeps going", async () => {
+    const logs: Array<Record<string, string>> = [];
+    const { module, calls } = fakeBundle([], async (call) => {
+      if (call.baseCommit === BASE) throw new Error("fatal: ghp_FAKESECRET0123456789abcdefABCDEF012345 in stderr");
+      return { bundled: true, head: "d".repeat(40) };
+    });
+    const { result } = await run({ ...input, gitHistory: history }, answer("changes_ready"), {
+      loadResultBundle: async () => module,
+      operatorLog: (event) => logs.push(event),
+    });
+    expect(result.outcome).toBe("changes_ready");
+    expect(calls).toHaveLength(2);
+    expect(logs).toEqual([{ warning: "result_bundle_failed", path: "/workspace", code: "result_bundle_failed" }]);
+    expect(JSON.stringify(logs)).not.toContain("FAKESECRET");
+    expect(JSON.stringify(result)).not.toContain("FAKESECRET");
+  });
+
+  it("keeps a module's own fixed code, and never logs a path the control plane did not send in its shape", async () => {
+    const logs: Array<Record<string, string>> = [];
+    const { module } = fakeBundle([], async () => {
+      throw new Error("result_bundle_shallow_invalid");
+    });
+    await run(
+      {
+        ...input,
+        gitHistory: {
+          repositories: [
+            { path: "/workspace", baseCommit: BASE, excludeCommits: [] },
+            { path: "/etc/ghp_FAKESECRET0123456789abcdefABCDEF012345", baseCommit: BASE, excludeCommits: [] },
+          ],
+        },
+      },
+      answer("changes_ready"),
+      { loadResultBundle: async () => module, operatorLog: (event) => logs.push(event) },
+    );
+    expect(logs).toEqual([
+      { warning: "result_bundle_failed", path: "/workspace", code: "result_bundle_shallow_invalid" },
+      { warning: "result_bundle_failed", code: "result_bundle_path_invalid" },
+    ]);
+  });
+
+  it("writes a real bundle into the workspace's .git with the shipped module", async () => {
+    const upstream = await tempWorkspace();
+    const env = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "T",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "T",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    };
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
+    git(upstream, "init", "-q", "-b", "main");
+    await writeFile(join(upstream, "a.txt"), "a\n");
+    git(upstream, "add", "a.txt");
+    git(upstream, "commit", "-q", "-m", "base");
+    const base = git(upstream, "rev-parse", "HEAD");
+    const workspace = await tempWorkspace();
+    git(workspace, "clone", "-q", "--depth", "1", "--no-local", `file://${upstream}`, ".");
+    const createClient = (config: WorkerClientConfig) => clientFor(answer("changes_ready"), {})(config);
+    const result = await runCodingWorker({
+      input: { ...input, gitHistory: { repositories: [{ path: "/workspace", baseCommit: base, excludeCommits: [] }] } },
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      // The "agent" commits its work while the turn runs.
+      createClient: (config) => {
+        const client = createClient(config);
+        return {
+          startThread: (options) => {
+            const thread = client.startThread(options);
+            return {
+              runStreamed: async (prompt, streamOptions) => {
+                await writeFile(join(workspace, "b.txt"), "b\n");
+                git(workspace, "add", "b.txt");
+                git(workspace, "commit", "-q", "-m", "agent");
+                return thread.runStreamed(prompt, streamOptions);
+              },
+            };
+          },
+        };
+      },
+      operatorLog: () => undefined,
+    });
+    expect(result.outcome).toBe("changes_ready");
+    const head = git(workspace, "rev-parse", "HEAD");
+    expect(git(upstream, "bundle", "list-heads", join(workspace, ".git", "wardby-result.bundle"))).toBe(
+      `${head} refs/wardby/bundle-head`,
     );
   });
 });

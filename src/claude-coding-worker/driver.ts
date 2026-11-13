@@ -6,6 +6,7 @@ import {
   type CodingTaskInput,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  type GitHistoryInput,
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
   TEST_OUTCOME_DESCRIPTION,
@@ -189,6 +190,18 @@ export interface ClaudeWorkerRunOptions {
   prepareDependencies?: () => Promise<unknown>;
   /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
   mcpToken?: string;
+  /**
+   * On a run with git history (CodingTaskInput.gitHistory, #536): asks the tool runner whether it has
+   * git (callGitCheck, tool-socket.ts) before anything else, and resolves with its unchecked JSON.
+   */
+  gitCheck?: () => Promise<unknown>;
+  /**
+   * On a run with git history: asks the tool runner for one repository's result bundle
+   * (callResultBundle, tool-socket.ts) after the agent has finished, and resolves with its unchecked JSON.
+   */
+  resultBundle?: (repository: GitHistoryInput["repositories"][number]) => Promise<unknown>;
+  /** One operator log line (a fixed-code JSON object); stderr by default. */
+  operatorLog?: (event: Record<string, string>) => void;
 }
 
 function boundedPrompt(task: string, runId: string, note: string | undefined, mcp: boolean): string {
@@ -207,6 +220,55 @@ async function runDependencyCache(options: ClaudeWorkerRunOptions): Promise<Depe
     options.trace?.record("dependency_cache_error", describeError(error));
     const unavailable = error instanceof Error && error.message === "dependency_cache_tool_unavailable";
     return { projects: [], reason: unavailable ? "tool_unavailable" : "worker_error" };
+  }
+}
+
+const RESULT_BUNDLE_CODE = /^result_bundle_[a-z_]+$/;
+const GIT_TOOL_CODE = /^git_tool_[a-z_]+$/;
+/** The shapes a history repository's path has (CodingTaskInput.gitHistory); only these are ever logged. */
+const HISTORY_PATH = /^\/workspace$|^\/repos\/[A-Za-z0-9._-]+$/;
+
+function stderrLog(event: Record<string, string>): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
+/** Fails the run with worker_git_unavailable unless the tool runner answers that it has git. */
+async function checkGit(options: ClaudeWorkerRunOptions): Promise<void> {
+  let answer: unknown;
+  try {
+    answer = await options.gitCheck?.();
+  } catch (error) {
+    options.trace?.record("git_check_error", describeError(error));
+  }
+  if ((answer as { ok?: unknown } | undefined)?.ok !== true) throw new Error("worker_git_unavailable");
+}
+
+/**
+ * The result bundle of each history repository (#536), through the tool runner, for changes_ready
+ * and budget_exhausted output alike. Never fails the run: a failure is one operator log line with a
+ * fixed code (the tool runner's own `result_bundle_*` code, the socket's `git_tool_*` code, or
+ * result_bundle_failed for anything else, so no text from the tool runner reaches the log), and the
+ * control plane then takes the files only.
+ */
+async function bundleResults(options: ClaudeWorkerRunOptions): Promise<void> {
+  const log = options.operatorLog ?? stderrLog;
+  for (const repository of options.input.gitHistory?.repositories ?? []) {
+    const where: Record<string, string> = HISTORY_PATH.test(repository.path) ? { path: repository.path } : {};
+    let code: string | undefined;
+    try {
+      if (!options.resultBundle) throw new Error("git_tool_unavailable");
+      const answer = (await options.resultBundle(repository)) as { ok?: unknown; reason?: unknown } | undefined;
+      if (answer?.ok !== true) {
+        code =
+          typeof answer?.reason === "string" && RESULT_BUNDLE_CODE.test(answer.reason)
+            ? answer.reason
+            : "result_bundle_failed";
+      }
+    } catch (error) {
+      options.trace?.record("result_bundle_error", describeError(error));
+      code = error instanceof Error && GIT_TOOL_CODE.test(error.message) ? error.message : "result_bundle_failed";
+    }
+    if (code) log({ warning: "result_bundle_failed", ...where, code });
   }
 }
 
@@ -325,11 +387,21 @@ function resultRefusedForBudget(message: { result?: unknown; errors?: unknown })
 }
 
 export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingWorkerOutput> {
+  // A run with git history (#536) needs git in the tool runner: fail before anything else without it.
+  const gitHistory = options.input.gitHistory !== undefined;
+  if (gitHistory) await checkGit(options);
   // The workspace is seeded before this container starts (the launcher's input gate); the agent
   // does not exist yet, so the tool runner has run no command.
   const dependencyCache = options.input.dependencyCache ? await runDependencyCache(options) : undefined;
   const withCache = <T extends CodingAgentOutput>(output: T): T & Pick<CodingWorkerOutput, "dependencyCache"> =>
     dependencyCache ? { ...output, dependencyCache } : output;
+  // The agent has finished: on a history run its commits are bundled, stopped work's too.
+  const finish = async <T extends CodingAgentOutput>(output: T) => {
+    if (gitHistory && (output.outcome === "changes_ready" || output.outcome === "budget_exhausted")) {
+      await bundleResults(options);
+    }
+    return withCache(output);
+  };
   const files = options.input.claudeContext?.files ?? [];
   let bareMode = options.input.claudeBareMode !== false;
   // Bare mode puts the repository context in the system prompt; native mode writes it to disk for
@@ -412,8 +484,10 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
         if (errored && resultRefusedForBudget(message)) budgetRefused = true;
         else if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
-        else if (message.subtype === "error_max_budget_usd") return withCache(budgetExhausted(options.input));
-        else if (message.subtype === "error_max_turns") turnLimit = true;
+        else if (message.subtype === "error_max_budget_usd") {
+          budgetRefused = true;
+          break;
+        } else if (message.subtype === "error_max_turns") turnLimit = true;
         else failed = true;
       }
     }
@@ -425,7 +499,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
     else streamFailed = apiError ?? streamFailureCode(err);
   }
-  if (budgetRefused) return withCache(budgetExhausted(options.input));
+  if (budgetRefused) return finish(budgetExhausted(options.input));
   if (streamFailed) throw new Error(streamFailed);
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
@@ -440,5 +514,5 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   }
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
-  return withCache(output);
+  return finish(output);
 }

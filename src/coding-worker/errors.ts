@@ -27,6 +27,8 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_output_run_mismatch",
   // Claude Code: its command tool (the relay to the tool runner's socket) never connected.
   "worker_tool_runner_unreachable",
+  // A run with git history (#536) on an image (or tool runner) without git.
+  "worker_git_unavailable",
 ]);
 
 /**

@@ -26,6 +26,24 @@ describe("Claude tool runner image policy", () => {
     expect(dockerfile.match(/AS runtime/g)).toHaveLength(1);
   });
 
+  it("has git for history runs (#536): the tool runner is the only Claude Code container that may", async () => {
+    const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
+    const base = dockerfile.slice(dockerfile.indexOf(" AS base"), dockerfile.indexOf(" AS node-python"));
+    const python = dockerfile.slice(dockerfile.indexOf(" AS node-python"), dockerfile.lastIndexOf("FROM "));
+    expect(base).toContain("apt-get install -y --no-install-recommends git");
+    expect(dockerfile).not.toContain("test ! -e /usr/bin/git");
+    // Every target checks that git runs, and still that ssh (a git recommendation) is absent.
+    for (const stage of [base, python]) {
+      expect(stage).toContain("git --version");
+      expect(stage).toContain("test ! -e /usr/bin/ssh");
+    }
+    // main.mjs imports ../coding-worker/result-bundle.mjs for the git tools.
+    expect(dockerfile).toContain(
+      "COPY src/coding-worker/result-bundle.mjs /opt/wardby/coding-worker/result-bundle.mjs",
+    );
+    expect(dockerfile).toContain('import("/opt/wardby/coding-worker/result-bundle.mjs")');
+  });
+
   it("builds the node-python tool runner as a named target, keeping the plain one the default", async () => {
     const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
     const from = dockerfile.split("\n").filter((line) => line.startsWith("FROM "));
