@@ -10,6 +10,7 @@ import {
   loadGitHubUserAuthConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
+  loadCodingResultBundleMaxBytes,
   loadCodingRunRepositoryLimit,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
@@ -672,6 +673,31 @@ describe("loadCodingRunRepositoryLimit", () => {
     expect(loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "17" })).toBe(17);
     expect(() => loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "18" })).toThrow(
       "CODING_MAX_RUN_REPOSITORIES must be at most 17 (the default repository plus 16 extras).",
+    );
+  });
+});
+
+describe("loadCodingResultBundleMaxBytes (#536)", () => {
+  it("loads CODING_MAX_RESULT_BUNDLE_MB as bytes, default 256", () => {
+    expect(loadCodingResultBundleMaxBytes({})).toBe(256 * 1024 * 1024);
+    expect(loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: "64" })).toBe(64 * 1024 * 1024);
+  });
+
+  it.each(["0", "-1", "1.5", "many", ""])("rejects CODING_MAX_RESULT_BUNDLE_MB=%j", (value) => {
+    expect(() => loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: value })).toThrow(
+      "CODING_MAX_RESULT_BUNDLE_MB must be a positive integer.",
+    );
+  });
+
+  it("rejects a value too large to count in bytes", () => {
+    expect(() =>
+      loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: String(Number.MAX_SAFE_INTEGER) }),
+    ).toThrow(/CODING_MAX_RESULT_BUNDLE_MB must be at most/);
+  });
+
+  it("is checked at start-up with the other coding limits", () => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_RESULT_BUNDLE_MB: "0" })).toThrow(
+      "CODING_MAX_RESULT_BUNDLE_MB must be a positive integer.",
     );
   });
 });

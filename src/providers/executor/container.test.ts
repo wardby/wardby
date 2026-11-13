@@ -427,10 +427,11 @@ class FakeJobs implements WorkspaceJobLauncher {
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
   materializedNames: Array<string | undefined> = [];
-  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<void> {
+  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<{ bundle: boolean }> {
     this.materializations += 1;
     this.materializedNames.push(name);
     this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
+    return { bundle: false };
   }
 }
 
@@ -3155,6 +3156,7 @@ describe("ContainerExecutor", () => {
       const created = await harness();
       created.jobs.materializeWorkspace = async () => {
         created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 
@@ -3664,6 +3666,7 @@ describe("ContainerExecutor", () => {
       created.jobs.result.resultArtifact = stoppedArtifact;
       created.jobs.materializeWorkspace = async () => {
         created.store.run.status = "cancelled";
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 

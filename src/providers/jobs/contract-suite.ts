@@ -1,5 +1,8 @@
+import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { JobHandle, JobLauncher, JobResult, JobSpec, JobStatus } from "./types.js";
+import type { JobHandle, JobLauncher, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 
 export interface JobLauncherContractHarness {
   launcher: JobLauncher;
@@ -8,10 +11,23 @@ export interface JobLauncherContractHarness {
   lose: (handle: JobHandle) => Promise<void>;
 }
 
+/** A launcher whose finished job's workspace the test can fill, for the collection cases. */
+export interface WorkspaceContractHarness {
+  launcher: WorkspaceJobLauncher;
+  spec: JobSpec;
+  finish: (handle: JobHandle) => Promise<void>;
+  /** The trusted destination of the spec's default workspace. */
+  destination: string;
+  /** Writes these files (relative path, may include `.git/...`) into the job's own /workspace. */
+  fillJobWorkspace: (handle: JobHandle, files: Record<string, string>) => Promise<void>;
+}
+
 export function jobLauncherContract(
   name: string,
   createHarness: () => JobLauncherContractHarness | Promise<JobLauncherContractHarness>,
+  createWorkspaceHarness?: () => Promise<WorkspaceContractHarness>,
 ): void {
+  if (createWorkspaceHarness) workspaceCollectionContract(name, createWorkspaceHarness);
   describe(`${name} JobLauncher contract`, () => {
     it("launches idempotently for the same run and identical spec", async () => {
       const { launcher, spec } = await createHarness();
@@ -109,6 +125,65 @@ export function jobLauncherContract(
       const result = await launcher.collect(stable);
       expect(status).toEqual({ state: "succeeded" });
       expect(result).toMatchObject({ exitCode: 0, reason: "completed" });
+    });
+  });
+}
+
+function workspaceCollectionContract(name: string, createHarness: () => Promise<WorkspaceContractHarness>): void {
+  describe(`${name} workspace collection contract (#536)`, () => {
+    const repository = {
+      "README.md": "changed\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "# v2 git bundle\n",
+    };
+
+    it("takes the result bundle to the trusted path and drops the root .git when history is on", async () => {
+      const h = await createHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await h.finish(handle);
+      await h.fillJobWorkspace(handle, repository);
+      const trusted = await mkdtemp(join(tmpdir(), "wardby-contract-bundle-"));
+      try {
+        const bundleDestination = join(trusted, "result.bundle");
+        expect(
+          await h.launcher.materializeWorkspace(handle, h.destination, undefined, {
+            gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+          }),
+        ).toEqual({ bundle: true });
+        expect(await readFile(bundleDestination, "utf8")).toBe("# v2 git bundle\n");
+        expect(await readdir(h.destination)).toEqual(["README.md"]);
+      } finally {
+        await rm(trusted, { recursive: true, force: true });
+      }
+    });
+
+    it("raises vcs_result_bundle_too_large for a bundle over the limit", async () => {
+      const h = await createHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await h.finish(handle);
+      await h.fillJobWorkspace(handle, repository);
+      const trusted = await mkdtemp(join(tmpdir(), "wardby-contract-bundle-"));
+      try {
+        const bundleDestination = join(trusted, "result.bundle");
+        await expect(
+          h.launcher.materializeWorkspace(handle, h.destination, undefined, {
+            gitHistory: { bundleDestination, maxBundleBytes: 4 },
+          }),
+        ).rejects.toThrow("vcs_result_bundle_too_large");
+        await expect(lstat(bundleDestination)).rejects.toThrow(/ENOENT/);
+      } finally {
+        await rm(trusted, { recursive: true, force: true });
+      }
+    });
+
+    it("refuses a .git, as before, when history is off", async () => {
+      const h = await createHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await h.finish(handle);
+      await h.fillJobWorkspace(handle, repository);
+      await expect(h.launcher.materializeWorkspace(handle, h.destination)).rejects.toThrow(
+        "docker_workspace_nested_repository",
+      );
     });
   });
 }

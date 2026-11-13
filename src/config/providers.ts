@@ -587,6 +587,8 @@ export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): 
 export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
   // Validated here so a bad CODING_MAX_RUN_REPOSITORIES stops start-up, not one link_repository call.
   loadCodingRunRepositoryLimit(env);
+  // Likewise a bad CODING_MAX_RESULT_BUNDLE_MB stops start-up, not one history run's collection.
+  loadCodingResultBundleMaxBytes(env);
   return {
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
     queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,
@@ -602,6 +604,20 @@ export function loadCodingRunRepositoryLimit(env: NodeJS.ProcessEnv = process.en
     );
   }
   return limit;
+}
+
+const MAX_RESULT_BUNDLE_MB = Math.floor(Number.MAX_SAFE_INTEGER / (1024 * 1024));
+
+/**
+ * CODING_MAX_RESULT_BUNDLE_MB (default 256), in bytes: the largest result bundle a history run's
+ * collector takes (#536). The collectors cap it again at the run's own disk.
+ */
+export function loadCodingResultBundleMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const megabytes = optionalPositiveInteger(env.CODING_MAX_RESULT_BUNDLE_MB, "CODING_MAX_RESULT_BUNDLE_MB") ?? 256;
+  if (megabytes > MAX_RESULT_BUNDLE_MB) {
+    throw new Error(`CODING_MAX_RESULT_BUNDLE_MB must be at most ${MAX_RESULT_BUNDLE_MB}.`);
+  }
+  return megabytes * 1024 * 1024;
 }
 
 const DNS_1123_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;

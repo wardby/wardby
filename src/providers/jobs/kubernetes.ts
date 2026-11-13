@@ -21,7 +21,7 @@
  * Until that gate opens, nothing untrusted runs.
  */
 import { spawn } from "node:child_process";
-import { copyFile, lstat, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { PassThrough, Writable, type Readable } from "node:stream";
@@ -89,10 +89,12 @@ import {
   type JobResult,
   type JobSpec,
   type JobStatus,
+  type MaterializedWorkspace,
+  type MaterializeWorkspaceOptions,
   type WorkspaceJobLauncher,
 } from "./types.js";
 import { expectedRepositoryHostPath } from "./storage-init.js";
-import { replaceDirectoryFromStaging } from "./workspace-swap.js";
+import { replaceDirectoryFromStaging, RESULT_BUNDLE_FILE } from "./workspace-swap.js";
 import {
   collectExclusions,
   normalizeCollectExclusions,
@@ -524,6 +526,54 @@ class BoundedCollector extends Writable {
   }
 }
 
+/** Writes at most `limit` bytes, as raw Buffers, to an open file; anything more only sets `exceeded`. */
+class BoundedFileSink extends Writable {
+  private bytes = 0;
+  exceeded = false;
+
+  constructor(
+    private readonly file: FileHandle,
+    private readonly limit: number,
+  ) {
+    super();
+  }
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.bytes += chunk.length;
+    if (this.bytes > this.limit) {
+      this.exceeded = true;
+      callback();
+      return;
+    }
+    this.file.write(chunk).then(() => callback(), callback);
+  }
+}
+
+/** The bundle read's exit code when there is no bundle to take (none, a symlink, or not a regular file). */
+const RESULT_BUNDLE_ABSENT_EXIT = 3;
+
+/**
+ * Run by the keeper's own `node` (every worker image ships it) as `node -e <script> <gitDir> <limit>`:
+ * streams `<gitDir>/wardby-result.bundle` to stdout, at most limit+1 bytes so the caller can tell an
+ * oversized one. The worker may have written anything there, so `<gitDir>` must be a real folder
+ * (lstat) and the bundle is opened with O_NOFOLLOW (a symlink fails to open) and O_NONBLOCK (a FIFO
+ * never blocks), then must be a regular file; otherwise it exits RESULT_BUNDLE_ABSENT_EXIT.
+ */
+const RESULT_BUNDLE_READ_SCRIPT = [
+  'const fs = require("node:fs");',
+  "const [gitDir, limitText] = process.argv.slice(1);",
+  `const absent = () => process.exit(${RESULT_BUNDLE_ABSENT_EXIT});`,
+  "let git;",
+  "try { git = fs.lstatSync(gitDir); } catch { absent(); }",
+  "if (!git.isDirectory()) absent();",
+  "let fd;",
+  "try {",
+  `  fd = fs.openSync(gitDir + ${JSON.stringify(`/${RESULT_BUNDLE_FILE}`)}, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);`,
+  "} catch { absent(); }",
+  "if (!fs.fstatSync(fd).isFile()) absent();",
+  'fs.createReadStream("", { fd, start: 0, end: Number(limitText) }).pipe(process.stdout);',
+].join("\n");
+
 /** Archives a trusted local directory with the host's `tar`, under a minimal environment. */
 export function hostTarArchive(directory: string): { stream: Readable; done: Promise<number> } {
   const child = spawn("tar", ["-C", directory, "-cf", "-", "."], {
@@ -824,7 +874,12 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     return structuredClone(result);
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string, name?: string): Promise<void> {
+  async materializeWorkspace(
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options: MaterializeWorkspaceOptions = {},
+  ): Promise<MaterializedWorkspace> {
     const names = this.namesFor(handle);
     const found = names && (await this.readRecord(names));
     if (!names || !found) throw new Error("job_not_found");
@@ -845,17 +900,88 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
     const target = expected;
     const maxBytes = record.diskMb * 1024 * 1024;
-    await replaceDirectoryFromStaging(target, maxBytes, "kubernetes_workspace_destination_invalid", (staging) =>
-      this.extractWorkspace(
-        names,
-        source,
-        staging,
+    const gitHistory = options.gitHistory && {
+      ...options.gitHistory,
+      // A bundle never exceeds the run's disk, whatever the configured limit.
+      maxBundleBytes: Math.min(options.gitHistory.maxBundleBytes, maxBytes),
+    };
+    if (gitHistory && (!Number.isSafeInteger(gitHistory.maxBundleBytes) || gitHistory.maxBundleBytes <= 0)) {
+      throw new Error("job_result_bundle_limit_invalid");
+    }
+    let bundle = false;
+    try {
+      await replaceDirectoryFromStaging(
+        target,
         maxBytes,
-        this.transferBudgetMs(record),
-        // Names are always the current built-in list; only the paths come from the record.
-        normalizeCollectExclusions(record.collectExclude?.paths),
-      ),
-    );
+        "kubernetes_workspace_destination_invalid",
+        async (staging) => {
+          await this.extractWorkspace(
+            names,
+            source,
+            staging,
+            maxBytes,
+            this.transferBudgetMs(record),
+            // Names are always the current built-in list; only the paths come from the record.
+            normalizeCollectExclusions(record.collectExclude?.paths),
+            // A history run's root .git never leaves the pod; only its bundle does, read on its own below.
+            gitHistory !== undefined,
+          );
+          if (gitHistory)
+            bundle = await this.readResultBundle(names, source, gitHistory, this.transferBudgetMs(record));
+        },
+      );
+    } catch (error) {
+      // A workspace that was not collected leaves no bundle behind either.
+      if (bundle && gitHistory) await rm(gitHistory.bundleDestination, { force: true });
+      throw error;
+    }
+    return { bundle };
+  }
+
+  /**
+   * Streams `<source>/.git/wardby-result.bundle` from the keeper to `bundleDestination` with one
+   * bounded exec (RESULT_BUNDLE_READ_SCRIPT). The exec's stdout carries raw Buffers, written as they
+   * come, never decoded. False when there is no regular-file bundle; `vcs_result_bundle_too_large`
+   * past `maxBundleBytes`. Leaves no file behind unless it returns true.
+   */
+  private async readResultBundle(
+    names: RunNames,
+    source: string,
+    gitHistory: NonNullable<MaterializeWorkspaceOptions["gitHistory"]>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const { bundleDestination, maxBundleBytes } = gitHistory;
+    const file = await open(bundleDestination, "w", 0o600);
+    const sink = new BoundedFileSink(file, maxBundleBytes);
+    let exitCode: number;
+    try {
+      try {
+        exitCode = await this.api.exec(
+          this.namespace,
+          names.pod,
+          KEEPER_CONTAINER,
+          ["node", "-e", RESULT_BUNDLE_READ_SCRIPT, `${source}/.git`, String(maxBundleBytes)],
+          { stdout: sink, timeoutMs },
+        );
+        if (!sink.writableEnded) sink.end();
+        await finished(sink);
+      } catch (error) {
+        sink.destroy();
+        throw errorWithCode("kubernetes_result_bundle_read_failed", error);
+      } finally {
+        await file.close();
+      }
+      if (exitCode === RESULT_BUNDLE_ABSENT_EXIT) {
+        await rm(bundleDestination, { force: true });
+        return false;
+      }
+      if (exitCode !== 0) throw new Error("kubernetes_result_bundle_read_failed");
+      if (sink.exceeded) throw new Error("vcs_result_bundle_too_large");
+      return true;
+    } catch (error) {
+      await rm(bundleDestination, { force: true });
+      throw error;
+    }
   }
 
   async stop(handle: JobHandle, _reason?: string): Promise<void> {
@@ -1388,6 +1514,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     maxBytes: number,
     timeoutMs: number,
     exclusions: CollectExclusions,
+    excludeRootGit = false,
   ) {
     const output = new PassThrough();
     // Errors are surfaced through the exec/extraction promises; never let a late destroy() crash the process.
@@ -1408,7 +1535,17 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         this.namespace,
         names.pod,
         KEEPER_CONTAINER,
-        ["tar", "-C", source, ...tarExcludeArgs(exclusions), "-cf", "-", "."],
+        [
+          "tar",
+          "-C",
+          source,
+          ...tarExcludeArgs(exclusions),
+          // Anchored: this drops the root .git only, never a nested one (which validation still refuses).
+          ...(excludeRootGit ? ["--anchored", "--exclude=./.git"] : []),
+          "-cf",
+          "-",
+          ".",
+        ],
         { stdout: output, timeoutMs },
       )
       .then((exitCode) => {
