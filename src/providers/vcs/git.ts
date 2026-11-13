@@ -117,6 +117,8 @@ const MAX_GIT_HISTORY_DEPTH = 100_000;
 const PINNED_REMOTE_LABEL = "pinned";
 /** How far `fetch --deepen` goes, step by step, looking for a merge base in a depth-1 clone. */
 const MERGE_BASE_DEEPEN_STEPS = [64, 256, 1024, 4096] as const;
+/** How many `--deepen` rounds restoreHeadDepth makes at most before it settles for what it has. */
+const HEAD_DEPTH_RESTORE_ATTEMPTS = 4;
 /** A conflict marker pair at the start of a line: git writes 7 characters (any longer run counts too), then a space or the line end. */
 const CONFLICT_MARKER_START = /^<{7,}(?: |\r?$)/m;
 const CONFLICT_MARKER_END = /^>{7,}(?: |\r?$)/m;
@@ -556,7 +558,7 @@ export class GitVcsProvider implements VcsProvider {
         normalized.gitHistory.depth !== "full" &&
         (normalized.remotes?.length || mergeFetched)
       ) {
-        await this.restoreHeadDepth(gitMetadataPath, workspacePath, cloneBranch, normalized);
+        await this.restoreHeadDepth(gitMetadataPath, workspacePath, cloneBranch, normalized, mergeFetched);
       }
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
@@ -1270,8 +1272,14 @@ export class GitVcsProvider implements VcsProvider {
   /**
    * Git's shallow boundary is shared by the whole repository: a depth-n fetch of a remote (or of a
    * continuation's target) whose tip is nearer the shared merge base than n can mark the head's own
-   * commits shallow, leaving the head with less history than configured. Fetching the head again
-   * at depth n makes git send unshallow lines and restore its window; the other tips only gain history.
+   * commits shallow, leaving the head with less history than configured.
+   *
+   * This only ever adds history. When the head already has at least n commits (for instance after
+   * fetchMergeTarget deepened it to reach a merge base) nothing is fetched. Otherwise it deepens by
+   * the missing count (`--deepen`, which moves the boundary back and never forward), a few bounded
+   * times while the head still stops at a shallow commit. It then checks that every remote link and
+   * the merge target kept at least the history they had, and that a merge base found before is
+   * still there. (A `--depth n` fetch would instead reset the boundary and could shorten all of them.)
    *
    * It fetches the recorded baseCommit SHA (never the branch name), into a scratch ref under
    * refs/wardby, so a branch that moved on the host meanwhile cannot move refs/remotes/origin/<branch>
@@ -1281,31 +1289,51 @@ export class GitVcsProvider implements VcsProvider {
     gitMetadataPath: string,
     workspacePath: string,
     cloneBranch: string,
-    input: { repository: string; gitHistory?: GitHistorySetting },
+    input: { repository: string; gitHistory?: GitHistorySetting; remotes?: readonly RemoteLinkInput[] },
+    mergeFetched: boolean,
   ): Promise<void> {
     const depth = input.gitHistory?.depth;
     if (typeof depth !== "number") return;
+    const git = (args: readonly string[], options: { acceptExitCodes?: number[] } = {}) =>
+      this.gitForPaths(gitMetadataPath, workspacePath, [...args], options);
+    const count = async (revision: string) => Number((await git(["rev-list", "--count", revision])).stdout.trim());
+    const mergeBase = async (a: string, b: string) =>
+      (await git(["merge-base", a, b], { acceptExitCodes: [1] })).stdout.trim();
     const sha = await this.revParseRaw(gitMetadataPath, workspacePath, `refs/remotes/origin/${cloneBranch}^{commit}`);
+    let have = await count(sha);
+    if (have >= depth) return;
+    const others = [
+      ...(input.remotes ?? []).map((remote) => `refs/remotes/${remote.name}/${remote.label}`),
+      ...(mergeFetched ? [MERGE_TARGET_REF] : []),
+    ];
+    const before = await Promise.all(others.map(count));
+    const baseBefore = mergeFetched ? await mergeBase(sha, MERGE_TARGET_REF) : "";
     await this.remote.withAccess(input.repository, async (token) => {
       try {
-        await this.gitForPaths(
-          gitMetadataPath,
-          workspacePath,
-          [
-            ...this.remote.gitConfig,
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--depth",
-            String(depth),
-            "origin",
-            `${sha}:${MERGE_HEAD_REF}`,
-          ],
-          this.gitAuth(token),
-        );
-        if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${MERGE_HEAD_REF}^{commit}`)) !== sha) {
-          throw new Error("vcs_head_commit_mismatch");
+        for (let attempt = 0; attempt < HEAD_DEPTH_RESTORE_ATTEMPTS && have < depth; attempt += 1) {
+          if (!(await this.stopsAtShallowBoundary(gitMetadataPath, workspacePath, sha))) break;
+          await this.gitForPaths(
+            gitMetadataPath,
+            workspacePath,
+            [
+              ...this.remote.gitConfig,
+              "fetch",
+              "--no-tags",
+              "--no-write-fetch-head",
+              `--deepen=${depth - have}`,
+              "origin",
+              `+${sha}:${MERGE_HEAD_REF}`,
+            ],
+            this.gitAuth(token),
+          );
+          if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${MERGE_HEAD_REF}^{commit}`)) !== sha) {
+            throw new Error("vcs_head_commit_mismatch");
+          }
+          have = await count(sha);
         }
+        const after = await Promise.all(others.map(count));
+        if (after.some((value, index) => value < before[index])) throw new Error("vcs_history_shortened");
+        if (baseBefore && !(await mergeBase(sha, MERGE_TARGET_REF))) throw new Error("vcs_history_shortened");
       } catch (error) {
         // Redacted text only; the raw error chain never leaves here.
         const detail = redactGitOutput(error instanceof Error ? error.message : "unknown", token ? [token] : []);
@@ -1313,6 +1341,28 @@ export class GitVcsProvider implements VcsProvider {
         throw new Error("vcs_remote_fetch_failed:origin", { cause: new Error(detail) });
       }
     });
+  }
+
+  /** Whether `commit`'s history ends at a shallow commit (rather than at a real root). */
+  private async stopsAtShallowBoundary(
+    gitMetadataPath: string,
+    workspacePath: string,
+    commit: string,
+  ): Promise<boolean> {
+    let shallow: string;
+    try {
+      shallow = await readFile(resolve(gitMetadataPath, "shallow"), "utf8");
+    } catch {
+      return false;
+    }
+    const boundary = new Set(shallow.split("\n").filter(Boolean));
+    if (boundary.size === 0) return false;
+    const roots = (
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-list", "--max-parents=0", commit])
+    ).stdout
+      .split("\n")
+      .filter(Boolean);
+    return roots.some((root) => boundary.has(root));
   }
 
   /**

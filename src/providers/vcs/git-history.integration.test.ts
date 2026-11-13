@@ -239,8 +239,11 @@ describe("git history runs: prepare (real git, #536)", { timeout: 30_000 }, () =
     const f = await fixture({ shared: 12, upstreamAhead: 6, forkAhead: 3 });
     const prepared = await f.provider.prepareWorkspace(input(f, { gitHistory: { depth: 10 } }));
     const ws = prepared.workspacePath;
-    expect(await workerGit(ws, ["rev-list", "--count", "HEAD"])).toBe("10");
-    expect(await git(ws, [`--git-dir=${prepared.gitMetadataPath}`, "rev-list", "--count", "HEAD"])).toBe("10");
+    // Deepening only adds history, so the head may end with more than the depth, never fewer.
+    expect(Number(await workerGit(ws, ["rev-list", "--count", "HEAD"]))).toBeGreaterThanOrEqual(10);
+    expect(
+      Number(await git(ws, [`--git-dir=${prepared.gitMetadataPath}`, "rev-list", "--count", "HEAD"])),
+    ).toBeGreaterThanOrEqual(10);
     expect(await workerGit(ws, ["rev-parse", "refs/remotes/upstream/main"])).toBe(f.upstreamTip);
     expect(await workerGit(ws, ["rev-parse", "HEAD"])).toBe(prepared.baseCommit);
     expect(await git(ws, [`--git-dir=${prepared.gitMetadataPath}`, "rev-parse", "refs/remotes/origin/main"])).toBe(
@@ -266,8 +269,56 @@ describe("git history runs: prepare (real git, #536)", { timeout: 30_000 }, () =
       }),
     );
     expect(prepared.baseCommit).toBe(branchTip);
-    const count = (dir: string) => git(prepared.workspacePath, [`--git-dir=${dir}`, "rev-list", "--count", branchTip]);
-    expect(await count(join(prepared.workspacePath, ".git"))).toBe("10");
-    expect(await count(prepared.gitMetadataPath)).toBe("10");
+    const count = async (dir: string) =>
+      Number(await git(prepared.workspacePath, [`--git-dir=${dir}`, "rev-list", "--count", branchTip]));
+    // Deepening only adds history, so the head may end with more than the depth, never fewer.
+    expect(await count(join(prepared.workspacePath, ".git"))).toBeGreaterThanOrEqual(10);
+    expect(await count(prepared.gitMetadataPath)).toBeGreaterThanOrEqual(10);
+  });
+  it("keeps a continuation's merge base when it lies deeper than the depth (restoring only adds history)", async () => {
+    // Shared 40, the branch 12 ahead, main 2 ahead, depth 5: the deepen loop has to take the head
+    // well past 5 commits to reach the merge base, and restoring the head's window must not undo it.
+    const f = await fixture({ shared: 40, upstreamAhead: 0, forkAhead: 0 });
+    await git(f.fork, ["checkout", "-q", "-b", "wardby/run-root"]);
+    let branchTip = "";
+    for (let n = 1; n <= 12; n += 1) branchTip = await commit(f.fork, "pr.txt", `${n}\n`, `pr ${n}`);
+    await git(f.fork, ["checkout", "-q", "main"]);
+    let targetCommit = "";
+    for (let n = 1; n <= 2; n += 1) targetCommit = await commit(f.fork, "main.txt", `${n}\n`, `main ${n}`);
+    const prepared = await f.provider.prepareWorkspace(
+      input(f, {
+        runId: "r2",
+        headRef: "wardby/run-root",
+        continuation: { rootRunId: "root" },
+        gitHistory: { depth: 5 },
+        remotes: [],
+      }),
+    );
+    expect(prepared.baseCommit).toBe(branchTip);
+    expect(prepared.targetMerge).toMatchObject({ ref: "main", targetCommit });
+    const ws = prepared.workspacePath;
+    expect((await workerGit(ws, ["rev-list", "--parents", "-n", "1", "HEAD"])).split(" ")).toEqual([
+      prepared.historyBase,
+      branchTip,
+      targetCommit,
+    ]);
+    const count = async (dir: string) => Number(await git(ws, [`--git-dir=${dir}`, "rev-list", "--count", branchTip]));
+    expect(await count(join(ws, ".git"))).toBeGreaterThanOrEqual(5);
+    expect(await count(prepared.gitMetadataPath)).toBeGreaterThanOrEqual(5);
+    expect(await workerGit(ws, ["merge-base", branchTip, targetCommit])).toBe(f.forkPoint);
+  });
+
+  it("never shortens a remote link inside the head's history while restoring the head's window", async () => {
+    // Upstream's tip is the fork's tip~3, depth 10: upstream's own fetch gives it 10 commits.
+    const f = await fixture({ shared: 12, upstreamAhead: 0, forkAhead: 3 });
+    const prepared = await f.provider.prepareWorkspace(input(f, { gitHistory: { depth: 10 } }));
+    const ws = prepared.workspacePath;
+    const count = async (dir: string, rev: string) =>
+      Number(await git(ws, [`--git-dir=${dir}`, "rev-list", "--count", rev]));
+    for (const dir of [join(ws, ".git"), prepared.gitMetadataPath]) {
+      expect(await count(dir, "HEAD")).toBeGreaterThanOrEqual(10);
+      expect(await count(dir, "refs/remotes/upstream/main")).toBeGreaterThanOrEqual(10);
+    }
+    expect(await workerGit(ws, ["rev-parse", "refs/remotes/upstream/main"])).toBe(f.upstreamTip);
   });
 });
