@@ -56,6 +56,15 @@ describe("GitHubRemote.notifyContinuationFinished and a target-branch merge", ()
       "❌ builder (wardby run run-2) could not push its changes: `a.ts` still has conflict markers after merging this pull request's target branch.",
     ]);
   });
+
+  it("names the repository of kept changes that are in another of the run's repositories", async () => {
+    const { remote, bodies } = remoteRecordingBodies();
+    await remote.notifyContinuationFinished(CONTINUATION, "budget_exhausted", {
+      agentName: "builder",
+      changesPushed: { pullRequestNumber: 7, repository: "openai/tools" },
+    });
+    expect(bodies[0]).toContain("The changes so far are in openai/tools#7;");
+  });
 });
 
 describe("GitHubRemote.pullRequestBase", () => {

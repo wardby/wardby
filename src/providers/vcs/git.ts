@@ -12,6 +12,7 @@ import {
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
@@ -27,7 +28,13 @@ import { simulatorGitEnvironment } from "../../config/test-simulators.js";
 import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
-import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
+import {
+  COMMIT_SHA,
+  MAX_REDACTED_SPAN,
+  isCodingRepositoryName,
+  redactTokenShapedValues,
+  normalizeGitRef,
+} from "../../coding/protocol.js";
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
 import type {
@@ -37,7 +44,9 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   TargetMerge,
   VcsPrepareInput,
   VcsProvider,
@@ -47,7 +56,38 @@ export const DEFAULT_MAX_CHANGED_FILES = 1_000;
 export const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
-const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * Walks every entry under `directory` (depth first, symlinks never followed),
+ * calling `onEntry` for each; it returns whether to descend into the entry.
+ * Shared by the workspace inspection and the run-wide entry count.
+ */
+async function walkEntries(
+  directory: string,
+  onEntry: (entry: Dirent, fullPath: string, directory: string) => Promise<boolean> | boolean,
+): Promise<void> {
+  const handle = await opendir(directory);
+  for await (const entry of handle) {
+    const fullPath = resolve(directory, entry.name);
+    if (await onEntry(entry, fullPath, directory)) await walkEntries(fullPath, onEntry);
+  }
+}
+
+/**
+ * The entry cap over several prepared repositories together (a run with
+ * several): each one passed its own inspection, but the run's workspaces as a
+ * whole may hold no more than `max` entries. Throws vcs_workspace_entry_limit.
+ */
+export async function countWorkspaceEntries(paths: readonly string[], max = MAX_WORKSPACE_ENTRIES): Promise<void> {
+  let entries = 0;
+  for (const path of paths) {
+    await walkEntries(path, (entry) => {
+      entries += 1;
+      if (entries > max) throw new Error("vcs_workspace_entry_limit");
+      return entry.isDirectory();
+    });
+  }
+}
 const SAFE_GIT_USERNAME = /^[A-Za-z0-9._-]{1,64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
@@ -323,6 +363,11 @@ function sameTargetMerge(left: TargetMerge | undefined, right: TargetMerge | und
   );
 }
 
+/** A workspace handle's id: `vcs-<runId>` for the default, `vcs-<runId>:<name>` for a slot. */
+function workspaceId(workspace: { runId: string; slot?: { name: string } }): string {
+  return `vcs-${workspace.runId}${workspace.slot ? `:${workspace.slot.name}` : ""}`;
+}
+
 function directChild(root: string, child: string): boolean {
   return child.startsWith(`${root}${sep}`) && !child.slice(root.length + 1).includes(sep);
 }
@@ -356,16 +401,18 @@ export class GitVcsProvider implements VcsProvider {
     await this.remote.assertContinuationOpen(normalized);
     await ensurePrivateDirectory(this.rootDir);
     await mkdir(resolve(this.rootDir, ".home"), { recursive: true, mode: 0o700 });
-    const runRoot = resolve(this.rootDir, normalized.runId);
-    if (!directChild(this.rootDir, runRoot)) throw new Error("vcs_workspace_path_invalid");
+    let paths: ReturnType<GitVcsProvider["expectedPaths"]>;
     try {
-      await mkdir(runRoot, { mode: 0o700 });
+      paths = this.expectedPaths(normalized.runId, normalized.slot?.name);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("vcs_workspace_exists", { cause: error });
-      throw error;
+      throw new Error("vcs_workspace_path_invalid", { cause: error });
     }
-    const workspacePath = resolve(runRoot, "workspace");
-    const gitMetadataPath = resolve(runRoot, "git");
+    // A slot lives in the run directory the default workspace created, which must already exist.
+    if (normalized.slot) await this.createSlotBase(paths);
+    else await this.createBase(paths.base);
+    // The directory this workspace owns: the run root for the default, repos/<name> for a slot.
+    const base = paths.base;
+    const { workspacePath, gitMetadataPath } = paths;
     // The remote validates its own URL (GitHubRemote: vcs_remote_invalid
     // unless it is exactly github.com's, outside the test-only override).
     const cloneUrl = this.remote.cloneUrl(normalized.repository);
@@ -395,7 +442,7 @@ export class GitVcsProvider implements VcsProvider {
               cloneUrl,
               `refs/heads/${cloneBranch}`,
             ],
-            { cwd: runRoot, ...auth },
+            { cwd: base, ...auth },
           );
           const found = listed.stdout.split("\n").some((line) => line.split("\t")[1] === `refs/heads/${cloneBranch}`);
           if (!found) throw this.remote.refNotFoundError(cloneBranch);
@@ -421,7 +468,7 @@ export class GitVcsProvider implements VcsProvider {
             cloneUrl,
             workspacePath,
           ],
-          { cwd: runRoot, ...auth },
+          { cwd: base, ...auth },
         );
         if (mergeRef && mergeRef !== normalized.headRef) {
           mergeFetched = await this.fetchMergeTarget(gitMetadataPath, workspacePath, cloneBranch, mergeRef, auth);
@@ -470,7 +517,7 @@ export class GitVcsProvider implements VcsProvider {
       await this.inspectWorkspace(workspacePath);
 
       return {
-        id: `vcs-${normalized.runId}`,
+        id: workspaceId(normalized),
         ...normalized,
         baseCommit,
         workspacePath,
@@ -478,16 +525,17 @@ export class GitVcsProvider implements VcsProvider {
         ...(merged ? { targetMerge: merged.targetMerge } : {}),
       };
     } catch (error) {
-      await rm(runRoot, { recursive: true, force: true });
+      // Never the run root for a slot: the default workspace (and any other slot) lives there.
+      await rm(base, { recursive: true, force: true });
       throw error;
     }
   }
 
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
     const normalized = this.validateInput(input);
-    const expected = this.expectedPaths(normalized.runId);
+    const expected = this.expectedPaths(normalized.runId, normalized.slot?.name);
     try {
-      const metadata = await lstat(expected.runRoot);
+      const metadata = await lstat(expected.base);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -501,7 +549,7 @@ export class GitVcsProvider implements VcsProvider {
       `refs/remotes/origin/${cloneBranch}^{commit}`,
     );
     const recovered: PreparedWorkspace = {
-      id: `vcs-${normalized.runId}`,
+      id: workspaceId(normalized),
       ...normalized,
       baseCommit,
       workspacePath: expected.workspacePath,
@@ -652,7 +700,7 @@ export class GitVcsProvider implements VcsProvider {
   /** The two-parent merge commit (baseCommit, the target) of the staged tree, as the Wardby identity. */
   private async commitMerge(prepared: PreparedWorkspace, merge: TargetMerge): Promise<string> {
     const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
     const commitSha = (
       await this.gitFor(prepared, [
         "commit-tree",
@@ -665,7 +713,7 @@ export class GitVcsProvider implements VcsProvider {
         `Merge ${merge.ref} into ${prepared.headRef} (Wardby run ${prepared.runId})`,
       ])
     ).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
     await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha, prepared.baseCommit]);
     return commitSha;
   }
@@ -682,16 +730,111 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  /** Removes the workspace's own directory: the run root for the default (slots included), repos/<name> for a slot. */
   async cleanup(workspace: PreparedWorkspace): Promise<void> {
-    const expected = this.expectedPaths(workspace.runId);
+    const expected = this.expectedPaths(workspace.runId, workspace.slot?.name);
     if (
-      workspace.id !== `vcs-${workspace.runId}` ||
+      workspace.id !== workspaceId(workspace) ||
       workspace.workspacePath !== expected.workspacePath ||
       workspace.gitMetadataPath !== expected.gitMetadataPath
     ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
-    await rm(expected.runRoot, { recursive: true, force: true });
+    await rm(expected.base, { recursive: true, force: true });
+  }
+
+  /**
+   * One commit's files at `<run>/repos/<name>/workspace`, for the run to read.
+   * The commit is fetched into a temporary git directory beside the copy
+   * (never inside it), checked out, and the git directory deleted, so the
+   * copy holds no git metadata at all; it is inspected like a workspace
+   * (no nested repository, no escaping symlink) and nothing in it is ever
+   * collected. The run's default workspace must already exist.
+   */
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    if (!SAFE_RUN_ID.test(input.runId) || !isCodingRepositoryName(input.name) || !COMMIT_SHA.test(input.commit)) {
+      throw new Error("vcs_read_only_input_invalid");
+    }
+    const repository = this.remote.normalizeRepository(input.repository);
+    const paths = this.expectedPaths(input.runId, input.name);
+    await this.createSlotBase(paths);
+    const temporaryGit = resolve(paths.base, ".git-fetch");
+    try {
+      await mkdir(paths.workspacePath, { mode: 0o700 });
+      await this.gitForPaths(temporaryGit, paths.workspacePath, ["init", "--quiet"]);
+      const fetchCommit = async (token: string | undefined) => {
+        try {
+          await this.gitForPaths(
+            temporaryGit,
+            paths.workspacePath,
+            [
+              ...this.remote.gitConfig,
+              "fetch",
+              "--no-tags",
+              "--no-write-fetch-head",
+              "--depth",
+              "1",
+              this.remote.cloneUrl(repository),
+              input.commit,
+            ],
+            this.gitAuth(token),
+          );
+        } catch (error) {
+          throw new Error("vcs_read_only_fetch_failed", { cause: error });
+        }
+      };
+      // Read access where the remote has it (GitHub: contents read, or none for a public repository).
+      if (this.remote.withReadAccess) await this.remote.withReadAccess(repository, fetchCommit);
+      else await this.remote.withAccess(repository, fetchCommit);
+      // Only a commit is checked out (never a bare tree or blob someone passed as a SHA).
+      if ((await this.revParseRaw(temporaryGit, paths.workspacePath, `${input.commit}^{commit}`)) !== input.commit) {
+        throw new Error("vcs_read_only_fetch_failed");
+      }
+      await this.gitForPaths(temporaryGit, paths.workspacePath, ["read-tree", "--reset", "-u", input.commit]);
+      await rm(temporaryGit, { recursive: true, force: true });
+      await this.inspectWorkspace(paths.workspacePath);
+      return {
+        runId: input.runId,
+        name: input.name,
+        repository,
+        commit: input.commit,
+        workspacePath: paths.workspacePath,
+      };
+    } catch (error) {
+      await rm(paths.base, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    const paths = this.expectedPaths(copy.runId, copy.name);
+    if (copy.workspacePath !== paths.workspacePath) throw new Error("vcs_workspace_handle_invalid");
+    await rm(paths.base, { recursive: true, force: true });
+  }
+
+  /** The default workspace's run root, created fresh (vcs_workspace_exists when it is already there). */
+  private async createBase(base: string): Promise<void> {
+    try {
+      await mkdir(base, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("vcs_workspace_exists", { cause: error });
+      throw error;
+    }
+  }
+
+  /**
+   * An extra repository's own directory, repos/<name>, created fresh inside
+   * the existing run root. The run root and repos/ must be real directories
+   * (never symlinks), so nothing is created outside the root directory.
+   */
+  private async createSlotBase(paths: { runRoot: string; base: string }): Promise<void> {
+    const runRootStat = await lstat(paths.runRoot).catch(() => null);
+    if (!runRootStat?.isDirectory() || runRootStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
+    const repos = resolve(paths.runRoot, "repos");
+    await mkdir(repos, { recursive: true, mode: 0o700 });
+    const reposStat = await lstat(repos);
+    if (!reposStat.isDirectory() || reposStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
+    await this.createBase(paths.base);
   }
 
   /**
@@ -729,6 +872,11 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  async resolveRef(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null> {
+    if (!this.remote.resolveCommit) throw new Error("vcs_resolve_ref_unsupported");
+    return this.remote.resolveCommit(this.remote.normalizeRepository(input.repository), input.ref, input.access);
+  }
+
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
     if (!this.remote.readRepositoryFile) throw new Error("vcs_read_file_unsupported");
     return this.remote.readRepositoryFile(input);
@@ -748,38 +896,65 @@ export class GitVcsProvider implements VcsProvider {
     // against the database, that this run is actually allowed to continue
     // that branch before ever setting `continuation`; this is a structural
     // check only, not the security boundary.
+    // branchRunId: a writable extra whose branch is named for another run (a
+    // continuation's root) but does not exist yet, so it is created off
+    // baseRef like a fresh run's; dispatch chose it, this checks only its shape.
     let continuation: { rootRunId: string } | undefined;
     if (input.continuation) {
       if (!SAFE_RUN_ID.test(input.continuation.rootRunId)) throw new Error("vcs_root_run_id_invalid");
-      if (headRef !== `wardby/run-${input.continuation.rootRunId}`) throw new Error("vcs_head_ref_invalid");
       continuation = { rootRunId: input.continuation.rootRunId };
-    } else if (headRef !== `wardby/run-${input.runId}`) {
+    }
+    if (input.branchRunId !== undefined && !SAFE_RUN_ID.test(input.branchRunId)) {
+      throw new Error("vcs_branch_run_id_invalid");
+    }
+    if (continuation && input.branchRunId !== undefined && input.branchRunId !== continuation.rootRunId) {
       throw new Error("vcs_head_ref_invalid");
     }
+    if (headRef !== `wardby/run-${continuation?.rootRunId ?? input.branchRunId ?? input.runId}`) {
+      throw new Error("vcs_head_ref_invalid");
+    }
+    if (input.slot !== undefined && !isCodingRepositoryName(input.slot.name)) throw new Error("vcs_slot_invalid");
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
     if (!protectsSomePath(protectedPaths)) throw new Error("vcs_protected_paths_invalid");
     const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
-    return { runId: input.runId, repository, baseRef, headRef, protectedPaths, collectExclude, continuation };
+    return {
+      runId: input.runId,
+      repository,
+      baseRef,
+      headRef,
+      protectedPaths,
+      collectExclude,
+      continuation,
+      ...(input.slot ? { slot: { name: input.slot.name } } : {}),
+      ...(input.branchRunId !== undefined ? { branchRunId: input.branchRunId } : {}),
+    };
   }
 
-  private expectedPaths(runId: string): { runRoot: string; workspacePath: string; gitMetadataPath: string } {
+  /** The default is `<root>/<runId>/{workspace,git}`; a slot (or read-only copy) is `<root>/<runId>/repos/<name>/…`. */
+  private expectedPaths(
+    runId: string,
+    slot?: string,
+  ): { runRoot: string; base: string; workspacePath: string; gitMetadataPath: string } {
     if (!SAFE_RUN_ID.test(runId)) throw new Error("vcs_workspace_handle_invalid");
+    if (slot !== undefined && !isCodingRepositoryName(slot)) throw new Error("vcs_workspace_handle_invalid");
     const runRoot = resolve(this.rootDir, runId);
     if (!directChild(this.rootDir, runRoot)) throw new Error("vcs_workspace_handle_invalid");
+    const base = slot === undefined ? runRoot : resolve(runRoot, "repos", slot);
     return {
       runRoot,
-      workspacePath: resolve(runRoot, "workspace"),
-      gitMetadataPath: resolve(runRoot, "git"),
+      base,
+      workspacePath: resolve(base, "workspace"),
+      gitMetadataPath: resolve(base, "git"),
     };
   }
 
   private async validatePrepared(workspace: PreparedWorkspace): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(workspace);
-    const expected = this.expectedPaths(normalized.runId);
+    const expected = this.expectedPaths(normalized.runId, normalized.slot?.name);
     if (
-      workspace.id !== `vcs-${normalized.runId}` ||
-      !SAFE_COMMIT_SHA.test(workspace.baseCommit) ||
+      workspace.id !== workspaceId(normalized) ||
+      !COMMIT_SHA.test(workspace.baseCommit) ||
       workspace.repository !== normalized.repository ||
       workspace.baseRef !== normalized.baseRef ||
       workspace.headRef !== normalized.headRef ||
@@ -793,16 +968,19 @@ export class GitVcsProvider implements VcsProvider {
     ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
-    const [rootReal, runRootReal, workspaceReal, metadataReal] = await Promise.all([
+    const [rootReal, baseReal, workspaceReal, metadataReal] = await Promise.all([
       realpath(this.rootDir),
-      realpath(expected.runRoot),
+      realpath(expected.base),
       realpath(expected.workspacePath),
       realpath(expected.gitMetadataPath),
     ]);
+    const expectedBase = normalized.slot
+      ? resolve(rootReal, workspace.runId, "repos", normalized.slot.name)
+      : resolve(rootReal, workspace.runId);
     if (
-      runRootReal !== resolve(rootReal, workspace.runId) ||
-      workspaceReal !== resolve(runRootReal, "workspace") ||
-      metadataReal !== resolve(runRootReal, "git")
+      baseReal !== expectedBase ||
+      workspaceReal !== resolve(baseReal, "workspace") ||
+      metadataReal !== resolve(baseReal, "git")
     ) {
       throw new Error("vcs_workspace_path_invalid");
     }
@@ -892,7 +1070,7 @@ export class GitVcsProvider implements VcsProvider {
       throw new Error("vcs_target_merge_failed", { cause: error });
     }
     const [tree, ...paths] = output.split("\0");
-    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_target_merge_failed");
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_target_merge_failed");
     const conflictedPaths = [...new Set(paths.filter(Boolean))].map(validateChangedPath);
     if (conflictedPaths.length > this.maxChangedFiles) throw new Error("vcs_target_merge_failed");
     const targetMerge: TargetMerge = { ref, targetCommit, conflictedPaths };
@@ -912,7 +1090,7 @@ export class GitVcsProvider implements VcsProvider {
           messagePath,
         ])
       ).stdout.trim();
-      if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_commit_sha_invalid");
+      if (!COMMIT_SHA.test(stateCommit)) throw new Error("vcs_commit_sha_invalid");
       await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", MERGE_STATE_REF, stateCommit]);
     } finally {
       await rm(messagePath, { force: true });
@@ -933,7 +1111,7 @@ export class GitVcsProvider implements VcsProvider {
       ])
     ).stdout.trim();
     if (!stateCommit) return undefined;
-    if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_merge_state_invalid");
+    if (!COMMIT_SHA.test(stateCommit)) throw new Error("vcs_merge_state_invalid");
     const raw = (await this.gitForPaths(gitMetadataPath, workspacePath, ["cat-file", "commit", stateCommit])).stdout;
     const split = raw.indexOf("\n\n");
     if (split < 0) throw new Error("vcs_merge_state_invalid");
@@ -946,7 +1124,7 @@ export class GitVcsProvider implements VcsProvider {
     if (
       parents.length !== 2 ||
       parents[0] !== workspace.baseCommit ||
-      !SAFE_COMMIT_SHA.test(parents[1]) ||
+      !COMMIT_SHA.test(parents[1]) ||
       !message.startsWith(`${MERGE_STATE_SUBJECT}\n\n`)
     ) {
       throw new Error("vcs_merge_state_invalid");
@@ -1013,31 +1191,26 @@ export class GitVcsProvider implements VcsProvider {
     const rootStat = await lstat(workspacePath);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     let entries = 0;
-    const visit = async (directory: string): Promise<void> => {
-      const handle = await opendir(directory);
-      for await (const entry of handle) {
-        entries += 1;
-        if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
-        if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
-        const fullPath = resolve(directory, entry.name);
-        const stat = await lstat(fullPath);
-        if (stat.isSymbolicLink()) {
-          const target = await readlink(fullPath);
-          const resolvedTarget = resolve(directory, target);
-          if (
-            isAbsolute(target) ||
-            (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))
-          ) {
-            throw new Error("vcs_symlink_escape");
-          }
-        } else if (stat.isDirectory()) {
-          await visit(fullPath);
-        } else if (!stat.isFile()) {
-          throw new Error("vcs_special_file");
+    await walkEntries(workspacePath, async (entry, fullPath, directory) => {
+      entries += 1;
+      if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
+      if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
+      const stat = await lstat(fullPath);
+      if (stat.isSymbolicLink()) {
+        const target = await readlink(fullPath);
+        const resolvedTarget = resolve(directory, target);
+        if (
+          isAbsolute(target) ||
+          (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))
+        ) {
+          throw new Error("vcs_symlink_escape");
         }
+        return false;
       }
-    };
-    await visit(workspacePath);
+      if (stat.isDirectory()) return true;
+      if (!stat.isFile()) throw new Error("vcs_special_file");
+      return false;
+    });
   }
 
   private async assertRemote(workspace: PreparedWorkspace): Promise<void> {
@@ -1141,7 +1314,7 @@ export class GitVcsProvider implements VcsProvider {
     const line = result.stdout.trim();
     if (!line) return null;
     const [sha, ref, ...rest] = line.split(/\s+/);
-    if (rest.length > 0 || !SAFE_COMMIT_SHA.test(sha) || ref !== `refs/heads/${workspace.headRef}`) {
+    if (rest.length > 0 || !COMMIT_SHA.test(sha) || ref !== `refs/heads/${workspace.headRef}`) {
       throw new Error("vcs_remote_response_invalid");
     }
     return sha;
@@ -1155,7 +1328,7 @@ export class GitVcsProvider implements VcsProvider {
     const sha = (
       await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-parse", "--verify", revision])
     ).stdout.trim();
-    if (!SAFE_COMMIT_SHA.test(sha)) throw new Error("vcs_commit_sha_invalid");
+    if (!COMMIT_SHA.test(sha)) throw new Error("vcs_commit_sha_invalid");
     return sha;
   }
 

@@ -105,6 +105,10 @@ interface FakeRepositoryLink {
   baseRef?: string | null;
   access?: string;
   triggers?: string[];
+  /** Default: the repository's name part. */
+  name?: string;
+  ref?: string | null;
+  inDefaultSet?: boolean;
 }
 
 function fakeDb(
@@ -123,6 +127,7 @@ function fakeDb(
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
   const codingRuns = new Map(seedCodingRuns.map((r) => [r.runId, r]));
+  const codingRunRepositories: Record<string, any>[] = [];
   let counter = 0;
 
   const db: any = {
@@ -131,21 +136,34 @@ function fakeDb(
       findMany: (async ({ where }: any) =>
         repositoryLinks
           .map((link) => ({
+            id: `link-${link.agentId}-${link.repository}`,
+            name: link.repository.split("/").at(-1)!,
+            provider: "github",
             baseRef: null,
+            ref: null,
+            refFromFile: null,
+            inDefaultSet: false,
+            authorizedVia: "host_permission",
+            createdAt: new Date(0),
             access: "write",
             triggers: [] as string[],
             ...link,
             agent: agentsById.get(link.agentId),
           }))
-          .filter(
-            (link) =>
+          .filter((link) => {
+            const matches = (w: any) =>
+              (w.access === undefined || link.access === w.access) &&
+              (w.triggers?.isEmpty !== true || link.triggers.length === 0);
+            return (
               (typeof where.agentId === "string"
                 ? link.agentId === where.agentId
                 : where.agentId.in.includes(link.agentId)) &&
-              (where.access === undefined || link.access === where.access) &&
-              (where.triggers?.isEmpty !== true || link.triggers.length === 0) &&
-              (where.agent?.kind === undefined || (link.agent?.kind ?? "native") === where.agent.kind),
-          )
+              (where.id?.in === undefined || where.id.in.includes(link.id)) &&
+              matches(where) &&
+              (where.OR === undefined || where.OR.some(matches)) &&
+              (where.agent?.kind === undefined || (link.agent?.kind ?? "native") === where.agent.kind)
+            );
+          })
           .sort((a, b) => a.repository.localeCompare(b.repository))) as any,
     },
     agent: {
@@ -157,6 +175,14 @@ function fakeDb(
       }) as any,
     },
     runBudgetEvent: { create: async ({ data }: any) => data },
+    codingRunRepository: {
+      findMany: (async ({ where }: any) => codingRunRepositories.filter((r) => r.runId === where.runId)) as any,
+      createMany: (async ({ data }: any) => {
+        codingRunRepositories.push(...data);
+        return { count: data.length };
+      }) as any,
+    },
+    codingRunRepositories,
     codingRun: {
       create: (async ({ data }: any) => {
         codingRuns.set(data.runId, data);
@@ -308,6 +334,10 @@ function fakeCodingExecutor(db: RunnerDb, result: { status: string; finalText: s
       });
     },
     async stop() {},
+    // Extra repositories (#537): every one authorized, and every ref names this commit.
+    authorizeCodingRepository: async () => ({ ok: true as const }),
+    readCodingRepositoryFile: async () => null,
+    resolveCodingRepositoryRef: async () => "e".repeat(40),
   };
 }
 
@@ -2835,6 +2865,8 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     edges?: FakeEdge[];
     codingRuns?: Record<string, any>[];
     grants?: FakeGrantSeed[];
+    /** An executor without the extra-repository methods (a deployment that cannot resolve them). */
+    noExtraRepositories?: boolean;
   }) {
     const db = fakeDb(
       options.agents ?? [leadAgent(), fixerAgent()],
@@ -2847,6 +2879,12 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     );
     const parentRun = await db.run.create({ data: { agentId: "lead" } });
     const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+    if (options.noExtraRepositories) {
+      const bare = executor as Partial<typeof executor>;
+      delete bare.authorizeCodingRepository;
+      delete bare.readCodingRepositoryFile;
+      delete bare.resolveCodingRepositoryRef;
+    }
     const llm = scriptedLlm([
       ...options.calls.map((args) => toolCall("delegate_to_fixer", args)),
       finalAnswer("reported"),
@@ -3049,6 +3087,94 @@ describe("delegating to a coding sub-agent with a repository list", () => {
     expect(toolResults(llm)[0]).toContain("repository_requires_coding_agent");
     expect(toolResults(llm)[0]).not.toContain(SERVICE_A);
     expect(await childrenOf(db, parentRun.id)).toEqual([]);
+  });
+
+  describe("repositories (extra repositories for the child's run)", () => {
+    const withReadLink = (): FakeRepositoryLink[] => [
+      ...twoLinks(),
+      { agentId: "fixer", repository: "acme/upstream", access: "read", name: "base", ref: "main" },
+    ];
+
+    it("offers the child's link names, but not its default's own write link, as an enum", async () => {
+      const { llm } = await runLead({
+        calls: [],
+        links: [...withReadLink(), { agentId: "fixer", repository: DEFAULT_REPOSITORY, name: "default" }],
+      });
+      const tool = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!;
+      const properties = tool.parameters.properties as any;
+      expect(properties.repositories).toEqual({
+        type: "array",
+        items: { type: "string", enum: ["service-a", "service-b", "base"] },
+        description:
+          "Which of the sub-agent's repository links this run also gets, at /repos/<name>, replacing its default set. [] = its default repository only.",
+      });
+      // The repository choice stays among write links.
+      expect(properties.repository.enum).toEqual([DEFAULT_REPOSITORY, SERVICE_A, SERVICE_B]);
+    });
+
+    it("offers repositories (and no repository choice) for a child with only read links", async () => {
+      const { llm } = await runLead({
+        calls: [],
+        links: [{ agentId: "fixer", repository: "acme/upstream", access: "read", name: "base", ref: "main" }],
+      });
+      const properties = llm.calls[0].tools!.find((t) => t.name === "delegate_to_fixer")!.parameters.properties as any;
+      expect(properties.repositories.items.enum).toEqual(["base"]);
+      expect(properties.repository).toBeUndefined();
+    });
+
+    it("passes repositories to dispatch as codingRepositories, which records the named link", async () => {
+      const { db, parentRun } = await runLead({
+        calls: [fix(SERVICE_A, { repositories: ["base"] })],
+        links: withReadLink(),
+      });
+      expect(dispatchRun).toHaveBeenLastCalledWith(expect.objectContaining({ codingRepositories: ["base"] }));
+      const [child] = await childrenOf(db, parentRun.id);
+      expect((db as any).codingRunRepositories).toEqual([
+        expect.objectContaining({ runId: child.id, name: "base", access: "read", resolvedSha: "e".repeat(40) }),
+      ]);
+    });
+
+    it("returns a set refusal to the model, starting nothing", async () => {
+      const { db, parentRun, results } = await runLead({
+        calls: [fix(SERVICE_A, { repositories: ["nope"] })],
+        links: withReadLink(),
+      });
+      expect(results[0]).toContain(
+        JSON.stringify({
+          error: "repository_not_listed",
+          message:
+            "repository_not_listed: name one of this coding agent's repository links: base, service-a, service-b.",
+        }),
+      );
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
+
+    it("returns coding_repositories_unsupported to the model when the executor cannot resolve extras", async () => {
+      const { db, parentRun, results } = await runLead({
+        calls: [fix(SERVICE_A, { repositories: ["base"] })],
+        links: withReadLink(),
+        noExtraRepositories: true,
+      });
+      expect(results[0]).toContain(
+        JSON.stringify({
+          error: "coding_repositories_unsupported",
+          message: "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+        }),
+      );
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
+
+    it("refuses repositories on a native child, starting nothing", async () => {
+      const db = fakeDb([leadAgent(), { ...leadAgent(), id: "researcher", name: "researcher" }], [edge("researcher")]);
+      const parentRun = await db.run.create({ data: { agentId: "lead" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_researcher", JSON.stringify({ task: "fix", repositories: ["base"] })),
+        finalAnswer("reported"),
+      ]);
+      await executeRun(parentRun.id, providers(llm), db);
+      expect(toolResults(llm)[0]).toContain("repository_requires_coding_agent");
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
   });
 
   it("refuses an oversized repository as an argument error that does not echo it", async () => {
@@ -3372,5 +3498,93 @@ describe("delegating to a coding sub-agent with a repository list", () => {
       expect(started).toEqual([]);
       expect(children.map((c) => c.id)).toEqual([child.id]);
     });
+  });
+});
+
+describe("a coding sub-run's pull requests across its repositories (#537)", () => {
+  const REPO = "your-org/your-fork";
+  const TOOLS = "your-org/tools";
+  const codingProfile: FakeCodingProfile = {
+    provider: "codex",
+    repository: REPO,
+    baseRef: "main",
+    defaultTask: null,
+    allowWebhookTaskOverride: true,
+    timeoutSec: 900,
+    allowedEgress: [],
+    protectedPaths: [],
+    toolchain: "node-python",
+    toolchainVersion: "3.12",
+    workerImageRef: null,
+  };
+  const outcome = (outcome: string, repository: string, number: number) => ({
+    schemaVersion: 1,
+    outcome,
+    repository,
+    baseRef: "main",
+    headRef: "wardby/run-x",
+    commitSha: "a".repeat(40),
+    pullRequestUrl: `https://github.com/${repository}/pull/${number}`,
+    pullRequestNumber: number,
+    summary: "Did the work.",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
+
+  it("the lead's delegation result lists the default repository's pull request, then each extra's", async () => {
+    const lead: FakeAgent = {
+      id: "lead",
+      name: "lead",
+      systemPrompt: "You delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const builder: FakeAgent = {
+      id: "builder",
+      name: "builder",
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb([lead, builder], [{ parentAgentId: "lead", childAgentId: "builder", boundName: "build" }]);
+    const parentRun = await db.run.create({ data: { agentId: "lead" } });
+    // The finished child: its default repository updated PR 7; its writable extras opened TOOLS#3
+    // and had no changes in `docs`; a read repository has no result.
+    const executor = {
+      ...fakeCodingExecutor(db, { status: "succeeded", finalText: "Done.", costUsd: 0 }),
+      async start(runId: string) {
+        const child = await (db as any).codingRun.findUnique({ where: { runId } });
+        child.result = outcome("pull_request_updated", REPO, 7);
+        (db as any).codingRunRepositories.push(
+          { runId, position: 0, name: "base", access: "read", result: null },
+          { runId, position: 1, name: "tools", access: "write", result: outcome("pull_request_opened", TOOLS, 3) },
+          { runId, position: 2, name: "docs", access: "write", result: { outcome: "no_changes" } },
+        );
+        await (db as any).run.update({
+          where: { id: runId },
+          data: { status: "succeeded", finalText: "Done.", costUsd: 0, finishedAt: new Date() },
+        });
+      },
+    };
+    const llm = scriptedLlm([
+      toolCall("delegate_to_build", JSON.stringify({ task: "change both" })),
+      finalAnswer("done"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+    const seen = toolResultSeen(llm, 1);
+    expect(seen.pullRequest).toEqual({
+      outcome: "updated",
+      repository: REPO,
+      number: 7,
+      url: `https://github.com/${REPO}/pull/7`,
+    });
+    expect(seen.pullRequests).toEqual([
+      { outcome: "updated", repository: REPO, number: 7, url: `https://github.com/${REPO}/pull/7` },
+      { outcome: "opened", repository: TOOLS, number: 3, url: `https://github.com/${TOOLS}/pull/3` },
+    ]);
   });
 });

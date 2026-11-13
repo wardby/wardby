@@ -14,11 +14,16 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import {
   CodingBaseRefSchema,
+  CodingReadRefSchema,
+  isCodingRepositoryName,
   isLocalRepository,
   normalizeGitHubRepository,
   normalizeLocalRepository,
 } from "../../coding/protocol.js";
 import { codeProviderOf, normalizeHostedRepository } from "../../coding/code-host.js";
+import { isSafeRepoPath } from "../../coding/local-git.js";
+import { defaultRepositoryName } from "../../coding/repository-names.js";
+import { loadCodingRunRepositoryLimit } from "../../config/providers.js";
 import {
   assertAgentAccess,
   requireAgentAccess,
@@ -28,7 +33,7 @@ import {
 } from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
-import { McpError } from "../errors.js";
+import { McpError, uniqueFields } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -47,6 +52,9 @@ type LinkArgs = {
   waitForCi?: boolean;
   markReadyWhenPassing?: boolean;
   baseRef?: string;
+  name?: string;
+  ref?: string | { fromFile: string };
+  inDefaultSet?: boolean;
   adminOverride?: boolean;
 };
 
@@ -89,6 +97,27 @@ async function assertNoConflicts(
   }
 }
 
+function invalidName(): McpError {
+  return new McpError(
+    400,
+    `repository_name_invalid: the link's name must match [a-z0-9][a-z0-9._-]{0,62} and not be "workspace"; pass name.`,
+  );
+}
+
+function nameTaken(name: string, otherRepository: string): McpError {
+  return new McpError(
+    409,
+    `repository_name_taken: the name "${name}" is already used by another link on this agent (${otherRepository}); pass a different name.`,
+  );
+}
+
+function nameTakenRace(name: string): McpError {
+  return new McpError(
+    409,
+    `repository_name_taken: the name "${name}" is already used by another link on this agent; pass a different name.`,
+  );
+}
+
 function checkNameTaken(checkName: string, repository: string): McpError {
   return new McpError(409, `Another agent already uses check name "${checkName}" on ${repository}.`);
 }
@@ -111,7 +140,11 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "reviewFixMaxRounds, waitForCi, markReadyWhenPassing, and baseRef (an omitted field is cleared, not kept) and re-checks access " +
       "— always send the full desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes " +
       "no triggers or checkName: it supports manual reviews only (trigger_agent with review). " +
-      "On a coding agent, adds a repository its runs may work in, with write access and no triggers: a GitHub repository or a local one.",
+      "On a coding agent, adds a repository its runs may work in, with no triggers: a GitHub repository or a local one. " +
+      'On a coding agent, access "read" adds a read-only repository mounted at /repos/<name> (needs ref: a branch, tag or commit SHA, ' +
+      'or ref: { fromFile: "<path>" } read from the default repository at dispatch); write adds a writable one. ' +
+      "name (default the repository's short name, lower-cased) is the folder under /repos/ and unique per agent; " +
+      "inDefaultSet: true puts the link in the set every run gets unless trigger_agent, a webhook or a delegation names its own repositories list.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -148,6 +181,19 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           description:
             "Coding agents only: the base branch for runs in this repository. Default: the coding profile's baseRef.",
         },
+        name: { type: "string", minLength: 1, maxLength: 63 },
+        ref: {
+          oneOf: [
+            { type: "string" },
+            {
+              type: "object",
+              additionalProperties: false,
+              properties: { fromFile: { type: "string", minLength: 1, maxLength: 255 } },
+              required: ["fromFile"],
+            },
+          ],
+        },
+        inDefaultSet: { type: "boolean" },
         adminOverride: {
           type: "boolean",
           description:
@@ -187,7 +233,6 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           : normalizeRepository(provider, args.repository);
       const triggers = [...new Set(args.triggers ?? [])];
       if (agent.kind === "coding") {
-        if (args.access !== "write") throw new McpError(400, "A coding agent's repository link needs write access.");
         // As codingProfile.repository: anything else would pass here and fail every run at dispatch.
         // What a coding run can work in, matching the coding profile.
         if (provider !== "github" && provider !== "local") {
@@ -205,15 +250,53 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
             "A coding agent's repository link takes no triggers, checkName, reviewFixMaxRounds, waitForCi or markReadyWhenPassing.",
           );
         }
-        if (agent.codingProfile?.repository === repository) {
+        if (args.access === "write" && agent.codingProfile?.repository === repository) {
           throw new McpError(400, `${repository} is already its default repository (codingProfile.repository).`);
         }
-      } else if (args.baseRef !== undefined) {
-        throw new McpError(400, "baseRef applies only to a coding agent's repository link.");
+        if (args.access === "read") {
+          if (args.baseRef !== undefined) throw new McpError(400, "A read link takes no baseRef.");
+          if (args.ref === undefined) {
+            throw new McpError(
+              400,
+              "A read link of a coding agent needs ref (a branch, tag or commit SHA) or ref: { fromFile }.",
+            );
+          }
+        } else if (args.ref !== undefined) {
+          throw new McpError(400, "ref applies only to a read link.");
+        }
+      } else if (
+        args.baseRef !== undefined ||
+        args.name !== undefined ||
+        args.ref !== undefined ||
+        args.inDefaultSet !== undefined
+      ) {
+        throw new McpError(
+          400,
+          args.baseRef !== undefined
+            ? "baseRef applies only to a coding agent's repository link."
+            : "name, ref and inDefaultSet apply only to a coding agent's repository link.",
+        );
       }
       const parsedBaseRef = args.baseRef === undefined ? null : CodingBaseRefSchema.safeParse(args.baseRef);
       if (parsedBaseRef && !parsedBaseRef.success) throw new McpError(400, "baseRef must be a safe branch ref.");
       const baseRef = parsedBaseRef ? parsedBaseRef.data : null;
+      const coding = agent.kind === "coding";
+      if (coding && args.name !== undefined && !isCodingRepositoryName(args.name)) throw invalidName();
+      let ref: string | null = null;
+      let refFromFile: string | null = null;
+      if (coding && args.ref !== undefined) {
+        if (typeof args.ref === "string") {
+          const parsed = CodingReadRefSchema.safeParse(args.ref);
+          if (!parsed.success) throw new McpError(400, "ref must be a branch, a tag or a 40-hex commit SHA.");
+          ref = parsed.data;
+        } else {
+          if (!isSafeRepoPath(args.ref.fromFile)) {
+            throw new McpError(400, "ref.fromFile must be a repository-relative file path.");
+          }
+          refFromFile = args.ref.fromFile;
+        }
+      }
+      const inDefaultSet = coding && args.inDefaultSet === true;
       if (provider === "local") {
         if (triggers.length > 0) throw new McpError(400, "local repositories support manual review only");
         // A check is only published for a dispatched host PR; a local link has none.
@@ -255,14 +338,58 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         ownerId: agent.ownerId,
         provider,
         repository,
-        kind: args.access,
+        kind: coding && args.access === "read" ? "coding_read" : args.access,
         adminOverride: args.adminOverride === true,
       });
       let link;
+      let linkedName = args.name ?? defaultRepositoryName(repository);
       try {
         link = await ctx.db.$transaction(
           async (tx) => {
             await assertNoConflicts(tx, { agentId: args.agentId, provider, repository, triggers, checkName });
+            let name = `${provider}:${repository}`;
+            if (coding) {
+              let existingWrite: { name: string } | null = null;
+              if (args.access === "write") {
+                existingWrite = await tx.agentRepository.findFirst({
+                  where: { agentId: args.agentId, provider, repository, access: "write" },
+                  select: { name: true },
+                });
+              }
+              // A write link keeps its name when re-linked without one (a backfilled name may not be the default).
+              name = args.name ?? existingWrite?.name ?? defaultRepositoryName(repository);
+              linkedName = name;
+              if (!isCodingRepositoryName(name)) throw invalidName();
+              const named = await tx.agentRepository.findUnique({
+                where: { agentId_name: { agentId: args.agentId, name } },
+              });
+              if (named && (named.provider !== provider || named.repository !== repository))
+                throw nameTaken(name, named.repository);
+              if (args.access === "write") {
+                const otherWrite = await tx.agentRepository.findFirst({
+                  where: { agentId: args.agentId, provider, repository, access: "write", NOT: { name } },
+                  select: { name: true },
+                });
+                if (otherWrite) {
+                  throw new McpError(
+                    409,
+                    `A coding agent can have one write link per repository; ${otherWrite.name} already is one.`,
+                  );
+                }
+              }
+              if (inDefaultSet) {
+                const others = await tx.agentRepository.count({
+                  where: { agentId: args.agentId, inDefaultSet: true, NOT: { name } },
+                });
+                const limit = loadCodingRunRepositoryLimit();
+                if (others + 2 > limit) {
+                  throw new McpError(
+                    400,
+                    `repository_set_too_large: the default set would hold ${others + 2} repositories (the default repository plus ${others + 1} links); the limit is ${limit} (CODING_MAX_RUN_REPOSITORIES).`,
+                  );
+                }
+              }
+            }
             const fields = {
               access: args.access,
               triggers,
@@ -271,19 +398,27 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               waitForCi,
               markReadyWhenPassing,
               baseRef,
+              ref,
+              refFromFile,
+              inDefaultSet,
               ...authorization,
             };
             return tx.agentRepository.upsert({
-              where: { agentId_provider_repository: { agentId: args.agentId, provider, repository } },
-              create: { agentId: args.agentId, provider, repository, ...fields },
+              where: { agentId_name: { agentId: args.agentId, name } },
+              create: { agentId: args.agentId, provider, repository, name, ...fields },
               update: fields,
             });
           },
           { isolationLevel: "Serializable" },
         );
       } catch (err) {
-        if (checkName !== null && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-          throw checkNameTaken(checkName, repository);
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          const fields = uniqueFields(err.meta, "AgentRepository");
+          if (fields.includes("agentId") && fields.includes("name")) {
+            // A concurrent link took the name between the check and the write.
+            throw nameTakenRace(linkedName);
+          }
+          if (checkName !== null) throw checkNameTaken(checkName, repository);
         }
         throw err;
       }
@@ -301,10 +436,11 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         agentId: { type: "string" },
         provider: { type: "string", enum: [...PROVIDERS] },
         repository: { type: "string", minLength: 1, maxLength: 300 },
+        name: { type: "string", minLength: 1, maxLength: 300 },
       },
       required: ["agentId", "repository"],
     },
-    handler: async (args: { agentId: string; provider?: string; repository: string }, ctx) => {
+    handler: async (args: { agentId: string; provider?: string; repository: string; name?: string }, ctx) => {
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
       requireBindingOwner(ctx, agent);
       const provider = args.provider ?? (isLocalRepository(args.repository) ? "local" : "github");
@@ -316,7 +452,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         );
       } else repository = normalizeRepository(provider, args.repository);
       const { count } = await ctx.db.agentRepository.deleteMany({
-        where: { agentId: args.agentId, provider, repository },
+        where: { agentId: args.agentId, provider, repository, ...(args.name ? { name: args.name } : {}) },
       });
       return textResult({ unlinked: count > 0 });
     },

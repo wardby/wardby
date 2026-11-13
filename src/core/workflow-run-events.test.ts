@@ -84,6 +84,7 @@ describe("emitRunFinishedEvents", () => {
     const auditDb = (rows: unknown[], modes: (string | null)[] = ["audit"]) => ({
       ...db(),
       run: {
+        findUnique: vi.fn(async () => null),
         findMany: vi.fn(async () =>
           modes.map((packageAuditMode, i) => ({
             id: `c${i}`,

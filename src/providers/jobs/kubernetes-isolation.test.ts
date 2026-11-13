@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
@@ -1352,5 +1353,78 @@ describe("buildRunPod for Claude Code", () => {
       "tool-setup": '{"schemaVersion":1}',
     });
     expect(buildCapabilitySecret(spec, "wardby-coding", "rrp_x").stringData).toEqual({ capability: "rrp_x" });
+  });
+});
+
+describe("buildRunPod with extra repositories (#537)", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const repositories: JobSpec["repositories"] = [
+    { name: "base", access: "read", hostPath: "/ws/run-k8s-1/repos/base/workspace" },
+    { name: "tools", access: "write", hostPath: "/ws/run-k8s-1/repos/tools/workspace" },
+  ];
+  const codex: JobSpec = { ...spec, repositories };
+  const claude: JobSpec = { ...spec, provider: "claude-code", toolImage: TOOL_IMAGE, repositories };
+  const tools = (built: V1Pod) => built.spec!.initContainers!.find((c) => c.name === "tool-runner")!;
+  const repoMounts = [
+    { name: "storage", mountPath: "/repos/base", subPath: "repos/base", readOnly: true },
+    { name: "storage", mountPath: "/repos/tools", subPath: "repos/tools" },
+  ];
+  const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+  it("creates each repository's storage folder in storage-init", () => {
+    const script = storageInit(buildRunPod(codex, options)).command![2];
+    expect(script).toContain('for (const name of ["workspace", "input", "output", "repos/base", "repos/tools"]) {');
+  });
+
+  it("mounts each extra in the Codex worker right after /workspace, read links read-only", () => {
+    const mounts = worker(buildRunPod(codex, options)).volumeMounts!;
+    expect(mounts.slice(1, 3)).toEqual(repoMounts);
+  });
+
+  it("mounts the same in Claude's tool runner and none in Claude's agent", () => {
+    const built = buildRunPod(claude, options);
+    expect(tools(built).volumeMounts!.slice(1, 3)).toEqual(repoMounts);
+    expect(JSON.stringify(worker(built).volumeMounts)).not.toContain("/repos");
+    expect(JSON.stringify(keeper(built).volumeMounts)).not.toContain("/repos");
+  });
+
+  it("attests a pod that mounts a read repository writable as drift", () => {
+    const built = buildRunPod(codex, options);
+    const drifted = structuredClone(built);
+    delete worker(drifted).volumeMounts![1].readOnly;
+    expect(() => assertRunPodMatches(built, built)).not.toThrow();
+    expect(() => assertRunPodMatches(drifted, built)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  // Hashes of the pods built before repositories existed. Never update them: a run without
+  // repositories must submit exactly this pod.
+  it.each([
+    ["codex", spec, "39b61d75298e53aa0a683357f0513f98db0bcd1f3e523b71ab1be8be50573f9a"],
+    [
+      "claude-code",
+      { ...spec, provider: "claude-code" as const, toolImage: TOOL_IMAGE },
+      "32b139806b53126bd3d59b001362f2cf8638af29099cfc1628db84a8f9bbf50c",
+    ],
+  ])("keeps a %s pod without repositories unchanged", (_label, job, expected) => {
+    expect(sha(buildRunPod(job, options))).toBe(expected);
+  });
+
+  it.each([
+    ["an invalid name", [{ name: "../x", access: "write", hostPath: "/x" }]],
+    ["an unknown access", [{ name: "base", access: "admin", hostPath: "/x" }]],
+    [
+      "a duplicate name",
+      [
+        { name: "base", access: "read", hostPath: "/x" },
+        { name: "base", access: "read", hostPath: "/x" },
+      ],
+    ],
+    [
+      "more than 16 entries",
+      Array.from({ length: 17 }, (_value, index) => ({ name: `r${index}`, access: "read", hostPath: "/x" })),
+    ],
+  ])("refuses a spec with %s", (_label, entries) => {
+    const bad = { ...spec, repositories: entries } as unknown as JobSpec;
+    expect(() => validateKubernetesSpec(bad)).toThrow(`${KUBERNETES_ISOLATION_ERROR}:repositories-invalid`);
   });
 });

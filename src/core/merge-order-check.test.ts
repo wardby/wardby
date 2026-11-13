@@ -141,6 +141,7 @@ describe("syncMergeOrderChecks across hosts", () => {
         })),
       ),
       issuePullRequest: { findMany: vi.fn(async () => []) },
+      codingRunRepository: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
       codingRun: {
         findMany: vi.fn(async () => []),
         findUnique: vi.fn(async ({ where }: { where: { runId: string } }) => ({

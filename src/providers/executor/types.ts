@@ -89,6 +89,22 @@ export interface Executor {
     maxBytes: number;
   }): Promise<string | null>;
   /**
+   * The commit a ref names in a repository (null when the ref does not exist). Throws on a host
+   * failure. Called by dispatch before its transaction (network call).
+   */
+  resolveCodingRepositoryRef?(input: {
+    repository: string;
+    ref: string;
+    access: "read" | "write";
+  }): Promise<string | null>;
+  /**
+   * The repository-access gate (RepoAccessGate.authorizeUse, the GitHub allowlist included) for one of a
+   * coding run's extra repositories. Dispatch calls it for every extra row before resolving that row's
+   * ref, so nothing is read from a repository the agent may not use. Without it, dispatch refuses a run
+   * with extra repositories.
+   */
+  authorizeCodingRepository?(input: AuthorizeUseInput): Promise<RepoAccessDecision>;
+  /**
    * Whether this executor can start coding-run services for a run of `provider`: its job launcher
    * says so (Kubernetes and Docker, for Codex and Claude Code).
    */
@@ -105,3 +121,4 @@ export interface Executor {
   defersCodingResolution?: boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";
+import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";

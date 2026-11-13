@@ -31,6 +31,7 @@ import {
   type ReviewTarget,
 } from "./host-events.js";
 import { mentionStatusRow, postMentionStatus, TERMINAL_RUN_STATUSES } from "./host-status.js";
+import { rootFollowUpInFlight } from "./run-pull-request.js";
 import { logger } from "./logger.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { fixRoundLedger, type FixRoundLedger } from "./review-fix-ledger.js";
@@ -83,6 +84,7 @@ export type ReviewFixSkip =
   | "cannot_continue"
   | "capped"
   | "in_flight"
+  | "root_in_flight"
   | "record_failed"
   | "dispatch_declined";
 
@@ -215,7 +217,10 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
     });
   };
 
-  const continuation = await checkContinuation(deps.db, origin.markerRunId, req.repository);
+  const continuation = await checkContinuation(deps.db, origin.markerRunId, req.repository, undefined, {
+    provider: req.provider,
+    number: req.prNumber,
+  });
   if (!continuation.ok || continuation.root.pullRequestNumber !== req.prNumber) {
     if (await ledger.markStopped(req.repository, req.prNumber, origin))
       await comment(unknownPriorRunBody(origin.markerRunId));
@@ -241,6 +246,12 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
     select: { id: true },
   });
   if (inFlight) return skipped("in_flight");
+  // And one follow-up at a time per root run (#537 §4): a mention's run, or a round on another pull
+  // request of the same change, works on the same branches. Checked before the round is recorded,
+  // and again in the dispatch transaction (beforePersist below) for one that starts in between.
+  const rootRunId = continuation.root.runId;
+  if (await rootFollowUpInFlight(deps.db, rootRunId)) return skipped("root_in_flight");
+  let rootBusy = false;
 
   // Counted before the run starts, and deliberately not rolled back if the dispatch below is
   // declined: once the round is labeled it must never be retried under the same number (a
@@ -278,13 +289,19 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
       { codeProvider: req.provider, repository: req.repository, number: req.prNumber },
       RESPONSE_PATH_SNAPSHOT_BUDGET,
     ),
+    beforePersist: async (tx) => {
+      rootBusy = await rootFollowUpInFlight(tx, rootRunId);
+      return !rootBusy;
+    },
     afterPersist: async (tx, run) => {
       await tx.runHostStatus.create({
         data: mentionStatusRow(req.provider, { repository: req.repository, number: req.prNumber }, run.id),
       });
     },
   });
-  if (!dispatched) return skipped("dispatch_declined");
+  // A follow-up that started between the check above and the dispatch: this round was recorded but
+  // never ran, which fails closed as a declined dispatch does (see recordRound above).
+  if (!dispatched) return skipped(rootBusy ? "root_in_flight" : "dispatch_declined");
   await postMentionStatus(
     deps.db,
     host,

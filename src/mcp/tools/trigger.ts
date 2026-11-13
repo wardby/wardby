@@ -29,6 +29,7 @@
  * gets 404, not another principal's final text/cost.
  */
 import { dispatchRun } from "../../core/dispatch.js";
+import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
 import {
   AttributionError,
@@ -58,6 +59,7 @@ const TriggerAgentSchema = z
     task: CodingTaskOverrideSchema.optional(),
     baseRef: CodingBaseRefSchema.optional(),
     repository: z.string().min(1).max(300).optional(),
+    repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -141,16 +143,24 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 function assertOverrideAllowed(
   principalId: string,
   agent: { id: string; ownerId: string | null; codingProfile: { allowWebhookTaskOverride: boolean } | null },
-  args: { task?: string; baseRef?: string; repository?: string },
+  args: { task?: string; baseRef?: string; repository?: string; repositories?: string[] },
 ): void {
   // Strictly the owner: the stdio operator's owner-level access doesn't make
   // it the owner whose repository authority the task steers (review M8).
   const isOwner = agent.ownerId !== null && agent.ownerId === principalId;
-  if (isOwner || (args.task === undefined && args.baseRef === undefined && args.repository === undefined)) return;
+  if (
+    isOwner ||
+    (args.task === undefined &&
+      args.baseRef === undefined &&
+      args.repository === undefined &&
+      args.repositories === undefined)
+  ) {
+    return;
+  }
   if (!agent.codingProfile?.allowWebhookTaskOverride) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task, baseRef or repository, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef, repository or repositories, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
     );
   }
 }
@@ -166,7 +176,7 @@ async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
-  args: { task?: string; baseRef?: string; repository?: string },
+  args: { task?: string; baseRef?: string; repository?: string; repositories?: string[] },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
   const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
@@ -189,6 +199,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           type: "string",
           description:
             "Coding agents only: a repository on the agent's list (see get_agent). Omit to use codingProfile.repository.",
+        },
+        repositories: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Coding agents only: link names (list_repositories) of the extra repositories for this run, replacing the agent's default set. [] = the default repository only.",
         },
         review: {
           type: "object",
@@ -236,9 +252,15 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       }
       if (
         agent.kind !== "coding" &&
-        (args.task !== undefined || args.baseRef !== undefined || args.repository !== undefined)
+        (args.task !== undefined ||
+          args.baseRef !== undefined ||
+          args.repository !== undefined ||
+          args.repositories !== undefined)
       ) {
-        throw new McpError(400, "Task, baseRef and repository overrides are only valid for coding agents.");
+        throw new McpError(
+          400,
+          "Task, baseRef, repository and repositories overrides are only valid for coding agents.",
+        );
       }
 
       // A local repository is re-checked against the roots as they are now
@@ -249,6 +271,10 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       // requested value.
       const refused = (err: unknown): never => {
         if (err instanceof RepositoryChoiceRefusedError) throw new McpError(400, `${err.code}: ${err.message}`);
+        // Both messages carry their code and never a caller-written value or a ref file's content.
+        if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
+          throw new McpError(400, err.message);
+        }
         throw err;
       };
       const repository =
@@ -308,6 +334,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           codingTask: args.task,
           codingBaseRef: args.baseRef,
           codingRepository: args.repository,
+          codingRepositories: args.repositories,
           attribution,
           task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
           triggeredById: ctx.principal.id,

@@ -11,7 +11,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
-import { withBaseCommit } from "../../coding/base-commit.js";
+import { withBaseCommit, withExtraRepositories } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
@@ -67,7 +67,12 @@ import {
   type ProviderFailureClass,
 } from "../../core/provider-wording.js";
 import { logger } from "../../core/logger.js";
-import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
+import {
+  requiredLevel,
+  type AuthorizeUseInput,
+  type RepoAccessDecision,
+  type RepoAccessGate,
+} from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
@@ -80,6 +85,7 @@ import {
   CodingRunResultSchema,
   CodingTaskInputSchema,
   MAX_CODING_INPUT_BYTES,
+  RESERVED_REPOSITORY_NAME,
   isLocalRepository,
   parseCodingWorkerOutputJson,
   redactAndTruncate,
@@ -90,6 +96,7 @@ import {
   type CodingRunResult,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  type PullRequestNote,
 } from "../../coding/protocol.js";
 import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
@@ -109,6 +116,7 @@ import {
 import {
   JobCapacityError,
   type JobHandle,
+  type JobRepositoryMount,
   type JobResourceLimits,
   type JobSpec,
   type WorkspaceJobLauncher,
@@ -118,10 +126,13 @@ import type {
   ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
+import { countWorkspaceEntries } from "../vcs/git.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
@@ -216,6 +227,69 @@ function pushedRecord(finalized: Awaited<ReturnType<VcsProvider["finalizeChanges
   };
 }
 
+type FinalizeResult = Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
+
+/** The last step of a merge order: every writer keeps CodingRun.mergeOrder within 1-99. */
+const MAX_MERGE_ORDER = 99;
+
+/** A run with any writable extra repository: the control plane collects and diffs each writable one itself (#537). */
+function hasWritableExtras(run: Pick<ContainerRunSnapshot, "repositories">): boolean {
+  return run.repositories.some((extra) => extra.access === "write");
+}
+
+/** The driver's note for one repository's pull request; `workspace` names the default repository. */
+function pullRequestNoteFor(output: CodingAgentOutput, name: string): PullRequestNote | undefined {
+  return output.pullRequests?.find((note) => note.name === name);
+}
+
+/** The description outcome finalizeChanges reported, when it opened or updated a pull request. */
+function descriptionOutcomeOf(finalized: FinalizeResult): DescriptionWriteOutcome | undefined {
+  return finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+    ? finalized.description
+    : undefined;
+}
+
+/**
+ * The run as one writable extra's publish sees it: that repository and base, and a continuation only
+ * when the extra's branch already exists (otherwise its pull request is a new one).
+ */
+function extraView(run: ContainerRunSnapshot, extra: RunRepositorySnapshot): ContainerRunSnapshot {
+  return {
+    ...run,
+    repository: extra.repository,
+    baseRef: extra.baseRef ?? run.baseRef,
+    rootCodingRunId: extra.continuesBranch ? run.rootCodingRunId : null,
+  };
+}
+
+/** One writable repository of a run with several, in publish order; `error` once it failed. */
+interface RepositorySlot {
+  /** RESERVED_REPOSITORY_NAME for the default repository, else the row's name. */
+  name: string;
+  extra?: RunRepositorySnapshot;
+  workspace?: PreparedWorkspace;
+  error?: unknown;
+}
+
+/** What finalizeChanges did for one repository of a run with several. */
+interface RepositoryPublish {
+  slot: RepositorySlot & { workspace: PreparedWorkspace };
+  finalized: FinalizeResult;
+  /** The run as reloaded right before this repository's push. */
+  current: ContainerRunSnapshot;
+  /** The same, as this repository's publish saw it (extraView for an extra). */
+  view: ContainerRunSnapshot;
+  /** The driver's output with this repository's own description and title. */
+  agentOutput: CodingWorkerOutput;
+  descriptionState: DescriptionState;
+  /** Its step in the merge order, should it publish alongside another of the run's repositories. */
+  mergeOrder: number;
+  /** Its step should it be the run's only push: what a run with one repository records (null = none). */
+  soleMergeOrder: number | null;
+}
+
+const isNoLongerActive = (error: unknown) => error instanceof Error && error.message === "coding_run_no_longer_active";
+
 /** The PR body's dependency cache line: the folders restored from a snapshot (hit or nearest). */
 function restoredDependenciesFor(output: CodingWorkerOutput): { restoredDependencies?: string[] } {
   const folders = restoredDependencyFolders(output.dependencyCache);
@@ -236,6 +310,77 @@ export interface CodingRunRecord {
   prDescriptionSha256?: string;
   /** With prDescriptionSha256: the run whose text the description carries (the fresh run itself). */
   prDescriptionRunId?: string;
+  /** The default repository's step in the merge order, set by a run with several repositories that had none. */
+  mergeOrder?: number;
+}
+
+/** How one writable repository of a run with several ended up (#537); `<code>` is the failure category. */
+export type RepositoryPublishStatus = "published" | "no_changes" | `failed(${string})`;
+
+/** What a run with several repositories records on one writable extra's row (CodingRunRepository). */
+export interface ExtraPublishRecord {
+  id: string;
+  name: string;
+  result: CodingRunResult | null;
+  pullRequestNumber: number | null;
+  resultBranch: string | null;
+  baseSha: string | null;
+  mergeOrder: number | null;
+  prDescriptionSha256?: string;
+  prDescriptionRunId?: string;
+  prDescriptionOutcome?: string;
+}
+
+/**
+ * A run's error when some of its repositories published and others failed: each repository's status,
+ * in publish order. A failure is named by its fixed category only, never its message, so nothing the
+ * model or a host wrote reaches Run.error.
+ */
+export function partiallyPublishedError(
+  statuses: ReadonlyArray<{ name: string; status: RepositoryPublishStatus }>,
+): string {
+  return `partially_published: ${statuses.map((s) => `${s.name}: ${s.status}`).join("; ")}`;
+}
+
+/** The failure category of a run some of whose repositories published and others failed. */
+export const PARTIALLY_PUBLISHED_CATEGORY = "partially_published";
+
+/** CodingRun columns from a CodingRunRecord (complete and completePartially). */
+function codingRunRecordData(record: CodingRunRecord) {
+  return {
+    ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
+    ...(record.baseSha ? { baseSha: record.baseSha } : {}),
+    ...(record.dependencyCacheResult ? { dependencyCacheResult: record.dependencyCacheResult } : {}),
+    ...(record.prDescriptionOutcome ? { prDescriptionOutcome: record.prDescriptionOutcome } : {}),
+    ...(record.prDescriptionSha256 && record.prDescriptionRunId
+      ? { prDescriptionSha256: record.prDescriptionSha256, prDescriptionRunId: record.prDescriptionRunId }
+      : {}),
+    ...(record.mergeOrder != null ? { mergeOrder: record.mergeOrder } : {}),
+  };
+}
+
+/** Writes each extra's outcome on its own row of the run (never another run's row). */
+async function writeExtraRecords(
+  tx: Pick<PrismaClient, "codingRunRepository">,
+  runId: string,
+  extras: readonly ExtraPublishRecord[],
+): Promise<void> {
+  for (const extra of extras) {
+    await tx.codingRunRepository.updateMany({
+      where: { id: extra.id, runId, name: extra.name },
+      data: {
+        ...(extra.result ? { result: extra.result } : {}),
+        ...(extra.pullRequestNumber != null ? { pullRequestNumber: extra.pullRequestNumber } : {}),
+        ...(extra.resultBranch ? { resultBranch: extra.resultBranch } : {}),
+        ...(extra.baseSha ? { baseSha: extra.baseSha } : {}),
+        ...(extra.mergeOrder != null ? { mergeOrder: extra.mergeOrder } : {}),
+        ...(extra.prDescriptionOutcome ? { prDescriptionOutcome: extra.prDescriptionOutcome } : {}),
+        ...(extra.prDescriptionSha256 && extra.prDescriptionRunId
+          ? { prDescriptionSha256: extra.prDescriptionSha256, prDescriptionRunId: extra.prDescriptionRunId }
+          : {}),
+      },
+    });
+  }
 }
 
 /** The stored form of a description outcome: written, replaced, refreshed:<reason>, unchanged, edited_by_hand, skipped:<reason>. */
@@ -309,7 +454,96 @@ export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: L
 /** A fix round's description state: the baseline to update against, or that it could not be loaded. */
 type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | null;
 
+/** One of a coding run's extra repositories (a CodingRunRepository row, #537), with its link as it is now. */
+export interface RunRepositorySnapshot {
+  id: string;
+  position: number;
+  name: string;
+  access: "read" | "write";
+  /** False when the stored access is neither "read" nor "write": such a row is refused, never treated as read. */
+  accessKnown: boolean;
+  provider: string;
+  repository: string;
+  requestedRef: string | null;
+  resolvedSha: string | null;
+  baseRef: string | null;
+  headRef: string | null;
+  linkId: string | null;
+  /** The row's link still exists with the same access and no triggers (a coding-set link). */
+  linkExists: boolean;
+  linkAuthorizedVia: string | null;
+  /** A writable row whose branch already exists from the root or an earlier continuation (pullRequestNumber or resultBranch set on a same-name row). */
+  continuesBranch: boolean;
+  pullRequestNumber: number | null;
+  mergeOrder: number | null;
+  result: unknown;
+}
+
+/** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
+export interface RunWorkspaces {
+  main: PreparedWorkspace;
+  writable: Map<string, PreparedWorkspace>;
+  readOnly: PreparedReadOnlyCopy[];
+}
+
+function isRunWorkspaces(value: PreparedWorkspace | RunWorkspaces | null | undefined): value is RunWorkspaces {
+  return Boolean(value && "main" in value && "writable" in value);
+}
+
+/**
+ * A job's extra repositories, in the run's order, each at the path the VCS prepared it at (a
+ * writable extra's workspace, or a read row's copy). Only name, access and that path: nothing else
+ * of the row (and no credential) reaches the launcher. Throws coding_workspace_lost for a row with
+ * no prepared folder.
+ */
+function jobRepositories(
+  rows: readonly RunRepositorySnapshot[],
+  workspaces: RunWorkspaces | null,
+): JobRepositoryMount[] {
+  return rows.map((row) => {
+    const prepared =
+      row.access === "read"
+        ? workspaces?.readOnly.find((copy) => copy.name === row.name)
+        : workspaces?.writable.get(row.name);
+    if (!prepared) throw new Error("coding_workspace_lost");
+    return { name: row.name, access: row.access, hostPath: prepared.workspacePath };
+  });
+}
+
+/** How many extra repositories are prepared at once. */
+const EXTRA_PREPARE_CONCURRENCY = 3;
+
+/**
+ * Maps `items` through `work`, at most `limit` at a time, in input order. On a failure no new item
+ * starts, the ones already running are waited for (so nothing is still being written when the caller
+ * cleans up), and then the first failure is thrown.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length);
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const lane = async (): Promise<void> => {
+    while (!failure && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await work(items[index]);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  if (failure) throw failure.error;
+  return results;
+}
+
 export interface ContainerRunSnapshot {
+  /** The run's extra repositories in position order (CodingRunRepository); [] for a single-repository run. */
+  repositories: RunRepositorySnapshot[];
   /** Run.runStepsLevel, fixed at dispatch; absent on older snapshots = summary. */
   runStepsLevel?: RunStepsLevel | null;
   runId: string;
@@ -437,7 +671,7 @@ export interface ContainerExecutionStore {
    * round's description update. Optional: without it fix rounds leave the
    * description alone.
    */
-  pullRequestDescriptionBaseline?(rootRunId: string): Promise<StoredDescriptionBaseline>;
+  pullRequestDescriptionBaseline?(rootRunId: string, name?: string): Promise<StoredDescriptionBaseline>;
   /**
    * The runs that pushed to the root run's pull request (the root, then its
    * continuations whose result pushed, oldest first), for the cumulative
@@ -446,10 +680,11 @@ export interface ContainerExecutionStore {
   pullRequestRunIds?(rootRunId: string): Promise<string[]>;
   /**
    * Whether wardby marked the root run's pull request ready for review
-   * (CodingRun.markedReadyAt). Optional: the fallback when the host's draft
-   * state is unknown; without it the pull request counts as a draft.
+   * (CodingRun.markedReadyAt; with `name`, the root's row of that extra
+   * repository). Optional: the fallback when the host's draft state is
+   * unknown; without it the pull request counts as a draft.
    */
-  pullRequestMarkedReady?(rootRunId: string): Promise<boolean>;
+  pullRequestMarkedReady?(rootRunId: string, name?: string): Promise<boolean>;
   /**
    * Where the root run's pull request came from (see LinkedIssueSource).
    * Optional: without it continuations get no issue text.
@@ -465,19 +700,38 @@ export interface ContainerExecutionStore {
   /**
    * Compare-and-set of the root run's description hash and author run: writes
    * only while the root still records `expectedSha256` (null = none). False
-   * when another write got there first.
+   * when another write got there first. With `name`, the root's row of that
+   * extra repository (CodingRunRepository) instead of the root run itself.
    */
   recordPullRequestDescription?(input: {
     rootRunId: string;
     expectedSha256: string | null;
     sha256: string;
     agentTextRunId: string;
+    name?: string;
   }): Promise<boolean>;
+  /** `extras`: a run with several repositories records each writable extra's outcome on its own row. */
   complete(
     runId: string,
     status: "succeeded" | "budget_exhausted",
     result: CodingRunResult,
     record?: CodingRunRecord,
+    extras?: ExtraPublishRecord[],
+  ): Promise<void>;
+  /**
+   * Ends a run with several repositories some of which published and others failed: failed, with
+   * `error` (partiallyPublishedError) and `audit` (partially_published). What did publish is recorded
+   * as complete records it: the default repository's result on the run, each extra's on its row.
+   */
+  completePartially(
+    runId: string,
+    input: {
+      mainResult: CodingRunResult | null;
+      record: CodingRunRecord;
+      extras: ExtraPublishRecord[];
+      error: string;
+      audit: CodingFailureAudit;
+    },
   ): Promise<void>;
   terminate(
     runId: string,
@@ -552,7 +806,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           select: { authorizedVia: true },
         })
       : null;
+    const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
     return {
+      repositories,
       runId: row.id,
       runStepsLevel: row.runStepsLevel,
       agentId: row.agentId,
@@ -612,6 +868,63 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     };
   }
 
+  /**
+   * The run's extra repositories (#537), each with whether its link is still a coding-set link of
+   * the agent (same id, same access, no triggers) and, for a continuation, whether a writable row's
+   * branch already exists from the root or an earlier continuation of the same tree (never this run
+   * itself: once it publishes, its own rows carry a branch too, and a reload must not change how it
+   * names a branch it created off its base).
+   */
+  private async loadRepositories(
+    runId: string,
+    agentId: string,
+    rootId: string | null,
+  ): Promise<RunRepositorySnapshot[]> {
+    const rows = await this.db.codingRunRepository.findMany({ where: { runId }, orderBy: { position: "asc" } });
+    if (rows.length === 0) return [];
+    const linkIds = rows.flatMap((r) => (r.linkId ? [r.linkId] : []));
+    const links =
+      linkIds.length > 0
+        ? await this.db.agentRepository.findMany({
+            where: { id: { in: linkIds }, agentId },
+            select: { id: true, access: true, triggers: true, authorizedVia: true },
+          })
+        : [];
+    const branchRows = rootId
+      ? await this.db.codingRunRepository.findMany({
+          where: {
+            codingRun: { OR: [{ runId: rootId }, { rootCodingRunId: rootId }] },
+            runId: { not: runId },
+            OR: [{ pullRequestNumber: { not: null } }, { resultBranch: { not: null } }],
+          },
+          select: { name: true },
+        })
+      : [];
+    return rows.map((r) => {
+      const link = links.find((l) => l.id === r.linkId && l.access === r.access && l.triggers.length === 0);
+      return {
+        id: r.id,
+        position: r.position,
+        name: r.name,
+        access: r.access === "write" ? "write" : "read",
+        accessKnown: r.access === "read" || r.access === "write",
+        provider: r.provider,
+        repository: r.repository,
+        requestedRef: r.requestedRef,
+        resolvedSha: r.resolvedSha,
+        baseRef: r.baseRef,
+        headRef: r.headRef,
+        linkId: r.linkId,
+        linkExists: Boolean(link),
+        linkAuthorizedVia: link?.authorizedVia ?? null,
+        continuesBranch: r.access === "write" && branchRows.some((b) => b.name === r.name),
+        pullRequestNumber: r.pullRequestNumber,
+        mergeOrder: r.mergeOrder,
+        result: r.result,
+      };
+    });
+  }
+
   async relatedPullRequests(runId: string): Promise<RelatedPullRequestEntry[]> {
     const group = await collectRelatedPullRequests(this.db, runId);
     // Every PR of the request so far, merged/closed ones included (listed as context).
@@ -623,12 +936,20 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }));
   }
 
-  async pullRequestMarkedReady(rootRunId: string): Promise<boolean> {
+  async pullRequestMarkedReady(rootRunId: string, name?: string): Promise<boolean> {
+    if (name !== undefined) {
+      const row = await this.db.codingRunRepository.findUnique({
+        where: { runId_name: { runId: rootRunId, name } },
+        select: { markedReadyAt: true },
+      });
+      return Boolean(row?.markedReadyAt);
+    }
     const root = await this.db.codingRun.findUnique({ where: { runId: rootRunId }, select: { markedReadyAt: true } });
     return Boolean(root?.markedReadyAt);
   }
 
-  async pullRequestDescriptionBaseline(rootRunId: string): Promise<StoredDescriptionBaseline> {
+  async pullRequestDescriptionBaseline(rootRunId: string, name?: string): Promise<StoredDescriptionBaseline> {
+    if (name !== undefined) return this.repositoryDescriptionBaseline(rootRunId, name);
     const root = await this.db.codingRun.findUnique({
       where: { runId: rootRunId },
       select: {
@@ -670,6 +991,34 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(previousAgentText !== undefined ? { previousAgentText } : {}),
       agentTextRunId,
       ...(legacySource ? { legacySource } : {}),
+    };
+  }
+
+  /**
+   * The baseline of an extra repository's pull request: the root run's row of that name. Rows are
+   * newer than recorded description hashes, so there is never a legacy description to rebuild.
+   */
+  private async repositoryDescriptionBaseline(rootRunId: string, name: string): Promise<StoredDescriptionBaseline> {
+    const row = await this.db.codingRunRepository.findUnique({
+      where: { runId_name: { runId: rootRunId, name } },
+      select: { prDescriptionSha256: true, prDescriptionRunId: true, result: true },
+    });
+    if (!row) throw new Error("coding_run_not_found");
+    const agentTextRunId = row.prDescriptionRunId ?? rootRunId;
+    const source =
+      agentTextRunId === rootRunId
+        ? row.result
+        : (
+            await this.db.codingRunRepository.findUnique({
+              where: { runId_name: { runId: agentTextRunId, name } },
+              select: { result: true },
+            })
+          )?.result;
+    const previousAgentText = storedSummary(source);
+    return {
+      recordedSha256: row.prDescriptionSha256,
+      ...(previousAgentText !== undefined ? { previousAgentText } : {}),
+      agentTextRunId,
     };
   }
 
@@ -738,7 +1087,15 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     expectedSha256: string | null;
     sha256: string;
     agentTextRunId: string;
+    name?: string;
   }): Promise<boolean> {
+    if (input.name !== undefined) {
+      const row = await this.db.codingRunRepository.updateMany({
+        where: { runId: input.rootRunId, name: input.name, prDescriptionSha256: input.expectedSha256 },
+        data: { prDescriptionSha256: input.sha256, prDescriptionRunId: input.agentTextRunId },
+      });
+      return row.count === 1;
+    }
     const written = await this.db.codingRun.updateMany({
       where: { runId: input.rootRunId, prDescriptionSha256: input.expectedSha256 },
       data: { prDescriptionSha256: input.sha256, prDescriptionRunId: input.agentTextRunId },
@@ -915,6 +1272,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     status: "succeeded" | "budget_exhausted",
     result: CodingRunResult,
     record: CodingRunRecord = {},
+    extras?: ExtraPublishRecord[],
   ): Promise<void> {
     const finishedAt = new Date();
     const finished = await this.db.$transaction(async (tx) => {
@@ -926,18 +1284,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       }
       await tx.codingRun.update({
         where: { runId },
-        data: {
-          result,
-          resultSchema: CODING_PROTOCOL_VERSION,
-          ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
-          ...(record.baseSha ? { baseSha: record.baseSha } : {}),
-          ...(record.dependencyCacheResult ? { dependencyCacheResult: record.dependencyCacheResult } : {}),
-          ...(record.prDescriptionOutcome ? { prDescriptionOutcome: record.prDescriptionOutcome } : {}),
-          ...(record.prDescriptionSha256 && record.prDescriptionRunId
-            ? { prDescriptionSha256: record.prDescriptionSha256, prDescriptionRunId: record.prDescriptionRunId }
-            : {}),
-        },
+        data: { result, resultSchema: CODING_PROTOCOL_VERSION, ...codingRunRecordData(record) },
       });
+      if (extras) await writeExtraRecords(tx, runId, extras);
       await tx.run.update({
         where: { id: runId },
         data: {
@@ -955,6 +1304,41 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }
     // Only the write that made the row terminal emits (never throws).
     if (finished) await emitRunCompletedEvent(this.db, runId);
+  }
+
+  async completePartially(
+    runId: string,
+    input: {
+      mainResult: CodingRunResult | null;
+      record: CodingRunRecord;
+      extras: ExtraPublishRecord[];
+      error: string;
+      audit: CodingFailureAudit;
+    },
+  ): Promise<void> {
+    const finishedAt = new Date();
+    const agentId = await this.db.$transaction(async (tx) => {
+      const ended = await tx.run.updateMany({
+        where: { id: runId, status: { in: ["pending", "running"] } },
+        data: { status: "failed", error: input.error, finishedAt, heartbeatAt: new Date() },
+      });
+      if (!ended.count) return null;
+      await tx.codingRun.update({
+        where: { runId },
+        data: {
+          ...(input.mainResult ? { result: input.mainResult, resultSchema: CODING_PROTOCOL_VERSION } : {}),
+          ...codingRunRecordData(input.record),
+          failureCategory: input.audit.failureCategory,
+          diagnosticId: input.audit.diagnosticId,
+        },
+      });
+      await writeExtraRecords(tx, runId, input.extras);
+      const row = await tx.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+      return row?.agentId ?? null;
+    });
+    if (!agentId) return;
+    await this.selfDefect({ id: runId, agentId, status: "failed", error: input.error, finishedAt });
+    await emitRunCompletedEvent(this.db, runId);
   }
 
   async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
@@ -1120,6 +1504,11 @@ export interface ContainerExecutorOptions {
   pollMaxMs?: number;
   /** How often to beat the heartbeat during a long launch; defaults to a third of the reconciler's timeout. */
   heartbeatIntervalMs?: number;
+  /**
+   * The entry cap over every prepared repository of a run with several (throws
+   * vcs_workspace_entry_limit). Test hook; defaults to countWorkspaceEntries.
+   */
+  countEntries?: (paths: string[]) => Promise<void>;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
@@ -1184,6 +1573,21 @@ type LoadedRegistryReport = {
 };
 
 class PreflightError extends Error {}
+
+/** An extra repository row with no resolved commit (or a writable one without its refs): refused before any clone. */
+export const CODING_REPOSITORY_UNRESOLVED_ERROR = "coding_repository_unresolved";
+
+/**
+ * A stored row the executor cannot trust is refused (fail closed): an access that is neither read nor
+ * write, or a writable row on another branch than the run's, which is the one it would be pushed to.
+ */
+function assertRowWellFormed(run: ContainerRunSnapshot, extra: RunRepositorySnapshot): void {
+  if (!extra.accessKnown) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+  // A writable row without its branch is never pushed (dispatch always stores the run's).
+  if (extra.access === "write" && extra.headRef !== run.headRef) {
+    throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+  }
+}
 
 /** A refusal by repository authorization; its message is the failure category's prefix (repo_access_*). */
 class RepoAccessError extends PreflightError {}
@@ -1335,6 +1739,8 @@ export class ContainerExecutor implements Executor {
     if (!run) throw new Error("coding_run_not_found");
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
     let workspace: PreparedWorkspace | null = null;
+    // Every workspace held once the default one is ready (the extras are added as each is prepared).
+    let workspaces: RunWorkspaces | null = null;
     let sessionId = run.proxySessionId;
     let handle = run.jobHandle;
     let claimId: string | null = null;
@@ -1357,15 +1763,39 @@ export class ContainerExecutor implements Executor {
       }
       // A launched run (recovered after a restart) is in flight: a transient
       // host error is retried once before it is stopped.
-      await this.authorizeRepository(run, { inFlight: Boolean(handle) });
-      try {
-        workspace = await this.options.vcs.recoverWorkspace(prepared);
-        if (!workspace && handle) throw new Error("coding_workspace_lost");
-        if (!workspace) workspace = await this.options.vcs.prepareWorkspace(prepared);
+      // A slow clone (large repository, cold host) outlives HEARTBEAT_TIMEOUT_MS just as a launch can.
+      const toPrepare = run;
+      // A launched run's job already has its read-only copies; only its writable extras are recovered.
+      const pending = run.repositories.filter((extra) => !(handle && extra.access === "read"));
+      workspace = await this.whileHeartbeating(runId, async () => {
+        // Every repository is authorized, and every extra row checked, before anything is cloned.
+        await this.authorizeRepository(toPrepare, { inFlight: Boolean(handle) });
+        await this.authorizeExtras(toPrepare, { inFlight: Boolean(handle) });
+        for (const extra of pending) this.extraPreflight(toPrepare, extra);
+        try {
+          const found = await this.options.vcs.recoverWorkspace(prepared);
+          if (!found && handle) throw new Error("coding_workspace_lost");
+          const ready = found ?? (await this.options.vcs.prepareWorkspace(prepared));
+          if (pending.length === 0) this.emit({ stage: "prepared", runId });
+          return ready;
+        } catch (error) {
+          if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
+          throw error;
+        }
+      });
+      if (pending.length > 0) {
+        const held: RunWorkspaces = { main: workspace, writable: new Map(), readOnly: [] };
+        workspaces = held;
+        const [extrasRun, launched] = [run, Boolean(handle)];
+        await this.whileHeartbeating(runId, async () => {
+          try {
+            await this.prepareExtras(extrasRun, pending, held, launched);
+          } catch (error) {
+            if (!spendEnabled && !launched) throw new PreflightError(safeError(error), { cause: error });
+            throw error;
+          }
+        });
         this.emit({ stage: "prepared", runId });
-      } catch (error) {
-        if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
-        throw error;
       }
       await this.options.vcs.notifyContinuationStarted?.(workspace, { agentName: run.agentName });
 
@@ -1402,10 +1832,13 @@ export class ContainerExecutor implements Executor {
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
         if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
-        const inputArtifact = await this.writeInput(run, deadlineAt, workspace);
+        const [inputRun, inputWorkspaces] = [run, workspaces ?? { main: workspace, writable: new Map(), readOnly: [] }];
+        const inputArtifact = await this.whileHeartbeating(runId, () =>
+          this.writeInput(inputRun, deadlineAt, inputWorkspaces),
+        );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        const spec = this.jobSpec(run, inputArtifact, { mcpTools: Boolean(mcpToken) });
+        const spec = this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) });
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         planned = this.options.jobs.plannedHandle?.(spec);
@@ -1428,7 +1861,7 @@ export class ContainerExecutor implements Executor {
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
-          await this.finishTerminal(run, handle, status.state, workspace, sessionId);
+          await this.finishTerminal(run, handle, status.state, workspaces ?? workspace, sessionId);
           return;
         }
         if (status.state === "running" && !observedRunning) {
@@ -1463,7 +1896,7 @@ export class ContainerExecutor implements Executor {
           ...(planned ? { planned } : {}),
         });
         if (requeued !== "spend_recorded") {
-          if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+          if (workspace) await this.cleanupWorkspaces(run, workspaces ?? workspace);
           if (requeued === "requeued") {
             // The next attempt writes its own input; this one names a session that is gone.
             await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1501,7 +1934,7 @@ export class ContainerExecutor implements Executor {
       const unreadyService = outOfBudget ? null : serviceUnreadyName(error);
       const protectedPath = outOfBudget ? null : protectedPathFromError(error);
       if (workspace) {
-        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.cleanupWorkspaces(run, workspaces ?? workspace);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
           ...(outOfBudget ? { budgetSentence: await this.budgetSentence(run) } : {}),
@@ -1578,6 +2011,127 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * Every extra repository through the same gate, read rows included: the GitHub allowlist is a
+   * hard limit for every row, whatever its stamp, and it may have narrowed since the root run, so a
+   * continuation is checked again too. A row whose link is gone (or changed access, or gained a
+   * trigger) is not authorized. Throws RepoAccessError for the first denied row.
+   */
+  private async authorizeExtras(run: ContainerRunSnapshot, opts: { inFlight: boolean; only?: string }): Promise<void> {
+    for (const extra of run.repositories) {
+      // `only` scopes the check to one row by name: one row's denial must not fail every publish.
+      if (opts.only !== undefined && extra.name !== opts.only) continue;
+      assertRowWellFormed(run, extra);
+      if (!extra.linkExists) throw new RepoAccessError("repo_access_not_authorized");
+      const decision = await this.options.repoAccess.authorizeUse({
+        ownerId: run.ownerId,
+        provider: extra.provider,
+        repository: extra.repository,
+        required: requiredLevel(extra.access === "read" ? "coding_read" : "coding"),
+        authorizedVia: extra.linkAuthorizedVia,
+        retryTransient: opts.inFlight,
+      });
+      if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
+    }
+  }
+
+  /**
+   * What one extra repository is prepared from. A read row is one commit's files (no branch, no
+   * protected paths, nothing collected). A write row is a workspace in its own slot on the run's
+   * branch, with the run's protected paths and collection exclusions; in a continuation it continues
+   * the branch only when an earlier run of the tree already made it, and otherwise creates the
+   * root's branch name off its base. Throws PreflightError("coding_repository_unresolved") for a row
+   * dispatch never resolved.
+   */
+  private extraPreflight(
+    run: ContainerRunSnapshot,
+    extra: RunRepositorySnapshot,
+  ): { kind: "read"; input: ReadOnlyCopyInput } | { kind: "write"; input: VcsPrepareInput } {
+    assertRowWellFormed(run, extra);
+    if (!extra.resolvedSha) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    if (extra.access === "read") {
+      return {
+        kind: "read",
+        input: { runId: run.runId, name: extra.name, repository: extra.repository, commit: extra.resolvedSha },
+      };
+    }
+    if (!extra.baseRef || !extra.headRef) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    // The run's own protected paths and exclusions, validated the way the default repository's are.
+    const main = this.preflight(run, { launched: true });
+    const root = run.rootCodingRunId;
+    return {
+      kind: "write",
+      input: {
+        runId: run.runId,
+        repository: extra.repository,
+        baseRef: extra.baseRef,
+        headRef: run.headRef,
+        protectedPaths: main.protectedPaths,
+        collectExclude: main.collectExclude,
+        slot: { name: extra.name },
+        continuation: extra.continuesBranch && root ? { rootRunId: root } : undefined,
+        ...(root && !extra.continuesBranch ? { branchRunId: root } : {}),
+      },
+    };
+  }
+
+  /**
+   * The extras beside the prepared default workspace, EXTRA_PREPARE_CONCURRENCY at a time, each added
+   * to `held` as soon as it is ready so a failure part way still cleans up what was made. A launched
+   * run's writable extras must still be there (coding_workspace_lost otherwise), as its default one
+   * must. Then the entry cap over every repository together, for a run being prepared fresh.
+   */
+  private async prepareExtras(
+    run: ContainerRunSnapshot,
+    pending: readonly RunRepositorySnapshot[],
+    held: RunWorkspaces,
+    launched: boolean,
+  ): Promise<void> {
+    const vcs = this.options.vcs;
+    await mapWithConcurrency(pending, EXTRA_PREPARE_CONCURRENCY, async (extra) => {
+      const plan = this.extraPreflight(run, extra);
+      if (plan.kind === "read") {
+        if (!vcs.prepareReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+        held.readOnly.push(await vcs.prepareReadOnlyCopy(plan.input));
+        return;
+      }
+      const found = await vcs.recoverWorkspace(plan.input);
+      if (!found && launched) throw new Error("coding_workspace_lost");
+      held.writable.set(extra.name, found ?? (await vcs.prepareWorkspace(plan.input)));
+    });
+    if (launched) return;
+    await (this.options.countEntries ?? countWorkspaceEntries)([
+      held.main.workspacePath,
+      ...[...held.writable.values()].map((w) => w.workspacePath),
+      ...held.readOnly.map((c) => c.workspacePath),
+    ]);
+  }
+
+  /**
+   * Removes a run's workspaces. Held ones are removed one by one (each removal is idempotent, so
+   * order does not matter), then the default workspace, recovered from the run when not held.
+   * Removing the default workspace removes the whole run directory, extras and read-only copies
+   * included, so a run whose extras are not held here (a recovered or terminal run) needs nothing
+   * more. Never throws. Returns the default workspace, when there was one.
+   */
+  private async cleanupWorkspaces(
+    run: ContainerRunSnapshot,
+    held: PreparedWorkspace | RunWorkspaces | null | undefined,
+  ): Promise<PreparedWorkspace | null> {
+    const vcs = this.options.vcs;
+    if (isRunWorkspaces(held)) {
+      for (const extra of held.writable.values()) await vcs.cleanup(extra).catch(() => undefined);
+      for (const copy of held.readOnly) await vcs.cleanupReadOnlyCopy?.(copy).catch(() => undefined);
+    }
+    let main = isRunWorkspaces(held) ? held.main : (held ?? null);
+    if (!main) {
+      const input = this.preflightForCleanup(run);
+      main = input ? await vcs.recoverWorkspace(input).catch(() => null) : null;
+    }
+    if (main) await vcs.cleanup(main).catch(() => undefined);
+    return main;
+  }
+
+  /**
    * The CodingRun's recorded issue as the Related section shows it (a Jira or
    * GitHub issue): control-plane data from the CodingRun row, key re-validated.
    */
@@ -1630,12 +2184,28 @@ export class ContainerExecutor implements Executor {
     return {};
   }
 
-  /** The new PR's Related pull requests input: earlier PRs of the same request, then this one. Never throws. */
-  private async relatedFor(run: ContainerRunSnapshot): Promise<{ related?: RelatedPullRequestsInput }> {
+  /**
+   * The new PR's Related pull requests input: earlier PRs of the same request, then `alsoPublished`
+   * (the PRs this run already opened in its other repositories), then this one (`self`: the default
+   * repository unless an extra's is given). Never throws.
+   */
+  private async relatedFor(
+    run: ContainerRunSnapshot,
+    alsoPublished: ReadonlyArray<{ repository: string; number: number; mergeOrder?: number }> = [],
+    self: { repository: string; mergeOrder?: number | null } = {
+      repository: run.repository,
+      mergeOrder: run.mergeOrder,
+    },
+  ): Promise<{ related?: RelatedPullRequestsInput }> {
     // A continuation's Related block is preserved from the current body (the description update keeps it).
     if (run.rootCodingRunId || !this.options.store.relatedPullRequests) return {};
     try {
-      const earlier = await this.options.store.relatedPullRequests(run.runId);
+      const stored = await this.options.store.relatedPullRequests(run.runId);
+      const listed = new Set(stored.map((pr) => `${pr.repository.toLowerCase()}#${pr.number}`));
+      const earlier = [
+        ...stored,
+        ...alsoPublished.filter((pr) => !listed.has(`${pr.repository.toLowerCase()}#${pr.number}`)),
+      ];
       if (earlier.length === 0) return {};
       const issue = this.recordedIssue(run);
       return {
@@ -1643,9 +2213,9 @@ export class ContainerExecutor implements Executor {
           entries: [
             ...earlier,
             {
-              repository: run.repository,
+              repository: self.repository,
               self: true,
-              ...(run.mergeOrder != null ? { mergeOrder: run.mergeOrder } : {}),
+              ...(self.mergeOrder != null ? { mergeOrder: self.mergeOrder } : {}),
             },
           ],
           ...(issue ? { issue } : {}),
@@ -1726,9 +2296,10 @@ export class ContainerExecutor implements Executor {
     run: ContainerRunSnapshot,
     handle: JobHandle,
     jobState: "succeeded" | "failed" | "stopped" | "lost",
-    existingWorkspace?: PreparedWorkspace | null,
+    heldWorkspaces?: PreparedWorkspace | RunWorkspaces | null,
     existingSessionId?: string | null,
   ): Promise<void> {
+    const existingWorkspace = isRunWorkspaces(heldWorkspaces) ? heldWorkspaces.main : heldWorkspaces;
     const sessionId = existingSessionId ?? run.proxySessionId;
     if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
     // For notifyContinuationFinished in the `finally` below -- defaults to
@@ -1747,7 +2318,7 @@ export class ContainerExecutor implements Executor {
     // Set with a success whose push merged the pull request's target branch; says what on the host.
     let merged: { mergeSentence?: string } = {};
     // Set when a run stopped at its budget still pushed its changes so far; says so on the host.
-    let changesPushed: { pullRequestNumber?: number } | undefined;
+    let changesPushed: { pullRequestNumber?: number; repository?: string } | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -1782,6 +2353,42 @@ export class ContainerExecutor implements Executor {
       const current = this.requireActive(await this.requireCurrent(run.runId));
       // Finished work is delivered even when it cost more than the run's limit (one reply
       // can cost more than its hold); the status comment then says so (overrunDetails).
+      if (output.outcome === "budget_exhausted" && hasWritableExtras(current)) {
+        this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        const kept = await this.keepStoppedChangesAll(handle, current, output, heldWorkspaces);
+        await this.recordRefusal(run.runId, sessionId);
+        const latest = await this.requireCurrent(run.runId).catch(() => kept.current);
+        await this.options.store.complete(
+          run.runId,
+          "budget_exhausted",
+          kept.main?.result ?? this.resultFor(output, latest, "budget_exhausted"),
+          kept.main?.record ?? dependencyCacheRecord(output),
+          kept.extras,
+        );
+        for (const pushed of kept.pushed) this.emit({ stage: pushed.outcome, runId: run.runId, jobId: handle.id });
+        this.terminal(latest, "budget_exhausted");
+        // Kept changes in any writable repository are reported: the default repository's first, else
+        // the first extra's (named by its repository, since the comment is on the default one's PR).
+        const reported = kept.main?.finalized ?? kept.pushed[0];
+        if (reported) {
+          changesPushed =
+            reported.outcome === "branch_pushed"
+              ? {}
+              : {
+                  pullRequestNumber: reported.pullRequestNumber,
+                  ...(kept.main ? {} : { repository: reported.repository }),
+                };
+        }
+        if (kept.main) {
+          const mainFinalized = kept.main.finalized;
+          if (mainFinalized.outcome === "pull_request_updated" && mainFinalized.targetMerge) {
+            merged = { mergeSentence: mergeSentence(mainFinalized.targetMerge) };
+          }
+        }
+        if (kept.pushed.length > 0) finishedSummary = output.summary;
+        outcome = "budget_exhausted";
+        return;
+      }
       if (output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
         const kept = await this.keepStoppedChanges(run, handle, current, output, existingWorkspace);
@@ -1807,6 +2414,20 @@ export class ContainerExecutor implements Executor {
           this.terminal(latest, "budget_exhausted");
         }
         outcome = "budget_exhausted";
+        return;
+      }
+      // Several repositories: each writable one is collected and diffed here, whatever the worker said.
+      if (hasWritableExtras(current)) {
+        const published = await this.publishAll(run, handle, current, output, heldWorkspaces, sessionId);
+        outcome = published.outcome;
+        if (published.outcome === "succeeded") {
+          overrun = this.overrunDetails(published.current);
+          const mainFinalized = published.main;
+          if (mainFinalized?.outcome === "pull_request_updated" && mainFinalized.targetMerge) {
+            merged = { mergeSentence: mergeSentence(mainFinalized.targetMerge) };
+          }
+          finishedSummary = output.summary;
+        }
         return;
       }
       // A workspace that merged its target branch has that merge to push even when the agent changed nothing.
@@ -1879,10 +2500,7 @@ export class ContainerExecutor implements Executor {
     } finally {
       if (run.sessionResume) await this.recordTranscript(run, handle);
       await this.options.jobs.remove(handle).catch(() => undefined);
-      const input = this.preflightForCleanup(run);
-      const workspace =
-        existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      const workspace = await this.cleanupWorkspaces(run, heldWorkspaces);
       // A run another process launched has no workspace here; its pull request still gets the final status.
       const target = workspace ?? this.continuationTargetOf(run);
       if (target) {
@@ -2059,6 +2677,374 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * A run with several repositories (#537): every writable repository is collected and diffed here,
+   * whatever the worker reported, then published one at a time, the default repository first and then
+   * each writable extra by position, each with its own branch, description and merge order. One
+   * repository's failure is its own: the rest are still tried, and what published stays published.
+   * Every repository published (or had nothing to publish): the run succeeds. Some published and some
+   * failed: it ends failed as partially_published. None published and one failed: that failure is
+   * thrown, as for a run with one repository. Throws coding_run_no_longer_active when the run was
+   * stopped meanwhile.
+   */
+  private async publishAll(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    current: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    held: PreparedWorkspace | RunWorkspaces | null | undefined,
+    sessionId: string | null | undefined,
+  ): Promise<{ outcome: "succeeded" | "failed"; current: ContainerRunSnapshot; main?: FinalizeResult }> {
+    const slots = await this.repositorySlots(current, held);
+    await this.collectWritable(handle, current, slots);
+    const done: RepositoryPublish[] = [];
+    let latest = current;
+    for (const slot of slots) {
+      if (slot.error !== undefined || !slot.workspace) continue;
+      try {
+        const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, done, {
+          summary: (text) => text,
+        });
+        latest = publish.current;
+        done.push(publish);
+      } catch (error) {
+        if (isNoLongerActive(error)) throw error;
+        slot.error = error;
+      }
+    }
+    const failed = slots.filter((slot) => slot.error !== undefined);
+    const pushed = done.flatMap((publish) => (publish.finalized.outcome === "no_changes" ? [] : [publish.finalized]));
+    if (pushed.length === 0 && failed.length > 0) throw failed[0].error;
+    const records = await this.publishRecords(current, output, done, { budgetStopped: false });
+    await this.recordRefusal(run.runId, sessionId);
+    if (failed.length === 0) {
+      // The default repository did not fail, so it has a result.
+      await this.options.store.complete(run.runId, "succeeded", records.mainResult!, records.record, records.extras);
+      for (const finalized of pushed) this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
+      this.terminal(latest, "succeeded");
+      return { outcome: "succeeded", current: latest, ...(records.main ? { main: records.main } : {}) };
+    }
+    // Each failure is logged under its own diagnostic id; Run.error names categories only.
+    const failures = failed.map((slot) => this.failure(slot.error));
+    const statusOf = (slot: RepositorySlot): RepositoryPublishStatus =>
+      slot.error !== undefined
+        ? `failed(${failureCategory(slot.error)})`
+        : done.some((publish) => publish.slot.name === slot.name && publish.finalized.outcome !== "no_changes")
+          ? "published"
+          : "no_changes";
+    const statuses = slots.map((slot) => ({ name: slot.name, status: statusOf(slot) }));
+    const error = partiallyPublishedError(statuses);
+    const audit = { failureCategory: PARTIALLY_PUBLISHED_CATEGORY, diagnosticId: failures[0].audit.diagnosticId };
+    containerLog.warn(
+      { runId: run.runId, diagnosticId: audit.diagnosticId, statuses: error },
+      "coding run published some of its repositories; the others failed",
+    );
+    await this.options.store.completePartially(run.runId, {
+      mainResult: records.mainResult,
+      record: records.record,
+      extras: records.extras,
+      error,
+      audit,
+    });
+    for (const finalized of pushed) this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
+    this.terminal(latest, "failed", audit);
+    return { outcome: "failed", current: latest };
+  }
+
+  /**
+   * A run with several repositories stopped at its budget keeps each writable repository's changes so
+   * far, the way keepStoppedChanges keeps the default one's: each pushed as its usual draft (or
+   * branch) with the unfinished-work summary, nothing pushed onto a continued pull request that is no
+   * longer a draft. A repository that fails is left out, alone. Throws only when the run was stopped
+   * meanwhile.
+   */
+  private async keepStoppedChangesAll(
+    handle: JobHandle,
+    current: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    held: PreparedWorkspace | RunWorkspaces | null | undefined,
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    main?: {
+      finalized: Exclude<FinalizeResult, { outcome: "no_changes" }>;
+      result: CodingRunResult;
+      record: CodingRunRecord;
+    };
+    extras: ExtraPublishRecord[];
+    pushed: Exclude<FinalizeResult, { outcome: "no_changes" }>[];
+  }> {
+    let slots: RepositorySlot[];
+    try {
+      slots = await this.repositorySlots(current, held);
+      await this.collectWritable(handle, current, slots);
+    } catch (error) {
+      if (isNoLongerActive(error)) throw error;
+      containerLog.warn(
+        { runId: current.runId, reason: describeFailure(error) },
+        "could not collect the changes of a run stopped at its budget; it ends without them",
+      );
+      return { current, extras: [], pushed: [] };
+    }
+    const kept: RepositoryPublish[] = [];
+    for (const slot of slots) {
+      const reason = (error: unknown) => ({
+        runId: current.runId,
+        repository: slot.name,
+        reason: describeFailure(error),
+      });
+      if (slot.error !== undefined || !slot.workspace) {
+        containerLog.warn(reason(slot.error), "could not keep one repository's changes of a run stopped at its budget");
+        continue;
+      }
+      const view = slot.extra ? extraView(current, slot.extra) : current;
+      const continuesPullRequest = Boolean(view.rootCodingRunId) && hasPullRequestDescription(view);
+      try {
+        if (continuesPullRequest && !(await this.continuationStillDraft(view, slot.workspace, slot.extra?.name))) {
+          containerLog.info(
+            { runId: current.runId, repository: slot.name },
+            "a run stopped at its budget pushes nothing onto a pull request that is no longer a draft",
+          );
+          continue;
+        }
+        const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, kept, {
+          summary: (text) => budgetStoppedSummary(text, current.request),
+          keepDescription: continuesPullRequest,
+        });
+        if (publish.finalized.outcome !== "no_changes") kept.push(publish);
+      } catch (error) {
+        if (isNoLongerActive(error)) throw error;
+        containerLog.warn(reason(error), "could not keep one repository's changes of a run stopped at its budget");
+      }
+    }
+    const records = await this.publishRecords(current, output, kept, { budgetStopped: true });
+    const main = kept.find((publish) => !publish.slot.extra);
+    return {
+      current: main?.current ?? current,
+      ...(main && records.mainResult && records.main && records.main.outcome !== "no_changes"
+        ? { main: { finalized: records.main, result: records.mainResult, record: records.record } }
+        : {}),
+      extras: records.extras,
+      pushed: kept.flatMap((publish) => (publish.finalized.outcome === "no_changes" ? [] : [publish.finalized])),
+    };
+  }
+
+  /**
+   * The writable repositories of a run with several, in publish order: the default one, then each
+   * writable extra by position, each with its workspace (held, else recovered). A read repository is
+   * never collected. A repository whose workspace is gone fails alone (coding_workspace_lost).
+   */
+  private async repositorySlots(
+    run: ContainerRunSnapshot,
+    held: PreparedWorkspace | RunWorkspaces | null | undefined,
+  ): Promise<RepositorySlot[]> {
+    const vcs = this.options.vcs;
+    const slots: RepositorySlot[] = [];
+    const main = isRunWorkspaces(held) ? held.main : held;
+    try {
+      const workspace = main ?? (await vcs.recoverWorkspace(this.preflight(run, { launched: true })));
+      if (!workspace) throw new Error("coding_workspace_lost");
+      slots.push({ name: RESERVED_REPOSITORY_NAME, workspace });
+    } catch (error) {
+      slots.push({ name: RESERVED_REPOSITORY_NAME, error });
+    }
+    const writable = run.repositories.filter((extra) => extra.access === "write");
+    for (const extra of [...writable].sort((a, b) => a.position - b.position)) {
+      try {
+        let workspace = isRunWorkspaces(held) ? held.writable.get(extra.name) : undefined;
+        if (!workspace) {
+          const plan = this.extraPreflight(run, extra);
+          workspace = (plan.kind === "write" ? await vcs.recoverWorkspace(plan.input) : null) ?? undefined;
+        }
+        if (!workspace) throw new Error("coding_workspace_lost");
+        slots.push({ name: extra.name, extra, workspace });
+      } catch (error) {
+        slots.push({ name: extra.name, extra, error });
+      }
+    }
+    return slots;
+  }
+
+  /**
+   * Copies each writable repository's folder out of the finished job into its workspace (a failure
+   * is that repository's alone), then caps the entries of every collected folder together: the run's
+   * 100,000 entries cover all its repositories, whichever launcher collected them. Over the cap,
+   * nothing is published (vcs_workspace_entry_limit).
+   */
+  private async collectWritable(handle: JobHandle, run: ContainerRunSnapshot, slots: RepositorySlot[]): Promise<void> {
+    const collected: string[] = [];
+    for (const slot of slots) {
+      if (slot.error !== undefined || !slot.workspace) continue;
+      try {
+        await this.options.jobs.materializeWorkspace(handle, slot.workspace.workspacePath, slot.extra?.name);
+        await normalizeCollectedLockfiles(run.provider, slot.workspace.workspacePath);
+        collected.push(slot.workspace.workspacePath);
+      } catch (error) {
+        slot.error = error;
+      }
+    }
+    await (this.options.countEntries ?? countWorkspaceEntries)(collected);
+  }
+
+  /**
+   * Publishes one repository of a run with several: right before its push, the owner's access to just
+   * this repository is checked again and the run must still be active; then finalizeChanges with this
+   * repository's own description, title, Related section (the run's pull requests published so far
+   * before it) and merge order. Throws whatever stops it.
+   */
+  private async publishRepository(
+    collectedFor: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    slot: RepositorySlot & { workspace: PreparedWorkspace },
+    published: readonly RepositoryPublish[],
+    options: { summary: (text: string) => string; keepDescription?: boolean },
+  ): Promise<RepositoryPublish> {
+    const latest = await this.requireCurrent(collectedFor.runId);
+    // One row's denial fails only that row.
+    if (slot.extra) await this.authorizeExtras(latest, { inFlight: true, only: slot.extra.name });
+    else await this.authorizeRepository(latest, { inFlight: true });
+    this.requireActive(await this.requireCurrent(collectedFor.runId));
+    const view = slot.extra ? extraView(latest, slot.extra) : latest;
+    const note = pullRequestNoteFor(output, slot.name);
+    // An explicit order wins (the default repository's existing one first); otherwise the run's pull
+    // requests are numbered after the order it inherited, in publish order, never past the last step
+    // (99). So with an inherited order the default repository keeps it and the extras number from the
+    // step after its own (inherited 3: the default 3, the first extra 5), which may leave a gap.
+    // publishRecords keeps the number only when two or more repositories pushed; a lone push records
+    // soleMergeOrder, as a run with one repository would.
+    const pushedSoFar = published.filter((publish) => publish.finalized.outcome !== "no_changes");
+    const numbered = Math.min(MAX_MERGE_ORDER, (latest.mergeOrder ?? 0) + pushedSoFar.length + 1);
+    const mergeOrder = slot.extra
+      ? (note?.mergeOrder ?? numbered)
+      : (latest.mergeOrder ?? note?.mergeOrder ?? numbered);
+    const soleMergeOrder = slot.extra
+      ? (note?.mergeOrder ?? latest.mergeOrder ?? null)
+      : (latest.mergeOrder ?? note?.mergeOrder ?? null);
+    const agentOutput: CodingWorkerOutput = {
+      ...output,
+      summary: options.summary(note?.description ?? output.summary),
+      tag: note?.title ?? output.tag,
+    };
+    const descriptionState = options.keepDescription ? null : await this.descriptionStateFor(view, slot.extra?.name);
+    const alsoPublished = pushedSoFar.flatMap((publish) =>
+      publish.finalized.outcome === "pull_request_opened" || publish.finalized.outcome === "pull_request_updated"
+        ? [
+            {
+              repository: publish.finalized.repository,
+              number: publish.finalized.pullRequestNumber,
+              mergeOrder: publish.mergeOrder,
+            },
+          ]
+        : [],
+    );
+    const finalized = await this.options.vcs.finalizeChanges(slot.workspace, {
+      summary: agentOutput.summary,
+      tests: output.tests,
+      tag: agentOutput.tag,
+      ...(await this.pullRequestRegistryReport(latest)),
+      // The dependency cache restores the default repository's folders only.
+      ...(slot.extra ? {} : restoredDependenciesFor(output)),
+      ...(await this.issueSourceFor(view)),
+      ...(await this.relatedFor(latest, alsoPublished, { repository: view.repository, mergeOrder })),
+      ...(descriptionState && "baseline" in descriptionState
+        ? { description: { baseline: descriptionState.baseline } }
+        : {}),
+    });
+    return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
+  }
+
+  /**
+   * What a run with several repositories records: the default repository's result and columns on the
+   * run, each other one's on its row. A repository with nothing to publish records its no_changes
+   * result; one that failed records nothing. A budget stop records a pushed repository whose summary
+   * or tests cannot be recorded with its push alone (as keepStoppedChanges does).
+   */
+  private async publishRecords(
+    run: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    done: readonly RepositoryPublish[],
+    options: { budgetStopped: boolean },
+  ): Promise<{
+    mainResult: CodingRunResult | null;
+    main?: FinalizeResult;
+    record: CodingRunRecord;
+    extras: ExtraPublishRecord[];
+  }> {
+    let mainResult: CodingRunResult | null = null;
+    let main: FinalizeResult | undefined;
+    let record: CodingRunRecord = dependencyCacheRecord(output);
+    const extras: ExtraPublishRecord[] = [];
+    // Numbered only when the run pushed two or more repositories; a lone push keeps a single run's order.
+    const several = done.filter((publish) => publish.finalized.outcome !== "no_changes").length >= 2;
+    for (const publish of done) {
+      const { finalized, view, slot } = publish;
+      const mergeOrder = several ? publish.mergeOrder : publish.soleMergeOrder;
+      const pushed = finalized.outcome !== "no_changes";
+      const name = slot.extra?.name;
+      const description = !pushed
+        ? await this.refreshDescriptionInTime(view, publish.agentOutput, slot.workspace, name)
+        : await this.recordDescription(view, publish.descriptionState, descriptionOutcomeOf(finalized), name).catch(
+            (): CodingRunRecord => ({}),
+          );
+      if (slot.extra && pushed && !view.rootCodingRunId && run.rootCodingRunId) {
+        await this.recordFirstExtraDescription(run, slot.extra.name, description);
+      }
+      const result = this.publishedResult(publish, options.budgetStopped);
+      if (!slot.extra) {
+        mainResult = result;
+        main = finalized;
+        record = {
+          ...record,
+          ...(pushed ? pushedRecord(finalized) : {}),
+          ...description,
+          ...(pushed && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
+        };
+        continue;
+      }
+      extras.push({
+        id: slot.extra.id,
+        name: slot.extra.name,
+        result,
+        pullRequestNumber:
+          finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+            ? finalized.pullRequestNumber
+            : null,
+        resultBranch: finalized.outcome === "branch_pushed" ? finalized.headRef : null,
+        baseSha: pushed ? finalized.baseCommit : null,
+        mergeOrder: pushed ? mergeOrder : null,
+        ...(description.prDescriptionOutcome ? { prDescriptionOutcome: description.prDescriptionOutcome } : {}),
+        ...(description.prDescriptionSha256 && description.prDescriptionRunId
+          ? { prDescriptionSha256: description.prDescriptionSha256, prDescriptionRunId: description.prDescriptionRunId }
+          : {}),
+      });
+    }
+    return { mainResult, ...(main ? { main } : {}), record, extras };
+  }
+
+  /** One repository's result; a budget stop's falls back to its push alone when its summary or tests cannot be recorded. */
+  private publishedResult(publish: RepositoryPublish, budgetStopped: boolean): CodingRunResult {
+    const { finalized, view, agentOutput } = publish;
+    try {
+      return this.resultFor(agentOutput, view, finalized.outcome, finalized);
+    } catch (error) {
+      if (!budgetStopped) throw error;
+      containerLog.warn(
+        { runId: view.runId, reason: describeFailure(error) },
+        "could not record the worker's summary and tests of a budget-stopped run; recording its push alone",
+      );
+      return this.resultFor(
+        {
+          ...agentOutput,
+          summary: budgetStoppedSummary(WORKER_BUDGET_EXHAUSTED_SUMMARY, view.request),
+          tests: [],
+          tag: undefined,
+        },
+        view,
+        finalized.outcome,
+        finalized,
+      );
+    }
+  }
+
+  /**
    * The pull request description a continuation run is about to replace, for
    * its task. Undefined for a fresh run or when it cannot be loaded: the run
    * goes ahead without the note.
@@ -2184,28 +3170,35 @@ export class ContainerExecutor implements Executor {
    */
   /**
    * Whether a continuation's pull request is still a draft: the host's answer
-   * when it has one, else the root run's record of wardby marking it ready.
-   * A failed record lookup counts as not a draft (nothing unfinished is pushed).
+   * when it has one, else the root run's record of wardby marking it ready
+   * (`name`: an extra repository's pull request, recorded on the root's row of
+   * that name). A failed record lookup counts as not a draft (nothing
+   * unfinished is pushed).
    */
-  private async continuationStillDraft(run: ContainerRunSnapshot, workspace: PreparedWorkspace): Promise<boolean> {
+  private async continuationStillDraft(
+    run: ContainerRunSnapshot,
+    workspace: PreparedWorkspace,
+    name?: string,
+  ): Promise<boolean> {
     const draft = await this.options.vcs.continuationPullRequestDraft?.(workspace).catch(() => undefined);
     if (draft !== undefined) return draft;
     const store = this.options.store;
     if (!run.rootCodingRunId || !store.pullRequestMarkedReady) return true;
     try {
-      return !(await store.pullRequestMarkedReady(run.rootCodingRunId));
+      return !(await store.pullRequestMarkedReady(run.rootCodingRunId, ...(name !== undefined ? [name] : [])));
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not read whether the pull request was marked ready");
       return false;
     }
   }
 
-  private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
+  /** `name`: an extra repository's pull request, whose baseline is the root run's row of that name. */
+  private async descriptionStateFor(run: ContainerRunSnapshot, name?: string): Promise<DescriptionState> {
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
     let stored: StoredDescriptionBaseline;
     try {
-      stored = await store.pullRequestDescriptionBaseline(run.rootCodingRunId);
+      stored = await store.pullRequestDescriptionBaseline(run.rootCodingRunId, ...(name !== undefined ? [name] : []));
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not load the pull request description baseline");
       return { failed: true };
@@ -2289,12 +3282,14 @@ export class ContainerExecutor implements Executor {
   /**
    * The run's description columns for store.complete. A fresh run that wrote
    * its PR records the hash on its own (root) row; a fix round that wrote or
-   * kept wardby's text compare-and-sets the root's hash. Never throws.
+   * kept wardby's text compare-and-sets the root's hash. Never throws. With
+   * `name` (an extra repository), the root's row of that name holds the hash.
    */
   private async recordDescription(
     run: ContainerRunSnapshot,
     state: DescriptionState,
     outcome: DescriptionWriteOutcome | undefined,
+    name?: string,
   ): Promise<CodingRunRecord> {
     if (!hasPullRequestDescription(run)) return {};
     if (!run.rootCodingRunId) {
@@ -2317,6 +3312,7 @@ export class ContainerExecutor implements Executor {
         expectedSha256: state.baseline.recordedSha256,
         sha256: outcome.sha256,
         agentTextRunId: outcome.agentTextRunId,
+        ...(name !== undefined ? { name } : {}),
       });
       // A lost race leaves the root's hash as the other write left it: the next
       // round sees a mismatch and falls back to a comment, the safe direction.
@@ -2334,6 +3330,41 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * An extra repository whose first pull request a continuation opened: its description hash is
+   * recorded on the root run's row of that name too (only while that row records none), where every
+   * later round reads its baseline and mark-ready keeps its state. Never throws.
+   */
+  private async recordFirstExtraDescription(
+    run: ContainerRunSnapshot,
+    name: string,
+    description: CodingRunRecord,
+  ): Promise<void> {
+    const store = this.options.store;
+    const { prDescriptionSha256: sha256, prDescriptionRunId: agentTextRunId } = description;
+    if (!run.rootCodingRunId || !sha256 || !agentTextRunId || !store.recordPullRequestDescription) return;
+    try {
+      const won = await store.recordPullRequestDescription({
+        rootRunId: run.rootCodingRunId,
+        expectedSha256: null,
+        sha256,
+        agentTextRunId,
+        name,
+      });
+      if (!won) {
+        containerLog.warn(
+          { runId: run.runId, rootRunId: run.rootCodingRunId, repository: name },
+          "the root run already records a description for this repository's pull request; not recorded",
+        );
+      }
+    } catch (err) {
+      containerLog.warn(
+        { err, runId: run.runId, repository: name },
+        "could not record the pull request description hash",
+      );
+    }
+  }
+
+  /**
    * refreshDescriptionWithoutPush, capped at DESCRIPTION_REFRESH_TIMEOUT_MS so a
    * slow host cannot hold up store.complete; a timeout is skipped:error.
    */
@@ -2341,6 +3372,7 @@ export class ContainerExecutor implements Executor {
     run: ContainerRunSnapshot,
     output: CodingWorkerOutput,
     existingWorkspace: PreparedWorkspace | null | undefined,
+    name?: string,
   ): Promise<CodingRunRecord> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<CodingRunRecord>((resolve) => {
@@ -2353,7 +3385,7 @@ export class ContainerExecutor implements Executor {
       }, DESCRIPTION_REFRESH_TIMEOUT_MS);
     });
     try {
-      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace), timedOut]);
+      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace, name), timedOut]);
     } finally {
       clearTimeout(timer);
     }
@@ -2361,17 +3393,41 @@ export class ContainerExecutor implements Executor {
 
   /**
    * A fix round that changed nothing still re-derives its PR description (no
-   * push). Never throws: any failure is recorded as skipped:error.
+   * push). Never throws: any failure is recorded as skipped:error. `name`: an
+   * extra repository's pull request (`run` as extraView sees it, with its own
+   * workspace), checked for access by that row alone.
    */
   private async refreshDescriptionWithoutPush(
     run: ContainerRunSnapshot,
     output: CodingWorkerOutput,
     existingWorkspace: PreparedWorkspace | null | undefined,
+    name?: string,
   ): Promise<CodingRunRecord> {
     const vcs = this.options.vcs;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !vcs.refreshPullRequestDescription) return {};
-    const state = await this.descriptionStateFor(run);
-    if (!state || "failed" in state) return this.recordDescription(run, state, undefined);
+    const state = await this.descriptionStateFor(run, name);
+    if (!state || "failed" in state) return this.recordDescription(run, state, undefined, name);
+    if (name !== undefined) {
+      try {
+        if (!existingWorkspace) throw new Error("coding_workspace_lost");
+        await this.authorizeExtras(await this.requireCurrent(run.runId), { inFlight: true, only: name });
+        const outcome = await vcs.refreshPullRequestDescription(existingWorkspace, {
+          summary: output.summary,
+          tests: output.tests,
+          tag: output.tag,
+          ...(await this.pullRequestRegistryReport(run)),
+          ...(await this.issueSourceFor(run)),
+          description: { baseline: state.baseline },
+        });
+        return await this.recordDescription(run, state, outcome, name);
+      } catch (err) {
+        containerLog.warn(
+          { err, runId: run.runId, repository: name },
+          "could not refresh the pull request description",
+        );
+        return { prDescriptionOutcome: "skipped:error" };
+      }
+    }
     try {
       const input = this.preflightForCleanup(run);
       // Only the pull request is needed: a run another process launched has no workspace here.
@@ -2549,6 +3605,20 @@ export class ContainerExecutor implements Executor {
     });
   }
 
+  /** The commit a ref names (Executor.resolveCodingRepositoryRef). */
+  async resolveCodingRepositoryRef(input: {
+    repository: string;
+    ref: string;
+    access: "read" | "write";
+  }): Promise<string | null> {
+    return this.options.vcs.resolveRef ? this.options.vcs.resolveRef(input) : null;
+  }
+
+  /** One extra repository through the repository-access gate (Executor.authorizeCodingRepository). */
+  authorizeCodingRepository(input: AuthorizeUseInput): Promise<RepoAccessDecision> {
+    return this.options.repoAccess.authorizeUse(input);
+  }
+
   /** The job launcher decides (Kubernetes and Docker start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
@@ -2647,14 +3717,27 @@ export class ContainerExecutor implements Executor {
   private async fitsCluster(run: ContainerRunSnapshot): Promise<boolean> {
     const { jobs, store } = this.options;
     if (!jobs.hasCapacityFor || !store.markQueued) return true;
-    const fits = await jobs.hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT)).catch(() => true);
+    // Asked before any workspace is prepared: the probe counts resources, which repositories don't change.
+    const fits = await jobs
+      .hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }))
+      .catch(() => true);
     if (fits) return true;
     await store.markQueued(run.runId);
     this.emit({ stage: "queued", runId: run.runId });
     return false;
   }
 
-  private jobSpec(run: ContainerRunSnapshot, inputArtifact: string, options: { mcpTools?: boolean } = {}): JobSpec {
+  /**
+   * The run's job. `workspaces` holds its prepared extras (null for a run with none): each extra's
+   * host path is the VCS's own workspacePath for it, never rebuilt here. Only a capacity probe, asked
+   * before anything is prepared, goes without them, and its spec then lists no repositories.
+   */
+  private jobSpec(
+    run: ContainerRunSnapshot,
+    inputArtifact: string,
+    workspaces: RunWorkspaces | null,
+    options: { mcpTools?: boolean; capacityProbe?: boolean } = {},
+  ): JobSpec {
     const provider = run.provider === "claude-code" ? "claude-code" : "codex";
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
@@ -2701,6 +3784,9 @@ export class ContainerExecutor implements Executor {
       labels: {},
       collectExclude: normalizeCollectExclusions(run.collectExclude),
       ...(services.length > 0 ? { services } : {}),
+      ...(run.repositories.length > 0 && !options.capacityProbe
+        ? { repositories: jobRepositories(run.repositories, workspaces) }
+        : {}),
     };
   }
 
@@ -2710,7 +3796,8 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspace: PreparedWorkspace): Promise<string> {
+  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspaces: RunWorkspaces): Promise<string> {
+    const workspace = workspaces.main;
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
@@ -2720,7 +3807,22 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
-    const withCommit = withBaseCommit(run.task, workspace.baseCommit);
+    // Each extra at the commit it was prepared at: the same values go into input.json's repositories
+    // and, in full, into the task text (the worker's own note shortens them).
+    const extras = run.repositories.map((r) => ({
+      name: r.name,
+      repository: r.repository,
+      access: r.access,
+      commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+    }));
+    const withBase = withBaseCommit(run.task, workspace.baseCommit);
+    const withCommit = withExtraRepositories(withBase, extras);
+    if (extras.length > 0 && withCommit === withBase) {
+      containerLog.warn(
+        { event: "coding.extra_commits_omitted", runId: run.runId },
+        "the coding task left no room for the extra repositories' commits",
+      );
+    }
     const description = await this.currentDescriptionText(run);
     // The ticket first, then the description: each is cut to what's left of the task's budget.
     // The target-branch merge note (conflicts to resolve) comes before the ticket and the description.
@@ -2732,7 +3834,7 @@ export class ContainerExecutor implements Executor {
       withLinkedIssue(withOriginal, await this.linkedIssueFor(run, description)),
       description,
     );
-    if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
+    if (withBase === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },
         "the coding task left no room for the base commit line",
@@ -2787,6 +3889,18 @@ export class ContainerExecutor implements Executor {
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
         ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
+        // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
+        ...(run.repositories.length > 0
+          ? {
+              repositories: extras.map((r) => ({
+                name: r.name,
+                path: `/repos/${r.name}`,
+                access: r.access,
+                repository: r.repository,
+                commit: r.commit,
+              })),
+            }
+          : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.
@@ -3158,6 +4272,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
   ["coding_services_unsupported", "preflight"],
+  // An extra repository dispatch never resolved to a commit: refused before anything is cloned.
+  [CODING_REPOSITORY_UNRESOLVED_ERROR, "preflight"],
   // Claude Code's tool runner failed to start or never became ready: the same category on both launchers.
   ["docker_tool_runner_", "job"],
   ["kubernetes_tool_runner_", "job"],

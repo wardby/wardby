@@ -19,6 +19,8 @@ import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
+import { syncMergeOrderChecks } from "../../core/merge-order-check.js";
+import { changeHasExtraPullRequest, updateRelatedPullRequests } from "../../core/related-pull-requests.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
@@ -72,7 +74,27 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
         .catch((err: unknown) =>
           compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
         );
+      // A top-level coding run of a change with pull requests in several repositories (#537), its
+      // root or a follow-up that continued it, is its own request set: no lead ends after it to list
+      // them in each other's Related sections or to post their merge order checks. Both never throw.
+      void Promise.resolve()
+        .then(async () => {
+          const { db, hosts, issueTrackers } = deps();
+          if (!(await ownsPullRequestSet(db, runId))) return;
+          await updateRelatedPullRequests(db, { id: runId }, hosts, issueTrackers);
+          await syncMergeOrderChecks({ db, hosts }, runId);
+        })
+        .catch((err: unknown) =>
+          compositionLog.warn({ err, runId }, "could not update the related pull requests of this run"),
+        );
     });
+}
+
+/** A top-level coding run whose change (its root and the root's continuations) opened pull requests in extra repositories (#537). */
+async function ownsPullRequestSet(db: ReReviewDeps["db"], runId: string): Promise<boolean> {
+  const run = await db.run.findUnique({ where: { id: runId }, select: { parentRunId: true } });
+  if (!run || run.parentRunId !== null) return false;
+  return changeHasExtraPullRequest(db, runId);
 }
 
 export interface ConfiguredExecutorOptions {

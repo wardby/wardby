@@ -25,6 +25,37 @@ export interface VcsPrepareInput {
    * fact.
    */
   continuation?: { rootRunId: string };
+  /**
+   * A writable extra repository of a run with several: prepared at
+   * `<run>/repos/<name>/{workspace,git}` beside the run's default workspace,
+   * which must already exist. Unset for the default repository.
+   */
+  slot?: { name: string };
+  /**
+   * The run whose `wardby/run-<id>` names the branch and pull request when it
+   * is not this run: a writable extra in a continuation that has no branch
+   * yet (continuation unset; headRef is created off baseRef). With
+   * continuation it must equal continuation.rootRunId.
+   */
+  branchRunId?: string;
+}
+
+/** One repository's files at one commit, for a run to read: no git metadata, never collected. */
+export interface ReadOnlyCopyInput {
+  runId: string;
+  /** The repository's name in the run (its folder under /repos/). */
+  name: string;
+  repository: string;
+  /** The full commit SHA dispatch resolved. */
+  commit: string;
+}
+
+export interface PreparedReadOnlyCopy {
+  runId: string;
+  name: string;
+  repository: string;
+  commit: string;
+  workspacePath: string;
 }
 
 /** Trusted paths are returned by the provider, never accepted from worker output. */
@@ -47,6 +78,10 @@ export interface PreparedWorkspace {
   protectedPaths: string[];
   collectExclude: string[];
   continuation?: { rootRunId: string };
+  /** See VcsPrepareInput.slot. */
+  slot?: { name: string };
+  /** See VcsPrepareInput.branchRunId: the publish identity when it is not this run's own. */
+  branchRunId?: string;
   /**
    * Set when prepareWorkspace merged the pull request's current target branch
    * into a continuation's workspace (it was behind): the target branch, the
@@ -155,6 +190,9 @@ export interface VcsProvider {
   recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null>;
   finalizeChanges(workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
+  /** A read-only copy of one commit beside the run's default workspace (which must already exist). */
+  prepareReadOnlyCopy?(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy>;
+  cleanupReadOnlyCopy?(copy: PreparedReadOnlyCopy): Promise<void>;
   /**
    * Best-effort "wardby is working on this" signal for a continuation
    * a no-op when `workspace.continuation` is unset, since a fresh run has
@@ -201,6 +239,8 @@ export interface VcsProvider {
    * provider (or test double) without it gives runs no services.
    */
   readRepositoryFile?(input: RepositoryFileInput): Promise<string | null>;
+  /** The commit a branch, tag or SHA names, or null when it does not exist. */
+  resolveRef?(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null>;
   /**
    * Re-derive a continuation's pull request description without pushing (a fix
    * round that made no changes). Undefined when there is nothing to refresh
@@ -240,9 +280,10 @@ export interface ContinuationFinishedDetails {
   conflictMarkersSentence?: string;
   /**
    * Set with `budget_exhausted` when the run's changes so far were pushed anyway
-   * (the pull request it opened or continued, or a branch with no number).
+   * (the pull request it opened or continued, or a branch with no number). `repository` is set when
+   * that pull request is in another of the run's repositories than the one being notified.
    */
-  changesPushed?: { pullRequestNumber?: number };
+  changesPushed?: { pullRequestNumber?: number; repository?: string };
 }
 
 /** What wardby last wrote into a pull request description (control-plane records). */

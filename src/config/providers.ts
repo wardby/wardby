@@ -6,6 +6,7 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
+import { MAX_RUN_REPOSITORIES_IN_INPUT } from "../coding/protocol.js";
 import {
   GVISOR_RUNTIME_CLASS,
   KUBERNETES_PLATFORMS,
@@ -584,10 +585,23 @@ export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
+  // Validated here so a bad CODING_MAX_RUN_REPOSITORIES stops start-up, not one link_repository call.
+  loadCodingRunRepositoryLimit(env);
   return {
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
     queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,
   };
+}
+
+/** CODING_MAX_RUN_REPOSITORIES: the default repository plus the extras one coding run may have (#537), at most 17. */
+export function loadCodingRunRepositoryLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const limit = optionalPositiveInteger(env.CODING_MAX_RUN_REPOSITORIES, "CODING_MAX_RUN_REPOSITORIES") ?? 5;
+  if (limit > MAX_RUN_REPOSITORIES_IN_INPUT + 1) {
+    throw new Error(
+      `CODING_MAX_RUN_REPOSITORIES must be at most ${MAX_RUN_REPOSITORIES_IN_INPUT + 1} (the default repository plus ${MAX_RUN_REPOSITORIES_IN_INPUT} extras).`,
+    );
+  }
+  return limit;
 }
 
 const DNS_1123_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;

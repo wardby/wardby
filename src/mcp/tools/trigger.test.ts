@@ -567,6 +567,124 @@ describe("trigger_agent", () => {
         expect(JSON.stringify(result)).toContain("only valid for coding agents");
         await native.client.close();
       });
+
+      describe("repositories (extra repositories for the run)", () => {
+        const SHA = "d".repeat(40);
+        /** A coding agent with one read link "base"; the executor authorizes and resolves it. */
+        async function withReadLink(principalId = "owner", agent = coding(false), grants: FakeGrantSeed[] = []) {
+          const db = fakeDb([{ ...agent, model: "gpt-5.6-luna" } as FakeAgentRow], grants) as any;
+          const listLinks = db.agentRepository.findMany;
+          const link = {
+            id: "link-base",
+            name: "base",
+            provider: "github",
+            repository: "acme/base",
+            access: "read",
+            baseRef: null,
+            ref: "main",
+            refFromFile: null,
+            inDefaultSet: false,
+            authorizedVia: "host_permission",
+            createdAt: new Date(0),
+          };
+          db.agentRepository.findMany = async (args: { where: Record<string, unknown> }) =>
+            args.where.OR !== undefined || args.where.id !== undefined ? [link] : listLinks(args);
+          const rows: unknown[] = [];
+          db.codingRunRepository = { createMany: async ({ data }: { data: unknown[] }) => void rows.push(...data) };
+          const executor = {
+            start: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+            authorizeCodingRepository: vi.fn(async () => ({ ok: true })),
+            readCodingRepositoryFile: vi.fn(async () => null),
+            resolveCodingRepositoryRef: vi.fn(async () => SHA),
+          };
+          const providers = { executor } as unknown as import("../../providers/index.js").ProviderRegistry;
+          const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+          mcp.setFixedContext({ ...fakeCtx(db, principalId, ["runs:trigger"], false), providers });
+          registerTriggerTool(mcp);
+          return { db, rows, executor, client: await connectClient(mcp) };
+        }
+
+        it("passes repositories to dispatch, which records the named link", async () => {
+          const { rows, client } = await withReadLink();
+          expect((await call(client, { repositories: ["base"] })).isError).toBeFalsy();
+          expect(rows).toEqual([
+            expect.objectContaining({
+              position: 0,
+              name: "base",
+              access: "read",
+              requestedRef: "main",
+              resolvedSha: SHA,
+            }),
+          ]);
+          await client.close();
+        });
+
+        it("repositories: [] gives the run no extra repositories", async () => {
+          const { rows, executor, client } = await withReadLink();
+          expect((await call(client, { repositories: [] })).isError).toBeFalsy();
+          expect(rows).toEqual([]);
+          expect(executor.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+          await client.close();
+        });
+
+        it("maps a set refusal to a 400 with its message, and starts no run", async () => {
+          const { db, client } = await withReadLink();
+          const result = await call(client, { repositories: ["nope"] });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain(
+            "repository_not_listed: name one of this coding agent's repository links: base.",
+          );
+          expect(db.runs.size).toBe(0);
+          await client.close();
+        });
+
+        it("maps a ref refusal to a 400 with its message, and starts no run", async () => {
+          const { db, executor, client } = await withReadLink();
+          executor.resolveCodingRepositoryRef.mockResolvedValueOnce(null as never);
+          const result = await call(client, { repositories: ["base"] });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain(
+            'repository_ref_unreadable: link \\"base\\" names ref main and it does not exist.',
+          );
+          expect(db.runs.size).toBe(0);
+          await client.close();
+        });
+
+        it("maps a deployment that cannot resolve extras to a 400 coding_repositories_unsupported", async () => {
+          const { db, executor, client } = await withReadLink();
+          const bare = executor as Partial<typeof executor>;
+          delete bare.authorizeCodingRepository;
+          delete bare.readCodingRepositoryFile;
+          delete bare.resolveCodingRepositoryRef;
+          const result = await call(client, { repositories: ["base"] });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain(
+            "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+          );
+          expect(JSON.stringify(result)).not.toMatch(/internal/i);
+          expect(db.runs.size).toBe(0);
+          await client.close();
+        });
+
+        it("a non-owner may pass repositories only when the owner opted in", async () => {
+          const closed = await withReadLink("g", coding(false), [grant("execute")]);
+          const refused = await call(closed.client, { repositories: ["base"] });
+          expect(refused.isError).toBe(true);
+          expect(JSON.stringify(refused)).toMatch(/allowWebhookTaskOverride/);
+          await closed.client.close();
+        });
+
+        it("refuses repositories on a native agent", async () => {
+          const native = await as("owner", { id: "a1", name: "n", ownerId: "owner" }, []);
+          const result = await call(native.client, { repositories: ["base"] });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain(
+            "Task, baseRef, repository and repositories overrides are only valid for coding agents.",
+          );
+          await native.client.close();
+        });
+      });
     });
 
     it("M8: the stdio operator is not the owner for task overrides either", async () => {

@@ -1,7 +1,19 @@
 import { atom, read, update } from "claude-code";
 import type { Register, UiCopyArgs } from "claude-code";
 
-import type { Filter, Older, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps, TextField } from "../types";
+import type {
+  Filter,
+  Older,
+  OpenStep,
+  Poll,
+  Resume,
+  RunDetail,
+  RunRepository,
+  RunRow,
+  Step,
+  Steps,
+  TextField,
+} from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -533,6 +545,50 @@ function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
   };
 }
 
+/** get_run's repositories (a multi-repository run); an older server, or a single-repository run, sends none. */
+function toRepositories(value: unknown): RunRepository[] {
+  if (!Array.isArray(value)) return [];
+  const found: RunRepository[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const repository = str(r.repository);
+    if (!repository) continue;
+    found.push({
+      name: str(r.name) ?? repository,
+      access: r.access === "write" ? "write" : "read",
+      repository,
+      requestedRef: str(r.requestedRef),
+      resolvedSha: str(r.resolvedSha),
+      pullRequestNumber: typeof r.pullRequestNumber === "number" ? r.pullRequestNumber : null,
+      pullRequestUrl: str(r.pullRequestUrl),
+      resultBranch: str(r.resultBranch),
+    });
+  }
+  return found;
+}
+
+/** The repositories of a multi-repository run other than the default one, which the run's own fields describe. */
+function extraRepositories(info: RunDetail): RunRepository[] {
+  return info.repositories.filter((r) => r.repository !== info.repository);
+}
+
+/** An https clone URL for a repository, or null when its host is not known from its name or pull request link. */
+function cloneUrlOfRepository(r: RunRepository): string | null {
+  const fromPr = cloneUrlOf(r.pullRequestUrl);
+  if (fromPr) return fromPr;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(r.repository)
+    ? `https://github.com/${r.repository}.git`
+    : null;
+}
+
+/** What to check out for an extra repository: its branch (writable) or its commit (read), as `name branch` or `name @ sha`. */
+function checkoutLine(r: RunRepository): string {
+  if (r.access === "write") return `${r.repository} ${r.resultBranch ?? r.requestedRef ?? ""}`.trim();
+  const at = r.resolvedSha ? r.resolvedSha.slice(0, 7) : r.requestedRef;
+  return at ? `${r.repository} @ ${at}` : r.repository;
+}
+
 function toDetail(run: Record<string, unknown>): RunDetail {
   const coding = (run.codingResult ?? {}) as Record<string, unknown>;
   const lastStep = (run.lastStep ?? {}) as Record<string, unknown>;
@@ -569,6 +625,7 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     repository: str(coding.repository),
     pullRequestUrl: str(coding.pullRequestUrl),
     resultBranch: str(run.resultBranch),
+    repositories: toRepositories(run.repositories),
     services: Array.isArray(run.services) ? run.services.map(String) : [],
     serviceStates,
     // The model the run was billed at (its catalog entry), when the server recorded one.
@@ -2113,6 +2170,11 @@ export const register: Register = (on, options) => {
       const prOutcome = open.outcomes.find((o) => o.kind === "pull_request" && o.url);
       const prUrl = shown?.pullRequestUrl ?? prOutcome?.url ?? null;
       const prNumber = prUrl ? /\/pull\/(\d+)/.exec(prUrl)?.[1] : null;
+      // A multi-repository run's other pull requests, one line each (those already drawn from the outcomes or as the default's are skipped).
+      const drawnUrls = new Set([...open.outcomes.map((o) => o.url), shown?.pullRequestUrl]);
+      const extraPrs = shown
+        ? extraRepositories(shown).filter((r) => r.pullRequestUrl && !drawnUrls.has(r.pullRequestUrl))
+        : [];
       // One dim line under the header: where, which model, how long, and when it finished or was last active.
       const when = open.finishedAt
         ? `finished ${ago(open.finishedAt, now)} ago`
@@ -2237,7 +2299,9 @@ export const register: Register = (on, options) => {
                     : null}
               </>,
             )}
-          {(open.outcomes.length > 0 || (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
+          {(open.outcomes.length > 0 ||
+            extraPrs.length > 0 ||
+            (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
             card(
               "produced-card",
               "produced",
@@ -2276,6 +2340,15 @@ export const register: Register = (on, options) => {
                     />
                   </Box>
                 )}
+                {extraPrs.map((r, i) => (
+                  <Box key={`extra-pr-${i}`} gap={1}>
+                    {pill("PR", "blue")}
+                    <Link
+                      href={r.pullRequestUrl as string}
+                      label={`Pull request${r.pullRequestNumber ? ` #${r.pullRequestNumber}` : ""} in ${r.repository}`}
+                    />
+                  </Box>
+                ))}
                 {!shown?.pullRequestUrl && shown?.resultBranch && <Text>Pushed branch {shown.resultBranch}</Text>}
                 {shown?.outcome && !shown.pullRequestUrl && !shown.resultBranch && (
                   <Text dimColor>{shown.outcome.replaceAll("_", " ")}</Text>
@@ -2460,6 +2533,20 @@ export const register: Register = (on, options) => {
                               ? "Or edit the path above and press Continue locally."
                               : "Clone the repository there, or edit the path above and press Continue locally."}
                           </Text>
+                        </Box>
+                      )}
+                      {extraRepositories(shown).length > 0 && (
+                        <Box flexDirection="column">
+                          <Text>Also in this run (check each out yourself):</Text>
+                          {extraRepositories(shown).map((r, i) => {
+                            const url = cloneUrlOfRepository(r);
+                            return (
+                              <Box key={`extra-repo-${i}`} flexDirection="column">
+                                <Text mono>{checkoutLine(r)}</Text>
+                                {url && <Text mono>{`git clone ${url}`}</Text>}
+                              </Box>
+                            );
+                          })}
                         </Box>
                       )}
                       {state?.phase === "done" && state.cleanup && (

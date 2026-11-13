@@ -320,6 +320,38 @@ describe("reReviewOnCodingRunTerminal", () => {
     release.mockRestore();
   });
 
+  it("refreshes the related pull requests and merge order checks when a top-level follow-up of a multi-repository change ends", async () => {
+    const review = await import("../../core/review-fix.js");
+    const events = await import("../../core/host-events.js");
+    const related = await import("../../core/related-pull-requests.js");
+    const order = await import("../../core/merge-order-check.js");
+    const reReview = vi.spyOn(review, "reReviewAfterNoChangeFix").mockResolvedValue(undefined);
+    const release = vi.spyOn(events, "startDeferredForRequest").mockResolvedValue(undefined);
+    const update = vi.spyOn(related, "updateRelatedPullRequests").mockResolvedValue(undefined);
+    const sync = vi.spyOn(order, "syncMergeOrderChecks").mockResolvedValue(undefined);
+    // A directly triggered continuation (no parent) whose own rows recorded no pull request: its
+    // root's extra opened one, so the change is still a set of several.
+    const findFirst = vi.fn(async () => ({ id: "row" }));
+    const changeDb = {
+      run: { findUnique: vi.fn(async () => ({ parentRunId: null })) },
+      codingRun: { findUnique: vi.fn(async () => ({ rootCodingRunId: "root" })) },
+      codingRunRepository: { findFirst },
+    };
+    const deps = { db: changeDb, executor: native, hosts: {}, repoAccess: {} } as never;
+    reReviewOnCodingRunTerminal(() => deps)("cont");
+    await vi.waitFor(() => expect(sync).toHaveBeenCalledWith({ db: changeDb, hosts: {} }, "cont"));
+    expect(update).toHaveBeenCalledWith(changeDb, { id: "cont" }, {}, undefined);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        access: "write",
+        pullRequestNumber: { not: null },
+        codingRun: { OR: [{ runId: "root" }, { rootCodingRunId: "root" }] },
+      },
+      select: { id: true },
+    });
+    for (const spy of [reReview, release, update, sync]) spy.mockRestore();
+  });
+
   it("runs both outside the caller's async context, so a coding run finishing inside its lead's step can start a review", async () => {
     // A stand-in for the DBOS step context a delegated coding run finishes in.
     const step = new AsyncLocalStorage<string>();

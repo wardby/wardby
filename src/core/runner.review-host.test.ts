@@ -178,10 +178,8 @@ function harness(opts: {
         return opts.links.filter((l) => l.agentId === where.agentId);
       },
       findUnique: async ({ where }: any) => {
-        const key = where.agentId_provider_repository;
-        const link = opts.links.find(
-          (l) => l.agentId === key.agentId && l.provider === key.provider && l.repository === key.repository,
-        );
+        const key = where.agentId_name;
+        const link = opts.links.find((l) => l.agentId === key.agentId && `${l.provider}:${l.repository}` === key.name);
         return link ? { ...link, agent: { ownerId: agent.ownerId } } : null;
       },
     },

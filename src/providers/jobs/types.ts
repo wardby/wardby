@@ -16,6 +16,18 @@ export interface JobResourceLimits {
 import type { CollectExclusions } from "../../coding/collect-exclude.js";
 import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 
+/**
+ * One of a run's extra repositories (#537): mounted at /repos/<name> wherever /workspace is (the Codex
+ * worker, Claude Code's tool runner; never Claude's agent), read-only for a read link. `hostPath` is
+ * where the VCS prepared its files (PreparedWorkspace / PreparedReadOnlyCopy.workspacePath); the
+ * launcher checks it is the run's own repos/<name>/workspace. Only "write" ones are ever collected.
+ */
+export interface JobRepositoryMount {
+  name: string;
+  access: "read" | "write";
+  hostPath: string;
+}
+
 export interface JobSpec {
   kind: "coding-agent";
   runId: string;
@@ -57,6 +69,11 @@ export interface JobSpec {
    * is unchanged.
    */
   services?: ResolvedCodingService[];
+  /**
+   * The run's extra repositories, in the run's order; absent for a run with none (never an empty
+   * list), so such a spec, and its hash, is unchanged.
+   */
+  repositories?: JobRepositoryMount[];
 }
 
 /** Opaque provider reference. Callers persist both fields exactly as given. */
@@ -158,7 +175,11 @@ export interface JobLauncher {
 
 /** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
 export interface WorkspaceJobLauncher extends JobLauncher {
-  materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
+  /**
+   * Copies the job's /workspace to `destination` (the run's default workspace), or with `name` that
+   * writable extra repository's /repos/<name> to its own workspace. A read repository is never collected.
+   */
+  materializeWorkspace: (handle: JobHandle, destination: string, name?: string) => Promise<void>;
   /**
    * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes and Docker, for
    * Codex and Claude Code. Absent means no services at all.

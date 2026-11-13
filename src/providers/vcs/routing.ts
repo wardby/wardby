@@ -8,7 +8,9 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "./types.js";
@@ -87,6 +89,18 @@ export class RoutingVcsProvider implements VcsProvider {
     return this.target(workspace.repository).cleanup(workspace);
   }
 
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    const target = this.target(input.repository);
+    if (!target.prepareReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.prepareReadOnlyCopy(input);
+  }
+
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    const target = this.target(copy.repository);
+    if (!target.cleanupReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.cleanupReadOnlyCopy(copy);
+  }
+
   async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     await this.optionalTarget(workspace.repository)?.notifyContinuationStarted?.(workspace, details);
   }
@@ -108,6 +122,10 @@ export class RoutingVcsProvider implements VcsProvider {
 
   async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
     return this.optionalTarget(workspace.repository)?.continuationPullRequestDraft?.(workspace);
+  }
+
+  async resolveRef(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null> {
+    return (await this.optionalTarget(input.repository)?.resolveRef?.(input)) ?? null;
   }
 
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {

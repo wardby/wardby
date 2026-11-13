@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
-import { workerTaskNote } from "../coding-worker/task-note.js";
+import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
+  claudeOutputJsonSchema,
   CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
   runClaudeCodingWorker,
   type ClaudeQueryFactory,
@@ -784,5 +785,59 @@ describe("runClaudeCodingWorker dependency cache", () => {
       { type: "result", subtype: "error_max_budget_usd" },
     );
     expect(output).toMatchObject({ outcome: "budget_exhausted", dependencyCache: { projects: [{ result: "hit" }] } });
+  });
+});
+
+describe("several repositories (#537)", () => {
+  const repositories = [
+    {
+      name: "base",
+      path: "/repos/base",
+      access: "read" as const,
+      repository: "upstream-org/upstream",
+      commit: "a".repeat(40),
+    },
+    {
+      name: "tools",
+      path: "/repos/tools",
+      access: "write" as const,
+      repository: "your-org/tools",
+      commit: "b".repeat(40),
+    },
+  ];
+
+  async function run(taskInput: CodingTaskInput) {
+    let captured: ClaudeQueryOptions | undefined;
+    await runClaudeCodingWorker({
+      input: taskInput,
+      proxyBaseUrl: "http://wardby-proxy:8787/",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createQuery: (options) => {
+        captured = options;
+        return (async function* () {
+          yield { type: "system" };
+        })();
+      },
+    }).catch(() => undefined);
+    return captured!;
+  }
+
+  it("offers an optional pullRequests and names the folders, only with repositories", async () => {
+    const multi = await run({ ...input, repositories });
+    const schema = multi.outputSchema as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(schema.properties.pullRequests).toMatchObject({ type: "array" });
+    expect(schema.required).not.toContain("pullRequests");
+    expect(multi.prompt).toContain(repositoriesTaskNote(repositories));
+
+    const single = await run(input);
+    expect(single.outputSchema).toBe(CLAUDE_OUTPUT_JSON_SCHEMA);
+    expect(claudeOutputJsonSchema(false)).toBe(CLAUDE_OUTPUT_JSON_SCHEMA);
+    expect(single.prompt).toBe(
+      `Complete this software-engineering task using the wardby_tools MCP tool.\n\nTask:\n${input.task}\n\n${workerTaskNote(undefined)}\n\nThe final JSON runId must be ${input.runId}.`,
+    );
   });
 });

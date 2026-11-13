@@ -14,6 +14,11 @@ the selected repository. Nothing is cloned or pushed for a refusal at run
 preparation. The check also happens immediately before a coding run pushes, so
 access lost during a run prevents publication.
 
+A coding run over several repositories checks every repository of its set the
+same way, read-only ones included, before anything is cloned and again before
+each push; the first one denied refuses the run. See
+Several repositories in one coding run (help article `multi-repository-runs`).
+
 1. Confirm the agent has an owner and the intended repository is attached.
 2. Confirm that owner has linked their GitHub account to Wardby.
 3. Confirm the GitHub App is installed on the repository and the owner has the

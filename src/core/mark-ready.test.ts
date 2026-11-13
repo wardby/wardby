@@ -21,10 +21,17 @@ const REVIEWER = {
   authorizedVia: AUTH,
 };
 const OPENED = {
+  schemaVersion: 1,
   outcome: "pull_request_opened",
   repository: "acme/web",
+  baseRef: "main",
+  headRef: "wardby/run-root",
+  commitSha: "b".repeat(40),
   pullRequestNumber: 7,
   pullRequestUrl: "https://github.com/acme/web/pull/7",
+  summary: "Did the work.",
+  tests: [],
+  usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
 };
 
 const rootRow = (fields: Record<string, unknown>) => ({
@@ -65,6 +72,12 @@ function setup(
       ),
       updateMany: vi.fn(async (_args: unknown) => ({ count: over.claimCount ?? 1 })),
       findMany: vi.fn(async (_args: unknown) => over.continuations ?? []),
+    },
+    // No extra repositories: the pull request is always the default repository's.
+    codingRunRepository: {
+      findMany: vi.fn(async (_args: unknown) => []),
+      findUnique: vi.fn(async (_args: unknown) => null),
+      updateMany: vi.fn(async (_args: unknown) => ({ count: 0 })),
     },
     runHostCheck: {
       findUnique: vi.fn(async (_args: unknown) => (over.hostCheck === undefined ? null : over.hostCheck)),
@@ -320,8 +333,10 @@ describe("maybeMarkReady", () => {
       })
       .mockResolvedValueOnce(rootRow({}));
     expect(await maybeMarkReady(deps, "acme/web", 7, "github")).toBe("marked");
-    expect(db.codingRun.findUnique).toHaveBeenCalledTimes(2);
+    // The marker, its root (resolveRunPullRequest), then the root read for the run tree and claim.
+    expect(db.codingRun.findUnique).toHaveBeenCalledTimes(3);
     expect((db.codingRun.findUnique.mock.calls[1] as unknown[])[0]).toMatchObject({ where: { runId: "root" } });
+    expect((db.codingRun.findUnique.mock.calls[2] as unknown[])[0]).toMatchObject({ where: { runId: "root" } });
     const claim = (db.codingRun.updateMany.mock.calls[0] as unknown[])[0] as { where: { runId: string } };
     expect(claim.where.runId).toBe("root");
   });

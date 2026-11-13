@@ -5,15 +5,26 @@ import type { RepoAccessGate } from "./repo-access.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runHostStatus: { create: vi.fn(async () => undefined) } } }));
 vi.mock("./dispatch.js", () => ({
-  dispatchRun: vi.fn(async (opts: { agentId: string; afterPersist?: (tx: unknown, run: unknown) => Promise<void> }) => {
-    const run = { id: `run-${opts.agentId}` };
-    await opts.afterPersist?.(txStub, run);
-    return { run };
-  }),
+  dispatchRun: vi.fn(
+    async (opts: {
+      agentId: string;
+      beforePersist?: (tx: unknown, agent: unknown) => Promise<boolean>;
+      afterPersist?: (tx: unknown, run: unknown) => Promise<void>;
+    }) => {
+      if (opts.beforePersist && !(await opts.beforePersist(txStub, {}))) return null;
+      const run = { id: `run-${opts.agentId}` };
+      await opts.afterPersist?.(txStub, run);
+      return { run };
+    },
+  ),
   checkContinuation: vi.fn(async () => ({
     ok: true,
     root: { runId: "run_1", baseRef: "main", headRef: "wardby/run-run_1", pullRequestNumber: 7 },
   })),
+}));
+vi.mock("./run-pull-request.js", async (orig) => ({
+  ...(await orig<typeof import("./run-pull-request.js")>()),
+  rootFollowUpInFlight: vi.fn(async () => false),
 }));
 vi.mock("./host-status.js", async (orig) => ({
   ...(await orig<typeof import("./host-status.js")>()),
@@ -25,6 +36,7 @@ vi.mock("./attribution.js", async (orig) => ({
 }));
 import { linkedPullRequestAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
+import { rootFollowUpInFlight } from "./run-pull-request.js";
 import { postMentionStatus, TERMINAL_RUN_STATUSES } from "./host-status.js";
 import { splitTaskOverride } from "./untrusted-content.js";
 import { MAX_REVIEW_BODY_CHARS, REVIEW_CUT_NOTE } from "./review-host-tools.js";
@@ -154,7 +166,13 @@ describe("startReviewFixRound", () => {
   it("refuses a known run that opened a different PR", async () => {
     vi.mocked(checkContinuation).mockResolvedValueOnce({
       ok: true,
-      root: { runId: "run_1", baseRef: "main", headRef: "h", pullRequestNumber: 9 },
+      root: {
+        runId: "run_1",
+        baseRef: "main",
+        headRef: "h",
+        pullRequestNumber: 9,
+        repo: { kind: "default", repository: REPO, pullRequestNumber: 9 },
+      },
     });
     const { deps } = setup();
     expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "cannot_continue" });
@@ -197,6 +215,46 @@ describe("startReviewFixRound", () => {
       },
       select: { id: true },
     });
+  });
+
+  it("runs a round on an extra repository's pull request of the root's set, matched by its own number", async () => {
+    vi.mocked(checkContinuation).mockResolvedValueOnce({
+      ok: true,
+      root: {
+        runId: "run_1",
+        baseRef: "main",
+        headRef: "wardby/run-run_1",
+        pullRequestNumber: 3,
+        repo: { kind: "extra", name: "tools", repository: "your-org/tools", pullRequestNumber: 3 },
+      },
+    });
+    const { deps } = setup();
+    const req = { ...REQ, repository: "your-org/tools", prNumber: 3 };
+    expect(await startReviewFixRound(req, deps)).toMatchObject({ kind: "dispatched", round: 1 });
+    expect(checkContinuation).toHaveBeenLastCalledWith(deps.db, "run_1", "your-org/tools", undefined, {
+      provider: "github",
+      number: 3,
+    });
+    expect(rootFollowUpInFlight).toHaveBeenCalledWith(deps.db, "run_1");
+  });
+
+  it("skips, recording no round, while another follow-up of the root run is in flight", async () => {
+    vi.mocked(rootFollowUpInFlight).mockResolvedValueOnce(true);
+    const { deps, host } = setup();
+    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "root_in_flight" });
+    expect(host.addLabel).not.toHaveBeenCalled();
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(host.comment).not.toHaveBeenCalled();
+  });
+
+  it("re-checks the root in the dispatch transaction: a follow-up that started in between wins", async () => {
+    // Free at the first check, busy by the time the dispatch transaction checks again.
+    vi.mocked(rootFollowUpInFlight).mockClear().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    txStub.runHostStatus.create.mockClear();
+    const { deps } = setup();
+    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "root_in_flight" });
+    expect(vi.mocked(rootFollowUpInFlight).mock.calls[1]).toEqual([txStub, "run_1"]);
+    expect(txStub.runHostStatus.create).not.toHaveBeenCalled();
   });
 
   it("proceeds when the fix agent's earlier run on this PR has finished", async () => {

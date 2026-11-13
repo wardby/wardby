@@ -24,6 +24,7 @@ const log = logger.child({ module: "issue-events" });
 export type IssueEventDb = DispatchDb &
   Pick<
     PrismaClient,
+    | "codingRunRepository"
     | "registryFetch"
     | "registryAuditRecord"
     | "runBudgetEvent"

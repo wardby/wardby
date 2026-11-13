@@ -89,6 +89,8 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
       updateMany: async () => ({ count: 1 }),
     },
     codingRun: { create: async ({ data }: any) => data },
+    // No repository links: a coding run has only its default repository.
+    agentRepository: { findMany: async () => [] },
     task: {
       create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }),
     },
@@ -209,6 +211,66 @@ describe("core/webhooks", () => {
     await expect(
       resolveWebhookRun(hook.id, hook.secret, native, executor, undefined, { repository: "acme/service-a" }),
     ).resolves.toEqual({ ok: false, reason: "invalid_repository" });
+  });
+
+  it("resolveWebhookRun reports set refusals with their code and ref failures without detail", async () => {
+    const codingProfile = {
+      provider: "codex",
+      repository: "acme/service-a",
+      baseRef: "main",
+      defaultTask: "Default task",
+      allowWebhookTaskOverride: true,
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    const db: any = fakeDb([{ id: "a1", name: "coder", kind: "coding", codingProfile }]);
+    const link = {
+      id: "link-base",
+      name: "base",
+      provider: "github",
+      repository: "acme/base",
+      access: "read",
+      baseRef: null,
+      ref: "main",
+      refFromFile: null,
+      inDefaultSet: false,
+      authorizedVia: "host_permission",
+      createdAt: new Date(0),
+    };
+    db.agentRepository = { findMany: async () => [link] };
+    const refExecutor: Executor = {
+      ...executor,
+      authorizeCodingRepository: async () => ({ ok: true }),
+      readCodingRepositoryFile: async () => null,
+      resolveCodingRepositoryRef: async () => null,
+    };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const fire = (repositories: string[]) =>
+      resolveWebhookRun(id, secret, db, refExecutor, undefined, { repositories });
+    await expect(fire(["nope"])).resolves.toEqual({
+      ok: false,
+      reason: "invalid_repositories",
+      code: "repository_not_listed",
+    });
+    await expect(fire(["base", "base"])).resolves.toEqual({
+      ok: false,
+      reason: "invalid_repositories",
+      code: "invalid_repositories",
+    });
+    await expect(fire(["base"])).resolves.toEqual({ ok: false, reason: "repository_ref_unreadable" });
+    // A deployment whose executor cannot resolve extra repositories refuses the same way.
+    await expect(resolveWebhookRun(id, secret, db, executor, undefined, { repositories: ["base"] })).resolves.toEqual({
+      ok: false,
+      reason: "invalid_repositories",
+      code: "coding_repositories_unsupported",
+    });
+
+    const native = fakeDb([{ id: "n1", name: "n", kind: "native" }]);
+    const hook = await createWebhook("n1", "p1", native);
+    await expect(
+      resolveWebhookRun(hook.id, hook.secret, native, executor, undefined, { repositories: ["base"] }),
+    ).resolves.toEqual({ ok: false, reason: "invalid_repositories", code: "invalid_repositories" });
   });
 
   it("accepts webhook task input for a native agent unconditionally, storing it as Run.taskOverride", async () => {

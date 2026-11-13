@@ -25,16 +25,31 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { ApiException, CoreV1Api, KubeConfig, NetworkingV1Api, type V1Endpoints } from "@kubernetes/client-node";
+import {
+  ApiException,
+  CoreV1Api,
+  KubeConfig,
+  NetworkingV1Api,
+  type V1Endpoints,
+  type V1Pod,
+} from "@kubernetes/client-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   loadContainerExecutorConfig,
   loadKubernetesJobConfig,
   type KubernetesJobConfig,
 } from "../../config/providers.js";
+import { createPrismaClient } from "../../core/db.js";
+import {
+  createForkSyncAgent,
+  FORK_SYNC_CAPABILITY,
+  forkSyncExecutor,
+  forkSyncRepositories,
+  runAndAssertForkSync,
+} from "../executor/fork-sync.test-support.js";
 import type { KubernetesApi, KubernetesExecOptions } from "./kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "./kubernetes-client.js";
-import { buildRunPod, kubernetesRunNames, type KubernetesRunNames } from "./kubernetes-isolation.js";
+import { buildRunPod, isRegistryDigest, kubernetesRunNames, type KubernetesRunNames } from "./kubernetes-isolation.js";
 import { runKubernetesPreflight } from "./kubernetes-preflight.js";
 import { KubernetesJobLauncher, type KubernetesClusterInfo } from "./kubernetes.js";
 import type { JobHandle, JobSpec } from "./types.js";
@@ -405,5 +420,114 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       await launcher.stop(handle);
       await launcher.remove(handle);
     }, 180_000);
+
+    /**
+     * The fork-sync scenario of src/providers/executor/multi-repo.docker.test.ts through this
+     * launcher (#537): dispatch, the ContainerExecutor and the database are production code; the
+     * pod mounts /repos/base and /repos/upstream read-only in the tool runner. Needs the Claude
+     * images as registry digests, DATABASE_URL, and a cluster whose coding proxy IS the scripted
+     * model (WARDBY_KUBERNETES_SCRIPTED_PROXY=1): the wardby-coding-proxy Deployment running
+     * forkSyncProxyProgram() with forkSyncProxyEnv() on a Claude worker image. Never set that
+     * against a harness with the real proxy.
+     */
+    const claudeImage = process.env.CODING_CLAUDE_WORKER_IMAGE ?? "";
+    const claudeToolImage = process.env.CODING_CLAUDE_TOOL_RUNNER_IMAGE ?? "";
+    describe.runIf(
+      process.env.WARDBY_KUBERNETES_SCRIPTED_PROXY === "1" &&
+        !!process.env.DATABASE_URL &&
+        isRegistryDigest(claudeImage) &&
+        isRegistryDigest(claudeToolImage),
+    )("fork sync across three local repositories (scripted proxy)", () => {
+      const PREFIX = "multirepo-k8s-";
+      const suffix = randomBytes(4).toString("hex");
+      const owner = `${PREFIX}owner-${suffix}`;
+      // Created in beforeAll: this body runs at collection even when the describe is skipped.
+      let db: ReturnType<typeof createPrismaClient>;
+
+      beforeAll(async () => {
+        db = createPrismaClient();
+        await db.principal.create({ data: { id: owner, subject: owner } });
+      });
+
+      afterAll(async () => {
+        await db.run.deleteMany({ where: { agentId: { startsWith: PREFIX } } });
+        await db.agent.deleteMany({ where: { id: { startsWith: PREFIX } } });
+        await db.principal.deleteMany({ where: { id: { startsWith: PREFIX } } });
+        await db.$disconnect();
+      });
+
+      it("merges upstream into the fork through a real conflict, never writes the read-only copies, and pushes wardby/run-<id>", async () => {
+        const repos = await forkSyncRepositories("wardby-k8s-multi-repo-");
+        roots.push(repos.root);
+        const agentId = `${PREFIX}agent-${suffix}`;
+        await createForkSyncAgent(db, { agentId, ownerId: owner, repos });
+        const workspaceRoot = join(repos.root, "workspaces");
+        // The pod as the launcher submitted it, to read its /repos mounts after the run removed it.
+        const pods: V1Pod[] = [];
+        const api = new Proxy(rawApi, {
+          get(target, prop, receiver) {
+            if (prop === "createPod") {
+              return (podNamespace: string, body: V1Pod) => {
+                pods.push(structuredClone(body));
+                return target.createPod(podNamespace, body);
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+          },
+        });
+        const launcher = new KubernetesJobLauncher({
+          api,
+          config,
+          workspaceRoot,
+          resolveCapability: async () => FORK_SYNC_CAPABILITY,
+          preflight: async () => cluster,
+        });
+        const executor = forkSyncExecutor({
+          db,
+          repos,
+          workspaceRoot,
+          agentImage: claudeImage,
+          toolImage: claudeToolImage,
+          // Tracked for afterAll's backstop if the run leaves objects behind.
+          onSession: (runId) => {
+            const names = kubernetesRunNames(runId);
+            tracked.push({ launcher, handle: handleFor(names), names });
+          },
+          jobs: launcher,
+        });
+        await runAndAssertForkSync({
+          db,
+          executor,
+          agentId,
+          repos,
+          proxyLog: async () => {
+            const pods = await rawCore.listNamespacedPod({
+              namespace,
+              labelSelector: "app.kubernetes.io/name=wardby-coding-proxy",
+            });
+            const logs = await Promise.all(
+              pods.items.map((pod) => rawCore.readNamespacedPodLog({ namespace, name: pod.metadata!.name! })),
+            );
+            return logs.join("\n");
+          },
+        });
+
+        // Only Claude's tool runner (a native sidecar) mounts the extras, never the agent; each read link read-only.
+        expect(pods).toHaveLength(1);
+        const containers = [...(pods[0].spec?.initContainers ?? []), ...(pods[0].spec?.containers ?? [])];
+        const reposMounts = containers.flatMap((container) =>
+          (container.volumeMounts ?? [])
+            .filter((mount) => mount.mountPath.startsWith("/repos/"))
+            .map((mount) => ({ container: container.name, path: mount.mountPath, readOnly: mount.readOnly === true })),
+        );
+        const toolRunner = containers.find((container) => container.image === claudeToolImage)?.name;
+        expect(toolRunner).toBeDefined();
+        expect(reposMounts).toEqual([
+          { container: toolRunner, path: "/repos/base", readOnly: true },
+          { container: toolRunner, path: "/repos/upstream", readOnly: true },
+        ]);
+      }, 300_000);
+    });
   });
 });

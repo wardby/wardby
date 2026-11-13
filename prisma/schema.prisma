@@ -644,6 +644,7 @@ model CodingRun {
   rootCodingRun   CodingRun?  @relation("CodingRunContinuation", fields: [rootCodingRunId], references: [runId])
   continuations   CodingRun[] @relation("CodingRunContinuation")
 
+  repositories             CodingRunRepository[]
   registryAllowances       RegistryAllowance[]
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
@@ -1559,6 +1560,15 @@ model AgentRepository {
   /// Only on a coding agent's link: the base branch for runs in this repository.
   /// Null = the coding profile's baseRef.
   baseRef              String?
+  /// The link's name, unique per agent. Coding links: the folder under /repos/ ([a-z0-9][a-z0-9._-]{0,62},
+  /// never "workspace"), default the repository's short name. Other links: `<provider>:<repository>`.
+  name                 String
+  /// Read coding links only: a branch, a tag or a 40-hex commit SHA. Exactly one of ref / refFromFile.
+  ref                  String?
+  /// Read coding links only: a path in the default repository whose one-line content is the ref, read at dispatch.
+  refFromFile          String?
+  /// Coding links only: part of the agent's default set (every run gets it unless the run names its own list).
+  inDefaultSet         Boolean  @default(false)
   createdAt            DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
@@ -1570,9 +1580,53 @@ model AgentRepository {
   authorizedById String?
   authorizedAt   DateTime?
 
-  @@unique([agentId, provider, repository])
+  @@unique([agentId, name])
   @@unique([provider, repository, checkName])
   @@index([provider, repository])
+}
+
+/// One extra repository of a coding run (#537): the default repository stays on CodingRun at /workspace;
+/// each extra is at /repos/<name>. Written at dispatch with the CodingRun; a continuation copies its root's rows.
+model CodingRunRepository {
+  id                   String    @id @default(cuid())
+  runId                String
+  codingRun            CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// Order listed (the per-run list's order, else the default set's link order).
+  position             Int
+  name                 String
+  /// "read" or "write".
+  access               String
+  provider             String
+  repository           String
+  /// The ref asked for (a read link's ref or the ref its file named; a write row's base branch). Null until a
+  /// deferred run resolves it.
+  requestedRef         String?
+  /// The link's refFromFile, when the ref came from a file.
+  refFromFile          String?
+  /// The commit requestedRef resolved to at dispatch (null until a deferred run's start resolves it).
+  resolvedSha          String?
+  viaRepositoryLink    Boolean   @default(true)
+  /// The AgentRepository row this came from (audit and re-check; no FK: the link may be removed).
+  linkId               String?
+  /// Writable rows only.
+  baseRef              String?
+  headRef              String?
+  baseSha              String?
+  resultBranch         String?
+  /// The CodingRunResultSchema shape for this repository.
+  result               Json?
+  pullRequestNumber    Int?
+  mergeOrder           Int?
+  markedReadyAt        DateTime?
+  prDescriptionSha256  String?
+  prDescriptionRunId   String?
+  prDescriptionOutcome String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@unique([runId, name])
+  @@index([provider, repository, pullRequestNumber])
+  @@index([mergeOrder])
 }
 
 /// A pull-request review deferred because its head's CI was still pending

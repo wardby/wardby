@@ -54,6 +54,7 @@ interface FakeRunRow {
     budgetBaseUsd?: string | null;
     budgetReservedUsd?: string | null;
     budgetLimitUsd?: string | null;
+    repositories?: Array<Record<string, unknown>>;
   } | null;
   auditRecords?: Array<{
     ecosystem: string;
@@ -130,6 +131,10 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
         where.runId.in
           .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
           .filter((row) => row.queuedAt !== null),
+    },
+    codingRunRepository: {
+      findMany: async ({ where }: { where: { runId: string } }) =>
+        runRows.get(where.runId)?.codingRun?.repositories ?? [],
     },
     localPullRequest: {
       findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.localPullRequest ?? null,
@@ -498,6 +503,100 @@ describe("run observability tools", () => {
     expect(traced).not.toHaveProperty("debugTraceMaxMb");
     const capped = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r3" } })) as never);
     expect(capped).toMatchObject({ debugTrace: true, debugTraceMaxMb: 20 });
+    await client.close();
+  });
+
+  it("get_run lists every repository of a multi-repository run in order, and none for a single-repository run", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 1,
+      tokensOut: 2,
+      costUsd: 0.01,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          ...base,
+          id: "multi",
+          codingRun: {
+            result: null,
+            repositories: [
+              {
+                name: "tools",
+                access: "write",
+                repository: "your-org/tools",
+                requestedRef: "main",
+                resolvedSha: null,
+                pullRequestNumber: 12,
+                resultBranch: "wardby/run-multi",
+                result: {
+                  schemaVersion: 1,
+                  outcome: "no_changes",
+                  repository: "your-org/tools",
+                  baseRef: "main",
+                  summary: "done sk-fake-secret-value-123",
+                  tests: [],
+                  usage: { tokensIn: 1, tokensOut: 2, costUsd: 0.01 },
+                },
+              },
+              {
+                name: "upstream",
+                access: "read",
+                repository: "upstream-org/upstream",
+                requestedRef: "v1",
+                resolvedSha: "a".repeat(40),
+                pullRequestNumber: null,
+                resultBranch: null,
+                result: null,
+              },
+            ],
+          },
+        },
+        { ...base, id: "single", codingRun: { result: null } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const multi = parseText((await client.callTool({ name: "get_run", arguments: { runId: "multi" } })) as never);
+    expect((multi as { repositories: unknown }).repositories).toEqual([
+      {
+        name: "tools",
+        access: "write",
+        repository: "your-org/tools",
+        requestedRef: "main",
+        resolvedSha: null,
+        pullRequestNumber: 12,
+        pullRequestUrl: "https://github.com/your-org/tools/pull/12",
+        resultBranch: "wardby/run-multi",
+        outcome: "no_changes",
+      },
+      {
+        name: "upstream",
+        access: "read",
+        repository: "upstream-org/upstream",
+        requestedRef: "v1",
+        resolvedSha: "a".repeat(40),
+        pullRequestNumber: null,
+        pullRequestUrl: null,
+        resultBranch: null,
+        outcome: null,
+      },
+    ]);
+    expect(JSON.stringify(multi)).not.toContain("sk-fake-secret-value-123");
+    const single = parseText((await client.callTool({ name: "get_run", arguments: { runId: "single" } })) as never);
+    expect(single).not.toHaveProperty("repositories");
     await client.close();
   });
 

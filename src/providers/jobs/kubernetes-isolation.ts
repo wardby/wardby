@@ -17,6 +17,12 @@ import type {
 } from "@kubernetes/client-node";
 import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
+import {
+  jobRepositoriesValid,
+  REPOSITORY_MOUNT_ROOT,
+  repositoryStorageDirectories,
+  storageInitScript,
+} from "./storage-init.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -119,20 +125,11 @@ function workerGate(entrypoint: string): string {
 }
 
 /**
- * Creates the worker's subPath mount sources, owned by the run uid, before any regular container
- * starts. Otherwise the kubelet creates them root-owned while setting up the worker's subPath mounts,
- * and the keeper (uid 10001, no capabilities) can't chmod them. Idempotent; no shell.
+ * The worker's subPath mount sources, created by storage-init (storage-init.ts storageInitScript)
+ * owned by the run uid before any regular container starts. Otherwise the kubelet creates them
+ * root-owned while setting up the worker's subPath mounts, and the keeper (uid 10001, no
+ * capabilities) can't chmod them. A run's extra repositories add their repos/<name> folders.
  */
-function storageInitScript(directories: readonly string[]): string {
-  return [
-    'const fs = require("node:fs");',
-    `for (const name of ${JSON.stringify(directories).replaceAll(",", ", ")}) {`,
-    `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
-    "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
-    "  fs.chmodSync(path, 0o700);",
-    "}",
-  ].join("\n");
-}
 const STORAGE_DIRECTORIES = ["workspace", "input", "output"] as const;
 /**
  * Claude's socket volume: its own memory-backed emptyDir, mounted by the worker and the tool runner
@@ -244,6 +241,8 @@ export function validateKubernetesSpec(spec: JobSpec): void {
       throw isolationError("services-invalid");
     }
   }
+  // Names, access and count only; the launcher checks each hostPath against its workspace root.
+  if (!jobRepositoriesValid(spec)) throw isolationError("repositories-invalid");
   const { cpus, memoryMb, pids, diskMb } = spec.limits;
   if (!inRange(cpus, 0.1, 32, false) || !isWholeMillicores(cpus)) throw isolationError("cpus-out-of-range");
   if (!inRange(memoryMb, 128, 65_536, true)) throw isolationError("memory-out-of-range");
@@ -367,10 +366,21 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const claude = spec.provider === "claude-code";
   const tool = claudeToolLimits(spec);
   const toolScratchMb = Math.max(16, Math.min(64, Math.floor(tool.memoryMb / 8)));
+  // Each extra repository beside /workspace, in the containers that mount it (never Claude's agent).
+  const repositoryMounts = (spec.repositories ?? []).map((r) => ({
+    name: "storage",
+    mountPath: `${REPOSITORY_MOUNT_ROOT}/${r.name}`,
+    subPath: `repos/${r.name}`,
+    ...(r.access === "read" ? { readOnly: true } : {}),
+  }));
   const storageInit: V1Container = {
     name: STORAGE_INIT_CONTAINER,
     image: spec.image,
-    command: ["node", "-e", storageInitScript(STORAGE_DIRECTORIES)],
+    command: [
+      "node",
+      "-e",
+      storageInitScript(STORAGE_ROOT, [...STORAGE_DIRECTORIES, ...repositoryStorageDirectories(spec)]),
+    ],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
       cpuMillicores: sidecarCpuMillicores,
@@ -424,6 +434,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         ]
       : [
           { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+          ...repositoryMounts,
           { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
           { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
           { name: "tmp", mountPath: "/tmp" },
@@ -463,6 +474,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         },
         volumeMounts: [
           { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+          ...repositoryMounts,
           { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
           { name: "tool-tmp", mountPath: "/tmp" },
           { name: "tool-home", mountPath: "/home/wardby" },

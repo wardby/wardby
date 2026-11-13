@@ -347,6 +347,20 @@ cache before you set `dependencyCache: true` on an agent that uses it.
 Images built `FROM` that release carry the cache module at
 `/opt/wardby/coding-worker/dependency-cache.mjs`; keep that path.
 
+## Several repositories in one run need a current driver
+
+A run with extra repositories ([several repositories in one
+run](coding-agent-setup.md#several-repositories-in-one-run)) adds a
+`repositories` key to the run input. Wardby writes it only when the run has
+extras, so runs with only the default repository work as before. A Codex worker
+built on a driver older than `driver-v30` validates its input with a strict
+schema, so it rejects every run that has extras (`worker_input_failed`). The
+same holds if you pin `CODING_CLAUDE_WORKER_IMAGE` to a Claude Code worker
+image from an older release. A Claude Code `workerImageRef` tool runner needs no
+rebuild: the extra folders are mounted into it and it needs no new code.
+Rebuild a Codex `workerImageRef` image on a current `driver-vN` digest before
+its agent gets extras, from links in its default set or a `repositories` list.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

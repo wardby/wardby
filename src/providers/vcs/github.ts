@@ -14,6 +14,7 @@ import {
 import { isSafeGitAuthToken } from "./remote.js";
 import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import {
+  COMMIT_SHA,
   DEPENDENCY_CACHE_PATH,
   normalizeGitHubRepository,
   normalizeGitRef,
@@ -63,7 +64,6 @@ const CONTINUATION_CHECK_RUN_NAME = "wardby/continuation";
 const SAFE_PULL_REQUEST_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$/;
 /** Mirrors the runId shape validated elsewhere (coding/protocol.ts, git.ts) — validated independently here too. */
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 export interface GitHubAppConfig {
   appId: string;
@@ -226,6 +226,10 @@ const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
+  /** The commit a ref names (null when absent); read access may be anonymous on a public repository. */
+  resolveCommit?(repository: string, ref: string, access: "read" | "write"): Promise<string | null>;
+  /** A contents:read token for a clone, or undefined (anonymous) on a public repository without the App. */
+  withReadToken?<T>(repository: string, action: (token: string | undefined) => Promise<T>): Promise<T>;
   createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
   /**
    * The root run's marked pull request if it is still open (draft or ready),
@@ -933,6 +937,51 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     });
   }
 
+  /** The commit a branch, tag or SHA names, or null when it does not exist. Read links clone public repositories anonymously when the App is not installed there. */
+  async resolveCommit(repository: string, ref: string, access: "read" | "write"): Promise<string | null> {
+    const normalized = normalizeGitHubRepository(repository);
+    const [owner, name] = normalized.split("/");
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${ref.split("/").map(encodeURIComponent).join("/")}`;
+    const read = async (bearer: string | null) => {
+      const response = await this.requestJson(
+        path,
+        bearer,
+        { headers: { accept: "application/vnd.github.sha" } },
+        [200, 404, 422],
+      );
+      if (response.status !== 200) return null;
+      const sha = (await response.text()).trim().toLowerCase();
+      return COMMIT_SHA.test(sha) ? sha : null;
+    };
+    if (access === "read") return this.withReadToken(normalized, (token) => read(token ?? null));
+    return this.withScopedToken(normalized, { contents: "read" }, (token) => read(token));
+  }
+
+  /**
+   * Read access for a clone: a contents:read token, or none (anonymous) on a public repository without
+   * the App. The mint has its own try, and `action` runs outside it, so an action error never retries
+   * anonymously.
+   */
+  async withReadToken<T>(repository: string, action: (token: string | undefined) => Promise<T>): Promise<T> {
+    const normalized = normalizeGitHubRepository(repository);
+    let token: string;
+    try {
+      token = await this.mintScopedToken(
+        normalized,
+        { contents: "read" },
+        (name, level) => level === "read" && (name === "metadata" || name === "contents"),
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === "github_app_not_installed") return action(undefined);
+      throw err;
+    }
+    try {
+      return await action(token);
+    } finally {
+      await this.revokeToken(token).catch(() => undefined);
+    }
+  }
+
   private identity?: Promise<{ id: number; slug: string; ownerLogin: string }>;
 
   /**
@@ -1034,7 +1083,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   async createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void> {
     const repository = normalizeGitHubRepository(input.repository);
-    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_COMMIT_SHA.test(input.headSha)) {
+    if (!SAFE_RUN_ID.test(input.runId) || !COMMIT_SHA.test(input.headSha)) {
       throw new Error("github_check_run_input_invalid");
     }
     await this.withChecksToken(repository, async (token) => {
@@ -1060,7 +1109,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
     const repository = normalizeGitHubRepository(input.repository);
-    if (!SAFE_RUN_ID.test(input.runId) || (input.headSha !== undefined && !SAFE_COMMIT_SHA.test(input.headSha))) {
+    if (!SAFE_RUN_ID.test(input.runId) || (input.headSha !== undefined && !COMMIT_SHA.test(input.headSha))) {
       throw new Error("github_check_run_input_invalid");
     }
     const ref = input.headSha ?? (input.headRef === undefined ? undefined : normalizeGitRef(input.headRef));
@@ -1265,7 +1314,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   /** See GitHubRepositoryAccess.proposeDescriptionComment. */
   async proposeDescriptionComment(input: UpdateDescriptionInput): Promise<boolean> {
     try {
-      if (!input.headSha || !/^[0-9a-f]{40}$/.test(input.headSha)) return false;
+      if (!input.headSha || !COMMIT_SHA.test(input.headSha)) return false;
       const target = this.descriptionTarget(input);
       return await this.withRepositoryToken(target.repository, async (token) => {
         const state = await this.descriptionState(token, input, target);
@@ -1287,7 +1336,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       !SAFE_RUN_ID.test(input.runId) ||
       !SAFE_RUN_ID.test(input.rootRunId) ||
       !SAFE_RUN_ID.test(input.baseline.agentTextRunId) ||
-      (input.headSha !== undefined && !/^[0-9a-f]{40}$/.test(input.headSha)) ||
+      (input.headSha !== undefined && !COMMIT_SHA.test(input.headSha)) ||
       // Only wardby's own pull request: its branch is the root run's.
       headRef !== `wardby/run-${input.rootRunId}`
     ) {
@@ -1722,23 +1771,22 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   /** Public for the code-review host, which issues its own REST calls with tokens minted here. */
   async requestJson(
     path: string,
-    bearer: string,
+    bearer: string | null,
     init: RequestInit = {},
     expectedStatuses: number[] = [200],
   ): Promise<Response> {
     let response: Response;
+    // A null bearer is an anonymous request (public repositories only); init.headers may still override.
+    const headers: Record<string, string> = {
+      accept: "application/vnd.github+json",
+      ...(bearer === null ? {} : { authorization: `Bearer ${bearer}` }),
+      "content-type": "application/json",
+      "user-agent": "wardby",
+      "x-github-api-version": this.apiVersion,
+      ...(init.headers as Record<string, string> | undefined),
+    };
     try {
-      response = await this.fetchImpl(`${this.apiBaseUrl}${path}`, {
-        ...init,
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${bearer}`,
-          "content-type": "application/json",
-          "user-agent": "wardby",
-          "x-github-api-version": this.apiVersion,
-          ...init.headers,
-        },
-      });
+      response = await this.fetchImpl(`${this.apiBaseUrl}${path}`, { ...init, headers });
     } catch (error) {
       // Keep the cause: the operator log needs the transport reason (DNS,
       // TLS, connect timeout); the message itself stays fixed and safe.

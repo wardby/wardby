@@ -58,6 +58,9 @@ fixes one and clears `lastError`; `delete_run_hook` removes it.
 
 ## Related
 
+- A coding run over several repositories lists one entry in `pullRequests` for
+  each repository it changed:
+  Several repositories in one coding run (help article `multi-repository-runs`).
 - [Send workflow updates to Slack](slack-notifications.md) — the built-in
   Slack messages use the same events.
 - [A run hook delivery failed](errors/run-hook-delivery-failed.md)

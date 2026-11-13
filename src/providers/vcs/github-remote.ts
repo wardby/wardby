@@ -64,6 +64,17 @@ export class GitHubRemote implements GitRemote {
     return this.options.github.withRepositoryToken(repository, fn);
   }
 
+  resolveCommit(repository: string, ref: string, access: "read" | "write"): Promise<string | null> {
+    const github = this.options.github;
+    if (!github.resolveCommit) throw new Error("vcs_resolve_ref_unsupported");
+    return github.resolveCommit(repository, ref, access);
+  }
+
+  withReadAccess<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T> {
+    const github = this.options.github;
+    return github.withReadToken ? github.withReadToken(repository, fn) : github.withRepositoryToken(repository, fn);
+  }
+
   conflictError(): Error {
     return new Error("vcs_head_ref_conflict");
   }
@@ -191,8 +202,10 @@ export class GitHubRemote implements GitRemote {
     // commit onto that branch already updates the PR natively -- which is
     // also why a PR a person has since marked ready for review is accepted
     // (acceptReadyForReview) rather than failing an already-pushed run.
+    // A writable extra in a continuation with no branch yet opens its PR under
+    // the root run's identity too (branchRunId), so later rounds find it.
     const pullRequest = await this.options.github.createOrFindDraftPullRequest({
-      runId: prepared.continuation?.rootRunId ?? prepared.runId,
+      runId: prepared.continuation?.rootRunId ?? prepared.branchRunId ?? prepared.runId,
       ...(prepared.continuation ? { acceptReadyForReview: true } : {}),
       repository: prepared.repository,
       baseRef: prepared.baseRef,
@@ -348,7 +361,7 @@ export class GitHubRemote implements GitRemote {
           : outcome === "budget_exhausted" && details?.changesPushed
             ? `⚠️ ${label} ran out of budget before finishing.${budgetSuffix} ${budgetStoppedChangesSentence(
                 details.changesPushed.pullRequestNumber
-                  ? `#${details.changesPushed.pullRequestNumber}`
+                  ? `${details.changesPushed.repository ?? ""}#${details.changesPushed.pullRequestNumber}`
                   : "this pull request",
                 false,
               )}${details?.mergeSentence ? ` ${details.mergeSentence}` : ""}${summarySuffix}`

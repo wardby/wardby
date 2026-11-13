@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildVcsProvider } from "./index.js";
 import { RoutingVcsProvider } from "./routing.js";
-import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "./types.js";
+import type { PreparedWorkspace, ReadOnlyCopyInput, VcsPrepareInput, VcsProvider } from "./types.js";
 
 function fake(tag: string): VcsProvider & { calls: string[] } {
   const calls: string[] = [];
@@ -69,6 +69,24 @@ describe("RoutingVcsProvider", () => {
       "started:local:/srv/repos/a",
       "file:local:/srv/repos/a",
     ]);
+  });
+
+  it("routes read-only copies by repository and refuses a provider without them", async () => {
+    const github = fake("github");
+    const local = {
+      ...fake("local"),
+      prepareReadOnlyCopy: vi.fn(async (input: ReadOnlyCopyInput) => ({ ...input, workspacePath: "/w" })),
+      cleanupReadOnlyCopy: vi.fn(async () => undefined),
+    };
+    const routing = new RoutingVcsProvider({ github, local });
+    const copyInput = { runId: "r1", name: "docs", repository: "local:/srv/repos/a", commit: "a".repeat(40) };
+    const copy = await routing.prepareReadOnlyCopy(copyInput);
+    await routing.cleanupReadOnlyCopy(copy);
+    expect(local.prepareReadOnlyCopy).toHaveBeenCalledWith(copyInput);
+    expect(local.cleanupReadOnlyCopy).toHaveBeenCalledWith(copy);
+    await expect(routing.prepareReadOnlyCopy({ ...copyInput, repository: "owner/repo" })).rejects.toThrow(
+      "vcs_read_only_unsupported",
+    );
   });
 
   it("fails a GitHub repository with vcs_github_not_configured when there is no GitHub provider", async () => {

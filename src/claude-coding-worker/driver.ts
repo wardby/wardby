@@ -78,6 +78,31 @@ export const CLAUDE_OUTPUT_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The output schema for a run; a run with extra repositories may also describe each pull request (optional). */
+export function claudeOutputJsonSchema(multi: boolean) {
+  if (!multi) return CLAUDE_OUTPUT_JSON_SCHEMA;
+  return {
+    ...CLAUDE_OUTPUT_JSON_SCHEMA,
+    properties: {
+      ...CLAUDE_OUTPUT_JSON_SCHEMA.properties,
+      pullRequests: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            title: { type: "string" },
+            description: { type: "string" },
+            mergeOrder: { type: "integer", minimum: 1, maximum: 99 },
+          },
+          required: ["name", "description"],
+          additionalProperties: false,
+        },
+      },
+    },
+  };
+}
+
 export interface ClaudeSdkMessage {
   type: string;
   subtype?: string;
@@ -319,7 +344,12 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   const security = claudeWorkerSecurityInstructions(mcp !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
   const stream = options.createQuery({
-    prompt: boundedPrompt(options.input.task, options.input.runId, workerTaskNote(dependencyCache), mcp !== undefined),
+    prompt: boundedPrompt(
+      options.input.task,
+      options.input.runId,
+      workerTaskNote(dependencyCache, options.input.repositories),
+      mcp !== undefined,
+    ),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
@@ -333,7 +363,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       options.input.maxOutputTokens ?? DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
     ),
     relayEnvironment: relayEnvironment(),
-    outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,
+    outputSchema: claudeOutputJsonSchema(Boolean(options.input.repositories)),
     developerInstructions,
     contextDirectory: context?.directory ?? null,
     skills: context?.skills ?? false,

@@ -19,6 +19,11 @@ import {
   type AttributionIntent,
 } from "./attribution.js";
 import { RepositoryChoiceRefusedError } from "./coding-repository.js";
+import {
+  RepositoryRefUnreadableError,
+  RepositorySetRefusedError,
+  type RepositorySetRefusalCode,
+} from "./coding-repository-set.js";
 import { dispatchRun } from "./dispatch.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
@@ -90,6 +95,8 @@ export type ResolveWebhookRunResult =
   | { ok: true; runId: string }
   | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" }
   | { ok: false; reason: "invalid_repository" }
+  | { ok: false; reason: "invalid_repositories"; code: RepositorySetRefusalCode }
+  | { ok: false; reason: "repository_ref_unreadable" }
   | { ok: false; reason: "invalid_issue"; message: string };
 
 /**
@@ -103,7 +110,7 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
-  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry; repository?: string } = {},
+  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry; repository?: string; repositories?: string[] } = {},
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -118,6 +125,11 @@ export async function resolveWebhookRun(
   // Choosing a repository takes the same opt-in as a task, and only a coding agent has one.
   if (opts.repository !== undefined) {
     if (agent.kind !== "coding") return { ok: false, reason: "invalid_repository" };
+    if (!taskAllowed(agent.kind, agent.codingProfile)) return { ok: false, reason: "disabled" };
+  }
+  // So does choosing the run's extra repositories (#537).
+  if (opts.repositories !== undefined) {
+    if (agent.kind !== "coding") return { ok: false, reason: "invalid_repositories", code: "invalid_repositories" };
     if (!taskAllowed(agent.kind, agent.codingProfile)) return { ok: false, reason: "disabled" };
   }
 
@@ -153,6 +165,7 @@ export async function resolveWebhookRun(
       codingTask: agent.kind === "coding" ? codingTask : undefined,
       taskOverride: agent.kind === "native" ? codingTask : undefined,
       codingRepository: agent.kind === "coding" ? opts.repository : undefined,
+      codingRepositories: agent.kind === "coding" ? opts.repositories : undefined,
       // The webhook is its creator's standing trigger: its runs are visible to
       // the creator (and the agent owner), like a trigger_agent call.
       triggeredById: webhook.ownerId,
@@ -171,7 +184,7 @@ export async function resolveWebhookRun(
           return false;
         }
         if (
-          (codingTask !== undefined || opts.repository !== undefined) &&
+          (codingTask !== undefined || opts.repository !== undefined || opts.repositories !== undefined) &&
           !taskAllowed(currentAgent.kind, currentAgent.codingProfile)
         ) {
           rejected = "disabled";
@@ -194,6 +207,9 @@ export async function resolveWebhookRun(
   } catch (err) {
     // The refusal's message lists the agent's repositories; the caller gets only the code.
     if (err instanceof RepositoryChoiceRefusedError) return { ok: false, reason: "invalid_repository" };
+    // Likewise for the extra repositories: the set refusal's code, and no detail for a ref failure.
+    if (err instanceof RepositorySetRefusedError) return { ok: false, reason: "invalid_repositories", code: err.code };
+    if (err instanceof RepositoryRefUnreadableError) return { ok: false, reason: "repository_ref_unreadable" };
     throw err;
   }
   if (!dispatched) return { ok: false, reason: rejected };

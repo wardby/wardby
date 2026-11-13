@@ -43,6 +43,7 @@ import {
   dockerSupportsServicesFor,
   type DockerContainerInspection,
   type DockerHostInfo,
+  WORKER_PATHS,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
@@ -60,7 +61,8 @@ import {
   type ServiceStateReporter,
   type ServiceStateUpdate,
 } from "./service-state.js";
-import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
+import { expectedRepositoryHostPath, repositoryStorageDirectories, storageInitScript } from "./storage-init.js";
+import type { JobHandle, JobRepositoryMount, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 
 const BACKEND = "docker";
@@ -731,7 +733,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     });
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string): Promise<void> {
+  async materializeWorkspace(handle: JobHandle, destination: string, name?: string): Promise<void> {
     await this.ready;
     const record = await this.findRecord(handle);
     if (!record) throw new Error("job_not_found");
@@ -739,13 +741,24 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       const current = await this.requireRecord(record.runId);
       await this.refresh(current);
       if (current.phase !== "succeeded") throw new Error("job_not_succeeded");
-      const expected = resolve(this.workspaceRoot, current.runId, "workspace");
+      let expected: string;
+      let source: string;
+      if (name === undefined) {
+        expected = resolve(this.workspaceRoot, current.runId, "workspace");
+        source = "/run/wardby/storage/workspace";
+      } else {
+        // Only a writable extra of this spec is ever collected; a read one never leaves the keeper.
+        const entry = current.spec.repositories?.find((r) => r.name === name);
+        if (entry?.access !== "write") throw new Error("docker_workspace_destination_invalid");
+        expected = this.repositoryHostPath(current.runId, entry);
+        source = `${WORKER_PATHS.storage}/repos/${entry.name}`;
+      }
       if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
         throw new Error("docker_workspace_destination_invalid");
       }
       await this.transfer.materializeDirectory(
         this.keeperName(current),
-        "/run/wardby/storage/workspace",
+        source,
         expected,
         current.spec.limits.diskMb * 1024 * 1024,
         // Names are always the current built-in list; only the paths come from the spec.
@@ -808,6 +821,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async launchLocked(spec: JobSpec): Promise<JobHandle> {
     const plan = buildDockerIsolationPlan(spec, this.options.proxyContainer);
+    // Before any side effect: every extra's files must be in this run's own repos/<name>.
+    for (const r of spec.repositories ?? []) this.repositoryHostPath(spec.runId, r);
     const services = buildDockerServicePlan(spec);
     const specHash = stableSpecHash(spec);
     const existing = await this.readRecord(spec.runId);
@@ -1298,9 +1313,38 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private async seedRun(record: DockerJobRecord, keeper: string): Promise<void> {
     const runRoot = resolve(this.workspaceRoot, record.runId);
     if (!runRoot.startsWith(`${this.workspaceRoot}/`)) throw new Error("docker_workspace_path_invalid");
+    // Checked again at seeding: a re-provisioned record's spec is the one stored at launch.
+    const repositories = (record.spec.repositories ?? []).map((r) => ({
+      name: r.name,
+      hostPath: this.repositoryHostPath(record.runId, r),
+    }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
     await this.transfer.seedDirectory(resolve(runRoot, "git"), keeper, "/run/wardby/storage/git");
+    if (repositories.length > 0) {
+      // The keeper creates only its fixed folders; the extras' mount sources are made here, owned by the run uid.
+      await this.run([
+        "container",
+        "exec",
+        keeper,
+        "node",
+        "-e",
+        storageInitScript(WORKER_PATHS.storage, repositoryStorageDirectories(record.spec)),
+      ]);
+      for (const r of repositories) {
+        await this.transfer.seedDirectory(r.hostPath, keeper, `${WORKER_PATHS.storage}/repos/${r.name}`);
+      }
+    }
     await this.transfer.seedInput(record.spec.inputArtifact, keeper);
+  }
+
+  /**
+   * An extra repository's host path from the spec (the VCS's prepared workspace), refused unless it is
+   * this run's own repos/<name>/workspace under the workspace root.
+   */
+  private repositoryHostPath(runId: string, entry: JobRepositoryMount): string {
+    const expected = expectedRepositoryHostPath(this.workspaceRoot, runId, entry.name);
+    if (!expected || resolve(entry.hostPath) !== expected) throw new Error("docker_workspace_path_invalid");
+    return expected;
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {

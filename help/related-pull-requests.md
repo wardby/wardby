@@ -150,6 +150,10 @@ it pushes) with failure category `continuation_closed`, and the delegating
 agent is told to make the change as a new pull request instead. See
 [Continuation's pull request is no longer open](errors/continuation-closed.md).
 
+A coding run over several repositories opens one pull request in each
+repository it changed, and they list each other in this section; see
+Several repositories in one coding run (help article `multi-repository-runs`).
+
 Wardby also keeps the recorded state of issue-linked pull requests current
 even when GitHub's merge or close webhook delivery was missed: it re-checks
 open ones in the background, at most ten at a time, each at most every ten

@@ -74,7 +74,9 @@ function fakeDb(
   const linkReads: unknown[] = [];
   const db: any = {
     agentRepository: {
-      findMany: async (args: unknown) => {
+      findMany: async (args: { where?: { OR?: unknown } }) => {
+        // The repository-set read (#537) asks for set-eligible links; these fakes have none.
+        if (args.where?.OR !== undefined) return [];
         linkReads.push(args);
         return budget.links ?? [];
       },
@@ -154,6 +156,9 @@ function fakeDb(
         return data;
       },
       findUnique: async ({ where }: any) => codingRuns.find((row) => row.runId === where.runId) ?? null,
+      // newestDefaultPullRequest: a root's continuations (newest first; insertion order here).
+      findMany: async ({ where }: any) =>
+        codingRuns.filter((row) => row.rootCodingRunId === where.rootCodingRunId).reverse(),
       // effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
       findFirst: async ({ where }: any) => {
         const [{ runId: rootId }] = where.OR;
@@ -165,6 +170,8 @@ function fakeDb(
         return matches[0] ? { mergeOrder: matches[0].mergeOrder } : null;
       },
     },
+    // No extra repositories unless a test seeds them (a continuation copies its root's: none here).
+    codingRunRepository: { findMany: async () => [], createMany: async () => ({ count: 0 }) },
     task: {
       create: async ({ data }: any) => {
         const now = new Date();
@@ -1622,7 +1629,13 @@ describe("dispatchRun", () => {
 
       expect(await checkContinuation(state.db, "root_run", "openai/wardby", "owner_1")).toEqual({
         ok: true,
-        root: { runId: "root_run", baseRef: "main", headRef: "wardby/run-root_run", pullRequestNumber: 22 },
+        root: {
+          runId: "root_run",
+          baseRef: "main",
+          headRef: "wardby/run-root_run",
+          pullRequestNumber: 22,
+          repo: { kind: "default", repository: "openai/wardby", pullRequestNumber: 22 },
+        },
       });
       const result = await dispatchRun({
         db: state.db,
@@ -2367,7 +2380,9 @@ describe("coding-run services", () => {
       const a = agent();
       const state = fakeDb(a, [], { links: listed });
       const findMany = vi.fn(async (): Promise<typeof listed> => []).mockResolvedValueOnce(listed);
-      state.db.agentRepository.findMany = findMany as never;
+      // The repository-set read (#537) has its own answer: none.
+      state.db.agentRepository.findMany = (async (args: { where?: { OR?: unknown } }) =>
+        args.where?.OR !== undefined ? [] : findMany()) as never;
       const attempt = dispatchRun({ db: state.db, executor: idle, agentId: a.id, codingRepository: "acme/service-a" });
       await expect(attempt).rejects.toBeInstanceOf(RepositoryChoiceRefusedError);
       await expect(attempt).rejects.toMatchObject({ code: "repository_not_listed", allowed: ["acme/default"] });

@@ -31,13 +31,17 @@ import {
 } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import {
-  CODING_REPOSITORY_LINK_FILTER,
   type CodingRepositoryReader,
   extraCodingRepositoryLinks,
   hasCodingRepositoryList,
   RepositoryChoiceRefusedError,
   resolveCodingRepository,
 } from "./coding-repository.js";
+import {
+  CODING_SET_LINK_FILTER,
+  RepositoryRefUnreadableError,
+  RepositorySetRefusedError,
+} from "./coding-repository-set.js";
 import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
 import { runStepsHook } from "./run-steps/native.js";
 import type { RunStepSink } from "./run-steps/types.js";
@@ -177,6 +181,8 @@ export function delegateToolDef(
   boundName: string,
   parallel: boolean,
   repositories: readonly string[] = [],
+  /** The child's repository link names a run can add (#537); none keeps the cached definition. */
+  repositoryNames: readonly string[] = [],
 ): LoadedTool {
   // With the flag off the description stays byte-identical to before, so
   // existing leads keep their cached tool definitions.
@@ -192,6 +198,17 @@ export function delegateToolDef(
             enum: [...repositories],
             description:
               "Which repository this sub-agent run works in. Required unless continuePriorRun names the run to continue.",
+          },
+        }
+      : {};
+  const repositoriesProperty =
+    repositoryNames.length > 0
+      ? {
+          repositories: {
+            type: "array",
+            items: { type: "string", enum: [...repositoryNames] },
+            description:
+              "Which of the sub-agent's repository links this run also gets, at /repos/<name>, replacing its default set. [] = its default repository only.",
           },
         }
       : {};
@@ -224,6 +241,7 @@ export function delegateToolDef(
             "equal numbers have no order between them. Set it whenever one change spans several repositories.",
         },
         ...repositoryProperty,
+        ...repositoriesProperty,
       },
       required: ["task"],
       additionalProperties: false,
@@ -247,6 +265,7 @@ const DelegateArgs = z
       .max(99, MERGE_ORDER_RANGE_MESSAGE)
       .optional(),
     repository: z.string().min(1).max(300).optional(),
+    repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
   })
   .strict();
 
@@ -369,7 +388,7 @@ async function delegationTarget(
   | { refusal: string }
 > {
   if (childAgent.kind !== "coding" || !childAgent.codingProfile) {
-    if (args.repository !== undefined) {
+    if (args.repository !== undefined || args.repositories !== undefined) {
       return {
         refusal: JSON.stringify({
           error: "repository_requires_coding_agent",
@@ -399,6 +418,11 @@ async function delegationTarget(
     }
     throw err;
   }
+}
+
+/** Its message names link names and ref-file paths only (owner-set), never a model-written value or a file's content. */
+function repositorySetRefusal(err: RepositorySetRefusedError | RepositoryRefUnreadableError): string {
+  return JSON.stringify({ error: err.code, message: err.message });
 }
 
 function repositoryRefusal(err: RepositoryChoiceRefusedError): string {
@@ -439,6 +463,7 @@ export function nativeChildResult(
 export type RunnerDb = Pick<
   PrismaClient,
   | "agent"
+  | "codingRunRepository"
   | "runHook"
   | "run"
   | "agentTool"
@@ -712,6 +737,8 @@ export function codingChildResult(
   codingResult?: unknown,
   /** The child's recorded budget refusal (loadBudgetEvent), if any. */
   budgetEvent?: { event: BudgetEventView; agentName: string } | null,
+  /** The results stored on the child's writable extra repositories' rows (#537), in set order. */
+  extraResults: readonly unknown[] = [],
 ): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
@@ -737,25 +764,51 @@ export function codingChildResult(
     ...(refusal ? { refusal } : {}),
     ...(errorCode ? { errorCode } : {}),
     ...(budget ? { budget } : {}),
-    ...pullRequestOf(codingResult),
+    ...pullRequestsOf(codingResult, extraResults),
   });
 }
 
 /**
- * The pull request the coding sub-run opened or pushed to, from wardby's own
- * stored result (never the sub-agent's text), so the parent can cite it.
+ * The pull requests the coding sub-run opened or pushed to, from wardby's own
+ * stored results (never the sub-agent's text), so the parent can cite them:
+ * `pullRequest` is the first (the default repository's when it has one), and
+ * `pullRequests`, present only when there are several, lists the default
+ * repository's and then each extra repository's (#537).
  */
-function pullRequestOf(codingResult: unknown): { pullRequest?: Record<string, unknown> } {
-  const pr = pullRequestOutcome(codingResult);
-  if (!pr) return {};
-  return {
-    pullRequest: {
-      outcome: pr.outcome === "pull_request_opened" ? "opened" : "updated",
-      repository: pr.repository,
-      number: pr.pullRequestNumber,
-      ...(pr.pullRequestUrl ? { url: pr.pullRequestUrl } : {}),
-    },
-  };
+function pullRequestsOf(
+  codingResult: unknown,
+  extraResults: readonly unknown[],
+): { pullRequest?: Record<string, unknown>; pullRequests?: Record<string, unknown>[] } {
+  const prs = [codingResult, ...extraResults].flatMap((result) => {
+    const pr = pullRequestOutcome(result);
+    return pr
+      ? [
+          {
+            outcome: pr.outcome === "pull_request_opened" ? "opened" : "updated",
+            repository: pr.repository,
+            number: pr.pullRequestNumber,
+            ...(pr.pullRequestUrl ? { url: pr.pullRequestUrl } : {}),
+          },
+        ]
+      : [];
+  });
+  if (prs.length === 0) return {};
+  return { pullRequest: prs[0], ...(prs.length > 1 ? { pullRequests: prs } : {}) };
+}
+
+/** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
+async function extraRepositoryResults(db: Pick<RunnerDb, "codingRunRepository">, runId: string): Promise<unknown[]> {
+  try {
+    const rows = await db.codingRunRepository.findMany({
+      where: { runId, access: "write" },
+      select: { result: true },
+      orderBy: { position: "asc" },
+    });
+    return rows.map((r) => r.result);
+  } catch (err) {
+    runnerLog.warn({ err, runId }, "could not read the coding sub-run's extra repository results");
+    return [];
+  }
 }
 
 /**
@@ -906,7 +959,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
         ? await db.agentRepository.findMany({
             where: {
               agentId: { in: subAgentEdges.map((edge) => edge.childAgentId) },
-              ...CODING_REPOSITORY_LINK_FILTER,
+              ...CODING_SET_LINK_FILTER,
               agent: { kind: "coding" },
             },
             include: {
@@ -920,13 +973,20 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
             orderBy: { repository: "asc" },
           })
         : [];
-    const repositoriesOf = async (childAgentId: string): Promise<string[]> => {
+    const repositoriesOf = async (childAgentId: string): Promise<{ repositories: string[]; names: string[] }> => {
+      const none = { repositories: [], names: [] };
       const links = childLinks.filter((link) => link.agentId === childAgentId);
       const child = links[0]?.agent;
       const profile = child?.codingProfile;
-      if (!profile) return [];
-      const extras = extraCodingRepositoryLinks(links, profile.repository);
-      if (extras.length === 0) return [];
+      if (!profile) return none;
+      // The `repository` choice is among write links; the `repositories` set is any set-eligible link
+      // but a write link to the child's default repository (that is the run's /workspace, never an extra).
+      const writeExtras = extraCodingRepositoryLinks(
+        links.filter((link) => link.access === "write"),
+        profile.repository,
+      );
+      const names = links.filter((link) => link.access !== "write" || writeExtras.includes(link)).map((l) => l.name);
+      if (names.length === 0) return none;
       // Across owners, as authorizeDelegation compares them (owner-less on both sides is the same
       // owner): the list is the child's owner's to show, so only a lead that could choose sees it.
       // That takes the opt-in and the lead's owner's execute access; revoke_access leaves the edge.
@@ -939,14 +999,18 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
           (await canDelegate(db, { ownerId: leadOwnerId }, { id: childAgentId, ownerId: childOwnerId }))
         )
       ) {
-        return [];
+        return none;
       }
-      return [profile.repository, ...extras.map((link) => link.repository)];
+      return {
+        repositories: writeExtras.length > 0 ? [profile.repository, ...writeExtras.map((link) => link.repository)] : [],
+        names,
+      };
     };
     const delegateTools = await Promise.all(
-      subAgentEdges.map(async (edge): Promise<LoadedTool> =>
-        delegateToolDef(edge.boundName, agent.parallelDelegations, await repositoriesOf(edge.childAgentId)),
-      ),
+      subAgentEdges.map(async (edge): Promise<LoadedTool> => {
+        const { repositories, names } = await repositoriesOf(edge.childAgentId);
+        return delegateToolDef(edge.boundName, agent.parallelDelegations, repositories, names);
+      }),
     );
     // Only queried when the runner was given review hosts. buildReviewHosts
     // always includes the local host, so a configured server always queries;
@@ -1140,6 +1204,40 @@ export async function readRedactionValues(accessor: SecretsAccessor, names: read
 }
 
 /**
+ * Live authorization of one repository link a native run holds: the link's
+ * current stamp and access, and the agent's CURRENT owner. Native links are
+ * named `<provider>:<repository>`; the stored provider and repository must
+ * still match the pinned link.
+ */
+export async function authorizeRepositoryLink(
+  db: Pick<RunnerDb, "agentRepository">,
+  repoAccess: RepoAccessGate,
+  agentId: string,
+  link: { provider: string; repository: string; access: string },
+) {
+  const current = await db.agentRepository.findUnique({
+    where: { agentId_name: { agentId, name: `${link.provider}:${link.repository}` } },
+    include: { agent: { select: { ownerId: true } } },
+  });
+  // Removed, or downgraded to read since the run loaded it as write.
+  if (!current || (link.access === "write" && current.access !== "write")) {
+    return { ok: false as const, reason: "not_authorized" as const };
+  }
+  if (current.provider !== link.provider || current.repository !== link.repository) {
+    return { ok: false as const, reason: "not_authorized" as const };
+  }
+  return repoAccess.authorizeUse({
+    ownerId: current.agent.ownerId,
+    provider: current.provider,
+    repository: current.repository,
+    required: requiredLevel(current.access === "write" ? "write" : "read"),
+    authorizedVia: current.authorizedVia,
+    // The run is under way: retry a transient GitHub error once.
+    retryTransient: true,
+  });
+}
+
+/**
  * One attempt's tool surface for a native run. `builtinHandler(name)` is the
  * single source of truth for which names are trusted built-ins (memory,
  * repo_*, jira_*, sub-agent/parent memory, delegate_to_*) and returns undefined
@@ -1240,7 +1338,12 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
           return null;
         });
-      return codingChildResult(waited.run, stored?.result, await loadBudgetEvent(db, childRunId));
+      return codingChildResult(
+        waited.run,
+        stored?.result,
+        await loadBudgetEvent(db, childRunId),
+        await extraRepositoryResults(db, childRunId),
+      );
     }
     return nativeChildResult(waited.run, wait.mergeOrderNote);
   };
@@ -1340,31 +1443,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           // Live, not from the pinned load: the link's current stamp and
           // access, and the agent's CURRENT owner (a make_owner, unlink, or
           // lost GitHub access takes effect on the very next call).
-          authorize: async (link) => {
-            const current = await db.agentRepository.findUnique({
-              where: {
-                agentId_provider_repository: {
-                  agentId: loaded.agentId,
-                  provider: link.provider,
-                  repository: link.repository,
-                },
-              },
-              include: { agent: { select: { ownerId: true } } },
-            });
-            // Removed, or downgraded to read since the run loaded it as write.
-            if (!current || (link.access === "write" && current.access !== "write")) {
-              return { ok: false, reason: "not_authorized" };
-            }
-            return repoAccess.authorizeUse({
-              ownerId: current.agent.ownerId,
-              provider: current.provider,
-              repository: current.repository,
-              required: requiredLevel(current.access === "write" ? "write" : "read"),
-              authorizedVia: current.authorizedVia,
-              // The run is under way: retry a transient GitHub error once.
-              retryTransient: true,
-            });
-          },
+          authorize: (link) => authorizeRepositoryLink(db, repoAccess, loaded.agentId, link),
         });
       };
     }
@@ -1584,6 +1663,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
                 codingRepository: delegation.repository,
+                codingRepositories: args.repositories,
                 requireExplicitRepository: true,
                 parentRunId: runId,
                 parentCallId: callId,
@@ -1603,6 +1683,9 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             } catch (err) {
               // An unlink since the check above (a wait for budget, say) is the model's to report.
               if (err instanceof RepositoryChoiceRefusedError) return repositoryRefusal(err);
+              if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
+                return repositorySetRefusal(err);
+              }
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
@@ -2313,6 +2396,7 @@ export async function durableDelegate(
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
               codingRepository: delegation.repository,
+              codingRepositories: dispatchArgs.repositories,
               requireExplicitRepository: true,
             }
           : {
@@ -2333,6 +2417,9 @@ export async function durableDelegate(
     } catch (err) {
       // An unlink since the check above (a wait for budget, say) is the model's to report.
       if (err instanceof RepositoryChoiceRefusedError) return finish(repositoryRefusal(err));
+      if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
+        return finish(repositorySetRefusal(err));
+      }
       if (err instanceof ContinuationRefusedError) {
         return finish(
           JSON.stringify({
@@ -2383,7 +2470,14 @@ export async function durableDelegate(
       const stored = await db.codingRun
         .findUnique({ where: { runId: childRunId }, select: { result: true } })
         .catch(() => null);
-      return finish(codingChildResult(child, stored?.result, await loadBudgetEvent(db, childRunId)));
+      return finish(
+        codingChildResult(
+          child,
+          stored?.result,
+          await loadBudgetEvent(db, childRunId),
+          await extraRepositoryResults(db, childRunId),
+        ),
+      );
     }
     if (now() - startedAt >= boundMs) {
       await executor.stop(childRunId, "sub-agent wait timed out").catch((err: unknown) => {

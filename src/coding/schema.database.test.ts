@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { Client } from "pg";
 import { createPrismaClient } from "../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -170,4 +173,62 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
       prDescriptionOutcome: "written",
     });
   });
+});
+
+const MIGRATIONS = join(process.cwd(), "prisma", "migrations");
+const LAST_BEFORE = "20261115000000_secret_oauth";
+const MULTI_REPO = "20261117000000_multi_repo_runs";
+
+describe.skipIf(!process.env.DATABASE_URL)("multi-repo migration backfills link names (PostgreSQL)", () => {
+  it("names coding links by short name with suffixes, and other links <provider>:<repository>", async () => {
+    const schema = `multi_repo_${randomUUID().replaceAll("-", "")}`;
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query(`CREATE SCHEMA "${schema}"`);
+      await client.query(`SET search_path TO "${schema}"`);
+      const dirs = readdirSync(MIGRATIONS, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+      for (const dir of dirs.filter((d) => d <= LAST_BEFORE)) {
+        await client.query(readFileSync(join(MIGRATIONS, dir, "migration.sql"), "utf8"));
+      }
+
+      const insertAgent = async (id: string, kind: string) => {
+        await client.query(
+          `INSERT INTO "Agent" ("id", "name", "systemPrompt", "model", "budgetUsd", "kind", "updatedAt")
+           VALUES ($1, $1, 'x', 'm', 1, $2, now())`,
+          [id, kind],
+        );
+      };
+      const insertLink = async (n: number, agentId: string, provider: string, repository: string) => {
+        await client.query(
+          `INSERT INTO "AgentRepository" ("id", "agentId", "provider", "repository", "access", "triggers", "createdAt")
+           VALUES ($1, $2, $3, $4, 'read', ARRAY[]::TEXT[], now() + ($5 || ' seconds')::interval)`,
+          [`link-${n}`, agentId, provider, repository, String(n)],
+        );
+      };
+      await insertAgent("coder", "coding");
+      await insertLink(1, "coder", "github", "acme/web");
+      await insertLink(2, "coder", "github", "other/web");
+      await insertLink(3, "coder", "github", "acme/Workspace");
+      await insertLink(4, "coder", "github", "acme/_x");
+      await insertAgent("native", "native");
+      await insertLink(5, "native", "github", "acme/web");
+      await insertLink(6, "native", "bitbucket", "acme/web");
+
+      await client.query(readFileSync(join(MIGRATIONS, MULTI_REPO, "migration.sql"), "utf8"));
+
+      const { rows } = await client.query<{ agentId: string; repository: string; name: string }>(
+        `SELECT "agentId", "repository", "name" FROM "AgentRepository" ORDER BY "id"`,
+      );
+      const names = (agentId: string) => rows.filter((r) => r.agentId === agentId).map((r) => r.name);
+      expect(names("coder")).toEqual(["web", "web-2", "workspace-2", "x"]);
+      expect(names("native")).toEqual(["github:acme/web", "bitbucket:acme/web"]);
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await client.end();
+    }
+  }, 30_000);
 });

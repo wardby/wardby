@@ -20,7 +20,7 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { CHILD_RUN_FAILURE_CODES } from "../../core/error-code.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
-import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { createRepoAccessGate, type RepoAccessDecision, type RepoAccessGate } from "../../core/repo-access.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import { entryOf } from "../llm/catalog-types.js";
@@ -40,10 +40,13 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
+import { countWorkspaceEntries, GitCommandError, redactGitOutput } from "../vcs/git.js";
 import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
 import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
@@ -63,6 +66,8 @@ import {
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
+  type ExtraPublishRecord,
+  type RunRepositorySnapshot,
   type ProvisioningClaim,
   storedTests,
 } from "./container.js";
@@ -121,6 +126,7 @@ const LOCAL_REPOSITORY = "local:/srv/repos/example";
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
   return {
+    repositories: [],
     runId: "run-1",
     agentId: "agent-1",
     status: "running",
@@ -193,7 +199,9 @@ function gateWith(
 }
 
 class FakeStore implements ContainerExecutionStore {
-  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord }> = [];
+  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord; extras?: ExtraPublishRecord[] }> = [];
+  /** Every completePartially input (a run with several repositories, some published and some failed). */
+  partials: Array<Parameters<ContainerExecutionStore["completePartially"]>[1]> = [];
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
@@ -211,9 +219,9 @@ class FakeStore implements ContainerExecutionStore {
   }
 
   /** Fix-round description store methods; tests that need them assign them. */
-  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
+  pullRequestDescriptionBaseline?: (rootRunId: string, name?: string) => Promise<StoredDescriptionBaseline>;
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
-  pullRequestMarkedReady?: (rootRunId: string) => Promise<boolean>;
+  pullRequestMarkedReady?: (rootRunId: string, name?: string) => Promise<boolean>;
   linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
   delegatingEventTask?: (runId: string) => Promise<string | null>;
   recordPullRequestDescription?: (input: {
@@ -221,6 +229,7 @@ class FakeStore implements ContainerExecutionStore {
     expectedSha256: string | null;
     sha256: string;
     agentTextRunId: string;
+    name?: string;
   }) => Promise<boolean>;
   /** Overrun top-ups; tests that need it assign it. */
   topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome; near?: boolean }>;
@@ -294,16 +303,35 @@ class FakeStore implements ContainerExecutionStore {
     return "requeued";
   }
 
+  /** Every argument count complete was called with, in order. */
+  completeArity: number[] = [];
   async complete(
     runId: string,
     status: "succeeded" | "budget_exhausted",
     result: never,
     record?: CodingRunRecord,
+    extras?: ExtraPublishRecord[],
   ): Promise<void> {
+    this.completeArity.push(arguments.length);
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
     this.run.result = structuredClone(result);
-    this.completions.push({ status, result: structuredClone(result), record: structuredClone(record) });
+    this.completions.push({
+      status,
+      result: structuredClone(result),
+      record: structuredClone(record),
+      extras: structuredClone(extras),
+    });
+  }
+
+  async completePartially(
+    runId: string,
+    input: Parameters<ContainerExecutionStore["completePartially"]>[1],
+  ): Promise<void> {
+    if (runId !== this.run.runId || !["pending", "running"].includes(this.run.status)) return;
+    this.run.status = "failed";
+    this.run.result = structuredClone(input.mainResult);
+    this.partials.push(structuredClone(input));
   }
 
   async terminate(
@@ -397,9 +425,12 @@ class FakeJobs implements WorkspaceJobLauncher {
   }
   /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
-  async materializeWorkspace(): Promise<void> {
+  /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
+  materializedNames: Array<string | undefined> = [];
+  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<void> {
     this.materializations += 1;
-    this.events.push("materialize");
+    this.materializedNames.push(name);
+    this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
   }
 }
 
@@ -408,6 +439,20 @@ class FakeVcs implements VcsProvider {
   finalized = 0;
   cleaned = 0;
   workspace: PreparedWorkspace | null = null;
+  /** Writable extras prepared and not yet removed, by slot name; removing the default workspace removes them too. */
+  slots = new Map<string, PreparedWorkspace>();
+  /** Read-only copies made and not yet removed, by name; removing the default workspace removes them too. */
+  copies = new Map<string, PreparedReadOnlyCopy>();
+  /** Every prepareWorkspace input, in order. */
+  prepareInputs: VcsPrepareInput[] = [];
+  /** Every prepareReadOnlyCopy input, in order. */
+  copyInputs: ReadOnlyCopyInput[] = [];
+  /** Names of the slots and copies removed one by one. */
+  cleanedSlots: string[] = [];
+  cleanedCopies: string[] = [];
+  /** Every writable extra's and read-only copy's workspacePath as prepared, by name (kept after cleanup). */
+  slotPaths = new Map<string, string>();
+  copyPaths = new Map<string, string>();
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
@@ -416,6 +461,18 @@ class FakeVcs implements VcsProvider {
   finalizeEmpty = false;
   /** The description outcome finalize reports on a pull request, when set. */
   finalizeDescription?: DescriptionWriteOutcome;
+  /** Every finalizeChanges call, by slot name (undefined for the default workspace). */
+  finalizeCalls: Array<{ slot?: string; details?: FinalizeChangesDetails }> = [];
+  /** Per slot: finalize reports an empty diff. */
+  emptySlots = new Set<string>();
+  /** Per slot: finalize throws this. */
+  slotErrors = new Map<string, Error>();
+  /** Per slot: the pull request number finalize opens (default 7). */
+  slotNumbers = new Map<string, number>();
+  /** Per slot: the description outcome finalize reports on its pull request, when set. */
+  slotDescriptions = new Map<string, DescriptionWriteOutcome>();
+  /** Runs as finalizeChanges starts, with the slot name (undefined for the default workspace). */
+  onFinalize?: (slot: string | undefined) => void;
   /** The target-branch merge prepare reports on a continuation's workspace, when set. */
   targetMerge?: PreparedWorkspace["targetMerge"];
   /** The no-push description refresh; tests that need it assign it. */
@@ -448,6 +505,23 @@ class FakeVcs implements VcsProvider {
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     this.prepared += 1;
+    this.prepareInputs.push(structuredClone(input));
+    if (input.slot) {
+      // Like the real provider: a slot lives in the run directory the default workspace made.
+      if (!this.workspace) throw new Error("vcs_workspace_path_invalid");
+      this.events.push(`prepare:${input.slot.name}`);
+      const slot = {
+        ...this.makeWorkspace(input),
+        id: `vcs-${input.runId}:${input.slot.name}`,
+        baseCommit: "b".repeat(40),
+        workspacePath: join(this.root, input.runId, "repos", input.slot.name, "workspace"),
+        gitMetadataPath: join(this.root, input.runId, "repos", input.slot.name, "git"),
+      };
+      await mkdir(slot.workspacePath, { recursive: true });
+      this.slots.set(input.slot.name, slot);
+      this.slotPaths.set(input.slot.name, slot.workspacePath);
+      return slot;
+    }
     this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
@@ -457,7 +531,26 @@ class FakeVcs implements VcsProvider {
     return this.workspace;
   }
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
+    if (input.slot) return this.slots.get(input.slot.name) ?? null;
     return this.workspace?.runId === input.runId ? this.workspace : null;
+  }
+  /** Runs at the start of prepareReadOnlyCopy (a test may slow it down or make it fail). */
+  onPrepareCopy?: (input: ReadOnlyCopyInput) => Promise<void>;
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    this.copyInputs.push(structuredClone(input));
+    this.events.push(`copy:${input.name}`);
+    await this.onPrepareCopy?.(input);
+    if (!this.workspace) throw new Error("vcs_workspace_path_invalid");
+    const copy = { ...input, workspacePath: join(this.root, input.runId, "repos", input.name, "workspace") };
+    await mkdir(copy.workspacePath, { recursive: true });
+    this.copies.set(input.name, copy);
+    this.copyPaths.set(input.name, copy.workspacePath);
+    return copy;
+  }
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    this.cleanedCopies.push(copy.name);
+    this.events.push(`cleanupCopy:${copy.name}`);
+    this.copies.delete(copy.name);
   }
   async finalizeChanges(
     workspace: PreparedWorkspace,
@@ -465,7 +558,35 @@ class FakeVcs implements VcsProvider {
   ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
-    this.events.push("finalize");
+    this.finalizeCalls.push({ slot: workspace.slot?.name, details: structuredClone(details) });
+    const slot = workspace.slot?.name;
+    this.events.push(slot === undefined ? "finalize" : `finalize:${slot}`);
+    this.onFinalize?.(slot);
+    if (slot !== undefined) {
+      const error = this.slotErrors.get(slot);
+      if (error) throw error;
+      if (this.emptySlots.has(slot)) {
+        return {
+          outcome: "no_changes",
+          repository: workspace.repository,
+          baseRef: workspace.baseRef,
+          baseCommit: "c".repeat(40),
+        };
+      }
+      const number = this.slotNumbers.get(slot) ?? 7;
+      const description = this.slotDescriptions.get(slot);
+      return {
+        outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        baseCommit: "c".repeat(40),
+        headRef: workspace.headRef,
+        commitSha: "d".repeat(40),
+        pullRequestNumber: number,
+        pullRequestUrl: `https://github.com/${workspace.repository}/pull/${number}`,
+        ...(description ? { description: structuredClone(description) } : {}),
+      };
+    }
     if (this.finalizeEmpty) {
       return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
     }
@@ -500,10 +621,19 @@ class FakeVcs implements VcsProvider {
         : {}),
     };
   }
-  async cleanup(): Promise<void> {
+  async cleanup(workspace: PreparedWorkspace): Promise<void> {
+    if (workspace.slot) {
+      this.cleanedSlots.push(workspace.slot.name);
+      this.events.push(`cleanup:${workspace.slot.name}`);
+      this.slots.delete(workspace.slot.name);
+      return;
+    }
     this.cleaned += 1;
     this.events.push("cleanup");
     this.workspace = null;
+    // Like the real provider: the default workspace's removal takes the whole run directory.
+    this.slots.clear();
+    this.copies.clear();
   }
   async notifyContinuationStarted(_workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     this.notifyStartedCalls += 1;
@@ -4142,6 +4272,45 @@ describe("ContainerExecutor", () => {
     expect(beatsDuringLaunch).toBeGreaterThan(0);
   });
 
+  // Reproduces the run-swept-while-cloning case: claimProvisioning sets heartbeatAt once, and a clone
+  // that outlives HEARTBEAT_TIMEOUT_MS let recover() abandon the run as coding_ambiguous_provisioning.
+  it("beats the heartbeat while a slow workspace is prepared", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
+    let beatsDuringPrepare = 0;
+    const inner = created.vcs.prepareWorkspace.bind(created.vcs);
+    created.vcs.prepareWorkspace = async (input) => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beatsDuringPrepare = created.store.heartbeats - before;
+      return inner(input);
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringPrepare).toBeGreaterThan(0);
+  });
+
+  it("beats the heartbeat while the input is written", async () => {
+    // A continuation: writeInput reads the stored PR description baseline from the store, a step that runs
+    // inside writeInput and nowhere else (prepareWorkspace has already returned by then).
+    const created = await harness(
+      { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      undefined,
+      { heartbeatIntervalMs: 5 },
+    );
+    let beatsDuringInput = 0;
+    let calls = 0;
+    created.store.pullRequestDescriptionBaseline = async () => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      // Later calls (finishing the run) are outside writeInput; keep the beats seen by the first.
+      if (calls++ === 0) beatsDuringInput = created.store.heartbeats - before;
+      return { recordedSha256: null, previousAgentText: "Previous body", agentTextRunId: "root-run" };
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringInput).toBeGreaterThan(0);
+  });
+
   it("stops beating once the launch returns, leaving the poll loop in charge", async () => {
     const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
     await created.executor.start("run-1");
@@ -4994,6 +5163,1026 @@ describe("ContainerExecutor in-flight repository re-checks (M-1, M-2)", () => {
     expect(asked).toHaveLength(1);
     expect(created.store.run.status).toBe("refused");
     expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_repo_access:/);
+  });
+});
+
+describe("ContainerExecutor with several repositories (#537)", () => {
+  const SHA_A = "a".repeat(40);
+  function extraRow(overrides: Partial<RunRepositorySnapshot> & { name: string }): RunRepositorySnapshot {
+    return {
+      id: `row-${overrides.name}`,
+      position: 1,
+      access: "read",
+      accessKnown: true,
+      provider: "github",
+      repository: `openai/${overrides.name}`,
+      requestedRef: "main",
+      resolvedSha: SHA_A,
+      baseRef: null,
+      headRef: null,
+      linkId: `link-${overrides.name}`,
+      linkExists: true,
+      linkAuthorizedVia: "admin",
+      continuesBranch: false,
+      pullRequestNumber: null,
+      mergeOrder: null,
+      result: null,
+      ...overrides,
+    };
+  }
+  const readRow = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) => extraRow({ name, ...overrides });
+  const writeRow = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) =>
+    extraRow({ name, access: "write", baseRef: "develop", headRef: "wardby/run-run-1", ...overrides });
+  const allowAll = () => ({
+    authorizeUse: vi.fn(async (_input: unknown): Promise<RepoAccessDecision> => ({ ok: true })),
+  });
+  const reasonLogged = (code: string) =>
+    logged.some((line) => typeof line.payload.reason === "string" && line.payload.reason.includes(code));
+  const terminationError = (created: Awaited<ReturnType<typeof harness>>) =>
+    (created.store.terminations[0] as { error: string } | undefined)?.error;
+  function expectNothingLeft(created: Awaited<ReturnType<typeof harness>>) {
+    expect(created.vcs.workspace).toBeNull();
+    expect([...created.vcs.slots.keys()]).toEqual([]);
+    expect([...created.vcs.copies.keys()]).toEqual([]);
+  }
+
+  it("prepares the default workspace first, then every extra, and runs", async () => {
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    const prepares = created.events.filter((e) => e.startsWith("prepare") || e.startsWith("copy:"));
+    expect(prepares[0]).toBe("prepare");
+    expect([...prepares.slice(1)].sort()).toEqual(["copy:base", "prepare:tools"]);
+    expect(created.vcs.copyInputs).toEqual([
+      { runId: "run-1", name: "base", repository: "openai/base", commit: SHA_A },
+    ]);
+    const tools = created.vcs.prepareInputs.find((input) => input.slot?.name === "tools");
+    expect(tools).toEqual({
+      runId: "run-1",
+      repository: "openai/tools",
+      baseRef: "develop",
+      headRef: "wardby/run-run-1",
+      protectedPaths: created.vcs.prepareInputs[0].protectedPaths,
+      collectExclude: created.vcs.prepareInputs[0].collectExclude,
+      slot: { name: "tools" },
+      continuation: undefined,
+    });
+    // Everything was cleaned up after the run.
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expect(created.vcs.cleanedCopies).toEqual(["base"]);
+    expect(created.vcs.cleaned).toBe(1);
+    expectNothingLeft(created);
+  });
+
+  it("prepares at most three extras at once", async () => {
+    const rows = ["a", "b", "c", "d", "e"].map((name, i) => readRow(name, { position: i + 1 }));
+    const created = await harness({ repositories: rows }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    let inFlight = 0;
+    let most = 0;
+    created.vcs.onPrepareCopy = async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 15));
+      inFlight -= 1;
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.copyInputs.map((c) => c.name)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(most).toBe(3);
+  });
+
+  it("authorizes every repository, read rows at read and write rows at write, before anything is cloned", async () => {
+    const gate = allowAll();
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: gate as never,
+    });
+    gate.authorizeUse.mockImplementation(async () => {
+      created.events.push("authorize");
+      return { ok: true as const };
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(gate.authorizeUse).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "openai/base", required: "read", authorizedVia: "admin" }),
+    );
+    expect(gate.authorizeUse).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "openai/tools", required: "write", authorizedVia: "admin" }),
+    );
+    // The default repository and both extras, all before the first clone (the final push re-checks later).
+    expect(created.events.slice(0, 4)).toEqual(["authorize", "authorize", "authorize", "prepare"]);
+  });
+
+  it("refuses a read row outside the GitHub allowlist even when it is admin-approved, before any clone", async () => {
+    const gate = createRepoAccessGate({
+      db: { hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) } } as never,
+      hosts: {},
+      trustedAccounts: async () => new Set(["openai"]),
+    });
+    const created = await harness(
+      { repositories: [readRow("base", { repository: "elsewhere/base", linkAuthorizedVia: "admin" })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_repo_access:coding_diag_/);
+    expect(reasonLogged("repo_access_github_account_not_allowed")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.jobs.launches).toBe(0);
+  });
+
+  it("refuses a row whose link is gone before any clone", async () => {
+    const created = await harness(
+      { repositories: [writeRow("tools"), readRow("base", { linkExists: false })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_repo_access:coding_diag_/);
+    expect(reasonLogged("repo_access_not_authorized")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.sessions.creates).toBe(0);
+  });
+
+  it("re-authorizes a continuation's extras too: the allowlist may have narrowed since the root run", async () => {
+    const gate = allowAll();
+    gate.authorizeUse.mockImplementation(async (input: unknown) =>
+      (input as { repository: string }).repository === "openai/base"
+        ? { ok: false, reason: "github_account_not_allowed" }
+        : { ok: true },
+    );
+    const created = await harness(
+      { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", repositories: [readRow("base")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("repo_access_github_account_not_allowed")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+  });
+
+  it("refuses a row dispatch never resolved, before any clone", async () => {
+    for (const row of [readRow("base", { resolvedSha: null }), writeRow("tools", { baseRef: null })]) {
+      logged.length = 0;
+      const created = await harness({ repositories: [row] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status, row.name).toBe("refused");
+      expect(terminationError(created)).toMatch(/^coding_failure_preflight:coding_diag_/);
+      expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+      expect(created.vcs.prepared).toBe(0);
+      expect(created.vcs.copyInputs).toEqual([]);
+    }
+  });
+
+  it("refuses a row with an unknown access, never treating it as read, before any clone", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      { repositories: [readRow("base", { accessKnown: false })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_preflight:coding_diag_/);
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(gate.authorizeUse.mock.calls.map(([input]) => (input as { repository: string }).repository)).not.toContain(
+      "openai/base",
+    );
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+  });
+
+  it("refuses a writable row stored on another branch than the run's, before any clone", async () => {
+    const created = await harness(
+      { repositories: [writeRow("tools", { headRef: "wardby/run-other" })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+  });
+
+  it("re-authorizes one row by name with `only`, leaving the others untouched", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      {
+        repositories: [
+          readRow("base", { linkExists: false }),
+          writeRow("tools"),
+          writeRow("docs", { accessKnown: false }),
+        ],
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    const run = await created.store.load("run-1");
+    const authorizeExtras = (
+      created.executor as unknown as {
+        authorizeExtras(run: ContainerRunSnapshot, opts: { inFlight: boolean; only?: string }): Promise<void>;
+      }
+    ).authorizeExtras.bind(created.executor);
+    // Only tools is checked: base's missing link and docs' unknown access are not looked at.
+    await authorizeExtras(run!, { inFlight: true, only: "tools" });
+    expect(gate.authorizeUse).toHaveBeenCalledTimes(1);
+    expect(gate.authorizeUse.mock.calls[0][0]).toMatchObject({
+      repository: "openai/tools",
+      required: "write",
+      retryTransient: true,
+    });
+    // The named row itself is still refused when its link is gone or the gate denies it.
+    await expect(authorizeExtras(run!, { inFlight: true, only: "base" })).rejects.toThrow("repo_access_not_authorized");
+    gate.authorizeUse.mockResolvedValueOnce({ ok: false, reason: "github_account_not_allowed" });
+    await expect(authorizeExtras(run!, { inFlight: true, only: "tools" })).rejects.toThrow(
+      "repo_access_github_account_not_allowed",
+    );
+    // A name that matches no row checks nothing.
+    gate.authorizeUse.mockClear();
+    await authorizeExtras(run!, { inFlight: true, only: "missing" });
+    expect(gate.authorizeUse).not.toHaveBeenCalled();
+  });
+
+  it("names a continuation's writable extras by the root's branch: continued when it exists, created when not", async () => {
+    const created = await harness(
+      {
+        rootCodingRunId: "root-run",
+        headRef: "wardby/run-root-run",
+        repositories: [
+          writeRow("tools", { continuesBranch: true, headRef: "wardby/run-root-run" }),
+          writeRow("docs", { headRef: "wardby/run-root-run" }),
+        ],
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    const bySlot = (name: string) => created.vcs.prepareInputs.find((input) => input.slot?.name === name);
+    expect(bySlot("tools")).toMatchObject({ headRef: "wardby/run-root-run", continuation: { rootRunId: "root-run" } });
+    expect(bySlot("tools")).not.toHaveProperty("branchRunId");
+    expect(bySlot("docs")).toMatchObject({ headRef: "wardby/run-root-run", branchRunId: "root-run" });
+    expect(bySlot("docs")?.continuation).toBeUndefined();
+  });
+
+  it("cleans up the default workspace, each writable extra and each read copy after a failure", async () => {
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    created.jobs.launchError = new Error("launch exploded");
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expect(created.vcs.cleanedCopies).toEqual(["base"]);
+    expect(created.vcs.cleaned).toBe(1);
+    expectNothingLeft(created);
+  });
+
+  it("leaves nothing behind when an extra fails part way, waiting for the ones still being prepared", async () => {
+    const rows = ["slow", "broken", "fine", "never"].map((name, i) => readRow(name, { position: i + 1 }));
+    const created = await harness({ repositories: rows }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    created.vcs.onPrepareCopy = async (input) => {
+      if (input.name === "slow") await new Promise((r) => setTimeout(r, 30));
+      if (input.name === "broken") throw new Error("vcs_read_only_fetch_failed");
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("vcs_read_only_fetch_failed")).toBe(true);
+    // No new extra starts after the failure; the slow one finished before anything was removed.
+    expect(created.vcs.copyInputs.map((c) => c.name)).toEqual(["slow", "broken", "fine"]);
+    expect(created.events.lastIndexOf("cleanup")).toBeGreaterThan(created.events.indexOf("copy:slow"));
+    expect([...created.vcs.cleanedCopies].sort()).toEqual(["fine", "slow"]);
+    expect(created.jobs.launches).toBe(0);
+    expectNothingLeft(created);
+  });
+
+  it("beats the heartbeat while an extra is prepared", async () => {
+    const created = await harness({ repositories: [readRow("base")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+      heartbeatIntervalMs: 5,
+    });
+    let beats = 0;
+    created.vcs.onPrepareCopy = async () => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beats = created.store.heartbeats - before;
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(beats).toBeGreaterThan(0);
+  });
+
+  it("caps the entries of every repository together", async () => {
+    async function run(filesEach: number) {
+      const counted: string[][] = [];
+      const created = await harness({ repositories: [readRow("base")] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+        // The shared counter, with a cap small enough for a test tree.
+        countEntries: async (paths) => {
+          counted.push(paths);
+          for (const path of paths) {
+            for (let i = 0; i < filesEach; i++) await writeFile(join(path, `file-${i}.txt`), "x");
+          }
+          return countWorkspaceEntries(paths, 5);
+        },
+      });
+      await created.executor.start("run-1");
+      return { created, counted };
+    }
+    // 3 + 3 entries: each repository is under the cap, together they are not.
+    const over = await run(3);
+    expect(over.created.store.run.status).toBe("refused");
+    expect(reasonLogged("vcs_workspace_entry_limit")).toBe(true);
+    expect(over.counted[0]).toHaveLength(2);
+    expect(over.created.jobs.launches).toBe(0);
+    expectNothingLeft(over.created);
+    // 2 + 2 entries fit.
+    const under = await run(2);
+    expect(under.created.store.run.status).toBe("succeeded");
+  });
+
+  it("does not count entries again for a single-repository run", async () => {
+    const countEntries = vi.fn(async () => undefined);
+    const created = await harness({}, IMAGE, undefined, undefined, { countEntries });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(countEntries).not.toHaveBeenCalled();
+  });
+
+  it("a launched run recovers its writable extras and makes no read copies (its job already has them)", async () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const created = await harness(
+      { jobHandle: handle, proxySessionId: "session-1", repositories: [readRow("base"), writeRow("tools")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    const input = {
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      protectedPaths: ["CODEOWNERS"],
+    };
+    await created.vcs.prepareWorkspace(input);
+    await created.vcs.prepareWorkspace({ ...input, repository: "openai/tools", slot: { name: "tools" } });
+    const before = created.vcs.prepared;
+    await created.executor.start("run-1");
+    expect(created.vcs.prepared).toBe(before);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expectNothingLeft(created);
+  });
+
+  it("fails a launched run whose writable extra is gone", async () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const created = await harness(
+      { jobHandle: handle, proxySessionId: "session-1", repositories: [writeRow("tools")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.vcs.prepareWorkspace({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      protectedPaths: ["CODEOWNERS"],
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(reasonLogged("coding_workspace_lost")).toBe(true);
+    expectNothingLeft(created);
+  });
+
+  // Secrets row 4 (JobSpec): a run's repositories reach the launcher as name, access and path only.
+  it.each([
+    ["codex", {}, undefined],
+    [
+      "claude-code",
+      { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+    ],
+  ])("gives a %s job each extra at its prepared path and nothing else of the row", async (_label, run, claude) => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { ...run, repositories: [writeRow("tools", { position: 1 }), readRow("base", { position: 2 })] },
+      IMAGE,
+      undefined,
+      claude,
+      { repoAccess: allowAll() as never },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let held: string | undefined;
+    created.jobs.onLaunch = () => void created.capabilities.get("run-1").then((value) => (held = value));
+    await created.executor.start("run-1");
+    expect(held).toBe(FAKE);
+    const spec = created.jobs.specs[0];
+    expect(spec.repositories).toEqual([
+      { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      { name: "base", access: "read", hostPath: created.vcs.copyPaths.get("base") },
+    ]);
+    for (const entry of spec.repositories!) expect(Object.keys(entry).sort()).toEqual(["access", "hostPath", "name"]);
+    expect(JSON.stringify(spec.repositories)).not.toContain(FAKE);
+    expect(JSON.stringify(spec)).not.toContain(FAKE);
+    // The capacity probe, asked before anything is prepared, lists none.
+    expect(created.jobs.capacityChecks.every((probe) => probe.repositories === undefined)).toBe(true);
+  });
+
+  it("writes the extras into input.json with the commit each was prepared at, and no secret", async () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+      IMAGE,
+      undefined,
+      undefined,
+      {
+        repoAccess: allowAll() as never,
+      },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect((JSON.parse(text) as { repositories: unknown }).repositories).toEqual([
+      { name: "base", path: "/repos/base", access: "read", repository: "openai/base", commit: SHA_A },
+      { name: "tools", path: "/repos/tools", access: "write", repository: "openai/tools", commit: "b".repeat(40) },
+    ]);
+    expect(text).not.toContain(FAKE);
+  });
+
+  it("leaves repositories out of input.json for a single-repository run", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect(text).not.toBe("");
+    expect("repositories" in (JSON.parse(text) as object)).toBe(false);
+  });
+
+  describe("the task text names each extra's full commit", () => {
+    const taskOf = (text: string) => (JSON.parse(text) as { task: string }).task;
+    const extraLines = [
+      `Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`,
+      `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable.`,
+    ].join("\n");
+
+    it.each([
+      ["codex", {}, undefined],
+      [
+        "claude-code",
+        { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      ],
+    ])("for a %s run", async (_label, run, claude) => {
+      const created = await harness(
+        { ...run, repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        claude,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("for a continuation", async () => {
+      const created = await harness(
+        {
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+          repositories: [
+            readRow("base", { position: 1 }),
+            writeRow("tools", { position: 2, headRef: "wardby/run-root-run", continuesBranch: true }),
+          ],
+        },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("leaves a single-repository run's task text unchanged", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).not.toContain("Extra repository");
+      expect(taskOf(text)).toBe(
+        `${created.store.run.task}\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+      );
+    });
+  });
+
+  it("gives a job without extras no repositories key at all", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    await created.executor.start("run-1");
+    expect("repositories" in created.jobs.specs[0]).toBe(false);
+  });
+
+  describe("publishing each repository", () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    function workerOutput(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "changes_ready",
+        summary: "Fixed it.",
+        tests: [{ command: "npm test", outcome: "passed" }],
+        ...overrides,
+      });
+    }
+    async function multi(rows: RunRepositorySnapshot[], output: Record<string, unknown> = {}, run = {}) {
+      const created = await harness({ repositories: rows, ...run }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput(output) };
+      return created;
+    }
+    const extrasOf = (created: Awaited<ReturnType<typeof harness>>) => created.store.completions[0]?.extras;
+
+    it("(a) publishes the default repository first, then each changed extra with its own description", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", title: "tools-fix", description: "Tools PR." }],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      const [main, tools] = created.vcs.finalizeCalls;
+      expect(main.details?.summary).toBe("Fixed it.");
+      expect(tools.details?.summary).toBe("Tools PR.");
+      expect(tools.details?.tag).toBe("tools-fix");
+      expect(tools.details?.related?.entries).toEqual([
+        { repository: "openai/example", number: 42, mergeOrder: 1 },
+        { repository: "openai/tools", self: true, mergeOrder: 2 },
+      ]);
+      expect(created.events.indexOf("finalize")).toBeLessThan(created.events.indexOf("finalize:tools"));
+      expect(created.store.completions).toHaveLength(1);
+      expect(created.store.completions[0].status).toBe("succeeded");
+      expect(created.store.completions[0].result).toMatchObject({ pullRequestNumber: 42, summary: "Fixed it." });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({
+          id: "row-tools",
+          name: "tools",
+          pullRequestNumber: 7,
+          baseSha: "c".repeat(40),
+          resultBranch: null,
+          result: expect.objectContaining({
+            outcome: "pull_request_opened",
+            repository: "openai/tools",
+            baseRef: "develop",
+            pullRequestNumber: 7,
+            summary: "Tools PR.",
+            tag: "tools-fix",
+          }),
+        }),
+      ]);
+    });
+
+    it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "no_changes" });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "no_changes" });
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+    });
+
+    it("(c) numbers the run's pull requests after the inherited order, an explicit order winning", async () => {
+      const numbered = await multi([writeRow("tools")]);
+      await numbered.executor.start("run-1");
+      expect(numbered.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(numbered)?.[0].mergeOrder).toBe(2);
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      await inherited.executor.start("run-1");
+      // The default repository keeps its own order; the next one comes after the inherited one.
+      expect(inherited.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(inherited)?.[0].mergeOrder).toBe(5);
+
+      const explicit = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 5 }],
+      });
+      await explicit.executor.start("run-1");
+      expect(explicit.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(explicit)?.[0].mergeOrder).toBe(5);
+    });
+
+    it("never numbers a pull request past step 99", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {}, { mergeOrder: 98 });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // The default repository keeps its inherited 98; the extras would be 100 and 101.
+      expect(created.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(created)?.map((extra) => extra.mergeOrder)).toEqual([99, 99]);
+      for (const call of created.vcs.finalizeCalls) {
+        for (const entry of call.details?.related?.entries ?? []) {
+          expect(entry.mergeOrder ?? 0).toBeLessThanOrEqual(99);
+        }
+      }
+    });
+
+    it("gives a lone pull request the order a run with one repository would", async () => {
+      // Only the default repository pushed: no order of its own, as with one repository.
+      const defaultOnly = await multi([writeRow("tools")]);
+      defaultOnly.vcs.emptySlots.add("tools");
+      await defaultOnly.executor.start("run-1");
+      expect(defaultOnly.store.run.status).toBe("succeeded");
+      expect(defaultOnly.store.completions[0].result).toMatchObject({ pullRequestNumber: 42 });
+      expect(defaultOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      // Only an extra pushed: no order, or the inherited one, or the driver's own.
+      const extraOnly = await multi([writeRow("tools")]);
+      extraOnly.vcs.finalizeEmpty = true;
+      await extraOnly.executor.start("run-1");
+      expect(extrasOf(extraOnly)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: null })]);
+      expect(extraOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      inherited.vcs.finalizeEmpty = true;
+      await inherited.executor.start("run-1");
+      expect(extrasOf(inherited)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 3 })]);
+
+      const given = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 6 }],
+      });
+      given.vcs.finalizeEmpty = true;
+      await given.executor.start("run-1");
+      expect(extrasOf(given)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 6 })]);
+    });
+
+    it("(d) ends partially_published when an extra fails after the default published", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })]);
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.completions).toEqual([]);
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.partials).toHaveLength(1);
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe(
+        "partially_published: workspace: published; tools: failed(workspace); docs: published",
+      );
+      expect(partial.error).not.toContain("vcs_head_ref_conflict");
+      expect(partial.audit.failureCategory).toBe("partially_published");
+      expect(partial.audit.diagnosticId).toMatch(/^coding_diag_/);
+      // The rest were still tried; what published stays recorded.
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      expect(partial.mainResult).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+      expect(partial.extras.map((extra) => extra.name)).toEqual(["docs"]);
+      expect(reasonLogged("vcs_head_ref_conflict")).toBe(true);
+      expect(created.observer.events.at(-2)).toMatchObject({ stage: "terminal", outcome: "failed" });
+    });
+
+    it("(d) fails the run with the failure itself when nothing published", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.finalizeEmpty = true;
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.partials).toEqual([]);
+      expect(terminationError(created)).toMatch(/^coding_failure_workspace:coding_diag_/);
+    });
+
+    it("(e) keeps a token in a failed push out of Run.error and the logs", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.slotErrors.set(
+        "tools",
+        new GitCommandError(128, redactGitOutput(`remote: rejected https://x-access-token:${FAKE}@github.com`, [FAKE])),
+      );
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe("partially_published: workspace: published; tools: failed(workspace)");
+      expect(JSON.stringify(created.store.partials)).not.toContain(FAKE);
+      expect(JSON.stringify(logged)).not.toContain(FAKE);
+      expect(reasonLogged("git_command_failed")).toBe(true);
+    });
+
+    it("(f) a budget stop keeps each writable repository's changes, recording the kept extras on their rows", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.emptySlots.add("docs");
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      const tools = created.vcs.finalizeCalls[1].details;
+      expect(tools?.summary).toBe(budgetStoppedSummary("Fixed it.", undefined));
+      expect(created.store.completions[0].status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({ name: "tools", pullRequestNumber: 7, mergeOrder: 2 }),
+      ]);
+    });
+
+    it("(f) a budget stop that kept only an extra's changes says so on the status comment", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "budget_exhausted",
+        changesPushed: { pullRequestNumber: 7, repository: "openai/tools" },
+      });
+    });
+
+    it("(f) a budget stop that kept the default repository's changes reports its own pull request", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      await created.executor.start("run-1");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: { pullRequestNumber: 42 } });
+      expect(created.vcs.notifyFinishedCalls[0].changesPushed).not.toHaveProperty("repository");
+    });
+
+    it("(f) a budget stop whose extra fails to push still keeps the others", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([]);
+    });
+
+    describe("in a continuation", () => {
+      const CONTINUATION = { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" };
+      const continued = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) =>
+        writeRow(name, { headRef: "wardby/run-root-run", continuesBranch: true, ...overrides });
+      const baseline = {
+        recordedSha256: "f".repeat(64),
+        previousAgentText: "Tools before.",
+        agentTextRunId: "root-run",
+      };
+
+      it("records the description of an extra's first pull request on the root's row of that name", async () => {
+        const created = await multi([writeRow("tools", { headRef: "wardby/run-root-run" })], {}, CONTINUATION);
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        const recorded: unknown[] = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", { kind: "written", sha256: "e".repeat(64) });
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.vcs.finalizeCalls[1]).toMatchObject({ slot: "tools" });
+        // A fresh pull request: no baseline to replace.
+        expect(created.vcs.finalizeCalls[1].details).not.toHaveProperty("description");
+        expect(recorded).toEqual([
+          {
+            rootRunId: "root-run",
+            expectedSha256: null,
+            sha256: "e".repeat(64),
+            agentTextRunId: "run-1",
+            name: "tools",
+          },
+        ]);
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({
+            name: "tools",
+            pullRequestNumber: 7,
+            prDescriptionOutcome: "written",
+            prDescriptionSha256: "e".repeat(64),
+            prDescriptionRunId: "run-1",
+          }),
+        ]);
+      });
+
+      it("records nothing on the root's row for an extra that continued its pull request", async () => {
+        const created = await multi([continued("tools")], {}, CONTINUATION);
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string; expectedSha256: string | null }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", {
+          kind: "replaced",
+          sha256: "e".repeat(64),
+          agentTextRunId: "run-1",
+        });
+        await created.executor.start("run-1");
+        expect(asked).toContain("tools");
+        expect(recorded.filter((input) => input.name === "tools")).toEqual([
+          expect.objectContaining({ expectedSha256: "f".repeat(64) }),
+        ]);
+      });
+
+      it("refreshes the description of a continued extra that changed nothing", async () => {
+        const created = await multi([continued("tools", { repository: "openai/tools" })], {}, CONTINUATION);
+        created.vcs.emptySlots.add("tools");
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        const refreshed: Array<{ repository: string; slot?: string; summary?: string }> = [];
+        created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+          refreshed.push({
+            repository: workspace.repository,
+            slot: (workspace as PreparedWorkspace).slot?.name,
+            summary: details.summary,
+          });
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(refreshed).toContainEqual({ repository: "openai/tools", slot: "tools", summary: "Fixed it." });
+        expect(asked).toContain("tools");
+        expect(recorded).toContainEqual(expect.objectContaining({ name: "tools", sha256: "9".repeat(64) }));
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({ name: "tools", pullRequestNumber: null, prDescriptionOutcome: "unchanged" }),
+        ]);
+      });
+
+      it("refreshes a no-change extra only after checking that repository's access again", async () => {
+        const gate = allowAll();
+        const created = await harness(
+          { repositories: [continued("tools")], ...CONTINUATION },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            repoAccess: gate as never,
+          },
+        );
+        created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+        created.vcs.emptySlots.add("tools");
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        let refreshes = 0;
+        created.vcs.refreshPullRequestDescription = async () => {
+          refreshes += 1;
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        created.vcs.onFinalize = (slot) => {
+          if (slot === "tools") {
+            gate.authorizeUse.mockImplementation(async (input: unknown) =>
+              (input as { repository: string }).repository === "openai/tools"
+                ? { ok: false, reason: "not_authorized" }
+                : { ok: true },
+            );
+          }
+        };
+        await created.executor.start("run-1");
+        expect(refreshes).toBe(0);
+        expect(extrasOf(created)).toEqual([expect.objectContaining({ prDescriptionOutcome: "skipped:error" })]);
+      });
+
+      it("asks whether each extra's own pull request was marked ready on a budget stop", async () => {
+        const created = await multi(
+          [continued("tools"), continued("docs", { position: 2 })],
+          {
+            outcome: "budget_exhausted",
+          },
+          CONTINUATION,
+        );
+        created.vcs.continuationPullRequestDraft = async () => undefined;
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestMarkedReady = async (_root, name) => {
+          asked.push(name);
+          // Only tools' pull request was marked ready; the default's and docs' are drafts.
+          return name === "tools";
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(asked).toEqual([undefined, "tools", "docs"]);
+        expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      });
+    });
+
+    it("(g) never collects or finalizes a read repository", async () => {
+      const created = await multi([readRow("base"), writeRow("tools", { position: 2 })]);
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+    });
+
+    it("re-authorizes each extra by name right before its push, refusing only that one", async () => {
+      const gate = allowAll();
+      const created = await harness(
+        { repositories: [writeRow("tools"), writeRow("docs", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: gate as never },
+      );
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      created.jobs.onLaunch = () => {
+        gate.authorizeUse.mockImplementation(async (input: unknown) =>
+          (input as { repository: string }).repository === "openai/tools"
+            ? { ok: false, reason: "not_authorized" }
+            : { ok: true },
+        );
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(repo_access); docs: published",
+      );
+    });
+
+    it("refuses to push a writable row stored without its branch", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.jobs.onLaunch = () => {
+        created.store.run.repositories[0].headRef = null;
+      };
+      await created.executor.start("run-1");
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(preflight)",
+      );
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
+
+    it("caps the entries of every collected repository together", async () => {
+      const counted: string[][] = [];
+      const created = await harness({ repositories: [writeRow("tools")] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+        countEntries: async (paths) => {
+          counted.push(paths);
+          // The first count is at prepare time; the job then "writes" 3 entries into each repository.
+          if (counted.length === 1) return;
+          for (const path of paths) for (let i = 0; i < 3; i++) await writeFile(join(path, `file-${i}.txt`), "x");
+          return countWorkspaceEntries(paths, 5);
+        },
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      await created.executor.start("run-1");
+      expect(counted).toHaveLength(2);
+      expect(counted[1]).toEqual([counted[0][0], created.vcs.slotPaths.get("tools")]);
+      expect(created.store.run.status).toBe("failed");
+      expect(reasonLogged("vcs_workspace_entry_limit")).toBe(true);
+      expect(created.vcs.finalizeCalls).toEqual([]);
+    });
+
+    it("(h) a single-repository run completes exactly as before, with no extras", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // runId, status, result and record: never a fifth (extras) argument.
+      expect(created.store.completeArity).toEqual([4]);
+      expect(created.store.completions[0].extras).toBeUndefined();
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
   });
 });
 
