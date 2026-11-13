@@ -8,7 +8,8 @@
  * - Every MCP tool is named in docs/ or help/.
  * - Every environment variable the code reads is named in docs/, help/, README.md or a deploy/
  *   guide, unless it is internal plumbing (INTERNAL_ENV, each with its reason).
- * - Help frontmatter `tags:` stays on one line of at most 120 characters.
+ * - Help frontmatter `tags:` stays on one line of at most 120 characters, or is the multi-line list
+ *   Prettier wraps a longer one into (`tags:`, `  [`, one item per line, `  ]`), which the catalog reads.
  *
  * Gaps found when this suite was written are listed in KNOWN_*: the main tests check everything
  * else and that each listed gap is still a gap (so a fixed one is taken off the list); the
@@ -229,11 +230,15 @@ const KNOWN_LONG_TAGS = new Set<string>([
   ...["help/troubleshooting/coding-workers.md"],
 ]);
 
-/** Help articles whose frontmatter tags are not one `tags: [ ... ]` line of at most 120 characters. */
+/**
+ * Help articles whose frontmatter tags are not one `tags: [ ... ]` line of at most 120 characters,
+ * nor the list Prettier wraps a longer one into (the catalog reads both).
+ */
 function tagProblems(): { file: string; problem: string }[] {
   const problems: { file: string; problem: string }[] = [];
   for (const path of helpArticles) {
     const frontmatter = /^---\n([\s\S]*?)\n---/.exec(read(path))?.[1];
+    if (frontmatter && /^tags:\n {2}\[\n(?: {4}[^\n]+,\n)+ {2}\]$/m.test(frontmatter)) continue;
     const line = frontmatter?.split("\n").find((l) => l.startsWith("tags:"));
     if (!line) continue;
     const file = relative(ROOT, path);

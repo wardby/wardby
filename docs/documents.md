@@ -378,12 +378,13 @@ tries three things in order:
    the summary `Agent edit for comment threads #2 (merged with v3)`, and the
    replies and resolving follow as for any send.
 2. **One reconcile run.** Otherwise Wardby starts one more coding run, trigger
-   `comment`, as the person who sent the threads, on the latest version. Its
-   task holds the current content (built as for a send) and the agent's earlier
-   edit (a design's changed files, or the whole edited Markdown), all redacted
-   against the agent's current secret values and wrapped as untrusted content,
-   and asks the agent to re-apply its change on top of the current version and
-   reply on the threads. Every check a send makes is made again: the sender's
+   `comment`, as the person who sent the threads, on the latest version, for
+   the threads still open or outdated (a thread closed meanwhile is left out and
+   gets no reply). Its task holds the current content (built as for a send) and
+   the agent's earlier edit (a design's changed files, or the whole edited
+   Markdown), all redacted against the agent's current secret values and
+   wrapped as untrusted content, and asks the agent to re-apply its change on
+   top of the current version and reply on the threads. Every check a send makes is made again: the sender's
    `write` access, the owner's `execute` on the agent, the agent's link and
    authorisation for the repository, the hourly send limit and the task size.
    Each thread first gets the agent note "The document changed while the agent
@@ -393,8 +394,11 @@ tries three things in order:
 3. **The conflict note.** If a reconcile run cannot start, or a reconcile run's
    own edit conflicts and cannot be merged, each thread gets "The document
    changed after this was sent, so the agent's edit was not applied. It is on
-   branch …" and stays open. There is at most one reconcile run per send; a
-   person can send the threads again.
+   branch …" and stays open. If the reconcile run itself fails, times out or is
+   refused, each thread gets "The agent run that re-applied the edit on the
+   newer version failed, so the document was not changed. The earlier edit is
+   on branch …", naming the first run's branch, and stays open. There is at
+   most one reconcile run per send; a person can send the threads again.
 
 ## Exports
 

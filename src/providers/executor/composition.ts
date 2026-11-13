@@ -19,6 +19,7 @@ import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
+import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
@@ -76,9 +77,18 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
     });
 }
 
-/** The document send-to-agent completion, outside the finishing run's async context. Never throws. */
+/**
+ * The document send-to-agent completion, outside the finishing run's async context. Never throws.
+ * Answering a run can start a reconcile run, so the self-defect sink is required: its start
+ * failure is filed as a send's is.
+ */
 export function documentRunFinishedHook(
-  deps: () => { db: PrismaClient; executor: Executor; cipher: Parameters<typeof loadAgentSecretValues>[1] },
+  deps: () => {
+    db: PrismaClient;
+    executor: Executor;
+    cipher: Parameters<typeof loadAgentSecretValues>[1];
+    selfDefects: SelfDefectSink;
+  },
 ): (runId: string) => void {
   return (runId) =>
     outsideRunContext(() => {
@@ -260,7 +270,14 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       // Threads sent from a document: publish the run's edit and post its replies (never throws).
       // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
       ...(cipher
-        ? { onTerminal: documentRunFinishedHook(() => ({ db: options.db, executor: composed, cipher })) }
+        ? {
+            onTerminal: documentRunFinishedHook(() => ({
+              db: options.db,
+              executor: composed,
+              cipher,
+              selfDefects: { db: options.db, issueTrackers },
+            })),
+          }
         : {}),
     }),
     jobs,
