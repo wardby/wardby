@@ -19,8 +19,8 @@ The same code answers a `repositories` list (`trigger_agent`, a webhook's
 `wardbyRepositories`, or a delegation) that names something that is not one of
 the agent's links: use link names from `list_repositories` (the `name` of each
 link, not the repository path). See
-Several repositories in one coding run (help article `multi-repository-runs`) and
-Repositories list refused (help article `errors/invalid-repositories`).
+[Several repositories in one coding run](../multi-repository-runs.md) and
+[Repositories list refused](invalid-repositories.md).
 
 A webhook that sends `wardbyRepository` gets the same refusal as a 400
 `{ "error": "invalid_repository" }` when

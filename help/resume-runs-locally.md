@@ -132,7 +132,7 @@ it from a release that includes session resume (see
 or its runs fail at input with `worker_input_failed`.
 
 A run over several repositories resumes with only `/workspace` mapped; see
-Several repositories in one coding run (help article `multi-repository-runs`).
+[Several repositories in one coding run](multi-repository-runs.md).
 
 Full setup: [Resume a run locally](../docs/coding-agent-setup.md#resume-a-run-locally).
 See also [Choose a native or coding agent](help://creating-agents).
