@@ -149,6 +149,23 @@ async function loadResultBundleModule(): Promise<ResultBundleModule> {
 
 const RESULT_BUNDLE_CODE = /^result_bundle_[a-z_]+$/;
 
+/** The longest one bundle may take (the module's own bound for `git bundle create`). */
+const RESULT_BUNDLE_MAX_MS = 10 * 60 * 1000;
+/**
+ * What the launcher still needs after the worker returns (collecting the files, sealing the result)
+ * is kept out of the bundle step's time: a slow bundle must end in the files-only fallback, never in
+ * the run's wall-clock timeout. The dependency cache has no such constant (it takes half the time
+ * left), so this one is chosen here: two minutes.
+ */
+const RESULT_BUNDLE_DEADLINE_MARGIN_MS = 2 * 60 * 1000;
+
+/** The time one bundle may take now: what is left before the deadline less the margin, at most the module's bound. 0 = skip. */
+export function resultBundleTimeLimitMs(deadlineAt: string | undefined, now = Date.now()): number {
+  const at = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
+  if (!Number.isFinite(at)) return RESULT_BUNDLE_MAX_MS;
+  return Math.max(0, Math.min(RESULT_BUNDLE_MAX_MS, at - now - RESULT_BUNDLE_DEADLINE_MARGIN_MS));
+}
+
 /** The operator log line, by default: one JSON object on stderr, as main.ts writes its error. */
 function stderrLog(event: Record<string, string>): void {
   process.stderr.write(`${JSON.stringify(event)}\n`);
@@ -164,6 +181,12 @@ function stderrLog(event: Record<string, string>): void {
 async function bundleResults(options: WorkerRunOptions, module: ResultBundleModule): Promise<void> {
   const log = options.operatorLog ?? stderrLog;
   for (const repository of options.input.gitHistory?.repositories ?? []) {
+    // The run's deadline is shared by the repositories in turn: each gets what is left, less the margin.
+    const timeoutMs = resultBundleTimeLimitMs(options.input.deadlineAt);
+    if (timeoutMs <= 0) {
+      log({ warning: "result_bundle_failed", code: "result_bundle_deadline" });
+      continue;
+    }
     const repoPath = module.resolveHistoryPath(repository.path, {
       workspace: options.workspace,
       reposRoot: options.reposRoot ?? "/repos",
@@ -178,6 +201,7 @@ async function bundleResults(options: WorkerRunOptions, module: ResultBundleModu
         baseCommit: repository.baseCommit,
         excludeCommits: repository.excludeCommits,
         gitBinary: options.gitBinary ?? "git",
+        timeoutMs,
       });
     } catch (error) {
       options.trace?.record("result_bundle_error", describeError(error));

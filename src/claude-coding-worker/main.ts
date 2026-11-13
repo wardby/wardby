@@ -46,7 +46,7 @@ try {
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
     // A run with git history (#536): the tool runner has the workspace and git; this container has neither.
     gitCheck: () => callGitCheck({ signal: controller.signal }),
-    resultBundle: (repository) => callResultBundle(repository, { signal: controller.signal }),
+    resultBundle: (repository, timeoutMs) => callResultBundle(repository, { signal: controller.signal, timeoutMs }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
     onSessionId: (id) => {

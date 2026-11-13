@@ -319,13 +319,14 @@ async function bundleInto(bundlePath, gitDir, { baseCommit, excludeCommits, gitB
     throw new Error("result_bundle_scratch_failed");
   }
   try {
-    const exists = await runGit(gitBinary, scratch, ["cat-file", "-e", `${head}^{commit}`]);
+    const step = { timeoutMs: Math.min(STEP_TIMEOUT_MS, timeoutMs) };
+    const exists = await runGit(gitBinary, scratch, ["cat-file", "-e", `${head}^{commit}`], step);
     if (exists.code !== 0) return { bundled: false, reason: "no_head" };
     const excluded = ["--not", baseCommit, ...excludeCommits];
-    const counted = await runGit(gitBinary, scratch, ["rev-list", "--count", head, ...excluded]);
+    const counted = await runGit(gitBinary, scratch, ["rev-list", "--count", head, ...excluded], step);
     if (counted.code !== 0) throw new Error("result_bundle_git_failed");
     if (counted.stdout.trim() === "0") return { bundled: false, reason: "no_new_commits" };
-    const updated = await runGit(gitBinary, scratch, ["update-ref", BUNDLE_HEAD_REF, head]);
+    const updated = await runGit(gitBinary, scratch, ["update-ref", BUNDLE_HEAD_REF, head], step);
     if (updated.code !== 0) throw new Error("result_bundle_git_failed");
 
     // Streamed to a file created here (never through an existing file or symlink), not by git.

@@ -575,6 +575,27 @@ test("the result bundle tool writes the bundle into the repository's .git and an
   });
 });
 
+test("the result bundle tool passes the caller's timeout to the module, and none when it is not given", async () => {
+  const seen = [];
+  const loadResultBundle = async () => ({
+    resolveHistoryPath: () => "/somewhere",
+    createResultBundle: async (options) => {
+      seen.push(options.timeoutMs);
+      return { bundled: false, reason: "no_new_commits" };
+    },
+  });
+  await withGitRunner({ loadResultBundle }, async ({ connect, base }) => {
+    const client = await connect();
+    const args = { path: "/workspace", base_commit: base, exclude_commits: [] };
+    await callTool(client, RESULT_BUNDLE_TOOL, { ...args, timeout_ms: 85_000 });
+    await callTool(client, RESULT_BUNDLE_TOOL, args);
+    // A timeout the schema does not allow never reaches the module.
+    const refused = await callTool(client, RESULT_BUNDLE_TOOL, { ...args, timeout_ms: 0 });
+    assert.equal(refused.result.isError, true);
+  });
+  assert.deepEqual(seen, [85_000, undefined]);
+});
+
 test("the result bundle tool answers a fixed code on failure, never git's output", async () => {
   await withGitRunner({}, async ({ connect, base, workspace }) => {
     const client = await connect();

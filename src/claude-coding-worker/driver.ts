@@ -199,7 +199,7 @@ export interface ClaudeWorkerRunOptions {
    * On a run with git history: asks the tool runner for one repository's result bundle
    * (callResultBundle, tool-socket.ts) after the agent has finished, and resolves with its unchecked JSON.
    */
-  resultBundle?: (repository: GitHistoryInput["repositories"][number]) => Promise<unknown>;
+  resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
 }
@@ -250,14 +250,38 @@ async function checkGit(options: ClaudeWorkerRunOptions): Promise<void> {
  * result_bundle_failed for anything else, so no text from the tool runner reaches the log), and the
  * control plane then takes the files only.
  */
+/** The longest the socket call for one bundle may take (tool-socket.ts RESULT_BUNDLE_TIMEOUT_MS). */
+const RESULT_BUNDLE_MAX_MS = 15 * 60_000;
+/**
+ * What the launcher still needs after the worker returns (collecting the files, sealing the result)
+ * is kept out of the bundle step's time: a slow bundle must end in the files-only fallback, never in
+ * the run's wall-clock timeout. The dependency cache has no such constant (it takes half the time
+ * left), so this one is chosen here: two minutes, the same as the Codex worker's.
+ */
+const RESULT_BUNDLE_DEADLINE_MARGIN_MS = 2 * 60_000;
+
+/** The time one bundle call may take now: what is left before the deadline less the margin, at most the socket's bound. 0 = skip. */
+export function resultBundleTimeoutMs(deadlineAt: string | undefined, now = Date.now()): number {
+  const at = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
+  if (!Number.isFinite(at)) return RESULT_BUNDLE_MAX_MS;
+  return Math.max(0, Math.min(RESULT_BUNDLE_MAX_MS, at - now - RESULT_BUNDLE_DEADLINE_MARGIN_MS));
+}
+
 async function bundleResults(options: ClaudeWorkerRunOptions): Promise<void> {
   const log = options.operatorLog ?? stderrLog;
   for (const repository of options.input.gitHistory?.repositories ?? []) {
     const where: Record<string, string> = HISTORY_PATH.test(repository.path) ? { path: repository.path } : {};
+    // The run's deadline is shared by the repositories in turn: each gets what is left, less the margin.
+    const timeoutMs = resultBundleTimeoutMs(options.input.deadlineAt);
+    if (timeoutMs <= 0) {
+      log({ warning: "result_bundle_failed", ...where, code: "result_bundle_deadline" });
+      continue;
+    }
     let code: string | undefined;
     try {
       if (!options.resultBundle) throw new Error("git_tool_unavailable");
-      const answer = (await options.resultBundle(repository)) as { ok?: unknown; reason?: unknown } | undefined;
+      const answer = (await options.resultBundle(repository, timeoutMs)) as
+        { ok?: unknown; reason?: unknown } | undefined;
       if (answer?.ok !== true) {
         code =
           typeof answer?.reason === "string" && RESULT_BUNDLE_CODE.test(answer.reason)

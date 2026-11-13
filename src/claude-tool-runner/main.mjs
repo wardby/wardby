@@ -141,12 +141,18 @@ function gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle }) {
         return { ok: false, reason: "git_unavailable" };
       }
     },
-    async bundle({ path, baseCommit, excludeCommits }) {
+    async bundle({ path, baseCommit, excludeCommits, timeoutMs }) {
       try {
         const module = await loadResultBundle();
         const repoPath = module.resolveHistoryPath(path, { workspace: workspacePath, reposRoot });
         if (repoPath === null) return { ok: false, reason: "result_bundle_path_invalid" };
-        const result = await module.createResultBundle({ repoPath, baseCommit, excludeCommits, gitBinary });
+        const result = await module.createResultBundle({
+          repoPath,
+          baseCommit,
+          excludeCommits,
+          gitBinary,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        });
         return result.bundled ? { ok: true, bundled: true } : { ok: true, bundled: false, reason: result.reason };
       } catch (error) {
         const code =
@@ -205,13 +211,21 @@ function toolServer(setup, gate, workspacePath, git) {
         path: z.string().min(1).max(256),
         base_commit: z.string().regex(COMMIT),
         exclude_commits: z.array(z.string().regex(COMMIT)).max(17),
+        timeout_ms: z.number().int().min(1).max(600_000).optional(),
       },
     },
-    async ({ path, base_commit, exclude_commits }) => ({
+    async ({ path, base_commit, exclude_commits, timeout_ms }) => ({
       content: [
         {
           type: "text",
-          text: JSON.stringify(await git.bundle({ path, baseCommit: base_commit, excludeCommits: exclude_commits })),
+          text: JSON.stringify(
+            await git.bundle({
+              path,
+              baseCommit: base_commit,
+              excludeCommits: exclude_commits,
+              timeoutMs: timeout_ms,
+            }),
+          ),
         },
       ],
     }),

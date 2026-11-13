@@ -200,6 +200,31 @@ describe("readHeadCommit", () => {
 // ---------------------------------------------------------------- createResultBundle
 
 describe("createResultBundle", () => {
+  it("stops a slow bundle at its timeout and leaves no partial bundle file behind", async () => {
+    const { work, base } = await shallowWorkRepo();
+    await commitFile(work, "b.txt", "b\n", "agent");
+    // A git that writes part of a bundle to stdout, then hangs on `git bundle create`.
+    const wrapper = join(root, "slow-git.sh");
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\nfor a in "$@"; do if [ "$a" = bundle ]; then printf 'partial'; exec sleep 30; fi; done\nexec git "$@"\n`,
+      { mode: 0o755 },
+    );
+    const started = Date.now();
+    await expect(
+      createResultBundle({
+        repoPath: work,
+        baseCommit: base,
+        excludeCommits: [],
+        gitBinary: wrapper,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toThrow(/^result_bundle_git_failed$/);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    await expect(lstat(join(work, ".git", RESULT_BUNDLE_NAME))).rejects.toThrow();
+    expect(await readdir(join(work, ".git"))).not.toContain(`${RESULT_BUNDLE_NAME}.lock`);
+  });
+
   it("bundles the new commits: the head is listed, and the bundle verifies once the base is present", async () => {
     const { upstream, work, base } = await shallowWorkRepo();
     await commitFile(work, "b.txt", "b\n", "agent one");

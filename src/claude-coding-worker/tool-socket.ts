@@ -92,6 +92,9 @@ export const RESULT_BUNDLE_TOOL = "wardby_result_bundle";
 export const GIT_CHECK_TIMEOUT_MS = 30_000;
 /** Above the tool runner's own bound for one bundle (result-bundle.mjs: ten minutes for `git bundle create`, plus its short steps). */
 export const RESULT_BUNDLE_TIMEOUT_MS = 15 * 60_000;
+/** The tool runner's own bound for one bundle (result-bundle.mjs BUNDLE_TIMEOUT_MS), and how much sooner it stops than the socket call. */
+const RESULT_BUNDLE_TOOL_MAX_MS = 10 * 60_000;
+const RESULT_BUNDLE_SOCKET_SLACK_MS = 5_000;
 
 export interface GitToolCall {
   socketPath?: string;
@@ -133,7 +136,13 @@ export async function callResultBundle(
 ): Promise<unknown> {
   return callToolRunner(
     RESULT_BUNDLE_TOOL,
-    { path: repository.path, base_commit: repository.baseCommit, exclude_commits: [...repository.excludeCommits] },
+    {
+      path: repository.path,
+      base_commit: repository.baseCommit,
+      exclude_commits: [...repository.excludeCommits],
+      // The tool runner stops its own git a little before the socket gives up, and removes the partial bundle.
+      timeout_ms: Math.max(1_000, Math.min(RESULT_BUNDLE_TOOL_MAX_MS, timeoutMs - RESULT_BUNDLE_SOCKET_SLACK_MS)),
+    },
     { socketPath, timeoutMs, signal, unavailable: "git_tool_unavailable", failed: "git_tool_failed" },
   );
 }

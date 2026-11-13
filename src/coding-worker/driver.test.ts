@@ -47,6 +47,9 @@ const input: CodingTaskInput = {
   deadlineAt: "2026-09-07T13:00:00.000Z",
 };
 
+/** A deadline far enough away that the bundle step has all the time it wants. */
+const FAR_DEADLINE = new Date(Date.now() + 24 * 3_600_000).toISOString();
+
 async function* events(values: WorkerEvent[]) {
   yield* values;
 }
@@ -1035,7 +1038,7 @@ describe("runCodingWorker git history (#536)", () => {
     const order: string[] = [];
     const { module, calls } = fakeBundle(order, async () => ({ bundled: true, head: "d".repeat(40) }));
     const { result, workspace } = await run(
-      { ...input, gitHistory: history },
+      { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
       answer("changes_ready"),
       { loadResultBundle: async () => module, gitBinary: "/opt/git" },
       order,
@@ -1043,8 +1046,14 @@ describe("runCodingWorker git history (#536)", () => {
     expect(result.outcome).toBe("changes_ready");
     expect(order).toEqual(["git_check:/opt/git", "client", "bundle", "bundle"]);
     expect(calls).toEqual([
-      { repoPath: workspace, baseCommit: BASE, excludeCommits: [TIP], gitBinary: "/opt/git" },
-      { repoPath: "/fake-repos/api", baseCommit: OTHER_BASE, excludeCommits: [], gitBinary: "/opt/git" },
+      { repoPath: workspace, baseCommit: BASE, excludeCommits: [TIP], gitBinary: "/opt/git", timeoutMs: 600_000 },
+      {
+        repoPath: "/fake-repos/api",
+        baseCommit: OTHER_BASE,
+        excludeCommits: [],
+        gitBinary: "/opt/git",
+        timeoutMs: 600_000,
+      },
     ]);
     // The output is unchanged: the bundle travels as a file, never in the result.
     expect(JSON.stringify(result)).not.toContain("d".repeat(40));
@@ -1056,15 +1065,62 @@ describe("runCodingWorker git history (#536)", () => {
       [{ type: "turn.failed", error: { message: "wardby_budget_exhausted" } }] as WorkerEvent[],
     ]) {
       const { module, calls } = fakeBundle([], async () => ({ bundled: false, reason: "no_new_commits" }));
-      const { result } = await run({ ...input, gitHistory: history }, values, { loadResultBundle: async () => module });
+      const { result } = await run({ ...input, deadlineAt: FAR_DEADLINE, gitHistory: history }, values, {
+        loadResultBundle: async () => module,
+      });
       expect(result.outcome).toBe("budget_exhausted");
       expect(calls.map((call) => call.baseCommit)).toEqual([BASE, OTHER_BASE]);
     }
   });
 
+  it("skips the bundle step, logging result_bundle_deadline, when the run's deadline is too close", async () => {
+    for (const deadlineAt of [
+      new Date(Date.now() - 1_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    ]) {
+      const logs: Array<Record<string, string>> = [];
+      const { module, calls } = fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) }));
+      const { result } = await run({ ...input, deadlineAt, gitHistory: history }, answer("changes_ready"), {
+        loadResultBundle: async () => module,
+        operatorLog: (event) => logs.push(event),
+      });
+      expect(result.outcome).toBe("changes_ready");
+      expect(calls).toEqual([]);
+      expect(logs).toEqual([
+        { warning: "result_bundle_failed", code: "result_bundle_deadline" },
+        { warning: "result_bundle_failed", code: "result_bundle_deadline" },
+      ]);
+    }
+  });
+
+  it("caps each bundle's timeout at the time left before the deadline, less the margin", async () => {
+    const { module, calls } = fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) }));
+    const deadlineAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    await run({ ...input, deadlineAt, gitHistory: history }, answer("changes_ready"), {
+      loadResultBundle: async () => module,
+    });
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      // Five minutes left, two kept back (the run's own clock keeps ticking while the test runs).
+      expect(call.timeoutMs).toBeLessThanOrEqual(3 * 60_000);
+      expect(call.timeoutMs).toBeGreaterThan(3 * 60_000 - 30_000);
+    }
+    expect(calls[1].timeoutMs!).toBeLessThanOrEqual(calls[0].timeoutMs!);
+    // Far away: the module's own bound.
+    const far = fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) }));
+    await run(
+      { ...input, deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), gitHistory: history },
+      answer("changes_ready"),
+      {
+        loadResultBundle: async () => far.module,
+      },
+    );
+    expect(far.calls.map((call) => call.timeoutMs)).toEqual([600_000, 600_000]);
+  });
+
   it("makes no bundle for no_changes", async () => {
     const { module, calls } = fakeBundle([], async () => ({ bundled: true, head: "d".repeat(40) }));
-    const { result } = await run({ ...input, gitHistory: history }, answer("no_changes"), {
+    const { result } = await run({ ...input, deadlineAt: FAR_DEADLINE, gitHistory: history }, answer("no_changes"), {
       loadResultBundle: async () => module,
     });
     expect(result.outcome).toBe("no_changes");
@@ -1082,7 +1138,7 @@ describe("runCodingWorker git history (#536)", () => {
     const order: string[] = [];
     await expect(
       run(
-        { ...input, gitHistory: history },
+        { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
         answer("changes_ready"),
         { gitBinary: join(tmpdir(), "wardby-no-such-git") },
         order,
@@ -1097,7 +1153,7 @@ describe("runCodingWorker git history (#536)", () => {
       if (call.baseCommit === BASE) throw new Error("fatal: ghp_FAKESECRET0123456789abcdefABCDEF012345 in stderr");
       return { bundled: true, head: "d".repeat(40) };
     });
-    const { result } = await run({ ...input, gitHistory: history }, answer("changes_ready"), {
+    const { result } = await run({ ...input, deadlineAt: FAR_DEADLINE, gitHistory: history }, answer("changes_ready"), {
       loadResultBundle: async () => module,
       operatorLog: (event) => logs.push(event),
     });
@@ -1116,6 +1172,7 @@ describe("runCodingWorker git history (#536)", () => {
     await run(
       {
         ...input,
+        deadlineAt: FAR_DEADLINE,
         gitHistory: {
           repositories: [
             { path: "/workspace", baseCommit: BASE, excludeCommits: [] },
@@ -1153,7 +1210,11 @@ describe("runCodingWorker git history (#536)", () => {
     git(workspace, "clone", "-q", "--depth", "1", "--no-local", `file://${upstream}`, ".");
     const createClient = (config: WorkerClientConfig) => clientFor(answer("changes_ready"), {})(config);
     const result = await runCodingWorker({
-      input: { ...input, gitHistory: { repositories: [{ path: "/workspace", baseCommit: base, excludeCommits: [] }] } },
+      input: {
+        ...input,
+        deadlineAt: FAR_DEADLINE,
+        gitHistory: { repositories: [{ path: "/workspace", baseCommit: base, excludeCommits: [] }] },
+      },
       workspace,
       proxyBaseUrl: "http://proxy:8080",
       capability: "rrp_worker_capability",

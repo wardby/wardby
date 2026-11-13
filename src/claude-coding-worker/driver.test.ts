@@ -28,6 +28,9 @@ const input: CodingTaskInput = {
   deadlineAt: "2026-09-07T13:00:00.000Z",
 };
 
+/** A deadline far enough away that the bundle step has all the time it wants. */
+const FAR_DEADLINE = new Date(Date.now() + 24 * 3_600_000).toISOString();
+
 describe("runClaudeCodingWorker", () => {
   it("pins the proxy, disables built-ins, and permits only the socket relay", async () => {
     let captured: ClaudeQueryOptions | undefined;
@@ -954,7 +957,8 @@ describe("runClaudeCodingWorker git history (#536)", () => {
     return {
       calls,
       gitCheck: () => callGitCheck({ socketPath }),
-      resultBundle: (repository: (typeof history.repositories)[number]) => callResultBundle(repository, { socketPath }),
+      resultBundle: (repository: (typeof history.repositories)[number], timeoutMs?: number) =>
+        callResultBundle(repository, { socketPath, ...(timeoutMs === undefined ? {} : { timeoutMs }) }),
     };
   }
   const cleanups: Array<() => Promise<void>> = [];
@@ -969,7 +973,7 @@ describe("runClaudeCodingWorker git history (#536)", () => {
       return name === "wardby_git_check" ? { ok: true } : { ok: true, bundled: true };
     });
     const result = await runClaudeCodingWorker({
-      input: { ...input, gitHistory: history },
+      input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
       proxyBaseUrl: "http://proxy",
       capability: "cap",
       signal: new AbortController().signal,
@@ -982,10 +986,13 @@ describe("runClaudeCodingWorker git history (#536)", () => {
     expect(order).toEqual(["wardby_git_check", "query", "wardby_result_bundle", "wardby_result_bundle"]);
     expect(runner.calls).toEqual([
       { name: "wardby_git_check", arguments: {} },
-      { name: "wardby_result_bundle", arguments: { path: "/workspace", base_commit: BASE, exclude_commits: [TIP] } },
       {
         name: "wardby_result_bundle",
-        arguments: { path: "/repos/api", base_commit: "c".repeat(40), exclude_commits: [] },
+        arguments: { path: "/workspace", base_commit: BASE, exclude_commits: [TIP], timeout_ms: 600_000 },
+      },
+      {
+        name: "wardby_result_bundle",
+        arguments: { path: "/repos/api", base_commit: "c".repeat(40), exclude_commits: [], timeout_ms: 600_000 },
       },
     ]);
   });
@@ -1000,7 +1007,7 @@ describe("runClaudeCodingWorker git history (#536)", () => {
         name === "wardby_git_check" ? { ok: true } : { ok: true, bundled: false, reason: "no_new_commits" },
       );
       const result = await runClaudeCodingWorker({
-        input: { ...input, gitHistory: history },
+        input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
         proxyBaseUrl: "http://proxy",
         capability: "cap",
         signal: new AbortController().signal,
@@ -1014,10 +1021,66 @@ describe("runClaudeCodingWorker git history (#536)", () => {
     }
   });
 
+  it("skips the bundle step, logging result_bundle_deadline, when the run's deadline is too close", async () => {
+    for (const deadlineAt of [
+      new Date(Date.now() - 1_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    ]) {
+      const logs: Array<Record<string, string>> = [];
+      const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+      const result = await runClaudeCodingWorker({
+        input: { ...input, deadlineAt, gitHistory: history },
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: queryOf([success("changes_ready")]),
+        gitCheck: runner.gitCheck,
+        resultBundle: runner.resultBundle,
+        operatorLog: (event) => logs.push(event),
+      });
+      expect(result.outcome).toBe("changes_ready");
+      expect(runner.calls.map((call) => call.name)).toEqual(["wardby_git_check"]);
+      expect(logs).toEqual([
+        { warning: "result_bundle_failed", path: "/workspace", code: "result_bundle_deadline" },
+        { warning: "result_bundle_failed", path: "/repos/api", code: "result_bundle_deadline" },
+      ]);
+    }
+  });
+
+  it("caps the socket call's timeout, and the tool's own, at the time left before the deadline, less the margin", async () => {
+    const seen: number[] = [];
+    const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+    await runClaudeCodingWorker({
+      input: { ...input, deadlineAt: new Date(Date.now() + 5 * 60_000).toISOString(), gitHistory: history },
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("changes_ready")]),
+      gitCheck: runner.gitCheck,
+      resultBundle: async (repository, timeoutMs) => {
+        seen.push(timeoutMs);
+        return runner.resultBundle(repository, timeoutMs);
+      },
+      operatorLog: () => undefined,
+    });
+    expect(seen).toHaveLength(2);
+    for (const timeoutMs of seen) {
+      expect(timeoutMs).toBeLessThanOrEqual(3 * 60_000);
+      expect(timeoutMs).toBeGreaterThan(3 * 60_000 - 30_000);
+    }
+    // The tool runner is told to stop a little sooner than the socket gives up.
+    const bundleCalls = runner.calls.filter((call) => call.name === "wardby_result_bundle");
+    for (const [index, call] of bundleCalls.entries()) {
+      const toolMs = call.arguments.timeout_ms as number;
+      expect(toolMs).toBeLessThan(seen[index]);
+      expect(toolMs).toBeGreaterThan(seen[index] - 10_000);
+    }
+  });
+
   it("makes no bundle for no_changes, and calls neither tool when history is off", async () => {
     const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
     await runClaudeCodingWorker({
-      input: { ...input, gitHistory: history },
+      input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
       proxyBaseUrl: "http://proxy",
       capability: "cap",
       signal: new AbortController().signal,
@@ -1054,7 +1117,7 @@ describe("runClaudeCodingWorker git history (#536)", () => {
       const gitCheck = await make();
       await expect(
         runClaudeCodingWorker({
-          input: { ...input, gitHistory: history },
+          input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
           proxyBaseUrl: "http://proxy",
           capability: "cap",
           signal: new AbortController().signal,
@@ -1077,6 +1140,7 @@ describe("runClaudeCodingWorker git history (#536)", () => {
     const result = await runClaudeCodingWorker({
       input: {
         ...input,
+        deadlineAt: FAR_DEADLINE,
         gitHistory: {
           repositories: [
             ...history.repositories,

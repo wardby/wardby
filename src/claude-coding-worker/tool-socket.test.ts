@@ -175,8 +175,17 @@ describe("git tools (#536)", () => {
     await expect(callResultBundle(repository, { socketPath: path })).resolves.toEqual({ ok: true, bundled: true });
     expect(seen[2].params).toEqual({
       name: RESULT_BUNDLE_TOOL,
-      arguments: { path: "/repos/api", base_commit: "a".repeat(40), exclude_commits: ["b".repeat(40)] },
+      // The tool's own bound: the module's ten minutes when the socket call has its default.
+      arguments: {
+        path: "/repos/api",
+        base_commit: "a".repeat(40),
+        exclude_commits: ["b".repeat(40)],
+        timeout_ms: 600_000,
+      },
     });
+    // A near deadline: the tool stops five seconds before the socket call gives up.
+    await callResultBundle(repository, { socketPath: path, timeoutMs: 90_000 });
+    expect((seen.at(-1)?.params as { arguments: { timeout_ms: number } }).arguments.timeout_ms).toBe(85_000);
     expect(RESULT_BUNDLE_TOOL).toBe("wardby_result_bundle");
   });
 
