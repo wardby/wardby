@@ -2031,3 +2031,63 @@ describe("countWorkspaceEntries", () => {
     }
   });
 });
+
+describe("NodeGitCommandRunner timeoutMs, input and env (#536)", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  async function fakeGit(script: string): Promise<{ root: string; executable: string }> {
+    const root = await mkdtemp(join(tmpdir(), "wardby-git-timeout-"));
+    roots.push(root);
+    const executable = resolve(root, "fake-git.sh");
+    await writeFile(executable, `#!/bin/sh\n${script}\n`);
+    await chmod(executable, 0o700);
+    return { root, executable };
+  }
+
+  it("kills a command that outlives its timeout, with every child it started, as timed_out", async () => {
+    // A shell that starts a child: killing only the shell would leave sleep holding the pipes open.
+    const { root, executable } = await fakeGit(`echo started; sleep 30; echo never`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const started = Date.now();
+    const error = await runner.run(["fetch"], { timeoutMs: 300 }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(GitCommandError);
+    expect((error as Error).message).toContain("timed_out");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("finishes normally under its timeout", async () => {
+    const { root, executable } = await fakeGit(`echo done`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    await expect(runner.run(["status"], { timeoutMs: 5_000 })).resolves.toMatchObject({ stdout: "done\n" });
+  });
+
+  it("writes input to stdin and sets only the commit identity variables it allows", async () => {
+    const { root, executable } = await fakeGit(
+      `cat; echo "|$GIT_AUTHOR_NAME|$GIT_AUTHOR_EMAIL|$GIT_AUTHOR_DATE|$GIT_COMMITTER_NAME|$GIT_COMMITTER_EMAIL|$GIT_COMMITTER_DATE"`,
+    );
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const result = await runner.run(["commit-tree"], {
+      input: "message\n",
+      env: {
+        GIT_AUTHOR_NAME: "Wardby",
+        GIT_AUTHOR_EMAIL: "wardby@users.noreply.github.com",
+        GIT_AUTHOR_DATE: "@1700000000 +0100",
+        GIT_COMMITTER_NAME: "Wardby",
+        GIT_COMMITTER_EMAIL: "wardby@users.noreply.github.com",
+        GIT_COMMITTER_DATE: "@1700000001 +0000",
+      },
+    });
+    expect(result.stdout).toBe(
+      "message\n|Wardby|wardby@users.noreply.github.com|@1700000000 +0100|Wardby|wardby@users.noreply.github.com|@1700000001 +0000\n",
+    );
+    await expect(
+      runner.run(["status"], { env: { GIT_DIR: "/elsewhere" } as unknown as GitCommandOptions["env"] }),
+    ).rejects.toThrow("git_env_invalid");
+  });
+});

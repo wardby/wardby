@@ -38,6 +38,7 @@ import {
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
 import { buildWorkerGitDir } from "./worker-git.js";
+import { RESULT_REF, importResultBundle, validateChangedPath } from "./result-history.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -145,7 +146,28 @@ export interface GitCommandOptions {
   maxOutputBytes?: number;
   /** Non-zero exit codes that still resolve with the output (`merge-tree` exits 1 on conflicts). */
   acceptExitCodes?: readonly number[];
+  /**
+   * Kills the command, and every process it started, after this many milliseconds, raising
+   * GitCommandError `timed_out`. Unset: no limit.
+   */
+  timeoutMs?: number;
+  /** Written to the command's stdin (`commit-tree -F -`); unset, stdin is closed. */
+  input?: string;
+  /** Only the commit identity and date variables (GIT_COMMIT_ENV_NAMES); anything else is refused. */
+  env?: Readonly<Partial<Record<GitCommitEnvName, string>>>;
 }
+
+/** The environment variables a caller may set for one git command: who made a commit, and when. */
+export const GIT_COMMIT_ENV_NAMES = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+] as const;
+export type GitCommitEnvName = (typeof GIT_COMMIT_ENV_NAMES)[number];
+const GIT_COMMIT_ENV = new Set<string>(GIT_COMMIT_ENV_NAMES);
 
 export interface GitCommandResult {
   stdout: string;
@@ -206,6 +228,15 @@ export class NodeGitCommandRunner implements GitCommandRunner {
     if (options.authUsername !== undefined && !SAFE_GIT_USERNAME.test(options.authUsername)) {
       throw new Error("git_auth_username_invalid");
     }
+    const commitEnv = Object.entries(options.env ?? {});
+    if (
+      commitEnv.some(([name, value]) => !GIT_COMMIT_ENV.has(name) || typeof value !== "string" || value.includes("\0"))
+    ) {
+      throw new Error("git_env_invalid");
+    }
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0)) {
+      throw new Error("git_timeout_invalid");
+    }
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
       HOME: this.options.homeDir,
@@ -223,16 +254,21 @@ export class NodeGitCommandRunner implements GitCommandRunner {
       GIT_LFS_SKIP_SMUDGE: "1",
       // WARDBY_TEST_SIMULATORS (test only): the simulator's throwaway CA; empty otherwise.
       ...simulatorGitEnvironment(),
+      ...Object.fromEntries(commitEnv),
     };
     const maxBytes = options.maxOutputBytes ?? MAX_GIT_OUTPUT_BYTES;
     const secrets = options.authToken ? [options.authToken] : [];
 
     return new Promise((resolvePromise, rejectPromise) => {
+      const timed = options.timeoutMs !== undefined;
       const child = spawn(this.gitBinary, [...args], {
         cwd: options.cwd,
         env,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe", options.authToken ? "pipe" : "ignore"],
+        // A timed command leads its own process group, so a timeout kills what it started too
+        // (fetch's index-pack, a shell's children), not just git.
+        detached: timed,
+        stdio: [options.input !== undefined ? "pipe" : "ignore", "pipe", "pipe", options.authToken ? "pipe" : "ignore"],
       });
       const childStdout = child.stdout;
       const childStderr = child.stderr;
@@ -241,6 +277,29 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         rejectPromise(new GitCommandError(null, "git_stdio_unavailable"));
         return;
       }
+      if (options.input !== undefined && child.stdin) {
+        child.stdin.on("error", () => undefined);
+        child.stdin.end(options.input);
+      }
+      let timedOut = false;
+      const killAll = () => {
+        try {
+          if (timed && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      };
+      const timer = timed
+        ? setTimeout(() => {
+            timedOut = true;
+            killAll();
+            // Whatever still holds the pipes open is not waited for.
+            childStdout.destroy();
+            childStderr.destroy();
+            rejectPromise(new GitCommandError(null, "timed_out"));
+          }, options.timeoutMs)
+        : undefined;
       if (options.authToken) {
         const authPipe = child.stdio[3] as Writable;
         authPipe.on("error", () => undefined);
@@ -256,7 +315,7 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         outputBytes += chunk.length;
         if (outputBytes > maxBytes) {
           outputExceeded = true;
-          child.kill("SIGKILL");
+          killAll();
           return;
         }
         chunks.push(chunk);
@@ -267,6 +326,8 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         spawnError = true;
       });
       child.once("close", (code) => {
+        if (timer) clearTimeout(timer);
+        if (timedOut) return;
         if (outputExceeded) {
           rejectPromise(new GitCommandError(code, "git_output_limit"));
           return;
@@ -336,17 +397,7 @@ export function protectedPathMatcher(patterns: readonly string[]): (path: string
   };
 }
 
-export function validateChangedPath(path: string): string {
-  if (
-    !path ||
-    isAbsolute(path) ||
-    path.includes("\\") ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  ) {
-    throw new Error("vcs_changed_path_invalid");
-  }
-  return path;
-}
+export { validateChangedPath };
 
 function nullSeparated(value: string): string[] {
   const values = value.split("\0");
@@ -678,7 +729,9 @@ export class GitVcsProvider implements VcsProvider {
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
     const merge = await this.readMergeState(prepared);
     const currentHead = await this.revParse(prepared, "HEAD");
-    if (currentHead !== prepared.baseCommit) {
+    // A history run's finalize records the tip it pushed (any number of commits on historyBase).
+    const finalizedHistory = prepared.gitHistory !== undefined && currentHead === (await this.resultRef(prepared));
+    if (currentHead !== prepared.baseCommit && !finalizedHistory) {
       const parent = await this.revParse(prepared, "HEAD^");
       if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
       if (merge && (await this.revParse(prepared, "HEAD^2")) !== merge.targetCommit) {
@@ -758,6 +811,9 @@ export class GitVcsProvider implements VcsProvider {
     // The merge state on disk is the trusted record; the handle must agree with it.
     const merge = await this.readMergeState(prepared);
     if (!sameTargetMerge(merge, prepared.targetMerge)) throw new Error("vcs_workspace_handle_invalid");
+    if (prepared.gitHistory) return this.finalizeHistory(prepared, merge, details);
+    // Only a history run's collector makes a result bundle.
+    if (details?.resultBundle !== undefined) throw new Error("vcs_workspace_handle_invalid");
     // Excluded paths (src/coding/collect-exclude.ts) are never collected from the worker, so
     // they are also neither added nor deleted here: tracked files under them stay untouched.
     await this.gitFor(prepared, [
@@ -828,7 +884,17 @@ export class GitVcsProvider implements VcsProvider {
       if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
       commitSha = currentHead;
     }
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
 
+  /** The end of every finalize that has something to push: push it once, then open or update the pull request (or report the branch). */
+  private async pushAndPublish(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+    changed: string[],
+    commitSha: string,
+  ): Promise<FinalizeChangesResult> {
     await this.remote.assertContinuationOpen(prepared);
     // Before the push: a description comment must already exist when the push starts a review.
     await this.remote
@@ -867,6 +933,160 @@ export class GitVcsProvider implements VcsProvider {
           }
         : {}),
     };
+  }
+
+  /**
+   * A history run's finalize (#536). With a result bundle, the agent's commits are imported and
+   * rewritten (result-history.ts) and become the start; without one, the start is historyBase
+   * (baseCommit, or M0, a continuation's committed target merge, which is then pushed even with no
+   * other change). The uncommitted files are staged on the start and committed on top as
+   * "Wardby run <id>" when they differ from it. Every check runs over the agent's own changes: each
+   * new commit's paths (against all its parents) and the uncommitted ones, together; the diff limit
+   * over all their diffs together; the conflict-marker check over the target merge's conflicted paths
+   * and every path a merge commit of the agent's resolved. refs/wardby/result records the tip pushed.
+   */
+  private async finalizeHistory(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+  ): Promise<FinalizeChangesResult> {
+    const historyBase = prepared.historyBase;
+    if (historyBase === undefined) throw new Error("vcs_workspace_handle_invalid");
+    const previousHead = await this.revParse(prepared, "HEAD");
+    const finalized = await this.resultRef(prepared);
+    if (details?.resultBundle === undefined && finalized !== null && finalized === previousHead) {
+      return this.repushFinalized(prepared, merge, details, finalized);
+    }
+    const imported =
+      details?.resultBundle !== undefined
+        ? await importResultBundle({
+            git: (args, options) => this.gitFor(prepared, args, options),
+            bundlePath: details.resultBundle,
+            historyBase,
+            remoteTips: prepared.remoteTips ?? [],
+            runId: prepared.runId,
+            maxDiffBytes: this.maxDiffBytes,
+            maxChangedFiles: this.maxChangedFiles,
+          })
+        : undefined;
+    const start = imported?.tip ?? historyBase;
+    // The index starts at the start's tree, so excluded paths (never collected) keep the start's
+    // version, and the staged diff is only what the agent left uncommitted.
+    await this.gitFor(prepared, ["read-tree", start]);
+    await this.gitFor(prepared, [
+      "add",
+      "--all",
+      "--",
+      ":/",
+      ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
+    ]);
+    const staged = nullSeparated(
+      (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", start, "--"])).stdout,
+    );
+    const changed = [...new Set([...(imported?.agentPaths ?? []).map(validateChangedPath), ...staged])];
+    if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
+    const protectedChange = changed.find(protectedPathMatcher(prepared.protectedPaths));
+    if (protectedChange) throw new Error(`vcs_protected_path:${protectedChange}`);
+    const remaining = this.maxDiffBytes - (imported?.agentDiffBytes ?? 0);
+    if (remaining < 0) throw new Error("vcs_diff_size_limit");
+    let diff: string;
+    try {
+      diff = (
+        await this.gitFor(prepared, ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", start, "--"], {
+          maxOutputBytes: remaining,
+        })
+      ).stdout;
+    } catch (error) {
+      if (error instanceof GitCommandError && error.message.includes("git_output_limit")) {
+        throw new Error("vcs_diff_size_limit", { cause: error });
+      }
+      throw error;
+    }
+    if (Buffer.byteLength(diff, "utf8") > remaining) throw new Error("vcs_diff_size_limit");
+    // After the size limits, as for a run without history. The workspace holds the final tree.
+    const conflicted = [...new Set([...(merge?.conflictedPaths ?? []), ...(imported?.mergePaths ?? [])])];
+    if (conflicted.length > 0) await this.assertConflictsResolved(prepared.workspacePath, conflicted);
+
+    const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    let commitSha: string;
+    if (tree === (await this.revParse(prepared, `${start}^{tree}`))) {
+      commitSha = start;
+    } else if (
+      previousHead !== start &&
+      (await this.commitParents(prepared, previousHead)).join(" ") === start &&
+      (await this.revParse(prepared, `${previousHead}^{tree}`)) === tree
+    ) {
+      // Finalized before with these same files: the commit already made is pushed again.
+      commitSha = previousHead;
+    } else {
+      commitSha = (
+        await this.gitFor(prepared, ["commit-tree", tree, "-p", start, "-m", `Wardby run ${prepared.runId}`])
+      ).stdout.trim();
+      if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
+    }
+    if (commitSha === prepared.baseCommit) {
+      return {
+        outcome: "no_changes",
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        baseCommit: prepared.baseCommit,
+      };
+    }
+    const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
+    if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha]);
+    await this.gitFor(prepared, ["symbolic-ref", "HEAD", `refs/heads/${prepared.headRef}`]);
+    await this.gitFor(prepared, ["update-ref", RESULT_REF, commitSha]);
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
+
+  /**
+   * A history run finalized before (refs/wardby/result is HEAD: every check passed then) and finalized
+   * again without a bundle: the same tip is pushed again, provided the collected files still match it.
+   */
+  private async repushFinalized(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+    commitSha: string,
+  ): Promise<FinalizeChangesResult> {
+    await this.gitFor(prepared, ["read-tree", commitSha]);
+    await this.gitFor(prepared, [
+      "add",
+      "--all",
+      "--",
+      ":/",
+      ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
+    ]);
+    const afterCommitChanges = nullSeparated(
+      (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", commitSha, "--"])).stdout,
+    );
+    if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
+    // Only for the pull request's notes (lockfiles): what the branch changes against where it started.
+    const changed = await this.gitFor(prepared, [
+      "diff",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      prepared.baseCommit,
+      commitSha,
+      "--",
+    ]).then(
+      (result) => nullSeparated(result.stdout).slice(0, this.maxChangedFiles),
+      () => [],
+    );
+    const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
+    if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
+
+  /** refs/wardby/result in the control plane's git dir, or null when no finalize recorded one. */
+  private async resultRef(workspace: PreparedWorkspace): Promise<string | null> {
+    const value = (await this.gitFor(workspace, ["for-each-ref", "--format=%(objectname)", RESULT_REF])).stdout.trim();
+    if (!value) return null;
+    if (!COMMIT_SHA.test(value)) throw new Error("vcs_commit_sha_invalid");
+    return value;
   }
 
   /** The two-parent merge commit (baseCommit, the target) of the staged tree, as the Wardby identity. */

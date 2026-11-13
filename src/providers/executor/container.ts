@@ -8,7 +8,7 @@ import {
   type PackageAuditReport,
 } from "../../coding/registry/audit-mode.js";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
@@ -274,6 +274,10 @@ interface RepositorySlot {
   extra?: RunRepositorySnapshot;
   workspace?: PreparedWorkspace;
   error?: unknown;
+  /** A history run's result bundle (#536): where collectWritable had it collected, removed after publishing. */
+  bundleDestination?: string;
+  /** Set when the collector wrote a bundle there; passed to finalizeChanges. */
+  resultBundle?: string;
 }
 
 /** What finalizeChanges did for one repository of a run with several. */
@@ -1628,6 +1632,11 @@ export interface ContainerExecutorOptions {
    * vcs_workspace_entry_limit). Test hook; defaults to countWorkspaceEntries.
    */
   countEntries?: (paths: string[]) => Promise<void>;
+  /**
+   * CODING_MAX_RESULT_BUNDLE_MB in bytes (loadCodingResultBundleMaxBytes): the largest result bundle a
+   * history run's collector takes (#536); each launcher caps it again at the run's disk. Default 256 MiB.
+   */
+  resultBundleMaxBytes?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
@@ -2688,7 +2697,62 @@ export class ContainerExecutor implements Executor {
     const preparedInput = this.preflight(collectedFor, { launched: true });
     const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
     if (!workspace) throw new Error("coding_workspace_lost");
-    await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+    const collected = await this.materialize(handle, workspace);
+    try {
+      return await this.finalizeCollected(run, collectedFor, output, summary, workspace, collected, options);
+    } finally {
+      await removeResultBundle(collected.bundleDestination);
+    }
+  }
+
+  /**
+   * Copies one writable repository out of the finished job into its workspace. A history run's result
+   * bundle (#536) is collected too, to a fresh path outside every workspace (resultBundlePath), with any
+   * stale file there removed first; without history the call is exactly as before. The caller removes
+   * the bundle once it is finalized, whatever happened.
+   */
+  private async materialize(
+    handle: JobHandle,
+    workspace: PreparedWorkspace,
+  ): Promise<{ bundleDestination?: string; resultBundle?: string }> {
+    const name = workspace.slot?.name;
+    if (!workspace.gitHistory) {
+      if (name === undefined) await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+      else await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath, name);
+      return {};
+    }
+    const bundleDestination = resultBundlePath(workspace);
+    await mkdir(dirname(bundleDestination), { recursive: true, mode: 0o700 });
+    await removeResultBundle(bundleDestination);
+    try {
+      const collected = await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath, name, {
+        gitHistory: {
+          bundleDestination,
+          maxBundleBytes: this.options.resultBundleMaxBytes ?? DEFAULT_RESULT_BUNDLE_MAX_BYTES,
+        },
+      });
+      return { bundleDestination, ...(collected?.bundle ? { resultBundle: bundleDestination } : {}) };
+    } catch (error) {
+      await removeResultBundle(bundleDestination);
+      throw error;
+    }
+  }
+
+  /** pushChanges once the job's workspace (and a history run's bundle) is collected. */
+  private async finalizeCollected(
+    run: ContainerRunSnapshot,
+    collectedFor: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    summary: string,
+    workspace: PreparedWorkspace,
+    collected: { resultBundle?: string },
+    options: { keepDescription?: boolean },
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    workspace: PreparedWorkspace;
+    finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
+    descriptionState: DescriptionState;
+  }> {
     await normalizeCollectedLockfiles(collectedFor.provider, workspace.workspacePath);
     const current = await this.requireCurrent(run.runId);
     // One more (usually cached) check right before anything is pushed: access
@@ -2710,6 +2774,7 @@ export class ContainerExecutor implements Executor {
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
         : {}),
+      ...(collected.resultBundle ? { resultBundle: collected.resultBundle } : {}),
     });
     return { current, workspace, finalized, descriptionState };
   }
@@ -2821,21 +2886,25 @@ export class ContainerExecutor implements Executor {
     sessionId: string | null | undefined,
   ): Promise<{ outcome: "succeeded" | "failed"; current: ContainerRunSnapshot; main?: FinalizeResult }> {
     const slots = await this.repositorySlots(current, held);
-    await this.collectWritable(handle, current, slots);
     const done: RepositoryPublish[] = [];
     let latest = current;
-    for (const slot of slots) {
-      if (slot.error !== undefined || !slot.workspace) continue;
-      try {
-        const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, done, {
-          summary: (text) => text,
-        });
-        latest = publish.current;
-        done.push(publish);
-      } catch (error) {
-        if (isNoLongerActive(error)) throw error;
-        slot.error = error;
+    try {
+      await this.collectWritable(handle, current, slots);
+      for (const slot of slots) {
+        if (slot.error !== undefined || !slot.workspace) continue;
+        try {
+          const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, done, {
+            summary: (text) => text,
+          });
+          latest = publish.current;
+          done.push(publish);
+        } catch (error) {
+          if (isNoLongerActive(error)) throw error;
+          slot.error = error;
+        }
       }
+    } finally {
+      await removeResultBundles(slots);
     }
     const failed = slots.filter((slot) => slot.error !== undefined);
     const pushed = done.flatMap((publish) => (publish.finalized.outcome === "no_changes" ? [] : [publish.finalized]));
@@ -2898,11 +2967,12 @@ export class ContainerExecutor implements Executor {
     extras: ExtraPublishRecord[];
     pushed: Exclude<FinalizeResult, { outcome: "no_changes" }>[];
   }> {
-    let slots: RepositorySlot[];
+    let slots: RepositorySlot[] = [];
     try {
       slots = await this.repositorySlots(current, held);
       await this.collectWritable(handle, current, slots);
     } catch (error) {
+      await removeResultBundles(slots);
       if (isNoLongerActive(error)) throw error;
       containerLog.warn(
         { runId: current.runId, reason: describeFailure(error) },
@@ -2910,6 +2980,28 @@ export class ContainerExecutor implements Executor {
       );
       return { current, extras: [], pushed: [] };
     }
+    try {
+      return await this.keepCollected(current, output, slots);
+    } finally {
+      await removeResultBundles(slots);
+    }
+  }
+
+  /** keepStoppedChangesAll once every writable repository (and each history run's bundle) is collected. */
+  private async keepCollected(
+    current: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    slots: RepositorySlot[],
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    main?: {
+      finalized: Exclude<FinalizeResult, { outcome: "no_changes" }>;
+      result: CodingRunResult;
+      record: CodingRunRecord;
+    };
+    extras: ExtraPublishRecord[];
+    pushed: Exclude<FinalizeResult, { outcome: "no_changes" }>[];
+  }> {
     const kept: RepositoryPublish[] = [];
     for (const slot of slots) {
       const reason = (error: unknown) => ({
@@ -3000,7 +3092,9 @@ export class ContainerExecutor implements Executor {
     for (const slot of slots) {
       if (slot.error !== undefined || !slot.workspace) continue;
       try {
-        await this.options.jobs.materializeWorkspace(handle, slot.workspace.workspacePath, slot.extra?.name);
+        const bundle = await this.materialize(handle, slot.workspace);
+        slot.bundleDestination = bundle.bundleDestination;
+        slot.resultBundle = bundle.resultBundle;
         await normalizeCollectedLockfiles(run.provider, slot.workspace.workspacePath);
         collected.push(slot.workspace.workspacePath);
       } catch (error) {
@@ -3073,6 +3167,7 @@ export class ContainerExecutor implements Executor {
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
         : {}),
+      ...(slot.resultBundle ? { resultBundle: slot.resultBundle } : {}),
     });
     return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
   }
@@ -4397,6 +4492,39 @@ export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
 /** Low-power mode: the native gateway serving a run's MCP tools did not wake; nothing launched. */
 export const MCP_GATEWAY_UNAVAILABLE_CATEGORY = "mcp_gateway_unavailable";
 
+/** CODING_MAX_RESULT_BUNDLE_MB's default, in bytes, when the executor is given no limit. */
+const DEFAULT_RESULT_BUNDLE_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Where a history run's result bundle (#536) for one repository is collected:
+ * `<run root>/result-bundles/<name>.bundle`, beside the workspaces and outside every one of them (the
+ * default repository is RESERVED_REPOSITORY_NAME, which no extra can be named). The run root is the
+ * workspace's base: `<run root>/workspace`, or `<run root>/repos/<name>/workspace` for a slot.
+ */
+function resultBundlePath(workspace: PreparedWorkspace): string {
+  const base = dirname(workspace.workspacePath);
+  const runRoot = workspace.slot ? dirname(dirname(base)) : base;
+  if (
+    basename(workspace.workspacePath) !== "workspace" ||
+    (workspace.slot && (basename(base) !== workspace.slot.name || basename(dirname(base)) !== "repos"))
+  ) {
+    throw new Error("coding_workspace_path_invalid");
+  }
+  return join(runRoot, "result-bundles", `${workspace.slot?.name ?? RESERVED_REPOSITORY_NAME}.bundle`);
+}
+
+/** Removes a collected result bundle; never throws (the run root's cleanup removes what is left). */
+async function removeResultBundle(path: string | undefined): Promise<void> {
+  if (path === undefined) return;
+  await rm(path, { force: true }).catch((error: unknown) => {
+    containerLog.warn({ reason: describeFailure(error) }, "could not remove a collected result bundle");
+  });
+}
+
+async function removeResultBundles(slots: readonly RepositorySlot[]): Promise<void> {
+  for (const slot of slots) await removeResultBundle(slot.bundleDestination);
+}
+
 /**
  * Error-code prefixes that name their category outright, checked before the
  * substring heuristics below. Those heuristics filed every `github_*` error
@@ -4415,6 +4543,14 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   // Claude Code's tool runner failed to start or never became ready: the same category on both launchers.
   ["docker_tool_runner_", "job"],
   ["kubernetes_tool_runner_", "job"],
+  // Git history (#536): a worker image (or Claude tool runner) without git is the image's
+  // configuration, like a missing worker image; the worker's code arrives as job_<code>.
+  ["job_worker_git_unavailable", "preflight"],
+  ["worker_git_unavailable", "preflight"],
+  // An invalid result-bundle limit (CODING_MAX_RESULT_BUNDLE_MB, refused at start-up first): configuration.
+  ["job_result_bundle_limit_invalid", "preflight"],
+  // The Kubernetes collector could not read a history run's result bundle: collecting the workspace failed.
+  ["kubernetes_result_bundle_read_failed", "workspace"],
   // Checked first: the host could not be asked (after one retry), not a lost permission.
   ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],
@@ -4434,6 +4570,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   ["vcs_github_not_configured", "preflight"],
   // The same for any other host: a repository whose provider this server has not registered.
   ["vcs_host_provider_not_configured", "preflight"],
+  // Every other vcs_ code is the workspace's: #536's vcs_result_*, vcs_remote_fetch_failed,
+  // vcs_history_shortened, vcs_git_history_invalid and vcs_worker_git_invalid included.
   ["vcs_", "workspace"],
   // The agent's MCP tool pins could not be read at launch: nothing was launched.
   [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
@@ -4459,7 +4597,7 @@ function causeChainStartsWith(error: unknown, prefix: string): boolean {
   return false;
 }
 
-function failureCategory(error: unknown): string {
+export function failureCategory(error: unknown): string {
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   for (const [prefix, category] of CATEGORY_BY_PREFIX) {
     if (raw.startsWith(prefix)) return category;

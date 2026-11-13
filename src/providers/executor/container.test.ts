@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ import {
   type JobResult,
   type JobSpec,
   type JobStatus,
+  type MaterializeWorkspaceOptions,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
 import type {
@@ -53,6 +54,7 @@ import {
   CAPACITY_RETRY_BACKOFF_MS,
   CATEGORY_BY_PREFIX,
   ContainerExecutor,
+  failureCategory,
   type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
@@ -427,11 +429,27 @@ class FakeJobs implements WorkspaceJobLauncher {
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
   materializedNames: Array<string | undefined> = [];
-  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<{ bundle: boolean }> {
+  /** Every materializeWorkspace call's arguments after the handle, as passed (#536). */
+  materializeCalls: unknown[][] = [];
+  /** Repository names (undefined: the default) whose collection writes a result bundle (#536). */
+  bundlesFor = new Set<string | undefined>();
+  /** Whether each history collection found its bundleDestination already gone, by name. */
+  destinationFreeAtCollect = new Map<string | undefined, boolean>();
+  async materializeWorkspace(
+    _handle: JobHandle,
+    ...args: [destination: string, name?: string, options?: MaterializeWorkspaceOptions]
+  ): Promise<{ bundle: boolean }> {
+    const [, name, options] = args;
     this.materializations += 1;
     this.materializedNames.push(name);
+    this.materializeCalls.push(args);
     this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
-    return { bundle: false };
+    const destination = options?.gitHistory?.bundleDestination;
+    if (destination === undefined) return { bundle: false };
+    this.destinationFreeAtCollect.set(name, !existsSync(destination));
+    if (!this.bundlesFor.has(name)) return { bundle: false };
+    await writeFile(destination, "a bundle");
+    return { bundle: true };
   }
 }
 
@@ -5822,6 +5840,120 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     });
   });
 
+  describe("git history at collect (#536)", () => {
+    async function finishedWith(overrides: Partial<ContainerRunSnapshot>, bundlesFor: (string | undefined)[] = []) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      for (const name of bundlesFor) created.jobs.bundlesFor.add(name);
+      const seenAtFinalize = new Map<string | undefined, boolean>();
+      const launched = { workspacePath: "" };
+      created.jobs.onLaunch = () => {
+        launched.workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      created.vcs.onFinalize = (slot) => {
+        const call = created.vcs.finalizeCalls.at(-1);
+        if (call?.details?.resultBundle) seenAtFinalize.set(slot, existsSync(call.details.resultBundle));
+      };
+      await created.executor.start("run-1");
+      return { created, seenAtFinalize, workspacePath: launched.workspacePath };
+    }
+    const bundlesDir = (workspacePath: string) => join(workspacePath, "..", "result-bundles");
+
+    it("collects the default repository's bundle outside the workspace and passes it to finalize, then removes it", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith({ gitHistoryDepth: 20 }, [undefined]);
+      expect(created.store.run.status).toBe("succeeded");
+      const destination = join(bundlesDir(workspacePath), "workspace.bundle");
+      expect(created.jobs.materializeCalls).toEqual([
+        [
+          workspacePath,
+          undefined,
+          { gitHistory: { bundleDestination: destination, maxBundleBytes: 256 * 1024 * 1024 } },
+        ],
+      ]);
+      expect(destination.startsWith(`${workspacePath}/`)).toBe(false);
+      expect(created.vcs.finalizeCalls[0].details?.resultBundle).toBe(destination);
+      expect(seenAtFinalize.get(undefined)).toBe(true);
+      expect(existsSync(destination)).toBe(false);
+      expect((await stat(bundlesDir(workspacePath))).mode & 0o777).toBe(0o700);
+    });
+
+    it("removes a stale file at the destination before collecting, and passes no bundle the collector did not write", async () => {
+      const created = await harness({ gitHistoryDepth: 20 }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.onLaunch = () => {
+        // A file left from an earlier attempt: never taken for this collection's bundle.
+        const dir = join(created.vcs.workspace!.workspacePath, "..", "result-bundles");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "workspace.bundle"), "stale");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.destinationFreeAtCollect.get(undefined)).toBe(true);
+      expect(created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+    });
+
+    it("collects each writable extra's bundle to its own path, and removes every bundle after publishing", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 }), writeRow("docs", { position: 2 })] },
+        [undefined, "tools"],
+      );
+      expect(created.store.run.status).toBe("succeeded");
+      const dir = bundlesDir(workspacePath);
+      const byName = new Map(created.jobs.materializeCalls.map((call) => [call[1], call[2]]));
+      expect(byName.get(undefined)).toEqual({
+        gitHistory: { bundleDestination: join(dir, "workspace.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("tools")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "tools.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("docs")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "docs.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      const details = new Map(created.vcs.finalizeCalls.map((call) => [call.slot, call.details]));
+      expect(details.get(undefined)?.resultBundle).toBe(join(dir, "workspace.bundle"));
+      expect(details.get("tools")?.resultBundle).toBe(join(dir, "tools.bundle"));
+      expect(details.get("docs")).not.toHaveProperty("resultBundle");
+      expect(seenAtFinalize.get("tools")).toBe(true);
+      for (const name of ["workspace", "tools", "docs"]) expect(existsSync(join(dir, `${name}.bundle`))).toBe(false);
+    });
+
+    it("removes the bundles when publishing fails", async () => {
+      const created = await harness(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      created.jobs.bundlesFor.add(undefined);
+      created.jobs.bundlesFor.add("tools");
+      created.vcs.slotErrors.set("tools", new Error("vcs_result_history_invalid"));
+      let workspacePath = "";
+      created.jobs.onLaunch = () => {
+        workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.find((call) => call.slot === "tools")?.details?.resultBundle).toBeDefined();
+      const dir = bundlesDir(workspacePath);
+      expect(existsSync(join(dir, "workspace.bundle"))).toBe(false);
+      expect(existsSync(join(dir, "tools.bundle"))).toBe(false);
+    });
+
+    it("without history, collects exactly as before: no options, no bundle, no bundle folder", async () => {
+      const single = await finishedWith({});
+      expect(single.created.jobs.materializeCalls).toEqual([[single.workspacePath]]);
+      expect(single.created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+      expect(existsSync(bundlesDir(single.workspacePath))).toBe(false);
+      const several = await finishedWith({ repositories: [writeRow("tools", { position: 1 })] });
+      expect(several.created.jobs.materializeCalls).toEqual([
+        [several.workspacePath],
+        [several.created.vcs.slotPaths.get("tools"), "tools"],
+      ]);
+      expect(several.created.vcs.finalizeCalls.every((call) => !("resultBundle" in (call.details ?? {})))).toBe(true);
+      expect(existsSync(bundlesDir(several.workspacePath))).toBe(false);
+    });
+  });
+
   describe("git history in input.json (#536)", () => {
     const history = {
       repositories: [
@@ -6460,6 +6592,27 @@ describe("CATEGORY_BY_PREFIX", () => {
   it("files every category under a coding_failure_<category> code a parent run can be told", () => {
     for (const [, category] of CATEGORY_BY_PREFIX) {
       expect(CHILD_RUN_FAILURE_CODES.has(`coding_failure_${category}`), category).toBe(true);
+    }
+  });
+
+  it("files git history's codes (#536): the vcs_ ones as workspace, a git-less image as preflight", () => {
+    const expected: Record<string, string> = {
+      vcs_result_bundle_invalid: "workspace",
+      vcs_result_bundle_too_large: "workspace",
+      vcs_result_history_invalid: "workspace",
+      vcs_result_commit_limit: "workspace",
+      vcs_result_commit_unsafe: "workspace",
+      "vcs_remote_fetch_failed:upstream": "workspace",
+      vcs_history_shortened: "workspace",
+      vcs_git_history_invalid: "workspace",
+      vcs_worker_git_invalid: "workspace",
+      kubernetes_result_bundle_read_failed: "workspace",
+      job_worker_git_unavailable: "preflight",
+      worker_git_unavailable: "preflight",
+      job_result_bundle_limit_invalid: "preflight",
+    };
+    for (const [code, category] of Object.entries(expected)) {
+      expect(failureCategory(new Error(code)), code).toBe(category);
     }
   });
 });

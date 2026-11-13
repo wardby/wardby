@@ -171,6 +171,12 @@ export interface FinalizeChangesDetails {
   related?: RelatedPullRequestsInput;
   /** Fix rounds: the control plane's record of the description wardby last wrote; enables the description update. */
   description?: { baseline: DescriptionBaseline };
+  /**
+   * A history run (#536): the worker's result bundle, as the collector moved it to a trusted path
+   * outside every workspace. Untrusted bytes: finalizeChanges validates it completely before pushing
+   * the agent's commits. Absent: the uncommitted files alone, as without history.
+   */
+  resultBundle?: string;
 }
 
 export type FinalizeChangesResult =
