@@ -786,6 +786,40 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       };
       expect(withMention.mentionedGuests).toEqual([{ guestId: gus.id, name: "Gus" }]);
 
+      // Changing the name renames this guest: the same guest, so earlier comments show the new name.
+      const rename = await call(`/s/${link.token}/guest`, {
+        method: "POST",
+        jar,
+        csrf: regBody.csrf,
+        body: { name: "Gustav" },
+      });
+      expect(rename.status).toBe(200);
+      jar.take(rename);
+      const renamed = (await rename.json()) as { csrf: string; me: unknown };
+      expect(renamed.me).toEqual({ kind: "guest", name: "Gustav", access: "comment" });
+      expect(await db.documentGuest.count({ where: { shareLinkId: link.id } })).toBe(1);
+      const afterRename = await (await call(`/d/api/${docId}`, { jar: m.jar })).text();
+      expect(afterRename).toContain("Gustav (guest)");
+      expect(afterRename).not.toContain("Gus (guest)");
+      // The email given at registration is kept when a rename leaves it out, and still never shown.
+      expect((await db.documentGuest.findUniqueOrThrow({ where: { id: gus.id } })).email).toBe(GUEST_EMAIL);
+      // A rename is held to the same rules as a registration.
+      const reservedRename = await call(`/s/${link.token}/guest`, {
+        method: "POST",
+        jar,
+        csrf: renamed.csrf,
+        body: { name: "Olive Owner" },
+      });
+      expect(reservedRename.status).toBe(400);
+      // The guest is still signed in and can comment under the new name.
+      const c2 = await call(`/d/api/${docId}/threads`, {
+        method: "POST",
+        jar,
+        csrf: renamed.csrf,
+        body: { anchor: { type: "text", quote: "world", prefix: "hello ", suffix: "" }, body: "second note" },
+      });
+      expect(c2.status).toBe(201);
+
       // Revoking the link ends the guest: the session is treated as absent.
       await revokeShareLink(db, { shareLinkId: link.id, viewer: { kind: "principal", principalId: owner.id } });
       const after = await call(`/d/api/${docId}`, { jar });

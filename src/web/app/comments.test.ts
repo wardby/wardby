@@ -171,6 +171,10 @@ describe("small formatters", () => {
     expect(initials("Ana Ruiz")).toBe("AR");
     expect(initials("  bob ")).toBe("B");
     expect(initials("")).toBe("?");
+    // Only words that start with a letter or digit: "(guest)" adds nothing.
+    expect(initials("Dana (guest)")).toBe("D");
+    expect(initials("Dana Lee (guest)")).toBe("DL");
+    expect(initials("(guest)")).toBe("?");
   });
   it("relative time", () => {
     const now = Date.parse("2026-11-11T12:00:00Z");

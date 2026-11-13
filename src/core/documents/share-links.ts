@@ -114,10 +114,15 @@ async function memberNames(db: ShareDb, doc: { id: string; ownerId: string }): P
   return [...(await principalNames(db, ids)).values()];
 }
 
-/** Registers a guest on a live link. The name is normalized (NFKC) and checked against the document's members. */
+/**
+ * Registers a guest on a live link, or renames one: with `guestId` (the caller's own guest on this
+ * link) the same guest gets the new name, so their earlier comments show it (names are looked up when
+ * shown). The name is normalized (NFKC) and checked against the document's members either way; an
+ * email left out of a rename keeps the one given before.
+ */
 export async function registerGuest(
   db: ShareDb,
-  input: { shareLinkId: string; name: string; email?: string },
+  input: { shareLinkId: string; name: string; email?: string; guestId?: string },
 ): Promise<{ guestId: string }> {
   const link = await db.documentShareLink.findUnique({
     where: { id: input.shareLinkId },
@@ -129,6 +134,13 @@ export async function registerGuest(
   if (input.email !== undefined && input.email.trim() !== "") {
     email = input.email.trim();
     if (email.length > MAX_EMAIL_CHARS || !EMAIL_SHAPE.test(email)) throw new Error("guest_email_invalid");
+  }
+  if (input.guestId) {
+    const renamed = await db.documentGuest.updateMany({
+      where: { id: input.guestId, shareLinkId: link.id },
+      data: { name, ...(email !== null ? { email } : {}) },
+    });
+    if (renamed.count === 1) return { guestId: input.guestId };
   }
   const guest = await db.documentGuest.create({ data: { shareLinkId: link.id, name, email } });
   return { guestId: guest.id };

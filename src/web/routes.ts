@@ -37,6 +37,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { documentAccess, type Viewer } from "../core/documents/access.js";
+import { notifyDocumentChange } from "../core/documents/events.js";
 import { registerGuest, resolveShareToken } from "../core/documents/share-links.js";
 import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
 import {
@@ -328,11 +329,22 @@ async function registerGuestRoute(
   if (typeof name !== "string" || (email !== undefined && email !== null && typeof email !== "string")) {
     throw new Error("invalid_request");
   }
+  // A guest of this link who changes their name stays the same guest (same session), so their
+  // earlier comments show the new name.
+  const own = ctx.kind === "guest" && ctx.shareLinkId === resolved.link.id ? ctx : null;
   const { guestId } = await registerGuest(deps.db, {
     shareLinkId: resolved.link.id,
     name,
     ...(typeof email === "string" ? { email } : {}),
+    ...(own ? { guestId: own.guestId } : {}),
   });
+  if (own && guestId === own.guestId) {
+    const guest = await deps.db.documentGuest.findUnique({ where: { id: guestId }, select: { name: true } });
+    // Open pages redraw the threads, so the guest's earlier comments show the new name.
+    await notifyDocumentChange(deps.db, resolved.document.id, "thread");
+    sendWebJson(res, 200, { csrf: own.csrf, me: { kind: "guest", name: guest?.name ?? name, access: "comment" } });
+    return;
+  }
   await endWebSession(deps.db, req.headers.cookie, options);
   const created = await createWebSession(deps.db, { guestId, shareLinkId: resolved.link.id }, options);
   addCookie(res, created.cookie);

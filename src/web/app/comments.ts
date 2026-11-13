@@ -147,12 +147,12 @@ export function decodeMentions(
   return { text, picked: [...picked.values()] };
 }
 
-/** Up to two initials for an avatar. */
+/** Up to two initials for an avatar, from words that start with a letter or digit (so "(guest)" adds none). */
 export function initials(name: string): string {
   const letters = name
     .trim()
     .split(/\s+/)
-    .filter(Boolean)
+    .filter((w) => /^[\p{L}\p{N}]/u.test(w))
     .map((w) => [...w][0] ?? "")
     .join("");
   return [...letters].slice(0, 2).join("").toUpperCase() || "?";
