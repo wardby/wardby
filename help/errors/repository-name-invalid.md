@@ -4,7 +4,7 @@ title: Invalid repository link name (repository_name_invalid)
 summary: A coding agent's link name does not match [a-z0-9][a-z0-9._-]{0,62}, is workspace, or the repository's short name cannot be used as a default; pass name.
 audience: operator
 tags: [error, coding-agents, repository_name_invalid, link_repository, name]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Invalid repository link name

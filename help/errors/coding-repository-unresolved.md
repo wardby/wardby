@@ -4,7 +4,7 @@ title: A repository of the run has no resolved commit (coding_repository_unresol
 summary: A coding run row for an extra repository was never resolved to a commit, or is malformed; the run is refused before anything is cloned.
 audience: operator
 tags: [error, coding-agents, coding_repository_unresolved, repositories, preflight]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # A repository of the run has no resolved commit

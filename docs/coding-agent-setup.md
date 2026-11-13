@@ -72,7 +72,7 @@ is the way to approve a repository there.
 ## A coding agent's repositories
 
 A coding agent works in a **default repository** (mounted at `/workspace`) and,
-since 0.10.0, can also have more repositories in the same run, writable or
+since 0.9.13, can also have more repositories in the same run, writable or
 read-only, each in its own folder under `/repos/<name>`. Its list comes from
 its links:
 

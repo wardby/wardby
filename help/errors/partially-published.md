@@ -4,7 +4,7 @@ title: Some repositories published and others failed (partially_published)
 summary: A coding run over several repositories published some pull requests and failed on others; what published stays published and a follow-up retries the rest.
 audience: operator
 tags: [error, coding-agents, partially_published, multiple repositories, pull request]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Some repositories published and others failed

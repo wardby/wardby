@@ -4,7 +4,7 @@ title: Repositories list refused (invalid_repositories)
 summary: The repositories list sent for a coding run is malformed, repeats a name, is sent to a native agent, or is sent with a continuation; no run was started.
 audience: operator
 tags: [error, coding-agents, invalid_repositories, repositories, wardbyRepositories, trigger_agent]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Repositories list refused

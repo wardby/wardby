@@ -4,7 +4,7 @@ title: Several repositories in one coding run (read-only and writable)
 summary: Give one coding agent a default set of extra repositories, writable or read-only, mounted at /repos/<name>; choose them per run with repositories, and see how pull requests, follow-ups and failures work.
 audience: operator
 tags: [coding-agents, multiple repositories, read-only repository, link_repository, repositories, inDefaultSet]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Several repositories in one coding run
@@ -62,6 +62,10 @@ own folder, `/repos/<name>`:
   and package allowlist, and the run's disk and 100,000-entry limits. Only the
   default repository supplies `CLAUDE.md`, skills, services and the dependency
   cache.
+- A Codex agent with its own `workerImageRef` needs that image rebuilt on
+  `driver-v30` or later before its runs get extras; an older driver rejects the
+  run input (`worker_input_failed`). Runs with only the default repository are
+  not affected.
 - Being in a set starts no review, mention follow-up, fix round or mark-ready
   in a repository; link the lead and reviewer there with the triggers you want.
 

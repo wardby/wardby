@@ -4,7 +4,7 @@ title: Read-only repository could not be fetched (vcs_read_only_fetch_failed)
 summary: Wardby could not fetch the pinned commit of a read link into a run's read-only folder; the host's detail is kept out of the message.
 audience: operator
 tags: [error, coding-agents, vcs_read_only_fetch_failed, read-only repository, link_repository]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Read-only repository could not be fetched

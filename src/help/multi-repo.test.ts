@@ -39,7 +39,7 @@ describe("multiple-repository help articles", () => {
 
   it("applies to the release that ships multiple repositories", () => {
     for (const id of ["multi-repository-runs", "fork-sync"]) {
-      expect(catalog.pages.find((p) => p.id === id)?.appliesTo).toBe(">=0.10.0");
+      expect(catalog.pages.find((p) => p.id === id)?.appliesTo).toBe(">=0.9.13");
     }
   });
 });

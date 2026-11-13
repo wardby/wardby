@@ -4,7 +4,7 @@ title: Keep a fork in sync with its upstream (fork sync)
 summary: A scheduled coding agent three-way merges what changed upstream into a fork using two read-only copies of the upstream, a marker file and one pull request.
 audience: operator
 tags: [fork sync, upstream, coding-agents, recipe, multiple repositories, read-only repository, upstream-sync]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Keep a fork in sync with its upstream

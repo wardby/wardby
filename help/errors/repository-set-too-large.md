@@ -4,7 +4,7 @@ title: Too many repositories for one run (repository_set_too_large)
 summary: The default set or a per-run repositories list would put more repositories in one coding run than CODING_MAX_RUN_REPOSITORIES allows.
 audience: operator
 tags: [error, coding-agents, repository_set_too_large, CODING_MAX_RUN_REPOSITORIES, repositories, inDefaultSet]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Too many repositories for one run

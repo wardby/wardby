@@ -4,7 +4,7 @@ title: Repository ref could not be read (repository_ref_unreadable)
 summary: A read link's ref file is missing, empty, too long or not a ref, or its ref does not exist or could not be resolved; no run was started.
 audience: operator
 tags: [error, coding-agents, repository_ref_unreadable, link_repository, fork-sync, read-only repository]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Repository ref could not be read

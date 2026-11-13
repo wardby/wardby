@@ -597,7 +597,7 @@ fails with category `continuation_closed` and pushes nothing — see
 
 A scheduled agent can keep a fork up to date with its upstream by merging in
 what changed upstream since the last sync, with no git history in the run. It
-needs Wardby 0.10.0 or later. The run holds three copies of code:
+needs Wardby 0.9.13 or later. The run holds three copies of code:
 
 | Folder            | What it is                                         | Access    |
 | ----------------- | -------------------------------------------------- | --------- |

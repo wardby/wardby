@@ -4,7 +4,7 @@ title: Repository link name already used (repository_name_taken)
 summary: link_repository was given, or defaulted to, a name another link of the same coding agent already uses; pass a different name.
 audience: operator
 tags: [error, coding-agents, repository_name_taken, link_repository, name]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # Repository link name already used

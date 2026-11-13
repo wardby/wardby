@@ -4,7 +4,7 @@ title: This deployment cannot resolve extra repositories (coding_repositories_un
 summary: A coding run asked for extra repositories on an executor that cannot read files or resolve refs in other repositories; no run was started.
 audience: operator
 tags: [error, coding-agents, coding_repositories_unsupported, repositories, executor]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.9.13"
 ---
 
 # This deployment cannot resolve extra repositories
@@ -32,7 +32,7 @@ Callers see it like the other repository-set refusals:
 
 ## What to do
 
-- Run the control plane with an executor from Wardby 0.10.0 or later (the
+- Run the control plane with an executor from Wardby 0.9.13 or later (the
   built-in container executor supports extra repositories).
 - Or run the agent with only its default repository: `repositories: []` on
   `trigger_agent`, and no links in the default set.
