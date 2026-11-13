@@ -18,6 +18,7 @@ import { UNTRUSTED_CONTEXT_TAG } from "../untrusted-content.js";
 import type { Viewer } from "./access.js";
 import { markRunFailedFromExecutorError } from "../dispatch.js";
 import {
+  AGENT_EDITED_NO_REPLY,
   AGENT_RUN_FAILED_REPLY,
   DOCUMENT_SWEEP_GRACE_MS,
   EDIT_NOT_APPLIED_NOTE,
@@ -188,6 +189,11 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     const [instructions, context] = task.split(open);
     expect(instructions).toContain(path);
     expect(instructions).toContain("wardby-thread-replies");
+    // The replies block is asked for last, as the end of the summary (an agent asked for a pull
+    // request description otherwise ends with that template and drops the block).
+    const lastPart = instructions.trimEnd().split("\n\n").at(-1)!;
+    expect(lastPart).toContain("wardby-thread-replies");
+    expect(lastPart).toMatch(/summary field/);
     expect(instructions).not.toContain("Make this warmer");
     expect(instructions).toContain(`First write that exact content to ${JSON.stringify(path)}`);
     expect(instructions).toContain(`Edit only ${JSON.stringify(path)}`);
@@ -417,6 +423,24 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(v.comments.at(-1)!.author.kind).toBe("agent");
     expect(v.comments.at(-1)!.body).toMatch(/did not reply/);
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
+  });
+
+  it("an edit published without a replies block says the agent edited it; the thread stays open", async () => {
+    const docId = await linkedDoc();
+    const t1 = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    const sha = await finish(runId, "succeeded", "Edited the doc.\n\n### How to try it\nOpen it.");
+    files.set(`${sha}:${path}`, "hello warm world\n\nsecond para");
+    await onDocumentRunFinished(db, deps, runId);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+    expect(doc.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(AGENT_EDITED_NO_REPLY);
   });
 
   it("a failed run posts the failure reply on each thread and publishes no version", async () => {
@@ -869,6 +893,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", () => {
     expect(context).not.toContain(`${dir}/boards/menu.html`);
     expect(context.match(/<<<WARDBY-FILE-[0-9a-f]{32} /g)).toHaveLength(2); // one section: start and end
     for (const rule of BOARD_FORMAT_RULES) expect(instructions).toContain(rule);
+    expect(instructions.trimEnd().split("\n\n").at(-1)).toMatch(/summary field[\s\S]*wardby-thread-replies/);
     expect(instructions).not.toContain("Bigger heading");
     expect(instructions).not.toContain(MENU_INTRO);
     expect(context.indexOf("COMMENT THREADS:")).toBeGreaterThan(context.indexOf(MENU_INTRO));

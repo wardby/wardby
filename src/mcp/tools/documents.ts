@@ -26,7 +26,7 @@ import {
   MAX_VERSIONS_PAGE,
   restoreVersion,
 } from "../../core/documents/versions.js";
-import { listThreads, reply, setThreadStatus } from "../../core/documents/comments.js";
+import { authorLabel, listThreads, reply, setThreadStatus } from "../../core/documents/comments.js";
 import type { ThreadView } from "../../core/documents/comments.js";
 import { listDocumentsFor } from "../../core/documents/list.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "../../core/untrusted-content.js";
@@ -286,10 +286,7 @@ function threadsPayload(threads: ThreadView[]) {
   const text = threads
     .map((t) => {
       const head = `Thread #${t.number} [${t.status}] id=${t.id} anchor=${JSON.stringify(t.anchor)}`;
-      const lines = t.comments.map(
-        (c) =>
-          `- ${c.author.name}${c.author.viaName ? ` via ${c.author.viaName}` : ""} (${c.author.kind}, comment ${c.id}): ${c.body}`,
-      );
+      const lines = t.comments.map((c) => `- ${authorLabel(c.author, `comment ${c.id}`)}: ${c.body}`);
       return [head, ...lines].join("\n");
     })
     .join("\n\n");

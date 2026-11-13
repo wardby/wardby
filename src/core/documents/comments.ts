@@ -34,6 +34,17 @@ export interface CommentView {
   mine: boolean;
 }
 
+/**
+ * A comment's author for plain-text renderings (MCP tool output, the agent's task): name, "via"
+ * name, then the kind and any extra in parentheses. A guest's name already ends in "(guest)", so
+ * the kind is not repeated for guests.
+ */
+export function authorLabel(author: CommentView["author"], extra?: string): string {
+  const who = `${author.name}${author.viaName ? ` via ${author.viaName}` : ""}`;
+  const parts = [...(author.kind === "guest" ? [] : [author.kind]), ...(extra ? [extra] : [])];
+  return parts.length ? `${who} (${parts.join(", ")})` : who;
+}
+
 export interface ThreadView {
   id: string;
   number: number;

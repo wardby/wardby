@@ -41,7 +41,7 @@ import {
   type SendContext,
 } from "./agent-formats.js";
 import { assertAgentRepository, assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
-import { listThreads, postAgentReply } from "./comments.js";
+import { authorLabel, listThreads, postAgentReply } from "./comments.js";
 import { contentHash } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
 import { getDocument, publishVersion } from "./service.js";
@@ -63,6 +63,8 @@ export const MAX_THREADS_PER_SEND = 50;
 
 export const AGENT_RUN_FAILED_REPLY = "The agent run failed; the document was not changed.";
 export const AGENT_NO_REPLY = "The agent did not reply to this thread.";
+/** The reply when the agent's edit was published but its summary had no reply for the thread (it stays open). */
+export const AGENT_EDITED_NO_REPLY = "The agent edited the document but did not reply to this thread.";
 /** Appended to the agent's reply when its edit could not be read or published (threads stay open). */
 export const EDIT_NOT_APPLIED_NOTE = "(The edit could not be applied.)";
 /** The reply when the document got a newer version after the send: the agent's edit is not published. */
@@ -118,9 +120,7 @@ const THREADS_CUT_MARKER = "\n\n[comment threads cut to fit the task]";
 function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: DocumentFormat): string {
   return threads
     .map((t) => {
-      const lines = t.comments.map(
-        (c) => `- ${c.author.name}${c.author.viaName ? ` via ${c.author.viaName}` : ""} (${c.author.kind}): ${c.body}`,
-      );
+      const lines = t.comments.map((c) => `- ${authorLabel(c.author)}: ${c.body}`);
       return [`Thread #${t.number} on ${fmt.anchorLabel(t.anchor)}:`, ...lines].join("\n");
     })
     .join("\n\n");
@@ -415,7 +415,7 @@ export async function onDocumentRunFinished(
     const replies = parseThreadReplies(run.finalText);
     for (const t of threads) {
       const entry = replies.get(t.number);
-      const body = entry?.reply ?? AGENT_NO_REPLY;
+      const body = entry?.reply ?? (edit.kind === "published" ? AGENT_EDITED_NO_REPLY : AGENT_NO_REPLY);
       await reply(t, edit.kind === "failed" ? `${body}\n\n${EDIT_NOT_APPLIED_NOTE}` : body);
       if (entry?.resolved && edit.kind !== "failed") {
         const resolved = await db.commentThread.updateMany({
