@@ -8,7 +8,13 @@ import type { CodingProxy, CodingProxyOptions, ProxyResponseSink } from "./proxy
 import { DependencyCacheService } from "./dependency-cache/service.js";
 import { RunStepForwarder } from "./run-step-forwarder.js";
 import { RegistryService } from "./registry/service.js";
-import { createRegistryUpstream, loadMcpGatewayUrl, loadRunStepsUrl, startConfiguredCodingProxy } from "./runtime.js";
+import {
+  createRegistryUpstream,
+  loadMcpGatewayUrl,
+  loadRunStepsUrl,
+  loadSubstrateProxyConfig,
+  startConfiguredCodingProxy,
+} from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
 
@@ -129,6 +135,38 @@ describe("configured coding proxy runtime", () => {
     expect(on.dependencyCache).toBeInstanceOf(DependencyCacheService);
     expect(on.sealsOnModelRequest).toBe(true);
     expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
+  });
+
+  it("mounts the Substrate routes only when SUBSTRATE_ATESPACE is set, and names what is missing", async () => {
+    const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const substrateOf = async (env: NodeJS.ProcessEnv) => {
+      const startServer = vi.fn(async () => handle);
+      const started = await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+      await started.close();
+      return (startServer.mock.calls[0] as unknown[])[1] as { substrate?: unknown };
+    };
+    const base = { OPENAI_API_KEY: "test-secret" };
+    const blob = { BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/tmp/wardby-substrate-test" };
+    expect((await substrateOf(base)).substrate).toBeUndefined();
+    const on = {
+      ...base,
+      ...blob,
+      SUBSTRATE_ATESPACE: "wardby-runs",
+      SUBSTRATE_ACTOR_JWT_ISSUER: "https://idp.example.invalid",
+    };
+    expect(typeof (await substrateOf(on)).substrate).toBe("function");
+    await expect(substrateOf({ ...on, SUBSTRATE_ACTOR_JWT_ISSUER: "" })).rejects.toThrow(
+      "SUBSTRATE_ACTOR_JWT_ISSUER is required",
+    );
+    await expect(
+      substrateOf({ ...base, SUBSTRATE_ATESPACE: "wardby-runs", SUBSTRATE_ACTOR_JWT_ISSUER: "x:" }),
+    ).rejects.toThrow(/BLOB_STORE|valid URL/);
+    await expect(substrateOf({ ...on, BLOB_STORE: "" })).rejects.toThrow("BLOB_STORE is required");
+    expect(loadSubstrateProxyConfig(on)?.jwksUrl.href).toBe("https://idp.example.invalid/openid/v1/jwks");
+    expect(
+      loadSubstrateProxyConfig({ ...on, SUBSTRATE_ACTOR_JWKS_URL: "https://keys.example.invalid/jwks" })?.jwksUrl.href,
+    ).toBe("https://keys.example.invalid/jwks");
   });
 
   it("closes the proxy server when the deny port cannot bind", async () => {

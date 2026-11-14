@@ -92,6 +92,12 @@ describe("coding proxy HTTP boundary", () => {
     expect((await call("/api/hello", { method: "GET" })).status).toBe(404);
   });
 
+  it("answers /substrate/ with 404 not_found when the route is not configured", async () => {
+    const response = await call("/substrate/runs/x/input");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { type: "not_found" } });
+  });
+
   it("requires the one-run bearer and JSON content type", async () => {
     const raw = JSON.stringify({ model: "test-model", input: "x", max_output_tokens: 2, stream: false });
     expect((await call("/v1/responses", { method: "POST", body: raw })).status).toBe(415);

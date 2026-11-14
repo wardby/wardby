@@ -1,4 +1,5 @@
 import type { PrismaClient } from "#prisma";
+import { createRemoteJWKSet } from "jose";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import {
   createSimulatorModelFetch,
@@ -10,6 +11,8 @@ import { loadRunStepsLevel } from "../../core/run-steps/config.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
+import { loadBlobStoreConfig } from "../../config/providers.js";
+import { substrateRunToken } from "../jobs/substrate/names.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
 import type { BlobStore } from "../storage/types.js";
 import { startEviction } from "./dependency-cache/eviction.js";
@@ -35,6 +38,9 @@ import {
 import { createPinnedProxyFetch, PROXY_EGRESS_ERROR, type PinnedProxyFetchOptions } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditSink } from "./types.js";
+import { createActorIdentityVerifier } from "./substrate/actor-identity.js";
+import { PrismaRelayStore } from "./substrate/prisma-relay-store.js";
+import { createSubstrateRoutes, SUBSTRATE_UPLOAD_MS } from "./substrate/routes.js";
 
 const MIB = 1024 * 1024;
 
@@ -121,6 +127,47 @@ export function loadRunStepsUrl(env: NodeJS.ProcessEnv): string | undefined {
   return url.origin;
 }
 
+export interface SubstrateProxyConfig {
+  atespace: string;
+  issuer: string;
+  jwksUrl: URL;
+  blobStore: BlobStoreConfig;
+  limits: { inputBytes: number; resultBytes: number; transcriptBytes: number; workspaceBytes: number };
+}
+
+/**
+ * The experimental Substrate job launcher's proxy routes (`/substrate/...`). Off unless SUBSTRATE_ATESPACE is
+ * set; then SUBSTRATE_ACTOR_JWT_ISSUER and a blob store (BLOB_STORE) are required, and the error names the
+ * missing variable (never a value). SUBSTRATE_ACTOR_JWKS_URL overrides the default `<issuer>/openid/v1/jwks`.
+ * SUBSTRATE_{INPUT,RESULT,TRANSCRIPT,WORKSPACE}_MAX_MB bound what a run may transfer.
+ */
+export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxyConfig | undefined {
+  const atespace = env.SUBSTRATE_ATESPACE?.trim();
+  if (!atespace) return undefined;
+  const issuer = env.SUBSTRATE_ACTOR_JWT_ISSUER?.trim().replace(/\/+$/, "");
+  if (!issuer) throw new Error("SUBSTRATE_ACTOR_JWT_ISSUER is required when SUBSTRATE_ATESPACE is set");
+  let jwksUrl: URL;
+  try {
+    jwksUrl = new URL(env.SUBSTRATE_ACTOR_JWKS_URL?.trim() || `${issuer}/openid/v1/jwks`);
+  } catch {
+    throw new Error("SUBSTRATE_ACTOR_JWT_ISSUER or SUBSTRATE_ACTOR_JWKS_URL is not a valid URL");
+  }
+  const blobStore = loadBlobStoreConfig(env);
+  if (!blobStore) throw new Error("BLOB_STORE is required when SUBSTRATE_ATESPACE is set");
+  return {
+    atespace,
+    issuer,
+    jwksUrl,
+    blobStore,
+    limits: {
+      inputBytes: positiveInt(env.SUBSTRATE_INPUT_MAX_MB, 64) * MIB,
+      resultBytes: positiveInt(env.SUBSTRATE_RESULT_MAX_MB, 16) * MIB,
+      transcriptBytes: positiveInt(env.SUBSTRATE_TRANSCRIPT_MAX_MB, 64) * MIB,
+      workspaceBytes: positiveInt(env.SUBSTRATE_WORKSPACE_MAX_MB, 1024) * MIB,
+    },
+  };
+}
+
 export interface CodingProxyRuntimeOptions {
   db: PrismaClient;
   /** The package registry's own client, so its traffic (many concurrent
@@ -159,6 +206,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const audit: ProxyAuditSink | undefined = mock
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
+  // Throws when SUBSTRATE_ATESPACE is set without what it needs, before anything listens.
+  const substrateConfig = loadSubstrateProxyConfig(env);
   // Throws on an invalid setting, before anything listens.
   const mcpGatewayUrl = loadMcpGatewayUrl(env);
   // Throws on an invalid setting, before anything listens.
@@ -204,11 +253,13 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     },
   });
 
+  let cacheBlobs: BlobStore | undefined;
   let dependencyCache: DependencyCacheService | undefined;
   let modelRequestSeal: ModelRequestSeal | undefined;
   let eviction: { stop(): void } | undefined;
   if (cacheConfig.enabled) {
     const blobs = (options.createBlobStore ?? createBlobStore)(cacheConfig.blobStore);
+    cacheBlobs = blobs;
     const cacheStore = new PrismaDependencyCacheStore(options.registryDb ?? options.db);
     modelRequestSeal = new ModelRequestSeal(cacheStore);
     dependencyCache = new DependencyCacheService({
@@ -240,6 +291,21 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   // submitter is passed and the proxy does no step extraction.
   const steps = runStepsUrl && runStepsCeiling !== "off" ? new RunStepForwarder({ url: runStepsUrl }) : undefined;
   const ledger = new PrismaProxyLedger(options.db);
+  const substrate = substrateConfig
+    ? createSubstrateRoutes({
+        atespace: substrateConfig.atespace,
+        relay: new PrismaRelayStore(options.db, { maxBufferedBytesPerRun: 8 * MIB }),
+        // The dependency cache's store when it is on, else one of the route's own.
+        blobs: cacheBlobs ?? (options.createBlobStore ?? createBlobStore)(substrateConfig.blobStore),
+        ledger,
+        verifyActor: createActorIdentityVerifier({
+          issuer: substrateConfig.issuer,
+          jwks: createRemoteJWKSet(substrateConfig.jwksUrl),
+        }),
+        tokenForRun: substrateRunToken,
+        limits: substrateConfig.limits,
+      })
+    : undefined;
   const proxy = new CodingProxy({
     ledger,
     credentials: new EnvironmentCredentialResolver(env),
@@ -266,6 +332,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
       registry,
       ...(dependencyCache ? { dependencyCache } : {}),
       mcp: createMcpRoute({ ledger, gatewayUrl: mcpGatewayUrl }),
+      ...(substrate ? { substrate, substrateUploadMs: SUBSTRATE_UPLOAD_MS } : {}),
       onRequest: options.onRequest,
     });
   } catch (error) {

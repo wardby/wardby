@@ -11,6 +11,7 @@ import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from
 import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 import { MCP_ROUTE_PATH } from "./mcp-route.js";
+import { SUBSTRATE_UPLOAD_MS } from "./substrate/routes.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
 
@@ -35,6 +36,13 @@ export interface CodingProxyServerConfig {
   requestMs?: number;
   /** The worker's MCP route (`/mcp`, createMcpRoute); absent, /mcp is not found. */
   mcp?: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+  /**
+   * The Substrate relay and transfer routes (`/substrate/...`, createSubstrateRoutes); absent, they are not found.
+   * An authenticated upload calls `clearBodyTimer`, which lifts the per-request body timer for it.
+   */
+  substrate?: (request: IncomingMessage, response: ServerResponse, clearBodyTimer: () => void) => Promise<void>;
+  /** Time an authenticated Substrate upload has to arrive (default SUBSTRATE_UPLOAD_MS). */
+  substrateUploadMs?: number;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -169,7 +177,11 @@ export async function startCodingProxyServer(
   // enforces on the upload itself), and every request gets a requestMs timer
   // of its own. Only the cache lifts that timer, and only for an upload it
   // has authenticated, found eligible and given its upload slot.
-  const extendedRequests = config.dependencyCache !== undefined;
+  const extendedRequests = config.dependencyCache !== undefined || config.substrate !== undefined;
+  const uploadWindowMs = Math.max(
+    config.dependencyCache?.uploadMs ?? 0,
+    config.substrate ? (config.substrateUploadMs ?? SUBSTRATE_UPLOAD_MS) : 0,
+  );
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: true }, (request, response) => {
     const startedAt = performance.now();
     const bodyTimer = extendedRequests
@@ -202,6 +214,15 @@ export async function startCodingProxyServer(
         await config.dependencyCache.handle(request, response, registryToken(request.headers.authorization), () =>
           clearTimeout(bodyTimer),
         );
+        return;
+      }
+      if (request.url?.startsWith("/substrate/")) {
+        if (!config.substrate) {
+          closeIfBodyUnread(request, response);
+          sendError(response, 404, "not_found");
+          return;
+        }
+        await config.substrate(request, response, () => clearTimeout(bodyTimer));
         return;
       }
       if (request.url?.startsWith("/registry/")) {
@@ -365,7 +386,7 @@ export async function startCodingProxyServer(
       sendError(response, 500, "internal_error");
     });
   });
-  server.requestTimeout = extendedRequests ? requestMs + config.dependencyCache!.uploadMs : requestMs;
+  server.requestTimeout = extendedRequests ? requestMs + uploadWindowMs : requestMs;
   server.headersTimeout = HTTP_LIMITS.headersMs;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
