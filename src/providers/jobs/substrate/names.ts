@@ -38,6 +38,7 @@ export const BLOB = {
   result: (t: string) => `substrate/runs/${t}/result.json`,
   transcript: (t: string) => `substrate/runs/${t}/transcript.jsonl`,
   workspace: (t: string) => `substrate/runs/${t}/workspace.tar`,
+  exit: (t: string) => `substrate/runs/${t}/exit.json`,
   done: (t: string) => `substrate/runs/${t}/done.json`,
 };
 

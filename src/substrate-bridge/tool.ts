@@ -16,7 +16,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
-import { readRunToken, requireProxyUrl, startReadyServer, stderrLogger, uploadFile, type Logger } from "./common.js";
+import {
+  postBestEffort,
+  postCapped,
+  readRunToken,
+  requireProxyUrl,
+  startReadyServer,
+  stderrLogger,
+  uploadFile,
+  type Logger,
+} from "./common.js";
 import {
   DEFAULT_METADATA_DIR,
   DEFAULT_READY_PORT,
@@ -69,8 +78,8 @@ export interface ToolHandle {
   close(): Promise<void>;
 }
 
-const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv): RunnerHandle => {
-  const child = spawn(process.execPath, [RUNNER_ENTRY], {
+export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: string = RUNNER_ENTRY): RunnerHandle => {
+  const child = spawn(process.execPath, [entry], {
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -95,6 +104,21 @@ const exec = (command: string, args: string[]): Promise<number> =>
     child.once("error", () => resolve(127));
     child.once("exit", (code) => resolve(code ?? 1));
   });
+
+/** The events of a 200 answer; undefined (a transient error to the caller) unless every event is an object with an integer seq. */
+function parseEvents(body: Buffer): { seq: number; type: string; channel?: string; line?: string }[] | undefined {
+  try {
+    const parsed = (JSON.parse(body.toString("utf8")) as { events?: unknown } | null)?.events;
+    if (!Array.isArray(parsed)) return undefined;
+    for (const event of parsed as unknown[]) {
+      if (event === null || typeof event !== "object" || !Number.isSafeInteger((event as { seq?: unknown }).seq))
+        return undefined;
+    }
+    return parsed as { seq: number; type: string; channel?: string; line?: string }[];
+  } catch {
+    return undefined;
+  }
+}
 
 export async function run(options: ToolOptions): Promise<ToolHandle> {
   const log = options.log ?? stderrLogger;
@@ -157,7 +181,15 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       return await abortStart("substrate_bridge_seed_unsafe");
     }
     await mkdir(workspace, { recursive: true });
-    const code = await exec(tar, ["-x", "-C", workspace, "-f", seedPath, "--no-same-owner"]);
+    const code = await exec(tar, [
+      "-x",
+      "-C",
+      workspace,
+      "-f",
+      seedPath,
+      "--no-same-owner",
+      "--delay-directory-restore",
+    ]);
     if (code !== 0) return await abortStart("substrate_bridge_seed_failed");
     log("substrate_bridge_seed_extracted", { entries: checked.entries });
   } catch (error) {
@@ -194,6 +226,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       dropped = true;
       log(code, { runToken: token, channel, ...fields });
       socket.destroy();
+      // Tell the relay once, without retrying, so the agent does not keep serving an orphaned channel.
+      if (!closedByRelay) void postBestEffort(`${base}/channels/${channel}/from-tool`, headers, { close: true });
     };
     const pump = async (): Promise<void> => {
       if (sending) return;
@@ -223,6 +257,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         sending = false;
       }
     };
+    // Writes to the runner's socket are not paused on backpressure: events arrive one poll at a
+    // time and a runner that does not read stalls only its own connection.
     socket.on("data", (chunk: string) => {
       try {
         for (const line of splitter.push(chunk)) queue.push({ line });
@@ -256,19 +292,42 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     // 1: some files changed while being read; the tar is still usable.
     if (code !== 0 && code !== 1) {
       log("substrate_bridge_collect_failed", { code });
+      await rm(tarPath, { force: true }).catch(() => undefined);
+      await postCapped(
+        `${base}/workspace-failed`,
+        headers,
+        undefined,
+        policy,
+        log,
+        "workspace-failed",
+        shutdown.signal,
+      );
       resolveCollected("failed");
       return;
     }
     const outcome = await uploadFile(`${base}/workspace`, headers, tarPath, policy, log, "workspace", shutdown.signal);
     await rm(tarPath, { force: true }).catch(() => undefined);
+    // A workspace that could not be stored: say so, so the launcher does not wait for it.
+    if (outcome !== "ok")
+      await postCapped(
+        `${base}/workspace-failed`,
+        headers,
+        undefined,
+        policy,
+        log,
+        "workspace-failed",
+        shutdown.signal,
+      );
     resolveCollected(outcome === "ok" ? "ok" : outcome === "rejected" ? "rejected" : "failed");
   };
 
   const eventsLoop = async (): Promise<void> => {
     let cursor = 0;
     while (!stopped) {
-      let events: { seq: number; type: string; channel?: string; line?: string }[] | undefined;
+      type ToolEvent = { seq: number; type: string; channel?: string; line?: string };
+      let events: ToolEvent[] | undefined;
       let rejected = false;
+      const before = cursor;
       try {
         const result = await send(`${base}/events?after=${cursor}`, {
           method: "GET",
@@ -276,8 +335,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
           timeoutMs: EVENTS_TIMEOUT_MS,
           signal: shutdown.signal,
         });
-        if (result.status === 200)
-          events = (JSON.parse(result.body.toString("utf8")) as { events: NonNullable<typeof events> }).events;
+        if (result.status === 200) events = parseEvents(result.body);
         else rejected = result.status < 500 && result.status !== 429;
       } catch {
         if (stopped) return;
@@ -292,7 +350,6 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         continue;
       }
       for (const event of events) {
-        if (typeof event.seq !== "number") continue;
         cursor = event.seq;
         const channel = typeof event.channel === "string" ? event.channel : "";
         if (event.type === "open" && channel) openChannel(channel);
@@ -307,6 +364,14 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
           // The relay is dropped once the workspace is uploaded: stop polling and idle.
           stopped = true;
           await collect();
+          return;
+        }
+      }
+      // A non-empty answer that did not move the cursor would be polled again at once: wait first.
+      if (events.length > 0 && cursor === before) {
+        try {
+          await policy.sleep(policy.baseMs, shutdown.signal);
+        } catch {
           return;
         }
       }

@@ -88,3 +88,52 @@ export async function uploadFile(
     return "failed";
   }
 }
+
+/** One attempt, no retry, no logging, any failure swallowed: for notices that only tidy up (closing an orphaned channel). */
+export async function postBestEffort(url: string, headers: Record<string, string>, body?: unknown): Promise<void> {
+  try {
+    await send(url, {
+      method: "POST",
+      headers: body === undefined ? headers : { ...headers, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      timeoutMs: 10_000,
+    });
+  } catch {
+    // Nothing to do: the proxy drops idle channels with the run.
+  }
+}
+
+/** A small POST with the standard retry rules, capped at UPLOAD_ATTEMPTS. True when the proxy answered 200. */
+export async function postCapped(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  policy: RetryPolicy,
+  log: Logger,
+  what: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    const text = body === undefined ? undefined : JSON.stringify(body);
+    const result = await withRetry(
+      () =>
+        send(url, {
+          method: "POST",
+          headers: text === undefined ? headers : { ...headers, "content-type": "application/json" },
+          ...(text === undefined ? {} : { body: text }),
+          timeoutMs: 30_000,
+          signal,
+        }),
+      { policy, maxAttempts: UPLOAD_ATTEMPTS, signal },
+    );
+    if (result.status === 200) {
+      log("substrate_bridge_posted", { what });
+      return true;
+    }
+    log("substrate_bridge_post_rejected", { what, status: result.status });
+    return false;
+  } catch {
+    log("substrate_bridge_post_failed", { what });
+    return false;
+  }
+}

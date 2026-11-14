@@ -22,7 +22,7 @@ import { run as runTool, type ToolHandle } from "./tool.js";
 
 /**
  * The images carry GNU tar. On a machine whose tar is bsdtar (macOS) the bridge runs through a shim
- * that drops GNU's --anchored/--no-anchored (bsdtar's --exclude patterns already match that way).
+ * that drops GNU-only flags (--anchored, --no-anchored, --delay-directory-restore) (bsdtar's --exclude patterns already match that way).
  */
 async function tarForTests(dir: string): Promise<string> {
   const version = await exec("tar", ["--version"]).then(
@@ -35,7 +35,7 @@ async function tarForTests(dir: string): Promise<string> {
     shim,
     `#!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored");
+const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore");
 process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
 `,
     { mode: 0o755 },
@@ -84,6 +84,7 @@ describe("substrate bridges, end to end without Substrate", () => {
   let sockets: string[];
   let routeLogs: unknown[];
   let proxyOverride: ((url: string) => number | undefined) | undefined;
+  let proxyDelay: ((url: string) => number) | undefined;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-it-"));
@@ -94,6 +95,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     sockets = [];
     routeLogs = [];
     proxyOverride = undefined;
+    proxyDelay = undefined;
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -120,7 +122,9 @@ describe("substrate bridges, end to end without Substrate", () => {
         req.resume();
         return;
       }
-      void routes(req, res);
+      const delay = proxyDelay?.(`${req.method} ${req.url}`) ?? 0;
+      if (delay > 0) setTimeout(() => void routes(req, res), delay);
+      else void routes(req, res);
     });
     await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
     proxyUrl = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
@@ -143,6 +147,8 @@ describe("substrate bridges, end to end without Substrate", () => {
     const seedDir = join(dir, "seed");
     await mkdir(join(seedDir, "src"), { recursive: true });
     await writeFile(join(seedDir, "src", "hello.txt"), "hello from the seed\n");
+    await mkdir(join(seedDir, "src", "skipped"), { recursive: true });
+    await writeFile(join(seedDir, "src", "skipped", "big.bin"), "excluded by path\n");
     await mkdir(join(seedDir, "node_modules"), { recursive: true });
     await writeFile(join(seedDir, "node_modules", "dep.js"), "skip me\n");
     await exec("tar", ["-c", "-C", seedDir, "-f", join(dir, "seed.tar"), "."]);
@@ -291,6 +297,8 @@ describe("substrate bridges, end to end without Substrate", () => {
     const listing = (await exec("tar", ["-t", "-f", tarPath])).stdout;
     expect(listing).toContain("src/hello.txt");
     expect(listing).not.toContain("node_modules");
+    expect(listing).not.toContain("src/skipped");
+    expect(listing).not.toContain("big.bin");
     expect(await readBlob(BLOB.transcript(TOKEN))).toEqual(Buffer.from('{"type":"user"}\n'));
     expect(await readdir(dir)).not.toContain("workspace.tar");
   });
@@ -330,16 +338,19 @@ describe("substrate bridges, end to end without Substrate", () => {
               `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: { note: REGISTRY_TOKEN, k: CAPABILITY } })}\n`,
             );
             await new Promise<void>((resolve) => socket.once("data", () => resolve()));
-            socket.end();
+            // A line the proxy rejects (413): the bridge drops the connection with a fixed code.
+            const oversized = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+            socket.write(`${REGISTRY_TOKEN}${CAPABILITY}${"\u00e9".repeat(3 * 1024 * 1024)}\n`);
+            await oversized;
             await mkdir(join(dir, "out"), { recursive: true });
-            await writeFile(join(dir, "out", "result.json"), "{}");
+            // A result the proxy rejects (413) while carrying the fake values.
+            await writeFile(join(dir, "out", "result.json"), `${REGISTRY_TOKEN}${CAPABILITY}`.repeat(70_000));
             return 0;
           })(),
         }),
       });
       await agent.uploaded;
       await tool.collected;
-      // A rejected upload and a retried line also log; drive both before asserting.
     } finally {
       process.stderr.write = realWrite;
     }
@@ -348,6 +359,134 @@ describe("substrate bridges, end to end without Substrate", () => {
     for (const secret of [CAPABILITY, REGISTRY_TOKEN, toolSetup, "do the thing"])
       expect(everything).not.toContain(secret);
     expect(everything).not.toContain("ping");
+    // The agent bridge logs to stderr (no logger injected), so the rejections show up there.
+    expect(stderr.join("")).toContain("substrate_bridge_send_rejected");
+    expect(stderr.join("")).toContain("substrate_bridge_upload_rejected");
+  });
+
+  const workerOptions = async (extra: Partial<Parameters<typeof runAgent>[0]> = {}) => ({
+    proxyUrl,
+    env: {},
+    metadataDir: await names("agent"),
+    inputPath: join(dir, "in", "input.json"),
+    resultPath: join(dir, "out", "result.json"),
+    transcriptPath: join(dir, "out", "session.jsonl"),
+    socketPath: join(dir, "agent", "runner.sock"),
+    readyPort: 0,
+    policy: FAST,
+    log,
+    ...extra,
+  });
+
+  it("reports a worker that exits without a result and still collects the workspace", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(await workerOptions({ launchWorker: () => ({ exited: Promise.resolve(2) }) }));
+    await agent.uploaded;
+    expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 2 });
+    expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+    expect(await tool.collected).toBe("ok");
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
+    expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+  });
+
+  it("reports a rejected result upload as an exit", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "result.json"), "r".repeat(2 << 20));
+            return 0;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 0 });
+    expect(await tool.collected).toBe("ok");
+  });
+
+  it("does not post an exit when the result was stored", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "result.json"), "{}");
+            return 1;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    expect(await blobs.head(BLOB.exit(TOKEN))).toBeNull();
+    expect(await blobs.head(BLOB.result(TOKEN))).not.toBeNull();
+    expect(await tool.collected).toBe("ok");
+  });
+
+  it("posts workspace-failed when the workspace cannot be archived", async () => {
+    const { workspace } = await stage();
+    const shim = join(dir, "failing-tar.mjs");
+    await writeFile(
+      shim,
+      `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore");
+if (args.includes("-c")) process.exit(2);
+process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
+`,
+      { mode: 0o755 },
+    );
+    const socketPath = join(dir, "tool", "runner.sock");
+    tool = await runTool({
+      proxyUrl,
+      metadataDir: await names("tool"),
+      workspace,
+      socketPath,
+      readyPort: 0,
+      tempRoot: dir,
+      tarCommand: shim,
+      policy: FAST,
+      log,
+      launchRunner: () => ({ ready: Promise.resolve(), exited: new Promise<number>(() => undefined) }),
+    });
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "result.json"), "{}");
+            return 0;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    expect(await tool.collected).toBe("failed");
+    expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+    expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+  });
+
+  it("closes a channel whose socket went away while the open was in flight", async () => {
+    await stage();
+    proxyDelay = (request) => (request === "POST /substrate/runs/" + TOKEN + "/channels" ? 150 : 0);
+    const socketPath = join(dir, "agent", "runner.sock");
+    agent = await runAgent(
+      await workerOptions({ launchWorker: () => ({ exited: new Promise<number>(() => undefined) }) }),
+    );
+    const socket = connect(socketPath);
+    await new Promise<void>((resolve) => socket.once("connect", resolve));
+    socket.destroy();
+    const types = await waitFor(async () => {
+      const events = await relay.pollTool(TOKEN, 0, 0);
+      return events.some((e) => e.type === "close") ? events.map((e) => e.type) : undefined;
+    });
+    expect(types).toEqual(["open", "close"]);
   });
 
   it("retries a busy proxy with the same sequence number", async () => {
@@ -382,6 +521,8 @@ describe("substrate bridges, end to end without Substrate", () => {
       }),
     });
     await agent.workerExited;
+    await agent.uploaded;
+    await tool.collected;
     expect(JSON.parse(reply)).toMatchObject({ id: 9, result: {} });
     expect(busy).toBeLessThan(0);
   });

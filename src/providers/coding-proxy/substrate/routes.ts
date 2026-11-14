@@ -25,6 +25,8 @@ import { RelayBackpressureError, RelayBusyError, type RelayStore, RelayUnknownEr
 export const MAX_LINE_BYTES = 4 * 1024 * 1024;
 /** A line post's JSON envelope may be larger than the line (escaping), within this bound. */
 const MAX_LINE_BODY_BYTES = 2 * MAX_LINE_BYTES + 4096;
+/** The longest exit report body. */
+const MAX_EXIT_BYTES = 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
 /** The time an upload has to arrive once it is authenticated. */
 export const SUBSTRATE_UPLOAD_MS = 10 * 60_000;
@@ -57,7 +59,9 @@ type RouteName =
   | "seed"
   | "events"
   | "channels.from-tool"
-  | "workspace";
+  | "workspace"
+  | "exit"
+  | "workspace-failed";
 
 interface Matched {
   name: RouteName;
@@ -97,6 +101,10 @@ function match(method: string, rest: string): Matched | undefined {
       return { name: "events", caller: "tool" };
     case "POST workspace":
       return { name: "workspace", caller: "tool" };
+    case "POST exit":
+      return { name: "exit", caller: "agent" };
+    case "POST workspace-failed":
+      return { name: "workspace-failed", caller: "tool" };
     default:
       return undefined;
   }
@@ -256,6 +264,24 @@ export function createSubstrateRoutes(
     return readBody(request, MAX_LINE_BODY_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
   }
 
+  /** The agent bridge's `{"code": <int>}` (Content-Length required, at most MAX_EXIT_BYTES). */
+  async function readExitCode(request: IncomingMessage): Promise<number> {
+    const length = request.headers["content-length"];
+    if (length === undefined) throw new RouteError(411, "length_required");
+    if (!/^\d+$/.test(length) || Number(length) > MAX_EXIT_BYTES) throw new RouteError(413, "too_large");
+    const raw = await readBody(request, MAX_EXIT_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new RouteError(400, "bad_request");
+    }
+    const code = (value as { code?: unknown } | null)?.code;
+    if (typeof code !== "number" || !Number.isSafeInteger(code) || code < -1_000_000 || code > 1_000_000)
+      throw new RouteError(400, "bad_request");
+    return code;
+  }
+
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
@@ -350,6 +376,26 @@ export function createSubstrateRoutes(
         case "workspace": {
           counters.bytes = await receiveBlob(request, BLOB.workspace(token), limits.workspaceBytes, clearBodyTimer);
           await blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace: "ok" })), {
+            contentType: "application/json",
+          });
+          await relay.dropRelay(token);
+          setupDeleted.delete(token);
+          sendJson(response, 200, {});
+          return;
+        }
+        case "exit": {
+          // The worker exited without a usable result: record its code and still collect the workspace.
+          const code = await readExitCode(request);
+          await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify({ code })), {
+            contentType: "application/json",
+          });
+          await relay.requestCollect(token);
+          sendJson(response, 200, {});
+          return;
+        }
+        case "workspace-failed": {
+          // The tool bridge could not produce the workspace tar: say so and end the relay.
+          await blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace: "failed" })), {
             contentType: "application/json",
           });
           await relay.dropRelay(token);

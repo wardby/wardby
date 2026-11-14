@@ -244,6 +244,35 @@ describe("substrate routes", () => {
     expect((await fetch(`${base}/channels/c1/lines?after=0`, agent())).status).toBe(404);
   });
 
+  it("stores the worker exit code and queues a collect request (agent only)", async () => {
+    await start();
+    const body = { method: "POST", body: JSON.stringify({ code: 3 }), headers: { "content-type": "application/json" } };
+    expect((await fetch(`${base}/exit`, tool(body))).status).toBe(401);
+    expect((await fetch(`${base}/exit`, { ...body, headers: { "x-api-key": OTHER_CAPABILITY } })).status).toBe(401);
+    expect(await blobs.head(BLOB.exit(TOKEN))).toBeNull();
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
+    const events = (await (await fetch(`${base}/events?after=0`, tool())).json()) as { events: { type: string }[] };
+    expect(events.events.map((e) => e.type)).toContain("collect");
+    for (const bad of ["{}", '{"code":"1"}', "[1]", "nope", '{"code":1.5}'])
+      expect((await fetch(`${base}/exit`, agent({ method: "POST", body: bad }))).status).toBe(400);
+    const big = await fetch(`${base}/exit`, agent({ method: "POST", body: " ".repeat(2000) }));
+    expect(big.status).toBe(413);
+  });
+
+  it("records a failed workspace and drops the relay (tool only)", async () => {
+    await start();
+    await fetch(`${base}/channels`, agent({ method: "POST" }));
+    expect((await fetch(`${base}/workspace-failed`, agent({ method: "POST" }))).status).toBe(401);
+    expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(200);
+    expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(200);
+    expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+    expect(await relay.pollTool(TOKEN, 0, 0)).toEqual([]);
+    expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+  });
+
   it("answers 429 relay_backpressure when the relay is full", async () => {
     relay = new MemoryRelayStore();
     relay.register(TOKEN, 10);

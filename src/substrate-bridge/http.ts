@@ -58,6 +58,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+const PIPE_ERROR_GRACE_MS = 100;
 const MAX_ERROR_BODY = 1024 * 1024;
 
 export async function send(url: string, options: RequestOptions): Promise<HttpResult> {
@@ -75,7 +76,17 @@ export async function send(url: string, options: RequestOptions): Promise<HttpRe
     headers["content-length"] = String(Buffer.byteLength(options.body));
   }
   return new Promise<HttpResult>((resolve, reject) => {
+    // A server that answers early (411, 413) may close the connection under an upload still being
+    // written: the request pipe then fails with EPIPE/ECONNRESET. The status that arrived is the
+    // answer, so a pipe error waits briefly for a response before it is reported.
+    let responded = false;
+    const pipeFailed = (error: Error): void => {
+      setTimeout(() => {
+        if (!responded) reject(error);
+      }, PIPE_ERROR_GRACE_MS).unref();
+    };
     const req = make(parsed, { method: options.method, headers, signal }, (response: IncomingMessage) => {
+      responded = true;
       const status = response.statusCode ?? 0;
       const done = (body: Buffer): void => resolve({ status, headers: response.headers, body });
       if (options.downloadTo !== undefined && status === 200) {
@@ -95,9 +106,12 @@ export async function send(url: string, options: RequestOptions): Promise<HttpRe
       response.once("error", reject);
       response.once("aborted", () => reject(new Error("aborted")));
     });
-    req.once("error", reject);
+    req.once("error", (error) => (signal.aborted ? reject(error) : pipeFailed(error)));
     if (options.uploadFile !== undefined) {
-      pipeline(createReadStream(options.uploadFile), req).catch(reject);
+      // Backpressure: pipeline() pauses the file stream while the socket's buffer is full.
+      pipeline(createReadStream(options.uploadFile), req).catch((error: Error) =>
+        signal.aborted ? reject(error) : pipeFailed(error),
+      );
     } else {
       req.end(options.body);
     }

@@ -13,7 +13,16 @@ import { mkdir, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readRunToken, requireProxyUrl, startReadyServer, stderrLogger, uploadFile, type Logger } from "./common.js";
+import {
+  postBestEffort,
+  postCapped,
+  readRunToken,
+  requireProxyUrl,
+  startReadyServer,
+  stderrLogger,
+  uploadFile,
+  type Logger,
+} from "./common.js";
 import { DEFAULT_METADATA_DIR, DEFAULT_READY_PORT, DEFAULT_TOOL_SOCKET, PLACEHOLDER_CAPABILITY } from "./constants.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
@@ -124,7 +133,11 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       log(code, { runToken: token, ...(channel ? { channel } : {}), ...fields });
       pollAbort.abort();
       socket.destroy();
+      // Tell the relay once, without retrying, so the tool does not keep serving an orphaned channel.
+      if (channel !== undefined && !closedByRelay) void closeOnce(channel);
     };
+    const closeOnce = (id: string): Promise<void> =>
+      postBestEffort(`${base}/channels/${id}/lines`, headers, { close: true });
 
     const pump = async (): Promise<void> => {
       if (sending || channel === undefined) return;
@@ -156,6 +169,8 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       }
     };
 
+    // Writes to the worker's socket are not paused on backpressure: events arrive one poll at a
+    // time and a worker that does not read stalls only its own connection.
     socket.on("data", (chunk: string) => {
       let lines: string[];
       try {
@@ -187,7 +202,11 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     } catch {
       return fail("substrate_bridge_open_failed");
     }
-    if (socket.destroyed) return;
+    if (socket.destroyed) {
+      // The worker went away while the open was in flight: close what was just opened.
+      if (!failed) void closeOnce(channel);
+      return;
+    }
     log("substrate_bridge_channel_open", { runToken: token, channel });
     socket.resume();
     void pump();
@@ -255,7 +274,9 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   // 4. Result and transcript, once the worker has exited.
   const uploaded = worker.exited.then(async (code) => {
     log("substrate_bridge_worker_exited", { runToken: token, code });
-    await uploadFile(`${base}/result`, headers, resultPath, policy, log, "result", shutdown.signal);
+    const outcome = await uploadFile(`${base}/result`, headers, resultPath, policy, log, "result", shutdown.signal);
+    // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace).
+    if (outcome !== "ok") await postCapped(`${base}/exit`, headers, { code }, policy, log, "exit", shutdown.signal);
     await uploadFile(`${base}/transcript`, headers, transcriptPath, policy, log, "transcript", shutdown.signal);
   });
 

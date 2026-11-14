@@ -5,8 +5,9 @@
  *
  * The seed comes from the trusted launcher through the proxy, so this is defence in depth: before
  * `tar -x` runs, every entry's header is read and an archive is refused when any entry has an
- * absolute or ".." name, a device/fifo type, a link that points out of the tree, or a path that
- * runs through a symlink the archive itself creates.
+ * absolute or ".." name, a device/fifo type, a hardlink out of the tree or through a symlink, or a path that
+ * runs through a symlink the archive itself creates. Symlinks may have any target. Anything the check
+ * does not understand (malformed or sparse/size pax records) is refused.
  */
 import { open } from "node:fs/promises";
 
@@ -64,18 +65,6 @@ function parseSize(field: Buffer): number | undefined {
   return parseInt(text, 8);
 }
 
-/** Lexically resolves `target` against the directory of `from`; undefined when it leaves the root. */
-function resolveInside(from: string, target: string): string | undefined {
-  const stack = from.split("/").slice(0, -1);
-  for (const part of target.split("/")) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") {
-      if (stack.pop() === undefined) return undefined;
-    } else stack.push(part);
-  }
-  return stack.join("/");
-}
-
 function cleanName(raw: string): string | undefined {
   if (raw.startsWith("/") || raw.includes("\0")) return undefined;
   const parts = raw.split("/").filter((p) => p !== "" && p !== ".");
@@ -83,19 +72,46 @@ function cleanName(raw: string): string | undefined {
   return parts.join("/");
 }
 
-function paxRecords(text: string): Map<string, string> {
+/** True when a proper parent prefix of `name` is a symlink the archive itself creates. */
+function throughSymlink(name: string, symlinks: ReadonlySet<string>): boolean {
+  const segments = name.split("/");
+  for (let i = 1; i < segments.length; i++) if (symlinks.has(segments.slice(0, i).join("/"))) return true;
+  return false;
+}
+
+/**
+ * Parses pax records ("<decimal length> <key>=<value>\n", length counting its own digits) on the
+ * raw bytes. Returns undefined on anything malformed, so the caller fails closed.
+ */
+function paxRecords(data: Buffer): Map<string, string> | undefined {
   const records = new Map<string, string>();
-  let rest = text;
-  while (rest.length > 0) {
-    const space = rest.indexOf(" ");
-    const length = Number(rest.slice(0, space));
-    if (space < 1 || !Number.isInteger(length) || length <= space || length > rest.length) break;
-    const record = rest.slice(space + 1, length - 1);
-    const eq = record.indexOf("=");
-    if (eq > 0) records.set(record.slice(0, eq), record.slice(eq + 1));
-    rest = rest.slice(length);
+  let pos = 0;
+  while (pos < data.length) {
+    const space = data.indexOf(0x20, pos);
+    if (space < 0 || space - pos > 10) return undefined;
+    const digits = data.subarray(pos, space).toString("latin1");
+    if (!/^[1-9][0-9]*$/.test(digits)) return undefined;
+    const length = Number(digits);
+    if (length <= space - pos + 1 || pos + length > data.length) return undefined;
+    if (data[pos + length - 1] !== 0x0a) return undefined;
+    const record = data.subarray(space + 1, pos + length - 1);
+    const eq = record.indexOf(0x3d);
+    if (eq < 1) return undefined;
+    const key = record.subarray(0, eq).toString("utf8");
+    if (records.has(key)) return undefined;
+    records.set(key, record.subarray(eq + 1).toString("utf8"));
+    pos += length;
   }
   return records;
+}
+
+/** Pax keys this check does not understand are refused: sparse maps and size overrides change what tar reads. */
+function paxKeysUnderstood(records: Map<string, string>): boolean {
+  for (const key of records.keys()) {
+    if (key.startsWith("GNU.")) return false;
+    if (key === "size" || key === "hdrcharset") return false;
+  }
+  return true;
 }
 
 async function check(source: Source): Promise<TarCheck> {
@@ -124,7 +140,8 @@ async function check(source: Source): Promise<TarCheck> {
       if (type === "L") longName = text;
       else if (type === "K") longLink = text;
       else {
-        const records = paxRecords((await source.read(dataStart, size)).toString("utf8"));
+        const records = paxRecords(await source.read(dataStart, size));
+        if (!records || !paxKeysUnderstood(records)) return bad("pax");
         paxPath = records.get("path");
         paxLink = records.get("linkpath");
       }
@@ -132,6 +149,10 @@ async function check(source: Source): Promise<TarCheck> {
       continue;
     }
     if (type === "g") {
+      // A global header would apply to every later entry: only plain, understood records are allowed.
+      if (size > MAX_META_BYTES) return bad("meta_too_large");
+      const records = paxRecords(await source.read(dataStart, size));
+      if (!records || !paxKeysUnderstood(records) || records.has("path") || records.has("linkpath")) return bad("pax");
       offset = next;
       continue;
     }
@@ -145,14 +166,13 @@ async function check(source: Source): Promise<TarCheck> {
     const name = cleanName(rawName);
     if (name === undefined) return bad("name");
     if (!["0", "5", "1", "2", "7"].includes(type)) return bad("type");
-    const segments = name.split("/");
-    for (let i = 1; i < segments.length; i++)
-      if (symlinks.has(segments.slice(0, i).join("/"))) return bad("through_symlink");
+    if (throughSymlink(name, symlinks)) return bad("through_symlink");
     if (type === "2") {
-      if (rawLink.startsWith("/") || resolveInside(name, rawLink) === undefined) return bad("symlink");
+      // Any target is accepted (real repositories have absolute and ".." links); nothing is ever written through one.
       symlinks.add(name);
     } else if (type === "1") {
-      if (cleanName(rawLink) === undefined) return bad("hardlink");
+      const target = cleanName(rawLink);
+      if (target === undefined || target === "" || throughSymlink(target, symlinks)) return bad("hardlink");
     }
     offset = next;
   }
