@@ -209,6 +209,7 @@ declare module "claude-code" {
       agentOpen: Shaped<{ id: string; tab: "detail" | "flow" } | null>;
       agentInfo: Shaped<{ id: string; at: number; value: Record<string, unknown> | null; error: string | null } | null>;
       promptOpen: Shaped<string | null>;
+      flowCursor: Shaped<{ id: string; line: number } | null>;
     };
   }
 }

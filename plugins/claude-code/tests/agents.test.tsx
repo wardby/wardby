@@ -777,3 +777,195 @@ test("get_agent failing shows the error; r reads it again", async ($, on) => {
   expect(calls.filter((c) => c === "get_agent")).toHaveLength(2);
   await ui.unmount();
 });
+
+/** Opens an agent's Flow tab on a surface, from the Agents list. */
+async function openFlow(
+  $: Parameters<Parameters<typeof test>[1]>[0],
+  clock: { settle: () => Promise<void> },
+  surface: "terminal" | "desktop",
+  agentKey: string,
+) {
+  const ui = await $.ui.mount({ ...PANE, surface });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: agentKey });
+  await clock.settle();
+  await ui.press({ key: "agent-tab-flow" });
+  await clock.settle();
+  return ui;
+}
+
+test("the terminal Flow tab draws a tree with the fix loop as a back reference", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, { runs: [run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000)] });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "terminal", "agent-d");
+  const lines = (await texts(ui)).split("\n").map((l) => l.trimEnd());
+  const i = lines.findIndex((l) => l.includes("@mention your-org/mobile"));
+  expect(i).toBeGreaterThanOrEqual(0);
+  const after = lines.slice(i).join("\n");
+  expect(after).toMatch(
+    /delivery[\s\S]*⇢ build builder[\s\S]*\(PR opened\)[\s\S]*reviewer[\s\S]*↺ fix ≤2 → back to delivery/,
+  );
+  // Dim stats from the runs window beside each agent.
+  expect(after).toContain("sonnet-5-5 · 1 runs · $0.25");
+  const text = await texts(ui);
+  expect(text).not.toMatch(/#[0-9a-f]{6}/i);
+  expect(text).not.toMatch(/workflow/i);
+  expect(await ui.findAll({ type: "Svg" })).toHaveLength(0);
+  await ui.unmount();
+});
+
+test("an agent with two leads is drawn once and referenced", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents.push({
+    ...structuredClone(LINKS.agents[0]),
+    id: "dl",
+    name: "device-lead",
+    entry: ["manual"],
+    repositories: [],
+    promptFirstLine: "Device check.",
+  });
+  data.edges.push({ from: "dl", to: "b", kind: "delegates", repository: null, label: "build" });
+  data.flows[0].agentIds.push("dl");
+  data.flows[0].entryAgentIds.push("dl");
+  linksServer(on, { data });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "terminal", "agent-d");
+  const text = await texts(ui);
+  expect(text).toContain("▶ manual");
+  expect(text).toContain("builder  (shared, shown above)");
+  // The builder is drawn in full once.
+  expect(text.match(/⇢ build builder$/gm)).toHaveLength(1);
+  // The desktop map draws builder once, with two incoming delegate edges.
+  await ui.press({ key: "crumb-agents" });
+  await ui.unmount();
+  const desk = await openFlow($, clock, "desktop", "agent-d");
+  const svg = (await desk.findAll({ type: "Svg" })).find((el) => String(el.props.alt).startsWith("Flow map"));
+  const source = String(svg?.props.source);
+  expect(source.match(/>builder</g)).toHaveLength(1);
+  expect(source.match(/stroke-dasharray="5 4"/g)?.length).toBeGreaterThanOrEqual(2);
+  await desk.unmount();
+});
+
+test("the desktop Flow tab draws an SVG map with node buttons", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "desktop", "agent-v");
+  const svg = (await ui.findAll({ type: "Svg" })).find((el) => String(el.props.alt).startsWith("Flow map"));
+  expect(svg).toBeDefined();
+  const source = String(svg?.props.source);
+  expect(source).toContain("<svg");
+  // The selected agent (reviewer, mint) has a heavy stroke; the others are dimmed.
+  expect(source).toMatch(/stroke="#15b982" stroke-width="2"/);
+  expect(source).toContain('opacity=".55"');
+  // The event pill and the fix loop.
+  expect(source).toContain("PR opened");
+  expect(source).toContain('stroke="#a8a29e"');
+  expect(source).toContain("fix ≤2");
+  expect(source).toContain("@mention your-org/mobile");
+  expect(source).not.toMatch(/workflow/i);
+  for (const id of ["d", "b", "v"]) expect(await ui.find({ key: `node-${id}` })).toBeDefined();
+  await ui.press({ key: "node-b" });
+  await clock.settle();
+  expect(await texts(ui)).toContain("› builder");
+  // Still on the Flow tab.
+  expect((await ui.find({ key: "agent-tab-flow" }))?.props.variant).toBe("primary");
+  await ui.unmount();
+});
+
+test("the terminal Flow tab moves a cursor over agents with j and k and opens one with o", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "terminal", "agent-d");
+  expect((await ui.find({ key: "flow-next" }))?.props.hotkey).toBe("j");
+  expect((await ui.find({ key: "flow-prev" }))?.props.hotkey).toBe("k");
+  expect((await ui.find({ key: "flow-open" }))?.props.hotkey).toBe("o");
+  // No hotkey is used twice on the screen.
+  const hotkeys = (await ui.findAll({ type: "Button" }))
+    .map((el) => el.props.hotkey)
+    .filter((k): k is string => typeof k === "string");
+  expect(new Set(hotkeys).size).toBe(hotkeys.length);
+  // The cursor starts on the open agent.
+  expect(await texts(ui)).toMatch(/› delivery/);
+  await ui.press({ key: "flow-next" });
+  await clock.settle();
+  expect(await texts(ui)).toMatch(/› ⇢ build builder/);
+  await ui.press({ key: "flow-next" });
+  await ui.press({ key: "flow-prev" });
+  await clock.settle();
+  expect(await texts(ui)).toMatch(/› ⇢ build builder/);
+  await ui.press({ key: "flow-open" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("Agents › your-org/mobile › builder");
+  expect(text).toContain("[Flow]");
+  await ui.unmount();
+});
+
+test("recent runs in a flow, and Open in Runs filters the Runs tab to the flow's agents", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, {
+    runs: [
+      run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000),
+      run("r2", "v", "reviewer", "failed", "0.100000", 1_800_000),
+      run("r3", "s", "solo", "succeeded", "0.050000", 600_000),
+    ],
+  });
+  await openPane($, clock);
+  for (const surface of SURFACES) {
+    const ui = await openFlow($, clock, surface, "agent-d");
+    const text = await texts(ui);
+    expect(text).toContain("Recent runs in this flow");
+    const recent = text.slice(text.indexOf("Recent runs in this flow"));
+    expect(recent).toContain("delivery");
+    expect(recent).toContain("reviewer");
+    expect(recent).not.toContain("solo");
+    await ui.press({ key: "flow-runs" });
+    await clock.settle();
+    expect((await ui.find({ key: "filter-text" }))?.props.value).toBe("builder, delivery, reviewer");
+    // delivery's and reviewer's runs, not solo's.
+    const runsText = await texts(ui);
+    expect(runsText).toContain("2 of 3 shown");
+    expect(runsText).not.toContain("solo");
+    // Back to a clean pane for the next surface.
+    await ui.press({ key: "clear-filter" });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    await ui.press({ key: "crumb-agents" });
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});
+
+test("the Flow tab lists agents that look related but are not linked", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.flows[0].related = ["s"];
+  data.unlinked = [];
+  linksServer(on, { data });
+  await openPane($, clock);
+  for (const surface of SURFACES) {
+    const ui = await openFlow($, clock, surface, "agent-d");
+    const text = await texts(ui);
+    const related = text.slice(text.indexOf("Not linked, but looks related"));
+    expect(text).toContain("Not linked, but looks related");
+    expect(related).toContain("solo");
+    expect(related).toContain("⏱ schedule");
+    expect(related).toContain("no repository, no sub-agent edge");
+    await ui.press({ key: "crumb-agents" });
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});

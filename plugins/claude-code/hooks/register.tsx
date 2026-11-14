@@ -183,6 +183,17 @@ const agentInfo = atom(
 const promptOpen = atom({ plugin: "wardby-runs", key: "promptOpen" } as const, null as string | null, {
   shape: "prompt-open-1",
 });
+// The terminal Flow tree's cursor: the tree line it sits on, for the agent whose Flow tab is open (a
+// different agent starts it on that agent's own line).
+const flowCursor = atom(
+  { plugin: "wardby-runs", key: "flowCursor" } as const,
+  null as { id: string; line: number } | null,
+  {
+    shape: "flow-cursor-1",
+  },
+);
+// The most run chains "Recent runs in this flow" lists.
+const FLOW_RECENT = 5;
 // The agents and their links change rarely: the Agents tab reads them again after this long, or on r.
 const LINKS_REFRESH_MS = 5 * 60_000;
 // An older server without list_agent_links costs two calls an agent to draw flows: only up to this many.
@@ -400,6 +411,268 @@ function entryChip(agent: LinkAgent, data: AgentLinks): string | null {
   return null;
 }
 
+/** An entry point as the Flow tab writes it: "@mention your-org/mobile", "Jira KEY", "▶ manual", "⏱ schedule". */
+function entryLine(entry: string): string {
+  if (entry.startsWith("mention:")) return `@mention ${entry.slice("mention:".length).replace(/^[a-z]+:/, "")}`;
+  if (entry === "schedule") return "⏱ schedule";
+  return entryLabel(entry);
+}
+
+/** One line of the terminal's Flow tree: its depth, the agent it names (null for an entry or an event). */
+type TreeLine = { depth: number; agentId: string | null; text: string; ref?: boolean };
+// The order an agent's links are walked in the tree: hand-offs first, the loop back last.
+const TREE_ORDER: LinkEdge["kind"][] = ["delegates", "reviews", "after_merge", "fixes"];
+
+/**
+ * A flow as a top-down tree, one block per entry agent (the key agent first): its entry line, then the
+ * agent, then its links depth first. A delegation is "⇢ <label> <name>"; a review is "→ (PR opened)" and
+ * the reviewer under it; a merge "→ (merged)" and the agent; a fix round "↺ <label> → back to <name>",
+ * never walked into. An agent drawn in full already is written again as "<name>  (shared, shown above)".
+ */
+function flowTree(flow: LinkFlow, data: AgentLinks): TreeLine[] {
+  const byId = new Map(data.agents.map((a) => [a.id, a]));
+  const nameOf = (id: string) => byId.get(id)?.name ?? id;
+  const members = new Set(flow.agentIds);
+  const drawn = new Set<string>();
+  const lines: TreeLine[] = [];
+  const agentLine = (id: string, depth: number, prefix: string) => {
+    if (drawn.has(id)) {
+      lines.push({ depth, agentId: id, text: `${prefix}${nameOf(id)}  (shared, shown above)`, ref: true });
+      return;
+    }
+    drawn.add(id);
+    lines.push({ depth, agentId: id, text: `${prefix}${nameOf(id)}` });
+    const seen = new Set<string>();
+    const out = data.edges
+      .filter((edge) => edge.from === id && members.has(edge.to))
+      .sort((a, b) => TREE_ORDER.indexOf(a.kind) - TREE_ORDER.indexOf(b.kind));
+    for (const edge of out) {
+      const key = `${edge.kind}\u0000${edge.to}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (edge.kind === "delegates") agentLine(edge.to, depth + 1, `⇢ ${edge.label ? `${edge.label} ` : ""}`);
+      else if (edge.kind === "fixes")
+        lines.push({ depth: depth + 1, agentId: null, text: `↺ ${edge.label ?? "fix"} → back to ${nameOf(edge.to)}` });
+      else {
+        const event = edge.kind === "reviews" ? (edge.label ?? "PR opened") : "merged";
+        lines.push({ depth: depth + 1, agentId: null, text: `→ (${event})` });
+        agentLine(edge.to, depth + 2, "");
+      }
+    }
+  };
+  const entries = [flow.key, ...flow.entryAgentIds.filter((id) => id !== flow.key)].filter(
+    (id) => flow.entryAgentIds.includes(id) && byId.has(id),
+  );
+  for (const id of entries) {
+    lines.push({ depth: 0, agentId: null, text: byId.get(id)!.entry.map(entryLine).join(" · ") || "▶ manual" });
+    agentLine(id, 1, "");
+  }
+  // An agent no entry reaches still gets its own block.
+  for (const id of flow.agentIds) if (!drawn.has(id) && byId.has(id)) agentLine(id, 0, "");
+  return lines;
+}
+
+/** A node of the desktop Flow map: an agent's box, an event's pill, or an entry's text. */
+type MapNode = {
+  id: string;
+  kind: "agent" | "event" | "entry";
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+type MapEdge = { from: string; to: string; dashed: boolean; label: string | null };
+const MAP_PAD = 16;
+// Room on the right for the fix rounds' curves back up.
+const MAP_LOOP = 64;
+const MAP_COL_GAP = 40;
+const MAP_ROW_GAP = 56;
+const nodeWidth = (label: string): number => Math.max(124, 7 * label.length + 24);
+
+/**
+ * A flow as a layered map: entries on top (text), then each agent in the row of its depth from the
+ * entries over delegations, reviews and merges (not fix rounds), with a "PR opened" pill per reviewed
+ * repository between writer and reviewer and a "merged" pill per merged repository. A row is ordered by
+ * name and centred. Delegations and fix rounds are dashed; fix rounds curve back up.
+ */
+function flowMap(
+  flow: LinkFlow,
+  data: AgentLinks,
+): { nodes: MapNode[]; edges: MapEdge[]; width: number; height: number } {
+  const byId = new Map(data.agents.map((a) => [a.id, a]));
+  const members = flow.agentIds.filter((id) => byId.has(id));
+  const inFlow = new Set(members);
+  const links = data.edges.filter((edge) => inFlow.has(edge.from) && inFlow.has(edge.to));
+  const nodes = new Map<string, { kind: MapNode["kind"]; label: string }>();
+  const edges: MapEdge[] = [];
+  const row = new Map<string, number>();
+  const addEdge = (edge: MapEdge) => {
+    if (!edges.some((e) => e.from === edge.from && e.to === edge.to && e.dashed === edge.dashed)) edges.push(edge);
+  };
+
+  for (const id of members) nodes.set(id, { kind: "agent", label: byId.get(id)!.name });
+  for (const id of flow.entryAgentIds.filter((id) => inFlow.has(id))) {
+    const entry = `entry:${id}`;
+    nodes.set(entry, { kind: "entry", label: byId.get(id)!.entry.map(entryLine).join(" · ") || "▶ manual" });
+    row.set(entry, 0);
+    row.set(id, 1);
+    addEdge({ from: entry, to: id, dashed: false, label: null });
+  }
+  const eventOf = (edge: LinkEdge): string => {
+    const id = `event:${edge.kind}:${edge.repository ?? ""}`;
+    if (!nodes.has(id)) nodes.set(id, { kind: "event", label: edge.kind === "reviews" ? "PR opened" : "merged" });
+    return id;
+  };
+  // Shortest depth from the entries; an event takes a row of its own.
+  const relax = (id: string, depth: number): boolean => {
+    if ((row.get(id) ?? Infinity) <= depth) return false;
+    row.set(id, depth);
+    return true;
+  };
+  for (let changed = true, rounds = 0; changed && rounds <= nodes.size * 2; rounds++) {
+    changed = false;
+    for (const edge of links) {
+      const from = row.get(edge.from);
+      if (from === undefined || edge.kind === "fixes") continue;
+      if (edge.kind === "delegates") changed = relax(edge.to, from + 1) || changed;
+      else {
+        const event = eventOf(edge);
+        changed = relax(event, from + 1) || changed;
+        changed = relax(edge.to, row.get(event)! + 1) || changed;
+      }
+    }
+  }
+  for (const edge of links) {
+    if (edge.kind === "delegates") addEdge({ from: edge.from, to: edge.to, dashed: true, label: edge.label });
+    else if (edge.kind === "fixes") addEdge({ from: edge.from, to: edge.to, dashed: true, label: edge.label ?? "fix" });
+    else {
+      const event = eventOf(edge);
+      addEdge({ from: edge.from, to: event, dashed: false, label: null });
+      addEdge({ from: event, to: edge.to, dashed: false, label: null });
+    }
+  }
+  // Whatever no entry reaches sits below the rest.
+  const last = Math.max(0, ...row.values());
+  for (const id of nodes.keys()) if (!row.has(id)) row.set(id, last + 1);
+
+  const rows: string[][] = [];
+  for (const [id, r] of row) (rows[r] ??= []).push(id);
+  const placed: MapNode[] = [];
+  const heightOf = (kind: MapNode["kind"]) => (kind === "agent" ? 46 : 28);
+  const rowWidth = (ids: string[]) =>
+    ids.reduce((sum, id) => sum + nodeWidth(nodes.get(id)!.label), 0) + MAP_COL_GAP * Math.max(0, ids.length - 1);
+  const used = rows.filter((ids) => ids && ids.length > 0);
+  const inner = Math.max(0, ...used.map(rowWidth));
+  let y = MAP_PAD;
+  for (const ids of used) {
+    ids.sort((a, b) => nodes.get(a)!.label.localeCompare(nodes.get(b)!.label) || a.localeCompare(b));
+    const tall = Math.max(...ids.map((id) => heightOf(nodes.get(id)!.kind)));
+    let x = MAP_PAD + (inner - rowWidth(ids)) / 2;
+    for (const id of ids) {
+      const { kind, label } = nodes.get(id)!;
+      const w = nodeWidth(label);
+      const h = heightOf(kind);
+      placed.push({ id, kind, label, x, y: y + (tall - h) / 2, w, h });
+      x += w + MAP_COL_GAP;
+    }
+    y += tall + MAP_ROW_GAP;
+  }
+  return { nodes: placed, edges, width: inner + 2 * MAP_PAD + MAP_LOOP, height: y - MAP_ROW_GAP + MAP_PAD };
+}
+
+/** Text made safe inside SVG markup. */
+const svgText = (text: string): string =>
+  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+const EVENT_STROKE = "#a8a29e";
+// Agent names on the map: a mid-tone that reads on light and dark (SVG takes no theme names).
+const MAP_LABEL = "#8a94a6";
+
+/**
+ * The Flow map as one SVG: agent boxes filled with a tint of their role's colour and stroked in it (red
+ * when their last run failed), the selected agent heavier, bold and ringed, the rest dimmed; events as
+ * dashed pills with italic labels; entries as text. Arrows run down; fix rounds curve back up on the right.
+ */
+function flowMapSvg(
+  map: ReturnType<typeof flowMap>,
+  opts: {
+    selected: string;
+    colour: (id: string) => string;
+    stats: (id: string) => string;
+    failed: (id: string) => boolean;
+  },
+): string {
+  const at = new Map(map.nodes.map((node) => [node.id, node]));
+  const font = 'font-family="system-ui,sans-serif"';
+  const parts: string[] = [
+    `<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="${EVENT_STROKE}" /></marker></defs>`,
+  ];
+  for (const edge of map.edges) {
+    const a = at.get(edge.from);
+    const b = at.get(edge.to);
+    if (!a || !b) continue;
+    const dash = edge.dashed ? ' stroke-dasharray="5 4"' : "";
+    const line = `stroke="${EVENT_STROKE}" stroke-width="1.5" fill="none"${dash} marker-end="url(#arrow)"`;
+    if (b.y <= a.y) {
+      // A loop back up: out of the source's right edge, round the right of the map, over the target's row
+      // and down into its top, so it crosses no other box.
+      const sx = a.x + a.w;
+      const sy = a.y + a.h / 2;
+      const tx = b.x + (b.w * 3) / 4;
+      const top = b.y - 22;
+      const bend = map.width - MAP_PAD;
+      parts.push(
+        `<path d="M${sx},${sy} C${bend},${sy} ${bend},${top} ${(bend + tx) / 2},${top} Q${tx},${top} ${tx},${b.y - 2}" ${line} />`,
+      );
+      if (edge.label)
+        parts.push(
+          `<text x="${sx + 6}" y="${sy - 6}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
+        );
+      continue;
+    }
+    const sx = a.x + a.w / 2;
+    const sy = a.y + a.h;
+    const tx = b.x + b.w / 2;
+    const ty = b.y - 2;
+    parts.push(`<path d="M${sx},${sy} L${tx},${ty}" ${line} />`);
+    if (edge.label)
+      parts.push(
+        `<text x="${(sx + tx) / 2 + 4}" y="${(sy + ty) / 2 + 3}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
+      );
+  }
+  for (const node of map.nodes) {
+    const cx = node.x + node.w / 2;
+    if (node.kind === "entry") {
+      parts.push(
+        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="12" fill="${EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
+      );
+      continue;
+    }
+    if (node.kind === "event") {
+      parts.push(
+        `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="${node.h / 2}" fill="none" stroke="${EVENT_STROKE}" stroke-dasharray="4 3" />`,
+        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="11" font-style="italic" fill="${EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
+      );
+      continue;
+    }
+    const colour = opts.colour(node.id).slice(0, 7);
+    const stroke = opts.failed(node.id) ? SVG_FAILED : colour;
+    const isSelected = node.id === opts.selected;
+    const group: string[] = [];
+    if (isSelected)
+      group.push(
+        `<rect x="${node.x - 4}" y="${node.y - 4}" width="${node.w + 8}" height="${node.h + 8}" rx="10" fill="none" stroke="${stroke}" stroke-opacity=".45" />`,
+      );
+    group.push(
+      `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="7" fill="${colour}2a" stroke="${stroke}" stroke-width="${isSelected ? 2 : 1}" />`,
+      `<text x="${cx}" y="${node.y + 19}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
+      `<text x="${cx}" y="${node.y + 35}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
+    );
+    parts.push(isSelected ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${map.width}" height="${map.height}" viewBox="0 0 ${map.width} ${map.height}">${parts.join("")}</svg>`;
+}
+
 /** An agent's kind for its pill: the coding agent's provider, else native. */
 const agentKind = (agent: LinkAgent): string =>
   agent.kind === "coding"
@@ -491,12 +764,25 @@ function runsWhen(agent: LinkAgent, data: AgentLinks): string[] {
   return [...new Set([...entries.filter((c): c is string => c !== null), ...notes])];
 }
 
-/** Whether the filter text (lower case, trimmed) is in the agent's name, model or a repository. */
+/**
+ * The filter text's terms, lower case: commas separate terms, and a field matches when it holds any one
+ * ("delivery, builder" keeps both agents' rows). Empty for no filter.
+ */
+const filterTerms = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .split(",")
+    .map((term) => term.trim())
+    .filter((term) => term !== "");
+/** Whether any filter term is in one of the fields; true for no filter. */
+const anyTerm = (text: string, fields: string[]): boolean => {
+  const terms = filterTerms(text);
+  return terms.length === 0 || fields.some((field) => terms.some((term) => field.toLowerCase().includes(term)));
+};
+
+/** Whether the filter text is in the agent's name, model or a repository. */
 const agentMatches = (agent: LinkAgent, text: string): boolean =>
-  text === "" ||
-  [agent.name, agent.model, ...agent.repositories.map((r) => r.repository)].some((field) =>
-    field.toLowerCase().includes(text),
-  );
+  anyTerm(text, [agent.name, agent.model, ...agent.repositories.map((r) => r.repository)]);
 
 // The status filter's choices: label, hotkey, and which statuses each keeps.
 const STATUS_FILTERS: { value: Filter["status"]; label: string; hotkey: string; keeps: (status: string) => boolean }[] =
@@ -775,14 +1061,10 @@ const branch = (depth: number): string => (depth === 0 ? "" : `${"   ".repeat(de
 
 function filtered(rows: RunRow[], f: Filter): RunRow[] {
   const keeps = STATUS_FILTERS.find((choice) => choice.value === f.status)?.keeps ?? (() => true);
-  const text = f.text.trim().toLowerCase();
   return rows.filter(
     (row) =>
       keeps(row.status) &&
-      (text === "" ||
-        [row.agentName, row.status, row.trigger, triggerLabel(row.trigger), row.task ?? ""].some((field) =>
-          field.toLowerCase().includes(text),
-        )),
+      anyTerm(f.text, [row.agentName, row.status, row.trigger, triggerLabel(row.trigger), row.task ?? ""]),
   );
 }
 
@@ -1905,7 +2187,8 @@ export const register: Register = (on, options) => {
     async function searchOlder(text: string, more: boolean): Promise<void> {
       const query = text.trim();
       const seq = ++searchSeq;
-      if (query === "") {
+      // Several comma-separated terms narrow only the runs the pane holds: the server searches one term.
+      if (query === "" || query.includes(",")) {
         await update($, older, () => IDLE_OLDER);
         return;
       }
@@ -2634,6 +2917,213 @@ export const register: Register = (on, options) => {
         );
       };
 
+      /**
+       * The Flow tab: the flow as a tree in the terminal (j/k move a cursor over agents, o opens one) or as
+       * an SVG map on the desktop (a button per agent under it, since the map takes no clicks), the
+       * selected agent highlighted. Below: the flow's recent run chains and the agents that look related.
+       */
+      const agentFlow = (all: AgentLinks, agent: LinkAgent, cursor: { id: string; line: number } | null) => {
+        const flow = flowOf(all, agent.id);
+        if (!flow) return null;
+        const byId = new Map(all.agents.map((a) => [a.id, a]));
+        const nameOf = (id: string) => byId.get(id)?.name ?? id;
+        const roleOf = (id: string): AgentRole => {
+          const a = byId.get(id);
+          return a ? agentRole(a, flow, all) : "sub";
+        };
+        const statsOf = (id: string) => {
+          const s = agentStats(rows, id);
+          return `${shortModel(byId.get(id)?.model ?? "")} · ${s.runs} runs · ${usd(s.cost)}`;
+        };
+        const heading = (label: string) =>
+          isDesktop ? (
+            <Text weight="semibold" size="footnote">
+              {label}
+            </Text>
+          ) : (
+            <Text bold>{label}</Text>
+          );
+        const openHere = (id: string) => openOn(id, "flow");
+
+        let drawing: unknown;
+        if (isDesktop) {
+          const map = flowMap(flow, all);
+          drawing = (
+            <Box key="flow-map" flexDirection="column" gap={1}>
+              {Svg && (
+                <Svg
+                  source={flowMapSvg(map, {
+                    selected: agent.id,
+                    colour: (id) => ROLE_COLOR[roleOf(id)],
+                    stats: statsOf,
+                    failed: (id) => {
+                      const last = agentStats(rows, id).last[0];
+                      return !!last && !ACTIVE.has(last) && last !== "succeeded";
+                    },
+                  })}
+                  alt={`Flow map of ${flow.name}`}
+                  width={map.width}
+                  height={map.height}
+                />
+              )}
+              <Box key="flow-nodes" gap={1} flexWrap="wrap">
+                {flow.agentIds
+                  .filter((id) => byId.has(id))
+                  .map((id) => (
+                    <Button
+                      key={`node-${id}`}
+                      label={nameOf(id)}
+                      variant={id === agent.id ? "primary" : "secondary"}
+                      onPress={() => openHere(id)}
+                    />
+                  ))}
+              </Box>
+            </Box>
+          );
+        } else {
+          const lines = flowTree(flow, all);
+          const selectable = lines.flatMap((line, i) => (line.agentId ? [i] : []));
+          const home = lines.findIndex((line) => line.agentId === agent.id && !line.ref);
+          const start = home >= 0 ? home : (selectable[0] ?? -1);
+          const at = cursor?.id === agent.id && selectable.includes(cursor.line) ? cursor.line : start;
+          const move = (step: number) =>
+            void update($, flowCursor, (c) => {
+              const from = c?.id === agent.id && selectable.includes(c.line) ? c.line : start;
+              const i = Math.min(selectable.length - 1, Math.max(0, selectable.indexOf(from) + step));
+              return selectable.length > 0 ? { id: agent.id, line: selectable[i] } : c;
+            });
+          drawing = (
+            <Box key="flow-tree" flexDirection="column">
+              {lines.map((line, i) => {
+                const lead = `${"  ".repeat(line.depth)}${i === at ? "› " : "  "}`;
+                if (!line.agentId)
+                  return (
+                    <Box key={`tree-${i}`}>
+                      <Text dimColor wrap="truncate-end">{`${lead}${line.text}`}</Text>
+                    </Box>
+                  );
+                const id = line.agentId;
+                return (
+                  <Box key={`tree-${i}`} gap={1}>
+                    <Button key={`tree-line-${i}`} onPress={() => openHere(id)}>
+                      {line.ref ? (
+                        <Text dimColor>{`${lead}${line.text}`}</Text>
+                      ) : (
+                        <Text color={ROLE_THEME[roleOf(id)]} bold={id === agent.id}>{`${lead}${line.text}`}</Text>
+                      )}
+                    </Button>
+                    {!line.ref && (
+                      <Text dimColor wrap="truncate-end">
+                        {statsOf(id)}
+                      </Text>
+                    )}
+                  </Box>
+                );
+              })}
+              {selectable.length > 0 && (
+                <Box key="flow-keys" gap={2}>
+                  <Button key="flow-prev" label="Previous (k)" hotkey="k" onPress={() => move(-1)} />
+                  <Button key="flow-next" label="Next (j)" hotkey="j" onPress={() => move(1)} />
+                  <Button
+                    key="flow-open"
+                    label="Open (o)"
+                    hotkey="o"
+                    onPress={() => {
+                      const id = lines[at]?.agentId;
+                      if (id) openHere(id);
+                    }}
+                  />
+                </Box>
+              )}
+            </Box>
+          );
+        }
+
+        // The pane's run chains that touch any of the flow's agents, newest first.
+        const members = new Set(flow.agentIds);
+        const chains: ListEntry[][] = [];
+        for (const entry of asChains(rows)) {
+          if (entry.kind === "heading" || entry.depth === 0) chains.push([entry]);
+          else chains[chains.length - 1]?.push(entry);
+        }
+        const recent = chains
+          .filter((chain) => chain.some((entry) => entry.kind === "run" && members.has(entry.row.agentId)))
+          .slice(0, FLOW_RECENT);
+        const names = flow.agentIds.filter((id) => byId.has(id)).map(nameOf);
+        const recentRuns = (
+          <Box key="flow-recent" flexDirection="column">
+            {heading("Recent runs in this flow")}
+            {recent.length === 0 ? (
+              <Text dimColor>No runs in the pane's window.</Text>
+            ) : (
+              recent.flat().map((entry) =>
+                entry.kind === "heading" ? (
+                  <Box key={`flow-recent-pr-${entry.pr}`}>
+                    <Text dimColor wrap="truncate-end">
+                      {entry.pr}
+                    </Text>
+                  </Box>
+                ) : (
+                  <Box key={`flow-recent-${entry.row.id}`} gap={1}>
+                    <Text>{branch(entry.depth)}</Text>
+                    {pill(entry.row.status.replaceAll("_", " "), statusTone(entry.row.status), "●")}
+                    <Text
+                      {...(entry.row.agentId === agent.id ? (isDesktop ? { weight: "semibold" } : { bold: true }) : {})}
+                    >
+                      {entry.event ? `${entry.row.agentName} · ${entry.event}` : entry.row.agentName}
+                    </Text>
+                    <Text dimColor>{`${ago(entry.row.startedAt, now)} ago · ${usd(entry.row.costUsd)}`}</Text>
+                  </Box>
+                ),
+              )
+            )}
+            <Box>
+              <Button
+                key="flow-runs"
+                label={isDesktop ? "Open in Runs →" : "Open in Runs → (g)"}
+                {...(isDesktop ? {} : { hotkey: "g" })}
+                onPress={() => {
+                  // One filter term per agent: the Runs tab keeps a run whose agent is any of them.
+                  void update($, filter, (old): Filter => ({ ...old, text: names.join(", ") }));
+                  void pane.searchOlder("", false);
+                  void update($, tab, () => "runs" as const);
+                }}
+              />
+            </Box>
+          </Box>
+        );
+
+        const related = flow.related.map((id) => byId.get(id)).filter((a): a is LinkAgent => !!a);
+        const relatedList = related.length > 0 && (
+          <Box key="flow-related" flexDirection="column">
+            {heading("Not linked, but looks related")}
+            {related.map((r) => {
+              const hasEdge = all.edges.some(
+                (edge) => edge.kind === "delegates" && (edge.from === r.id || edge.to === r.id),
+              );
+              const entry = entryChip(r, all);
+              return (
+                <Box key={`flow-related-${r.id}`} gap={1}>
+                  <Button key={`related-${r.id}`} onPress={() => openHere(r.id)}>
+                    <Text dimColor={!isDesktop}>{r.name}</Text>
+                  </Button>
+                  {entry && <Text dimColor>{entry}</Text>}
+                  {r.repositories.length === 0 && !hasEdge && <Text dimColor>no repository, no sub-agent edge</Text>}
+                </Box>
+              );
+            })}
+          </Box>
+        );
+
+        return (
+          <Box key="agent-flow" flexDirection="column" gap={1}>
+            {drawing as never}
+            {recentRuns}
+            {relatedList}
+          </Box>
+        );
+      };
+
       const openAgent = opened && data?.agents.find((a) => a.id === opened.id);
       if (data && opened && openAgent) {
         const held = await read($, agentInfo);
@@ -2641,6 +3131,7 @@ export const register: Register = (on, options) => {
         // Opened before a reload, or the reply was dropped: read it now (once; loadAgent skips a held one).
         if (opened.tab === "detail" && !info) void pane.loadAgent(openAgent.id, false);
         const showAll = (await read($, promptOpen)) === openAgent.id;
+        const cursor = await read($, flowCursor);
         return (
           <Box flexDirection="column" gap={1}>
             {header}
@@ -2648,6 +3139,7 @@ export const register: Register = (on, options) => {
             {notices}
             {agentScreenHeader(data, openAgent, opened.tab, info?.value ?? null)}
             {opened.tab === "detail" && agentDetail(data, openAgent, info, showAll)}
+            {opened.tab === "flow" && agentFlow(data, openAgent, cursor)}
           </Box>
         );
       }
