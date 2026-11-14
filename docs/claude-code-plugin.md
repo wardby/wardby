@@ -148,7 +148,9 @@ review, fix rounds or after-merge runs), with agents that share a repository
 or budget group but no trigger shown separately as related. Pick an agent for
 its **Detail** tab (settings, entry points, notes) and its **Flow** tab (the
 map of what it receives from and hands to). In the terminal the Flow tab is a
-tree.
+tree: j and k move between its agents and o opens one. On the desktop, the
+buttons under the map open an agent. Under either come the flow's recent run
+chains and the agents that look related but have no link.
 
 The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
 server it reads each agent with `get_agent`, for up to 30 agents; with more it
@@ -168,7 +170,9 @@ article for how links are worked out.
 - **Strips** (desktop): one card per pull request, its steps drawn as a row of
   dots; click a step's name to see it.
 - **Filters**: show all, active, failed or finished runs, or type to match an
-  agent, status, trigger or task.
+  agent, status, trigger or task. Commas separate terms that each match
+  (`builder, reviewer`); **Open in Runs →** on a Flow tab fills in the flow's
+  agents this way.
 - **Run detail**: a header with the run's status, short id, repository, model,
   duration and budget bar, then a card each for what started the run (with its
   request), what it produced, the run tree, services (ready, starting or

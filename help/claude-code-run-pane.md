@@ -42,8 +42,9 @@ If the pane says auto mode refused a call, allow `mcp__wardby__list_runs`,
 pane needs.
 
 The filter box first narrows the runs the pane holds: those still running and
-those from the last 24 hours, matched by agent, status, trigger or task. With
-Wardby 0.9.7 or later it also asks the server, and lists older runs whose id,
+those from the last 24 hours, matched by agent, status, trigger or task. Separate
+terms with commas to match any of them (`builder, reviewer`). With
+Wardby 0.9.7 or later a single term also asks the server, and lists older runs whose id,
 agent name, status, trigger, repository (any of the run's) or branch matches under **Older runs**,
 with **Load more** for the next page. The server never searches task text,
 since it can hold secret values.
