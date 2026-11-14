@@ -499,7 +499,11 @@ const MAP_PAD = 16;
 const MAP_LOOP = 64;
 const MAP_COL_GAP = 40;
 const MAP_ROW_GAP = 56;
-const nodeWidth = (label: string): number => Math.max(124, 7 * label.length + 24);
+// Room for a node's text: about 7.2px a character at the name's 12px, 6.2px at the stats line's 10px,
+// and 18px of padding either side, so neither line runs into the border.
+const NODE_PAD = 18;
+const nodeWidth = (label: string, detail = ""): number =>
+  Math.ceil(Math.max(124, 7.2 * label.length + 2 * NODE_PAD, 6.2 * detail.length + 2 * NODE_PAD));
 
 /**
  * A flow as a layered map: entries on top (text), then each agent in the row of its depth from the
@@ -510,6 +514,8 @@ const nodeWidth = (label: string): number => Math.max(124, 7 * label.length + 24
 function flowMap(
   flow: LinkFlow,
   data: AgentLinks,
+  /** The line under an agent's name, so its box is wide enough for it. */
+  detail: (id: string) => string = () => "",
 ): { nodes: MapNode[]; edges: MapEdge[]; width: number; height: number } {
   const byId = new Map(data.agents.map((a) => [a.id, a]));
   const members = flow.agentIds.filter((id) => byId.has(id));
@@ -570,9 +576,13 @@ function flowMap(
   const rows: string[][] = [];
   for (const [id, r] of row) (rows[r] ??= []).push(id);
   const placed: MapNode[] = [];
-  const heightOf = (kind: MapNode["kind"]) => (kind === "agent" ? 46 : 28);
+  const heightOf = (kind: MapNode["kind"]) => (kind === "agent" ? 50 : 28);
+  const widthOf = (id: string) => {
+    const { kind, label } = nodes.get(id)!;
+    return nodeWidth(label, kind === "agent" ? detail(id) : "");
+  };
   const rowWidth = (ids: string[]) =>
-    ids.reduce((sum, id) => sum + nodeWidth(nodes.get(id)!.label), 0) + MAP_COL_GAP * Math.max(0, ids.length - 1);
+    ids.reduce((sum, id) => sum + widthOf(id), 0) + MAP_COL_GAP * Math.max(0, ids.length - 1);
   const used = rows.filter((ids) => ids && ids.length > 0);
   const inner = Math.max(0, ...used.map(rowWidth));
   let y = MAP_PAD;
@@ -582,7 +592,7 @@ function flowMap(
     let x = MAP_PAD + (inner - rowWidth(ids)) / 2;
     for (const id of ids) {
       const { kind, label } = nodes.get(id)!;
-      const w = nodeWidth(label);
+      const w = widthOf(id);
       const h = heightOf(kind);
       placed.push({ id, kind, label, x, y: y + (tall - h) / 2, w, h });
       x += w + MAP_COL_GAP;
@@ -639,7 +649,7 @@ function flowMapSvg(
       );
       if (edge.label)
         parts.push(
-          `<text x="${sx + 6}" y="${sy - 6}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
+          `<text x="${sx + 8}" y="${sy + 14}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
         );
       continue;
     }
@@ -678,8 +688,8 @@ function flowMapSvg(
       );
     group.push(
       `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="7" fill="${colour}2a" stroke="${stroke}" stroke-width="${isSelected ? 2 : 1}" />`,
-      `<text x="${cx}" y="${node.y + 19}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
-      `<text x="${cx}" y="${node.y + 35}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
+      `<text x="${cx}" y="${node.y + 21}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
+      `<text x="${cx}" y="${node.y + 38}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
     );
     parts.push(isSelected || opts.dimOthers === false ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
   }
@@ -3089,7 +3099,7 @@ export const register: Register = (on, options) => {
 
         let drawing: unknown;
         if (isDesktop) {
-          const map = flowMap(flow, all);
+          const map = flowMap(flow, all, statsOf);
           drawing = (
             <Box key="flow-map" flexDirection="column" gap={1}>
               {Svg && (
@@ -3259,7 +3269,7 @@ export const register: Register = (on, options) => {
 
         // The same map, larger, as a page in the browser: the pane's dock stops at under half the window.
         const openLarger = () => {
-          const map = flowMap(flow, all);
+          const map = flowMap(flow, all, statsOf);
           const failed = (id: string) => {
             const last = agentStats(rows, id).last[0];
             return !!last && !ACTIVE.has(last) && last !== "succeeded";
