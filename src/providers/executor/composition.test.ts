@@ -32,6 +32,7 @@ describe("JOB_LAUNCHER=substrate", () => {
     SUBSTRATE_API_URL: "https://api.ate.example:443",
     SUBSTRATE_TOKEN_FILE: tokenFile,
     SUBSTRATE_PROXY_HOST: "proxy.example",
+    SUBSTRATE_ATESPACE: "wardby-runs",
     BLOB_STORE: "local",
     BLOB_STORE_LOCAL_DIR: join(dir, "blobs"),
   };
@@ -67,11 +68,16 @@ describe("JOB_LAUNCHER=substrate", () => {
   });
 
   it("does not leak the token file contents or path in errors", () => {
-    try {
-      build({ SUBSTRATE_PROXY_PORT: "x" });
-    } catch (error) {
-      expect(String(error)).not.toContain("fake-token-value");
-    }
+    let message = "";
+    expect(() => {
+      try {
+        build({ SUBSTRATE_PROXY_PORT: "x" });
+      } catch (error) {
+        message = String(error);
+        throw error;
+      }
+    }).toThrow("SUBSTRATE_PROXY_PORT");
+    expect(message).not.toContain("fake-token-value");
   });
 
   it("composes a routing executor", () => {

@@ -1426,6 +1426,7 @@ components:
             - local
             - docker
             - kubernetes
+            - substrate
         kubernetes:
           anyOf:
             - type: object

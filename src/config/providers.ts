@@ -723,8 +723,6 @@ export interface SubstrateJobConfig {
   workerSelector?: Record<string, string>;
 }
 
-/** The Atespace runs live in when SUBSTRATE_ATESPACE is unset on the control plane. */
-export const DEFAULT_SUBSTRATE_ATESPACE = "wardby-runs";
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
 
 function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
@@ -762,11 +760,8 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) {
     throw new Error("SUBSTRATE_PROXY_PORT must be an integer from 1 to 65535.");
   }
-  const atespace = dnsLabel(
-    env.SUBSTRATE_ATESPACE?.trim() || undefined,
-    "SUBSTRATE_ATESPACE",
-    DEFAULT_SUBSTRATE_ATESPACE,
-  );
+  // Required, no default: the coding proxy uses the same variable as its on/off switch.
+  const atespace = dnsLabel(requiredEnv(env, "SUBSTRATE_ATESPACE"), "SUBSTRATE_ATESPACE", "");
   const credentialsNamespace = dnsLabel(
     env.SUBSTRATE_CREDENTIALS_NAMESPACE?.trim() || undefined,
     "SUBSTRATE_CREDENTIALS_NAMESPACE",

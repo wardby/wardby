@@ -477,6 +477,7 @@ describe("loadSubstrateJobConfig", () => {
     SUBSTRATE_API_URL: "https://api.ate.example:443",
     SUBSTRATE_TOKEN_FILE: "/var/run/token",
     SUBSTRATE_PROXY_HOST: "proxy.example",
+    SUBSTRATE_ATESPACE: "wardby-runs",
   };
 
   it("applies defaults", () => {
@@ -513,9 +514,12 @@ describe("loadSubstrateJobConfig", () => {
     });
   });
 
-  it.each(["SUBSTRATE_API_URL", "SUBSTRATE_TOKEN_FILE", "SUBSTRATE_PROXY_HOST"])("requires %s by name", (name) => {
-    expect(() => loadSubstrateJobConfig({ ...base, [name]: "" })).toThrow(`${name} is required`);
-  });
+  it.each(["SUBSTRATE_API_URL", "SUBSTRATE_TOKEN_FILE", "SUBSTRATE_PROXY_HOST", "SUBSTRATE_ATESPACE"])(
+    "requires %s by name",
+    (name) => {
+      expect(() => loadSubstrateJobConfig({ ...base, [name]: "" })).toThrow(`${name} is required`);
+    },
+  );
 
   it("rejects bad values without echoing them", () => {
     expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_PROXY_PORT: "secretish" })).toThrow(
