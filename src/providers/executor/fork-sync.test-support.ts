@@ -257,6 +257,8 @@ export function forkSyncExecutor(input: {
   workspaceRoot: string;
   agentImage: string;
   toolImage: string;
+  /** The Codex worker image, for a Codex agent (the executor's workerImage). */
+  codexImage?: string;
   onSession?: (runId: string) => void;
 }): ContainerExecutor {
   const { db, repos } = input;
@@ -282,6 +284,7 @@ export function forkSyncExecutor(input: {
     artifactRoot: join(repos.root, "artifacts"),
     credentialRef: "env:OPENAI_API_KEY",
     anthropicCredentialRef: "env:ANTHROPIC_API_KEY",
+    ...(input.codexImage ? { workerImage: input.codexImage } : {}),
     claudeWorkerImage: input.agentImage,
     claudeToolRunnerImage: input.toolImage,
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 256 },
@@ -384,6 +387,293 @@ export async function runAndAssertForkSync(input: {
       requestedRef: "main",
       resolvedSha: u1,
     }),
+  ]);
+  return runId;
+}
+
+/**
+ * The fork-sync merge with git history (#536): the run's .git has upstream's main as
+ * refs/remotes/upstream/main, so the scripted agent merges it with git itself, under its own
+ * identity (finalize must rewrite it as Wardby), fixes the one conflict app.txt can have, records
+ * upstream's tip in upstream-sync and commits the merge. The same command serves every sync: a
+ * later sync whose merge-base has moved forward merges cleanly. Prints the merge-base it saw and
+ * each step's exit code.
+ */
+export const HISTORY_MERGE_COMMAND = [
+  "cd /workspace || exit 9",
+  "export GIT_AUTHOR_NAME='Agent Smith' GIT_AUTHOR_EMAIL=agent@example.invalid",
+  "export GIT_COMMITTER_NAME='Agent Smith' GIT_COMMITTER_EMAIL=agent@example.invalid",
+  'echo "merge-base=$(git merge-base HEAD upstream/main)"',
+  "git merge --no-ff --no-commit upstream/main > /tmp/merge.out 2>&1; echo merge.rc=$?",
+  "if grep -q '^<<<<<<< ' app.txt; then printf '%s\\n' a B-fork B-upstream c > app.txt; echo resolved=app.txt; fi",
+  "git rev-parse upstream/main > upstream-sync",
+  "git add app.txt upstream-sync",
+  "git commit -q --no-edit; echo commit.rc=$?",
+  // .cache holds the sandbox's package manager config, which runs never collect.
+  "git status --porcelain --untracked-files=all -- . ':(exclude).cache' | sed 's/^/status: /'",
+  "echo status.end",
+].join("\n");
+
+/**
+ * The scripted model for history runs, as a Node program listening on 8787 for both workers: Claude
+ * Code (Anthropic Messages, run_command) and Codex (OpenAI Responses, the exec_command function of
+ * Codex's classic tool set, which a gpt-4.1 model gets). One tool call running FAKE_TOOL_COMMAND,
+ * then the final JSON (FAKE_RESULT with the task's run id). Stateless per request; every request is
+ * logged as one JSON line (Claude's messages or Codex's input), so the command's output is read from
+ * the logs.
+ */
+export function historyProxyProgram(): string {
+  return String.raw`
+const http = require('node:http');
+function fromBody(body) {
+  const text = JSON.stringify(body?.messages ?? body?.input ?? []);
+  return {
+    runId: /The final JSON runId must be ([A-Za-z0-9_-]+)\./.exec(text)?.[1] ?? '',
+    answered: text.includes('"tool_use_id":"toolu_history"') || text.includes('"type":"function_call_output"'),
+  };
+}
+const result = (task) => ({ ...JSON.parse(process.env.FAKE_RESULT), runId: task.runId });
+const frames = (list) => list.map((frame) => 'event: ' + frame.type + '\n' + 'data: ' + JSON.stringify(frame) + '\n\n').join('');
+function claudeSse(id, name, input) { return frames([
+  { type: 'message_start', message: { id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name, input: {} } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 7 } },
+  { type: 'message_stop' },
+]); }
+const usage = { input_tokens: 10, input_tokens_details: { cached_tokens: 0 }, output_tokens: 5, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 15 };
+function codexSse(item) { return frames([
+  { type: 'response.created', response: { id: 'resp_history' } },
+  { type: 'response.output_item.done', item },
+  { type: 'response.completed', response: { id: 'resp_history', usage } },
+]); }
+http.createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  let body;
+  try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+  const capability = request.headers['x-api-key'] ?? String(request.headers.authorization ?? '').replace(/^Bearer /, '');
+  console.log(JSON.stringify({ method: request.method, url: request.url, stream: body?.stream, model: body?.model, messages: body?.messages ?? body?.input, validCapability: capability === process.env.EXPECTED_CAPABILITY }));
+  if (request.method === 'HEAD' && request.url === '/api/hello') return response.writeHead(200, { 'cache-control': 'no-store' }).end();
+  const task = fromBody(body);
+  if (request.method === 'POST' && request.url === '/v1/messages?beta=true') {
+    const id = task.answered ? 'toolu_structured_history' : 'toolu_history';
+    const name = task.answered ? 'StructuredOutput' : 'mcp__wardby_tools__run_command';
+    const input = task.answered ? result(task) : { command: process.env.FAKE_TOOL_COMMAND, timeout_ms: 60000 };
+    if (body?.stream === false) {
+      return response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
+        id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
+        content: [{ type: 'tool_use', id, name, input }], stop_reason: 'tool_use', stop_sequence: null,
+        usage: { input_tokens: 12, output_tokens: 7 },
+      }));
+    }
+    return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(claudeSse(id, name, input));
+  }
+  if (request.method === 'POST' && request.url.startsWith('/v1/responses')) {
+    const item = task.answered
+      ? { type: 'message', id: 'msg_final', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(result(task)), annotations: [] }] }
+      : { type: 'function_call', id: 'fc_history', call_id: 'call_history', name: 'exec_command', arguments: JSON.stringify({ cmd: process.env.FAKE_TOOL_COMMAND, yield_time_ms: 30000 }) };
+    return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(codexSse(item));
+  }
+  response.writeHead(404).end();
+}).listen(8787, '0.0.0.0');
+`;
+}
+
+/** The history proxy's environment: the capability it checks, the final answer and the merge command. */
+export function historyProxyEnv(): Record<string, string> {
+  return {
+    EXPECTED_CAPABILITY: FORK_SYNC_CAPABILITY,
+    FAKE_RESULT: JSON.stringify(FORK_SYNC_RESULT),
+    FAKE_TOOL_COMMAND: HISTORY_MERGE_COMMAND,
+  };
+}
+
+/** What a history fork sync asks for. */
+export const HISTORY_FORK_SYNC_TASK =
+  "Merge upstream/main into the fork with git, then write upstream's tip into upstream-sync.";
+
+/**
+ * A coding agent (Claude Code or Codex) whose default is local:<fork> with full git history, and
+ * one read link `upstream` (main) fetched as a git remote (`as: "remote"`), in the default set.
+ */
+export async function createHistoryForkSyncAgent(
+  db: PrismaClient,
+  input: {
+    agentId: string;
+    ownerId: string;
+    repos: ForkSyncRepositories;
+    provider: "claude-code" | "codex";
+    model: string;
+  },
+): Promise<void> {
+  const { agentId, ownerId, repos } = input;
+  await db.agent.create({
+    data: {
+      id: agentId,
+      name: agentId,
+      systemPrompt: "Keep the fork in sync with its upstream.",
+      model: input.model,
+      budgetUsd: 1,
+      kind: "coding",
+      ownerId,
+      codingProfile: {
+        create: {
+          provider: input.provider,
+          repository: `local:${repos.fork}`,
+          defaultTask: HISTORY_FORK_SYNC_TASK,
+          protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+          timeoutSec: 300,
+          repositoryAuthorizedVia: "local_root",
+          gitHistoryFull: true,
+        },
+      },
+    },
+  });
+  await db.agentRepository.create({
+    data: {
+      agentId,
+      name: "upstream",
+      provider: "local",
+      repository: `local:${repos.upstream}`,
+      access: "read",
+      inDefaultSet: true,
+      authorizedVia: "local_root",
+      ref: "main",
+      asRemote: true,
+    },
+  });
+}
+
+/** Upstream's next commit (U2), by its own author: new.txt changed and later.txt added; app.txt untouched. */
+export async function addUpstreamCommit(repos: ForkSyncRepositories): Promise<string> {
+  const { upstream, git } = repos;
+  await writeFile(join(upstream, "new.txt"), "new upstream file, v2\n");
+  await writeFile(join(upstream, "later.txt"), "a later upstream file\n");
+  await git(upstream, "add", "new.txt", "later.txt");
+  await git(
+    upstream,
+    "-c",
+    "user.name=Upstream Dev",
+    "-c",
+    "user.email=upstream@example.invalid",
+    "commit",
+    "--quiet",
+    "--author",
+    "Upstream Dev <upstream@example.invalid>",
+    "-m",
+    "U2",
+  );
+  return git(upstream, "rev-parse", "HEAD");
+}
+
+/** Merges the run's pushed branch into the fork's main (the pull request merged, by fast-forward). */
+export async function mergeRunBranch(repos: ForkSyncRepositories, runId: string): Promise<void> {
+  await repos.git(repos.fork, "merge", "--quiet", "--ff-only", `wardby/run-${runId}`);
+}
+
+const WARDBY_SIGNATURE = "Wardby <wardby@users.noreply.github.com>";
+
+/**
+ * Dispatches one history fork sync (awaiting the run) and asserts it: the run succeeded; the
+ * command saw `expectedMergeBase` as the merge-base and a conflict exactly when `conflict` is set;
+ * the pushed wardby/run-<id> is one merge commit whose parents are the fork's main and upstream's
+ * tip, authored and committed by Wardby, with no conflict markers; every commit the branch adds is
+ * either upstream's own (by SHA, unchanged) or Wardby's, and none carries the agent's identity or
+ * the fake capability. Returns the run id.
+ */
+export async function runAndAssertHistorySync(input: {
+  db: PrismaClient;
+  executor: ContainerExecutor;
+  agentId: string;
+  repos: ForkSyncRepositories;
+  proxyLog: () => Promise<string>;
+  upstreamTip: string;
+  expectedMergeBase: string;
+  conflict: boolean;
+  /** The files the merge must hold, path to content. */
+  expectedFiles: Record<string, string>;
+}): Promise<string> {
+  const { db, repos } = input;
+  const { upstream, fork, git, gitRaw } = repos;
+  const upstreamBefore = await snapshot(repos, upstream);
+  const forkMainBefore = await git(fork, "rev-parse", "main");
+
+  const dispatched = await dispatchRun({ db, executor: input.executor, agentId: input.agentId, awaitExecution: true });
+  const runId = dispatched!.run.id;
+  const run = await db.run.findUniqueOrThrow({
+    where: { id: runId },
+    select: { status: true, error: true, codingRun: { select: { headRef: true, gitHistoryFull: true } } },
+  });
+  const proxyLog = (await input.proxyLog())
+    .split("\n")
+    .filter((line) => line.includes(`The final JSON runId must be ${runId}.`))
+    .join("\n");
+  if (run.status !== "succeeded") throw new Error(`run_${run.status}: ${run.error}\nproxy:\n${proxyLog}`);
+  expect(run.codingRun?.gitHistoryFull).toBe(true);
+
+  const requests = proxyLog
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as { method: string; validCapability: boolean })
+    .filter((r) => r.method === "POST");
+  expect(requests.length).toBeGreaterThanOrEqual(2);
+  expect(requests.every((r) => r.validCapability)).toBe(true);
+  // The command's output, in the tool result the model was sent.
+  expect(proxyLog).toContain(`merge-base=${input.expectedMergeBase}`);
+  expect(/merge\.rc=(\d+)/.exec(proxyLog)?.[1], proxyLog).toBe(input.conflict ? "1" : "0");
+  // In the command's output (the logged JSON escapes its newlines), not the command's own text.
+  expect(/merge\.rc=\d+\\nresolved=app\.txt/.test(proxyLog)).toBe(input.conflict);
+  expect(/commit\.rc=(\d+)/.exec(proxyLog)?.[1], proxyLog).toBe("0");
+  // Nothing left uncommitted: the merge is the whole result.
+  expect(proxyLog, proxyLog).toContain("commit.rc=0\\nstatus.end");
+
+  // The branch is exactly one merge commit: the fork's main, then upstream's tip.
+  const branch = `wardby/run-${runId}`;
+  expect(run.codingRun?.headRef).toBe(branch);
+  const tip = await git(fork, "rev-parse", branch);
+  expect((await git(fork, "rev-list", "--parents", "-n", "1", tip)).split(" ")).toEqual([
+    tip,
+    forkMainBefore,
+    input.upstreamTip,
+  ]);
+  expect(await git(fork, "log", "-1", "--format=%an <%ae>|%cn <%ce>", tip)).toBe(
+    `${WARDBY_SIGNATURE}|${WARDBY_SIGNATURE}`,
+  );
+  // The merge's tree: exactly the expected files, and no conflict markers anywhere.
+  const files = (await git(fork, "ls-tree", "-r", "--name-only", tip)).split("\n").sort();
+  expect(files).toEqual(Object.keys(input.expectedFiles).sort());
+  for (const [path, content] of Object.entries(input.expectedFiles)) {
+    const text = await gitRaw(fork, "show", `${tip}:${path}`);
+    expect(text, path).toBe(content);
+    expect(text, path).not.toMatch(/^(<<<<<<<|=======|>>>>>>>)/m);
+  }
+
+  // Every commit the branch adds: upstream's own (present upstream, unchanged), or Wardby's.
+  const added = (await git(fork, "rev-list", tip, "--not", forkMainBefore)).split("\n").filter(Boolean);
+  expect(added).toContain(tip);
+  for (const commit of added) {
+    const object = await gitRaw(fork, "cat-file", "-p", commit);
+    expect(object).not.toContain(FORK_SYNC_CAPABILITY);
+    expect(object).not.toContain("Agent Smith");
+    expect(object).not.toContain("agent@example.invalid");
+    const fromUpstream = await git(upstream, "cat-file", "-t", commit).catch(() => "");
+    if (fromUpstream === "commit") {
+      expect(object).toBe(await gitRaw(upstream, "cat-file", "-p", commit));
+    } else {
+      expect(await git(fork, "log", "-1", "--format=%an <%ae>|%cn <%ce>", commit)).toBe(
+        `${WARDBY_SIGNATURE}|${WARDBY_SIGNATURE}`,
+      );
+    }
+  }
+  expect(await git(fork, "rev-parse", "main")).toBe(forkMainBefore);
+  // The upstream was never written.
+  expect(await snapshot(repos, upstream)).toEqual(upstreamBefore);
+  // The remote link's row: fetched as a remote, at upstream's tip.
+  const rows = await db.codingRunRepository.findMany({ where: { runId } });
+  expect(rows).toEqual([
+    expect.objectContaining({ name: "upstream", access: "read", asRemote: true, resolvedSha: input.upstreamTip }),
   ]);
   return runId;
 }
