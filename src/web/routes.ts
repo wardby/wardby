@@ -45,10 +45,12 @@ import {
   getDocumentJson,
   getFrames,
   getMentions,
+  getReviewCandidates,
   getVersionJson,
   listVersionsJson,
   patchComment,
   postFidelity,
+  postReview,
   postReply,
   postSend,
   postStatus,
@@ -91,7 +93,9 @@ const ID = "[A-Za-z0-9_-]{1,64}";
 const DOC_PAGE = new RegExp(`^/d/(${ID})$`);
 const SHARE_PAGE = /^\/s\/([A-Za-z0-9_-]{1,200})$/;
 const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
-const API_DOC = new RegExp(`^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames|export|exports))?$`);
+const API_DOC = new RegExp(
+  `^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames|export|exports|review|review-candidates))?$`,
+);
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
 const API_VERSIONS = new RegExp(`^/d/api/(${ID})/versions(?:/([1-9][0-9]{0,8})(/restore)?)?$`);
@@ -457,6 +461,10 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
     if (sub === "threads" && method === "POST")
       return { write: true, run: (v, _a, b) => postThread(res, deps, id, v, b) };
     if (sub === "send" && method === "POST") return { write: true, run: (v, _a, b) => postSend(res, deps, id, v, b) };
+    if (sub === "review" && method === "POST")
+      return { write: true, run: (v, _a, b) => postReview(res, deps, id, v, b) };
+    if (sub === "review-candidates" && method === "GET")
+      return { write: false, run: (v) => getReviewCandidates(res, deps, id, v) };
     if (sub === "fidelity" && method === "POST") {
       return { write: true, run: (v, _a, b) => postFidelity(res, deps, id, v, b) };
     }

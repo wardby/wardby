@@ -1645,6 +1645,132 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
     });
   });
 
+  describe("document review", () => {
+    const secretName = `RV_WEB_${s.slice(0, 8)}`;
+    const reviewAgentId = `rv-web-${s}`;
+    afterAll(async () => {
+      await db.document.deleteMany({ where: { agentId: reviewAgentId } });
+      await db.agentSecret.deleteMany({ where: { agentId: reviewAgentId } });
+      await db.secret.deleteMany({ where: { name: secretName } });
+      await db.agent.deleteMany({ where: { id: reviewAgentId } });
+    });
+
+    const newDoc = async () =>
+      (await createDocument(db, cipher, { ownerId: owner.id, title: "Review me", markdown: "hello world" })).id;
+    const post = (id: string, who: { jar: Jar; csrf: string }, body: object) =>
+      call(`/d/api/${id}/review`, { method: "POST", jar: who.jar, csrf: who.csrf, body });
+
+    it("adds the review to the page payload and runs the review actions", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      const m = await session(member.id);
+      const page = (await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any;
+      expect(page.review).toMatchObject({ state: "draft", currentVersion: 1, can: { submit: true, review: false } });
+      const cands = (await (await call(`/d/api/${id}/review-candidates`, { jar: o.jar })).json()) as any;
+      expect(cands.members.map((x: any) => x.principalId)).toContain(owner.id);
+      const sub = await post(id, o, { action: "submit", reviewers: [member.id] });
+      expect(sub.status).toBe(200);
+      const subbed = ((await sub.json()) as any).review;
+      expect(subbed.state).toBe("in_review");
+      expect(subbed.reviewers[0]).toMatchObject({ ref: member.id, verdict: "none" });
+      // The member was granted comment access by being named; their view hides refs and offers the verdict.
+      const asMember = ((await (await call(`/d/api/${id}`, { jar: m.jar })).json()) as any).review;
+      expect(asMember.can.review).toBe(true);
+      expect(asMember.reviewers[0]).not.toHaveProperty("ref");
+      const stale = await post(id, m, { action: "verdict", verdict: "approve", versionNumber: 9 });
+      expect([stale.status, await stale.json()]).toEqual([409, { error: "document_version_conflict" }]);
+      const ok = await post(id, m, { action: "verdict", verdict: "approve", versionNumber: 1, note: "Good" });
+      expect(((await ok.json()) as any).review.state).toBe("approved");
+      // Locked: an editor save answers 409 document_locked; send is not offered.
+      const save = await call(`/d/api/${id}/content`, {
+        method: "PUT",
+        jar: o.jar,
+        csrf: o.csrf,
+        body: { markdown: "x", baseNumber: 1 },
+      });
+      expect([save.status, await save.json()]).toEqual([409, { error: "document_locked" }]);
+      const locked = (await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any;
+      expect(locked.document.canSend).toBe(false);
+      const reopened = await post(id, o, { action: "reopen" });
+      expect(((await reopened.json()) as any).review.state).toBe("in_review");
+    });
+
+    it("answers the review codes with their statuses and refuses malformed bodies", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      const out = await session(outsider.id);
+      expect((await post(id, o, { action: "submit", reviewers: [] })).status).toBe(409);
+      expect((await post(id, o, { action: "nope" })).status).toBe(400);
+      expect((await post(id, o, { action: "verdict", verdict: "approve" })).status).toBe(400);
+      expect((await post(id, o, { action: "force", note: "  " })).status).toBe(400);
+      expect((await post(id, out, { action: "archive", archived: true })).status).toBe(404);
+      await post(id, o, { action: "submit", reviewers: [member.id] });
+      const forbidden = await post(id, o, { action: "verdict", verdict: "approve", versionNumber: 1 });
+      expect([forbidden.status, await forbidden.json()]).toEqual([403, { error: "document_review_forbidden" }]);
+      expect((await call(`/d/api/${id}/review-candidates`, { jar: (await session(member.id)).jar })).status).toBe(403);
+      // CSRF still guards the write.
+      expect(
+        (await call(`/d/api/${id}/review`, { method: "POST", jar: o.jar, body: { action: "reopen" } })).status,
+      ).toBe(403);
+    });
+
+    it("lets a guest reviewer on a comment link approve through the page API", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      const link = await createShareLink(db, {
+        documentId: id,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "comment",
+      });
+      const jar = new Jar();
+      const page = await call(`/s/${link.token}`, { jar });
+      jar.take(page);
+      const pre = bootstrapOf(await page.text()).csrf as string;
+      const reg = await call(`/s/${link.token}/guest`, { method: "POST", jar, csrf: pre, body: { name: "Gus" } });
+      jar.take(reg);
+      const { csrf } = (await reg.json()) as { csrf: string };
+      const guestId = (await db.documentGuest.findFirstOrThrow({ where: { shareLinkId: link.id } })).id;
+      await post(id, o, { action: "submit", reviewers: [`guest:${guestId}`] });
+      const res = await post(id, { jar, csrf }, { action: "verdict", verdict: "approve", versionNumber: 1 });
+      expect(res.status).toBe(200);
+      const review = ((await res.json()) as any).review;
+      expect(review.state).toBe("approved");
+      expect(review.reviewers[0]).toMatchObject({ kind: "guest", name: "Gus (guest)", me: true });
+      expect(JSON.stringify(review)).not.toContain(guestId);
+    });
+
+    it("never returns an agent secret value in a review note", async () => {
+      const id = await newDoc();
+      await db.agent.create({
+        data: {
+          id: reviewAgentId,
+          name: reviewAgentId,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const value = `fake-web-review-${s}`;
+      await createSecret(secretName, value, owner.id, cipher, db);
+      await attachSecret(reviewAgentId, secretName, owner.id, db);
+      await db.document.update({ where: { id }, data: { agentId: reviewAgentId } });
+      const o = await session(owner.id);
+      const m = await session(member.id);
+      await post(id, o, { action: "submit", reviewers: [member.id] });
+      const res = await post(id, m, {
+        action: "verdict",
+        verdict: "request_changes",
+        versionNumber: 1,
+        note: `key ${value}`,
+      });
+      const text = await res.text();
+      expect(text).not.toContain(value);
+      expect(text).toContain("[REDACTED]");
+      expect(await (await call(`/d/api/${id}`, { jar: o.jar })).text()).not.toContain(value);
+    });
+  });
+
   describe("exports", () => {
     let exportDesignId: string;
     const allow: RateLimiter = { check: async () => {} };

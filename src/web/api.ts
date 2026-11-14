@@ -8,7 +8,7 @@
  * secret values when stored (service.ts, comments.ts), and fidelity samples
  * when they are recorded (fidelity.ts), so no new secret path opens here:
  * /frames only rewrites links in stored boards (frames.ts). Names only: no email of
- * any viewer, member or guest is ever part of a response.
+ * any viewer, member or guest is ever part of a response. Review names and notes are stored redacted (review.ts).
  */
 import type { ServerResponse } from "node:http";
 import { atLeast } from "../core/grants.js";
@@ -32,6 +32,17 @@ import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js
 import { recordFidelity, type FidelityBoard } from "../core/documents/fidelity.js";
 import { loadContent } from "../core/documents/files.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
+import {
+  forceApprove,
+  getReviewView,
+  reopenDocument,
+  reviewCandidates,
+  reviewDocument,
+  setArchived,
+  submitForReview,
+  type ReviewView,
+} from "../core/documents/review.js";
+import { isLocked } from "../core/documents/review-state.js";
 import type { VersionWarning } from "../core/documents/warnings.js";
 import { getVersion, listVersions, MAX_VERSIONS_PAGE, restoreVersion } from "../core/documents/versions.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
@@ -90,6 +101,7 @@ export async function getDocumentJson(
   );
   const member = viewer.kind === "principal";
   const design = document.kind === "design";
+  const review = await getReviewView(deps.db, documentId, viewer);
   const linked = !!document.repository && !!document.path && (!design || !!document.baseRef);
   sendWebJson(res, 200, {
     document: {
@@ -99,7 +111,7 @@ export async function getDocumentJson(
       updatedAt: document.updatedAt,
       // Where a linked document lives is for members only.
       ...(member ? { repository: document.repository, path: document.path } : {}),
-      canSend: atLeast("document", me.access, "write") && linked,
+      canSend: atLeast("document", me.access, "write") && linked && !isLocked(review.state),
       // Whether PNG/PDF export is available (a renderer is configured).
       canRender: deps.exports?.renderer != null,
     },
@@ -113,7 +125,116 @@ export async function getDocumentJson(
     me,
     threads,
     mentionedGuests,
+    review: reviewJson(review),
   });
+}
+
+/** The review as the page shows it: names and notes as text; refs (principal ids, guest:<id>) for the owner only. */
+export function reviewJson(view: ReviewView) {
+  const owner = view.can.submit || view.can.archive || view.can.unarchive;
+  return {
+    state: view.state,
+    currentVersion: view.currentVersion,
+    progress: view.progress,
+    reviewers: view.reviewers.map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      ...(owner ? { ref: r.ref } : {}),
+      name: r.name,
+      verdict: r.verdict,
+      versionNumber: r.versionNumber,
+      note: r.note,
+      current: r.current,
+      me: r.me,
+    })),
+    finalApprover: view.finalApprover
+      ? {
+          name: view.finalApprover.name,
+          me: view.finalApprover.me,
+          ...(owner ? { ref: view.finalApprover.principalId } : {}),
+        }
+      : null,
+    forced: view.forced,
+    events: view.events.map((e) => ({
+      id: e.id,
+      kind: e.kind,
+      actorName: e.actorName,
+      fromState: e.fromState,
+      toState: e.toState,
+      versionNumber: e.versionNumber,
+      note: e.note,
+      createdAt: e.createdAt.toISOString(),
+    })),
+    can: view.can,
+  };
+}
+
+const VERDICTS = new Set(["approve", "request_changes"]);
+
+/** POST /d/api/<id>/review: one review action, answered with the updated review. */
+export async function postReview(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+  body: Record<string, unknown>,
+): Promise<void> {
+  let view: ReviewView;
+  switch (body.action) {
+    case "submit": {
+      const reviewers = body.reviewers;
+      if (!Array.isArray(reviewers) || !reviewers.every((r) => typeof r === "string")) return invalid();
+      const fa = body.finalApproverId;
+      if (fa !== undefined && fa !== null && typeof fa !== "string") return invalid();
+      view = await submitForReview(deps.db, {
+        documentId,
+        viewer,
+        reviewers: reviewers,
+        ...(fa !== undefined ? { finalApproverId: fa } : {}),
+      });
+      break;
+    }
+    case "verdict": {
+      const n = body.versionNumber;
+      if (typeof body.verdict !== "string" || !VERDICTS.has(body.verdict)) return invalid();
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return invalid();
+      if (body.note !== undefined && typeof body.note !== "string") return invalid();
+      view = await reviewDocument(deps.db, deps.cipher, {
+        documentId,
+        viewer,
+        verdict: body.verdict as "approve" | "request_changes",
+        versionNumber: n,
+        ...(typeof body.note === "string" ? { note: body.note } : {}),
+      });
+      break;
+    }
+    case "force": {
+      const note = str(body, "note");
+      if (note.trim() === "") return invalid();
+      view = (await forceApprove(deps.db, deps.cipher, { documentId, viewer, note })).view;
+      break;
+    }
+    case "reopen":
+      view = await reopenDocument(deps.db, { documentId, viewer });
+      break;
+    case "archive":
+      if (typeof body.archived !== "boolean") return invalid();
+      view = await setArchived(deps.db, { documentId, viewer, archived: body.archived });
+      break;
+    default:
+      return invalid();
+  }
+  sendWebJson(res, 200, { review: reviewJson(view) });
+}
+
+/** GET /d/api/<id>/review-candidates: whom the owner may name (owner only). */
+export async function getReviewCandidates(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+): Promise<void> {
+  sendWebJson(res, 200, await reviewCandidates(deps.db, documentId, viewer));
 }
 
 /** A version's stored warnings (always an array). */
