@@ -1,2 +1,7 @@
 Wardby
 Copyright 2026 Christopher Fields
+
+This product includes a TypeScript client generated at build time from the
+Agent Substrate API definition (api/ateapi/v1/ateapi.proto),
+Copyright 2026 The Agent Substrate Authors, licensed under the Apache
+License, Version 2.0. Source: https://github.com/agent-substrate/substrate
