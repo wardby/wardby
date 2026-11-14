@@ -921,7 +921,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "reply_to_thread",
     scope: "documents:write",
-    description: "Replies to an open comment thread as you (needs comment access to the document).",
+    description:
+      "Replies to an open or outdated comment thread as you (needs comment access to the document); a resolved thread is refused with comment_thread_closed.",
     inputSchema: {
       type: "object",
       properties: { threadId: { type: "string" }, body: { type: "string" } },

@@ -159,7 +159,8 @@ export async function reply(
   if (!thread) throw new Error("comment_not_found");
   const doc = await requireDocumentAccess(db, thread.documentId, input.viewer, "comment");
   checkBody(input.body);
-  if (thread.status !== "open") throw new Error("comment_thread_closed");
+  // Open and outdated threads take replies (an outdated one lost its anchor, not its discussion).
+  if (thread.status !== "open" && thread.status !== "outdated") throw new Error("comment_thread_closed");
   const body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
   const c = await db.comment.create({ data: { threadId: thread.id, body, ...authorFields(input.viewer) } });
   await notifyDocumentChange(db, doc.id, "comment");

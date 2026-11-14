@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createThread } from "../core/documents/comments.js";
 import { publishVersion } from "../core/documents/service.js";
 import { reopenDocument, reviewDocument, setArchived, submitForReview } from "../core/documents/review.js";
 import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
@@ -108,6 +109,40 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => banner(a)).toContain("Changes requested · v1");
       await expect.poll(() => verdicts.getByRole("button").allTextContents()).toEqual(["Approve"]);
       expect(await verdicts.textContent()).toContain("You requested changes on v1");
+    }, 90_000);
+
+    it("an outdated thread takes a reply from the page", async () => {
+      const d = await server.design({
+        title: "Out",
+        kind: "document",
+        markdown: "# O\n\nhello world\n",
+        access: "comment",
+      });
+      const t = await createThread(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        anchor: { type: "text", quote: "hello world", prefix: "", suffix: "" },
+        body: "Is this right?",
+      });
+      const out = await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        markdown: "# O\n\nsomething else\n",
+        via: "mcp",
+      });
+      expect(out.reanchored).toEqual({ kept: 0, outdated: 1 });
+      const a = await open(d.cookie, d.documentId);
+      const row = a.locator(".tp-row", { hasText: "Is this right?" });
+      await expect.poll(() => row.locator(".chip.out").count(), { timeout: 10_000 }).toBe(1);
+      await row.click();
+      await a.locator(".cpop textarea").fill("Still worth asking");
+      await a.locator(".cpop textarea").press(SUBMIT);
+      await expect.poll(() => a.locator(".cpop").textContent(), { timeout: 10_000 }).toContain("Still worth asking");
+      expect(await a.locator(".cpop [role=alert]").count()).toBe(0);
+      const bodies = await server.db.comment.findMany({
+        where: { threadId: t.threadId },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(bodies.map((c) => c.body)).toEqual(["Is this right?", "Still worth asking"]);
     }, 90_000);
 
     it("force approve lists who it overrides and needs a note", async () => {

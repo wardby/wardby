@@ -174,6 +174,19 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
     );
   });
 
+  it("an outdated thread still takes replies; a resolved one does not", async () => {
+    const t = await createThread(db, cipher, { documentId: docId, viewer: asMember(), anchor, body: "gone text" });
+    await db.commentThread.update({ where: { id: t.threadId }, data: { status: "outdated" } });
+    const r = await reply(db, cipher, { threadId: t.threadId, viewer: guestComment, body: "still relevant" });
+    expect(r.commentId).toBeTruthy();
+    // Replying leaves it outdated: its anchor is still gone.
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } })).status).toBe("outdated");
+    await db.commentThread.update({ where: { id: t.threadId }, data: { status: "resolved" } });
+    await expect(reply(db, cipher, { threadId: t.threadId, viewer: asOwner(), body: "late" })).rejects.toThrow(
+      "comment_thread_closed",
+    );
+  });
+
   it("lists with names, mine flag and filters", async () => {
     const d = (await createDocument(db, cipher, { ownerId: owner.id, title: "L", markdown: "hello world" })).id;
     await db.resourceGrant.create({
