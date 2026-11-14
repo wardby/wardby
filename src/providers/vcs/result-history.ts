@@ -2,7 +2,8 @@ import { constants } from "node:fs";
 import { lstat, mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import type { Readable } from "node:stream";
-import { COMMIT_SHA, redactTokenShapedValues } from "../../coding/protocol.js";
+import { COMMIT_SHA } from "../../coding/protocol.js";
+import { redactSecrets } from "../../coding/redact.js";
 
 /**
  * A history run's result bundle (#536), imported into the control plane's own git dir. The bundle is
@@ -374,7 +375,7 @@ async function readCommit(git: ResultGit, sha: string): Promise<ParsedCommit> {
     fail("vcs_result_history_invalid");
   }
   for (const text of [message, author, committer]) {
-    if (redactTokenShapedValues(text) !== text) fail("vcs_result_commit_unsafe");
+    if (redactSecrets(text, []) !== text) fail("vcs_result_commit_unsafe");
   }
   const authorDate = AUTHOR_DATE.exec(author);
   const committerDate = AUTHOR_DATE.exec(committer);

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { NodeGitCommandRunner } from "./git.js";
 import { MAX_RESULT_COMMITS, importResultBundle, type ResultGit } from "./result-history.js";
 
@@ -361,6 +362,24 @@ describe("importResultBundle (real git, #536)", { timeout: 60_000 }, () => {
       const error = await errorOf(importIt(f));
       expect(error.message).toBe("vcs_result_commit_unsafe");
       expect(everythingIn(error)).not.toContain(FAKE_TOKEN);
+    }
+  });
+
+  it("refuses the run's registry token and a bare Bearer value in commit text", async () => {
+    const registry = deriveRegistryToken("fake-capability-for-test");
+    const bearer = "FAKEbearerValue1234567890abcdef";
+    const cases: { message: string; extra: Record<string, string>; secret: string }[] = [
+      { message: `fix: use token ${registry}`, extra: {}, secret: registry },
+      { message: "fine", extra: { GIT_AUTHOR_EMAIL: `${registry}@example.invalid` }, secret: registry },
+      { message: `fix: Bearer ${bearer}`, extra: {}, secret: bearer },
+    ];
+    for (const c of cases) {
+      const f = await fixture();
+      await commit(f.worker, { "b.txt": "b\n" }, c.message, c.extra);
+      await makeBundle(f);
+      const error = await errorOf(importIt(f));
+      expect(error.message).toBe("vcs_result_commit_unsafe");
+      expect(everythingIn(error)).not.toContain(c.secret);
     }
   });
 

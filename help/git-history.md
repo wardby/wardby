@@ -24,8 +24,9 @@ carries the agent's real commits, merge commits included.
 - `depth` is a whole number from 1 to 100000, or `"full"`. `null` (the
   default) is off, with today's behaviour. `update_agent` with
   `gitHistory: null` turns it off again.
-- A numeric depth can give somewhat more history than asked, never less. Use
-  `"full"` for a [fork sync](fork-sync.md) so the merge base is always found.
+- A numeric depth normally gives at least that much history and can give more.
+  Use `"full"` for a [fork sync](fork-sync.md) so the merge base is always
+  found.
 - It applies to every **writable** repository of the run: `/workspace` and each
   writable `/repos/<name>`. Read-only folders never get a `.git`.
 - `get_agent` shows the stored value as `gitHistoryDepth` (a number or null) and
@@ -66,6 +67,15 @@ instead of being mounted as a folder:
 - Remote links count toward `CODING_MAX_RUN_REPOSITORIES` like other extras.
 - The fetch happens in Wardby before the run starts. If it fails the run ends
   with [`vcs_remote_fetch_failed`](errors/vcs-remote-fetch-failed.md).
+
+Operator notes:
+
+- Merging a remote pushes that remote's history into the default repository's
+  branch. If the upstream is private, its history becomes part of the fork,
+  which may be public.
+- Prefer a branch or tag `ref` for remote links. A remote fetched by a raw SHA
+  or a `fromFile` SHA is trusted as upstream content, and its changes are not
+  checked against `protectedPaths`. Only use SHAs you trust.
 
 ## What the agent sees
 

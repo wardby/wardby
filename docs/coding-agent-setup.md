@@ -317,7 +317,8 @@ or later.
 `gitHistoryDepth` and `gitHistoryFull`, and `get_agent` shows those two fields
 rather than `gitHistory` (full overrides depth). It is fixed at dispatch and
 copied to the run, so a change applies to later runs. A numeric depth can give
-somewhat more history than asked, never less; use `"full"` for fork sync.
+somewhat more history than asked; it normally gives at least the depth, but
+that is not guaranteed, so use `"full"` for fork sync.
 
 **Remote links.** A read link with `as: "remote"` is fetched into the default
 repository's `.git` instead of mounted at `/repos/<name>`. Its `name` is the git
@@ -349,6 +350,15 @@ remote name (`origin` is reserved), and its resolved commit is stored as
 - The commit is fetched by Wardby before the run, with the same access as a
   read-only folder. A failure is `vcs_remote_fetch_failed`.
 
+**Operator notes on remotes.**
+
+- Merging a remote pushes that remote's history into the default repository's
+  branch. If the upstream is private, its history becomes part of the fork,
+  which may be public.
+- Prefer a branch or tag `ref` for remote links. A remote fetched by a raw SHA
+  or a `fromFile` SHA is trusted as upstream content, and its changes are not
+  checked against `protectedPaths`. Only use SHAs you trust.
+
 **What the agent gets.** The task text says the workspace has history to the
 configured depth (or full), lists each remote as `<name>/<label> at <commit>`,
 and says fetching and pushing are not possible, so the agent commits its work;
@@ -361,9 +371,10 @@ because only a validated bundle is imported.
 `budget_exhausted`), the worker returns its new commits as a bundle. Wardby
 fetches it with object checks, then:
 
-- requires at most 500 new commits per repository (`vcs_result_commit_limit`),
-  each with a message of at most 64 KiB, none with token-shaped text in a message
-  or an author or committer name or email (`vcs_result_commit_unsafe`);
+- requires at most 500 new commits per repository (`vcs_result_commit_limit`);
+- requires each commit message to be at most 64 KiB and free of token-shaped
+  text, as are the author and committer names and emails
+  (`vcs_result_commit_unsafe`);
 - requires the base to be an ancestor of the result, and every new commit's
   parents to be other new commits, the base, or a remote's fetched tip
   (`vcs_result_history_invalid`);
