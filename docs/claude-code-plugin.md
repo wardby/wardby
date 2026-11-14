@@ -155,6 +155,13 @@ tree: j and k move between its agents and o opens one. On the desktop, the
 buttons under the map open an agent. Under either come the flow's recent run
 chains and the agents that look related but have no link.
 
+**Open larger** on the desktop (w in the terminal) opens the flow's map in your
+browser at full size, with its agents and recent runs. The pane writes the page
+to a `wardby-flows` folder in your temporary folder and opens it with `open`
+(macOS), `xdg-open` (Linux) or `start` (Windows); if no browser starts, a
+message gives the file's path. The page is a snapshot: press the button again
+for fresh numbers.
+
 The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
 server it lists your agents with `list_agents` and reads each one's sub-agents
 and repositories with `list_subagents` and `list_repositories`, for up to 30

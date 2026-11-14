@@ -33,7 +33,8 @@ listed as **related**: a guess, shown separately.
 ## In Claude Code
 
 The wardby-runs pane's **Agents** tab draws your flows: a list grouped by flow, and for each agent a
-Detail tab and a Flow tab with the map. In the terminal the Flow tab is a tree. See
+Detail tab and a Flow tab with the map. In the terminal the Flow tab is a tree. **Open larger**
+(w in the terminal) opens the map in your browser at full size, as a snapshot. See
 [The Claude Code run pane](claude-code-run-pane.md). Allow `mcp__<server>__list_agent_links` and
 `mcp__<server>__get_agent` for it in auto mode.
 
