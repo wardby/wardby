@@ -25,12 +25,19 @@ export const MCP_SERVER = "wardby";
 /**
  * The pane's read-only tools on a server: what auto mode needs allowed. stop_run is never added: it
  * changes a run. get_run_steps backs Recent steps and Steps; get_run_text reads the rest of a long request,
- * final answer or error for Show full text and Copy. Against an older server without them the rules are harmless.
+ * final answer or error for Show full text and Copy; list_agent_links and get_agent back the Agents tab (flows, and the agent Detail). Against an older server without them the rules are harmless.
  */
 export function paneTools(server: string): string[] {
-  return ["list_runs", "list_agents", "get_run", "get_run_transcript", "get_run_steps", "get_run_text"].map(
-    (tool) => `mcp__${server}__${tool}`,
-  );
+  return [
+    "list_runs",
+    "list_agents",
+    "get_run",
+    "get_run_transcript",
+    "get_run_steps",
+    "get_run_text",
+    "list_agent_links",
+    "get_agent",
+  ].map((tool) => `mcp__${server}__${tool}`);
 }
 export const PANE_TOOLS = paneTools(MCP_SERVER);
 

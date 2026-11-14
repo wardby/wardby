@@ -8,8 +8,8 @@ finished Claude Code run in your own terminal.
 The plugin lives in this repository under `plugins/claude-code/`, and the
 repository is its marketplace (`.claude-plugin/marketplace.json`). It talks only
 to the wardby MCP server your Claude Code session already has, through
-`list_runs`, `list_agents`, `get_run`, `get_run_steps`, `get_run_text` and
-`get_run_transcript`, so it shows exactly what those tools show you and needs no
+`list_runs`, `list_agents`, `get_run`, `get_run_steps`, `get_run_text`,
+`get_run_transcript`, `list_agent_links` and `get_agent`, so it shows exactly what those tools show you and needs no
 token of its own.
 
 Against a server older than 0.8.0, which can't list runs across agents, the pane

@@ -36,8 +36,9 @@ server named `wardby` yet. Or install it yourself with
 
 If the pane says auto mode refused a call, allow `mcp__wardby__list_runs`,
 `mcp__wardby__list_agents`, `mcp__wardby__get_run`,
-`mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps` and
-`mcp__wardby__get_run_text` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
+`mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps`,
+`mcp__wardby__get_run_text`, `mcp__wardby__list_agent_links` and
+`mcp__wardby__get_agent` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
 pane needs.
 
 The filter box first narrows the runs the pane holds: those still running and
