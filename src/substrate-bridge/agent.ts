@@ -9,7 +9,7 @@
  * Nothing secret is logged (see Logger in common.ts).
  */
 import { spawn } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,14 +21,20 @@ import {
   startReadyServer,
   stderrLogger,
   uploadFile,
+  waitForRound,
   waitForRunToken,
+  withRound,
   type Logger,
 } from "./common.js";
 import {
   DEFAULT_METADATA_DIR,
   DEFAULT_READY_PORT,
   DEFAULT_TOOL_SOCKET,
+  MAX_ROUND,
+  NEXT_ROUND_POLL_MS,
   PLACEHOLDER_CAPABILITY,
+  WARM_ROUNDS_ENV,
+  WORKER_CONTEXT_ROOT,
   WORKER_OUTPUT_TAIL,
 } from "./constants.js";
 import { findWorkerDiagnostic, LineTail, waitAtMost } from "./diagnostics.js";
@@ -72,6 +78,14 @@ export interface AgentOptions {
   giveUpMs?: number;
   /** How long the transcript upload may take before the bridge gives up on it and reports the result (default 2 min). */
   transcriptDeadlineMs?: number;
+  /** Warm rounds: the worker's native-mode context directory, removed before each later round (tests). */
+  contextRoot?: string;
+  /** Warm rounds: how long to wait between asks for the next round's input (default 1 s). */
+  nextRoundPollMs?: number;
+  /** Warm rounds: called once a round's uploads are done (tests and the bridge's own log). */
+  onRoundDone?: (round: number) => void;
+  /** Warm rounds: called when a later round's worker starts, with the session it resumes (if any). */
+  onRoundStarted?: (round: number, resumeSessionId: string | undefined) => void;
 }
 
 export interface AgentHandle {
@@ -79,8 +93,10 @@ export interface AgentHandle {
   readyPort: number;
   /** Resolves with the worker's exit code. */
   workerExited: Promise<number>;
-  /** Resolves once the transcript and result uploads have finished (or been given up on). */
+  /** Resolves once the transcript and result uploads have finished (or been given up on): round 1's. */
   uploaded: Promise<void>;
+  /** Whether the bridge stays for follow-up rounds (the template's WARDBY_SUBSTRATE_WARM_ROUNDS=1). */
+  warmRounds: boolean;
   close(): Promise<void>;
 }
 
@@ -107,6 +123,43 @@ const OUTPUT_DRAIN_MS = 2_000;
 /** The transcript is best effort: it never holds the result back for longer than this. */
 export const TRANSCRIPT_DEADLINE_MS = 2 * 60_000;
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The transcript header is one short JSON line; anything longer is not read. */
+const MAX_HEADER_BYTES = 64 * 1024;
+
+/** The session id in the worker's transcript header (its first line), if it wrote one. */
+async function transcriptSessionId(path: string): Promise<string | undefined> {
+  try {
+    const text = (await readFile(path)).subarray(0, MAX_HEADER_BYTES).toString("utf8");
+    const newline = text.indexOf("\n");
+    const header = JSON.parse(newline < 0 ? text : text.slice(0, newline)) as { sessionId?: unknown } | null;
+    const id = header?.sessionId;
+    return typeof id === "string" && SESSION_ID.test(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Warm rounds: the input the worker reads, with `sessionResume` on (the session file must be kept for
+ * the next round to resume it) and, from round 2, `resumeSessionId`. An input that is not a JSON
+ * object is written unchanged: the worker refuses it as it would today.
+ */
+async function writeRoundInput(path: string, body: Buffer, resumeSessionId: string | undefined): Promise<void> {
+  let text = body.toString("utf8");
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      text = JSON.stringify({ ...value, sessionResume: true, ...(resumeSessionId ? { resumeSessionId } : {}) });
+    }
+  } catch {
+    // Unchanged.
+  }
+  const temporary = `${path}.tmp`;
+  await writeFile(temporary, text, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
 export async function run(options: AgentOptions): Promise<AgentHandle> {
   // The operator-diagnostics tail: the worker's stderr and this bridge's events. The worker holds no
   // real secret (the gateway injects the capability on the wire), only the placeholder.
@@ -115,6 +168,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   const policy = options.policy ?? DEFAULT_POLICY;
   const giveUpMs = options.giveUpMs ?? 60_000;
   const env = options.env ?? process.env;
+  const warmRounds = env[WARM_ROUNDS_ENV] === "1";
   const inputPath = options.inputPath ?? "/run/wardby/input/input.json";
   const resultPath = options.resultPath ?? "/run/wardby/output/result.json";
   const transcriptPath = options.transcriptPath ?? "/run/wardby/output/session.jsonl";
@@ -150,6 +204,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       ? error
       : new BridgeError("substrate_bridge_input_failed");
   }
+  if (warmRounds) await writeRoundInput(inputPath, await readFile(inputPath), undefined);
   log("substrate_bridge_input_ready", { runToken: token });
 
   // 2. The tool socket.
@@ -307,54 +362,119 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     listener.listen(socketPath, () => resolve());
   });
 
-  // 3. The worker.
-  const worker = (options.launchWorker ?? spawnWorker)({
-    ...env,
-    WARDBY_PROXY_URL: options.proxyUrl,
-    WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
-  });
-  log("substrate_bridge_worker_started", { runToken: token });
-  // The worker's last lines, in memory only: nothing of them leaves the actor except the one fixed
-  // diagnostic findWorkerDiagnostic accepts.
-  const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
-  const drained = Promise.all([
-    ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
-    ...(worker.stderr ? [diagnostics.tail.follow(worker.stderr)] : []),
-  ]);
-
-  // 4. Transcript, then result, once the worker has exited. The result (or the exit report) ends the
-  // run: the control plane may read the transcript and remove the run's blobs as soon as it lands,
-  // so nothing is uploaded after it. The transcript is best effort and bounded, and never blocks it.
+  // 3. The worker, and 4. its transcript and result once it has exited (per round).
   const transcriptDeadlineMs = options.transcriptDeadlineMs ?? TRANSCRIPT_DEADLINE_MS;
-  const uploaded = worker.exited.then(async (code) => {
-    log("substrate_bridge_worker_exited", { runToken: token, code });
-    await uploadFile(
-      `${base}/transcript`,
-      headers,
-      transcriptPath,
-      policy,
-      log,
-      "transcript",
-      AbortSignal.any([shutdown.signal, AbortSignal.timeout(transcriptDeadlineMs)]),
-    );
-    const outcome = await uploadFile(`${base}/result`, headers, resultPath, policy, log, "result", shutdown.signal);
-    // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
-    // with the worker's own diagnostic code when it printed one.
-    if (outcome !== "ok") {
-      await waitAtMost(drained, OUTPUT_DRAIN_MS);
-      const diagnostic = findWorkerDiagnostic(output.lines());
-      // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log, before the
-      // exit report that ends the run.
-      await diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
-      await postCapped(`${base}/exit`, headers, { code, ...diagnostic }, policy, log, "exit", shutdown.signal);
+  const startRound = (round: number): { exited: Promise<number>; uploaded: Promise<void> } => {
+    const worker = (options.launchWorker ?? spawnWorker)({
+      ...env,
+      WARDBY_PROXY_URL: options.proxyUrl,
+      WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
+    });
+    log("substrate_bridge_worker_started", { runToken: token, ...(round > 1 ? { round } : {}) });
+    // The worker's last lines, in memory only: nothing of them leaves the actor except the one fixed
+    // diagnostic findWorkerDiagnostic accepts.
+    const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
+    const drained = Promise.all([
+      ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
+      ...(worker.stderr ? [diagnostics.tail.follow(worker.stderr)] : []),
+    ]);
+    // The transcript, then the result, once the worker has exited. The result (or the exit report)
+    // ends the round: the control plane may read the transcript and remove the run's blobs as soon as
+    // it lands, so nothing is uploaded after it. The transcript is best effort and bounded, and never
+    // blocks it.
+    const uploaded = worker.exited.then(async (code) => {
+      log("substrate_bridge_worker_exited", { runToken: token, code });
+      await uploadFile(
+        withRound(`${base}/transcript`, round),
+        headers,
+        transcriptPath,
+        policy,
+        log,
+        "transcript",
+        AbortSignal.any([shutdown.signal, AbortSignal.timeout(transcriptDeadlineMs)]),
+      );
+      const outcome = await uploadFile(
+        withRound(`${base}/result`, round),
+        headers,
+        resultPath,
+        policy,
+        log,
+        "result",
+        shutdown.signal,
+      );
+      // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
+      // with the worker's own diagnostic code when it printed one.
+      if (outcome !== "ok") {
+        await waitAtMost(drained, OUTPUT_DRAIN_MS);
+        const diagnostic = findWorkerDiagnostic(output.lines());
+        // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log, before the
+        // exit report that ends the round.
+        await diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
+        await postCapped(
+          withRound(`${base}/exit`, round),
+          headers,
+          { code, ...diagnostic },
+          policy,
+          log,
+          "exit",
+          shutdown.signal,
+        );
+      }
+    });
+    return { exited: worker.exited, uploaded };
+  };
+  const first = startRound(1);
+
+  /**
+   * Warm rounds: after a round's uploads, wait (across the launcher's suspend and resume) for the next
+   * round's input, then run the worker again on the same socket, resuming the previous round's
+   * Claude Code session. The previous round's output files and the worker's context directory go
+   * first, so nothing of it is mistaken for the new round's.
+   */
+  const followRounds = async (): Promise<void> => {
+    let round = 1;
+    let uploaded = first.uploaded;
+    while (round < MAX_ROUND && !shutdown.signal.aborted) {
+      await uploaded;
+      options.onRoundDone?.(round);
+      const sessionId = await transcriptSessionId(transcriptPath);
+      round += 1;
+      log("substrate_bridge_waiting_for_round", { runToken: token, round });
+      const answer = await waitForRound(
+        () =>
+          send(withRound(`${base}/input`, round), {
+            method: "GET",
+            headers,
+            timeoutMs: 5 * 60_000,
+            signal: shutdown.signal,
+          }),
+        { pollMs: options.nextRoundPollMs ?? NEXT_ROUND_POLL_MS, signal: shutdown.signal },
+      );
+      await Promise.all([resultPath, transcriptPath].map((path) => rm(path, { force: true })));
+      await rm(options.contextRoot ?? WORKER_CONTEXT_ROOT, { recursive: true, force: true });
+      await writeRoundInput(inputPath, answer.body, sessionId);
+      log("substrate_bridge_input_ready", { runToken: token, round, resumed: sessionId ? 1 : 0 });
+      options.onRoundStarted?.(round, sessionId);
+      uploaded = startRound(round).uploaded;
     }
-  });
+  };
+  if (warmRounds) {
+    void followRounds().catch((error: unknown) => {
+      if (!shutdown.signal.aborted) {
+        log("substrate_bridge_round_failed", {
+          runToken: token,
+          code: error instanceof BridgeError ? error.code : "unexpected",
+        });
+      }
+    });
+  }
 
   return {
     runToken: token,
     readyPort: ready.port,
-    workerExited: worker.exited,
-    uploaded,
+    workerExited: first.exited,
+    uploaded: first.uploaded,
+    warmRounds,
     close: async () => {
       shutdown.abort();
       for (const socket of sockets) socket.destroy();

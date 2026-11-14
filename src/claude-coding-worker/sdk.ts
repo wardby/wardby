@@ -74,6 +74,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     permissionMode: "dontAsk",
     // Only a session-resume run keeps the session file (under CLAUDE_CONFIG_DIR) for transcript capture.
     persistSession: config.persistSession,
+    // Only on a warm Substrate follow-up round: continue the previous round's conversation.
+    ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
     env: config.environment,
     // Only on a traced run; otherwise the SDK's default handling is unchanged.
     ...(config.stderr ? { stderr: config.stderr } : {}),

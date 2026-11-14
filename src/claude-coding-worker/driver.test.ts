@@ -160,6 +160,40 @@ describe("runClaudeCodingWorker", () => {
     expect(persist).toEqual([true, false]);
   });
 
+  it("resumes the given session (warm Substrate round) and keeps it; absent, nothing is resumed", async () => {
+    const seen: { persist: boolean; resume: string | undefined }[] = [];
+    const createQuery: ClaudeQueryFactory = (options) => {
+      seen.push({ persist: options.persistSession, resume: options.resumeSessionId });
+      return (async function* () {
+        yield {
+          type: "system",
+          subtype: "init",
+          session_id: "s-1",
+          mcp_servers: [{ name: "wardby_tools", status: "connected" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "-",
+            tests: [],
+          }),
+        };
+      })();
+    };
+    const base = { proxyBaseUrl: "http://proxy", capability: "cap", signal: new AbortController().signal, createQuery };
+    const id = "0b5f0d6c-4a43-4a1c-9b7e-2f6a1d2c3e4f";
+    await runClaudeCodingWorker({ ...base, input: { ...input, resumeSessionId: id } });
+    await runClaudeCodingWorker({ ...base, input });
+    expect(seen).toEqual([
+      { persist: true, resume: id },
+      { persist: false, resume: undefined },
+    ]);
+  });
+
   it("uses the run's turn limit, or the worker default when the agent sets none", async () => {
     const seen: number[] = [];
     const createQuery: ClaudeQueryFactory = (options) => {

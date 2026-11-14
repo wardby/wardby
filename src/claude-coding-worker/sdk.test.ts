@@ -31,6 +31,12 @@ describe("Claude SDK configuration", () => {
     expect(buildClaudeSdkOptions({ ...config(), persistSession: false }).persistSession).toBe(false);
   });
 
+  it("resumes a session only when one is given (warm Substrate rounds)", () => {
+    const id = "0b5f0d6c-4a43-4a1c-9b7e-2f6a1d2c3e4f";
+    expect(buildClaudeSdkOptions({ ...config(), resumeSessionId: id }).resume).toBe(id);
+    expect(buildClaudeSdkOptions(config())).not.toHaveProperty("resume");
+  });
+
   it("allows only the private socket relay and no Claude built-in tools", () => {
     const options = buildClaudeSdkOptions(config());
     expect(options).toMatchObject({

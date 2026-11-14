@@ -78,3 +78,13 @@ it("parses worker diagnostic lines exactly as the shared parser does", () => {
   for (const line of lines)
     expect(bridgeParseWorkerDiagnosticLine(line)).toEqual(sharedParseWorkerDiagnosticLine(line));
 });
+
+it("matches the warm-rounds values of the launcher, the names and the worker", async () => {
+  const bridge = await import("./constants.js");
+  const specs = await import("../providers/jobs/substrate/specs.js");
+  const names = await import("../providers/jobs/substrate/names.js");
+  const context = await import("../claude-coding-worker/context.js");
+  expect(bridge.WARM_ROUNDS_ENV).toBe(specs.WARM_ROUNDS_ENV);
+  expect(bridge.MAX_ROUND).toBe(names.MAX_ROUND);
+  expect(bridge.WORKER_CONTEXT_ROOT).toBe(context.CONTEXT_ROOT);
+});
