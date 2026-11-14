@@ -31,6 +31,8 @@ export interface DesignHistoryHost {
 interface Viewing {
   number: number;
   frames: FrameBoard[];
+  /** Shown as the changes since this version (Review vN): the boards whose HTML differs from it. */
+  since: { number: number; changed: Set<string> } | null;
   board: string;
   confirm: boolean;
   error: string;
@@ -172,12 +174,27 @@ export class DesignHistory {
 
   // ---- one version ------------------------------------------------------------------
 
-  /** Shows version `number` read-only. */
-  async view(number: number): Promise<void> {
+  /**
+   * Shows version `number` read-only. With `since` (an earlier version), the boards that differ from it
+   * (changed or added) are marked, and the first of them is shown.
+   */
+  async view(number: number, since?: number): Promise<void> {
     const seq = ++this.seq;
     let frames: FrameBoard[];
+    let changes: Viewing["since"] = null;
     try {
-      frames = await this.host.api.frames("overview", number);
+      const [shown, earlier] = await Promise.all([
+        this.host.api.frames("overview", number),
+        since !== undefined && since < number ? this.host.api.frames("overview", since) : null,
+      ]);
+      frames = shown;
+      if (earlier && since !== undefined) {
+        const before = new Map(earlier.map((f) => [f.id, f.html]));
+        changes = {
+          number: since,
+          changed: new Set(frames.filter((f) => before.get(f.id) !== f.html).map((f) => f.id)),
+        };
+      }
     } catch (err) {
       if (seq !== this.seq) return;
       this.error = errorMessage(err);
@@ -198,7 +215,8 @@ export class DesignHistory {
     this.viewing = {
       number,
       frames,
-      board: frames[0]?.id ?? "",
+      since: changes,
+      board: (frames.find((f) => changes?.changed.has(f.id)) ?? frames[0])?.id ?? "",
       confirm: false,
       error: "",
       busy: false,
@@ -250,7 +268,7 @@ export class DesignHistory {
         {
           type: "button",
           class: f.id === v.board ? "on" : "",
-          data: { board: f.id },
+          data: { board: f.id, ...(v.since?.changed.has(f.id) ? { changed: "" } : {}) },
           aria: { pressed: String(f.id === v.board) },
           onClick: () => {
             v.board = f.id;
@@ -258,6 +276,7 @@ export class DesignHistory {
           },
         },
         f.name,
+        v.since?.changed.has(f.id) ? " · changed" : "",
       ),
     );
     const board = v.frames.find((f) => f.id === v.board) ?? v.frames[0];
@@ -309,7 +328,7 @@ export class DesignHistory {
           "span",
           { class: "vb-text" },
           h("b", {}, `Viewing v${v.number}`),
-          v.number === 1 ? " — the first version" : "",
+          v.since ? ` — changes since v${v.since.number}` : v.number === 1 ? " — the first version" : "",
         ),
         canRestore
           ? h(

@@ -140,9 +140,10 @@ export interface BoardsEditor {
    * Locks or unlocks the board in place, as if mounted that way (a review lock while the page is
    * open). Locking deselects and stops the keyboard shortcuts; unlocking gives each element its own
    * flags back. Neither is an edit: no change is reported and edits made before the lock stay as
-   * they are (unsaved, if they were).
+   * they are (unsaved, if they were). Resolves once text being typed when it locked is back in the
+   * board (dirty() then says whether anything is unsaved).
    */
-  setEditable(on: boolean): void;
+  setEditable(on: boolean): Promise<void>;
   setDevice(id: DeviceId): void;
   /** Called when the content or the boards change (not debounced). */
   onChange(cb: () => void): void;
@@ -529,13 +530,14 @@ export function createBoardsEditor(opts: {
       return editable;
     },
     setEditable(on) {
-      if (on === editable) return;
+      if (on === editable) return Promise.resolve();
       editable = on;
       // Nothing stays selected or being typed in: a selected element's toolbar and text editing end
       // (what was typed is kept in the board, as an edit made before the lock).
+      let typingEnded: Promise<void> = Promise.resolve();
       if (!on) {
         const typing = editor.getEditing()?.getView() as { disableEditing?: () => Promise<void> } | undefined;
-        void typing?.disableEditing?.();
+        typingEnded = Promise.resolve(typing?.disableEditing?.()).catch(() => undefined);
       }
       // Unlocking deselects too: an element selected while locked shows its rebuilt toolbar once selected again.
       editor.select();
@@ -545,7 +547,7 @@ export function createBoardsEditor(opts: {
         editor.Keymaps.removeAll();
       }
       const root = wrapper();
-      if (!root) return;
+      if (!root) return typingEnded;
       const um = editor.UndoManager;
       um.stop();
       try {
@@ -554,6 +556,7 @@ export function createBoardsEditor(opts: {
       } finally {
         um.start();
       }
+      return typingEnded;
     },
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),

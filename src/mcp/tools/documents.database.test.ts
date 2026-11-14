@@ -971,6 +971,48 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(sub.json.reviewers[0]).toMatchObject({ kind: "guest", ref: `guest:${guestId}` });
     });
 
+    it("gives reviewer refs, actor refs and the final approver's id to the owner only", async () => {
+      const callOwner = await connect(owner);
+      const callOther = await connect(other);
+      const id = (await callOwner("create_document", { title: "Refs", markdown: "x" })).json.documentId as string;
+      const { createShareLink, registerGuest } = await import("../../core/documents/share-links.js");
+      const link = await createShareLink(db, {
+        documentId: id,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "comment",
+      });
+      const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: "Gwen" });
+      await callOwner("submit_for_review", {
+        documentId: id,
+        reviewers: [other.id, `guest:${guestId}`],
+        finalApproverId: other.id,
+      });
+      const verdict = await callOther("review_document", {
+        documentId: id,
+        verdict: "request_changes",
+        versionNumber: 1,
+      });
+      const mine = (await callOwner("get_document", { documentId: id })).json;
+      expect(mine.reviewers.map((r: any) => r.ref)).toEqual(expect.arrayContaining([other.id, `guest:${guestId}`]));
+      expect(mine.finalApproverId).toBe(other.id);
+      expect(mine.events.map((e: any) => e.actorRef)).toContain(owner.id);
+      expect(mine.reviewText).toContain(other.id);
+      // Everyone else: names and verdicts, no ids of people.
+      const ids = [owner.id, other.id, guestId];
+      for (const out of [
+        verdict,
+        await callOther("get_document", { documentId: id }),
+        await callOther("wait_for_review", { documentId: id, state: "draft", timeoutSeconds: 1 }),
+      ]) {
+        expect(out.isError).toBe(false);
+        for (const r of out.json.reviewers) expect(r).not.toHaveProperty("ref");
+        for (const e of out.json.events) expect(e).not.toHaveProperty("actorRef");
+        expect(out.json).not.toHaveProperty("finalApproverId");
+        for (const v of ids) expect(out.text).not.toContain(v);
+        expect(out.json.reviewText).toContain("Gwen");
+      }
+    });
+
     it("never returns an agent secret value in a review note", async () => {
       const secret = `fake-review-secret-${s}`;
       const secretRow = await db.secret.create({

@@ -227,7 +227,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         verdict: "approve",
         versionNumber: 1,
       });
-      await expect.poll(() => save()).toBe("Read only: approved");
+      await expect.poll(() => save()).toBe("Read only: approved · unsaved changes");
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
 
@@ -465,6 +465,98 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.locator(".save").click();
       await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(2);
       await expect.poll(() => save(), { timeout: 10_000 }).toBe("Saved");
+      await context.close();
+    }, 90_000);
+
+    it("a design's Review vN shows the boards changed since the version the reviewer read, not just the last step", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "comment" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      const page = await open(d.cookie, d.documentId);
+      const menu = files()["boards/menu.html"].replace("</body>", "<p>v2</p></body>");
+      await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        files: { ...files(), "boards/menu.html": menu },
+        via: "mcp",
+      });
+      const home = files()["boards/home.html"].replace("</body>", "<p>v3</p></body>");
+      await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        files: { ...files(), "boards/menu.html": menu, "boards/home.html": home },
+        via: "mcp",
+      });
+      await expect.poll(() => banner(page)).toContain("v3 was published while you were reviewing v1");
+      await page.getByRole("tab", { name: "Review" }).click();
+      await page.getByRole("button", { name: "Review v3" }).click();
+      await expect.poll(() => page.locator(".vbar").textContent()).toContain("Viewing v3 — changes since v1");
+      const changed = page.locator(".vv-boards [data-changed]");
+      expect(await changed.evaluateAll((els) => els.map((e) => e.getAttribute("data-board")))).toEqual([
+        "home",
+        "menu",
+      ]);
+      await page.context().close();
+    }, 90_000);
+
+    it("a design's edits from before a lock survive a reopen and a newer version: the changed banner shows", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      // While `held` is set, the page's refetches wait, so one refetch sees the reopen and the new version together.
+      let release: () => void = () => undefined;
+      let held: Promise<void> | null = null;
+      await page.route(
+        (url) => url.pathname === `/d/api/${d.documentId}`,
+        async (route) => {
+          if (route.request().method() === "GET" && held) await held;
+          return route.fallback();
+        },
+      );
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.url()));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      // Still typing (nothing is saved while text is being edited) when the approval lands.
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("!");
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const save = () => page.locator(".save").textContent();
+      await expect.poll(() => save()).toBe("Read only: approved · unsaved changes");
+      expect(puts).toEqual([]);
+      const typed = await h1.textContent();
+      expect(typed).toContain("!");
+
+      held = new Promise<void>((r) => (release = r));
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      const home = files()["boards/home.html"].replace("</body>", "<p>v2</p></body>");
+      await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        files: { ...files(), "boards/home.html": home },
+        via: "mcp",
+      });
+      await page.waitForTimeout(500);
+      held = null;
+      release();
+      await expect.poll(() => page.getByText("This design changed.").isVisible()).toBe(true);
+      await expect.poll(() => save()).toBe("Unsaved changes");
+      expect(await h1.textContent()).toBe(typed);
+      expect(await page.locator(".version").textContent()).toBe("design · v1");
+      expect(puts).toEqual([]);
       await context.close();
     }, 90_000);
 

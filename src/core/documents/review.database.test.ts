@@ -311,6 +311,30 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await db.document.delete({ where: { id } });
   });
 
+  it("force approve on a document deleted after the access check says document_not_found", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    // Deletes the document just before force approve reads its final approver (after the access check).
+    const racing = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "document") return Reflect.get(target, prop, receiver);
+        return new Proxy(target.document, {
+          get(model, name, r) {
+            const real = Reflect.get(model, name, r) as (...a: unknown[]) => Promise<unknown>;
+            if (name !== "findUnique" && name !== "findUniqueOrThrow") return real;
+            return async (args: { select?: Record<string, boolean> }) => {
+              if (args?.select?.finalApproverId && args.select.agentId) await target.document.delete({ where: { id } });
+              return real.call(model, args);
+            };
+          },
+        });
+      },
+    });
+    await expect(forceApprove(racing, cipher, { documentId: id, viewer: as(owner), note: "Go" })).rejects.toThrow(
+      /^document_not_found$/,
+    );
+  });
+
   it("two concurrent approvals move the document to approved exactly once", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });

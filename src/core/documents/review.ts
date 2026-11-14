@@ -371,10 +371,12 @@ export async function forceApprove(
   const principalId = viewer.principalId;
   const access = await documentAccess(db, input.documentId, input.viewer);
   if (access === "none") throw new Error("document_not_found");
-  const docRow = await db.document.findUniqueOrThrow({
+  const docRow = await db.document.findUnique({
     where: { id: input.documentId },
     select: { agentId: true, finalApproverId: true },
   });
+  // Deleted since the access check.
+  if (!docRow) throw new Error("document_not_found");
   const isApprover = docRow.finalApproverId === principalId && atLeast("document", access, "comment");
   if (access !== "owner" && !isApprover) throw new Error("document_review_forbidden");
   if (input.note.trim() === "") invalid();

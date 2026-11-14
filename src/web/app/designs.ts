@@ -583,10 +583,16 @@ function mount(
       reload ? h("button", { type: "button", onClick: () => location.reload() }, "Reload") : null,
     );
   };
-  const dirty = () => canEdit && !lockedNow && boards.dirty();
+  /**
+   * The board holds edits not saved yet, also while locked: they wait for a reopen, and a newer version
+   * then shows the changed banner instead of replacing them.
+   */
+  const dirty = () => canEdit && boards.dirty();
+  /** Unsaved edits that may be saved now: none while the design is locked. */
+  const canSaveNow = () => dirty() && !lockedNow;
   /** The save state when nothing is being saved: what this viewer can do with the design now. */
   const restingSaveText = () => {
-    if (lockedNow) return `Read only: ${lockState}`;
+    if (lockedNow) return `Read only: ${lockState}${dirty() ? " · unsaved changes" : ""}`;
     if (canEdit) return dirty() ? "Unsaved changes" : "Saved";
     return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
   };
@@ -715,7 +721,7 @@ function mount(
       await api.fidelity(forVersion, results).catch(() => undefined);
       await refreshPayload();
     }
-    if (dirty()) schedule();
+    if (canSaveNow()) schedule();
   };
 
   /**
@@ -753,7 +759,7 @@ function mount(
   // ---- Overview, Play and Export ----
   /** Saves pending edits first, so the frames and exports show what the page shows. */
   const flushSave = async () => {
-    if (!dirty() || conflict || measuring) return;
+    if (!canSaveNow() || conflict || measuring) return;
     clearTimeout(timer);
     await save();
   };
@@ -862,10 +868,10 @@ function mount(
       banner: reviewBanner,
       panel: reviewPanelEl,
       showReviewTab: () => showTab("review"),
-      showChanges: (_from, to) => {
+      showChanges: (from, to) => {
         showTab("history");
         void designHistory.open();
-        void designHistory.view(to);
+        void designHistory.view(to, from);
       },
       loadLatest: () => refresh(),
       onLock: (on, state) => {
@@ -884,7 +890,10 @@ function mount(
         // A page mounted editable turns read-only in place, the way a page mounted locked is: the
         // board takes no edits, and Style, Settings, + Board, Layers and undo are gone.
         if (canEdit) {
-          boards.setEditable(!on);
+          // Text being typed when it locked joins the board's unsaved edits: the save state then says so.
+          void boards.setEditable(!on).then(() => {
+            if (lockedNow === on && !conflict && !saving) showSave(restingSaveText());
+          });
           if (on) (document.activeElement as HTMLElement | null)?.blur();
           tabs.style.hidden = on;
           tabs.settings.hidden = on;

@@ -386,7 +386,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const canEditNow = () => canEditText() && !edits.isViewing;
   /** The save state when nothing is being saved: what this viewer can do with the document now. */
   const restingSaveText = () => {
-    if (locked) return lockState === "archived" ? "Read only: archived" : "Read only: approved";
+    if (locked) {
+      // Edits from before the lock wait, unsaved, for a reopen.
+      const word = lockState === "archived" ? "Read only: archived" : "Read only: approved";
+      return dirty ? `${word} · unsaved changes` : word;
+    }
     if (editable && !lossyLocked) return dirty ? "Unsaved changes" : "Saved";
     return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
   };
