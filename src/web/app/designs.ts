@@ -4,6 +4,8 @@
  * writer's edits with a debounced PUT of the changed files only, based on the version shown. Live
  * updates (live.ts) refetch threads and newer versions as documents.ts does. A writer's first view of a
  * version runs the import fidelity check (fidelity.ts) and reports it once.
+ * The review banner and Review tab are the shared panel (review-ui.ts); an approved or archived
+ * design opens read-only.
  *
  * Every server string (title, board names, warnings, problems) goes into the page as text (dom.ts h()),
  * never as markup. Boards render only inside GrapesJS's canvas, under the page CSP.
@@ -33,6 +35,8 @@ import { exportsMenu } from "./exports-menu.js";
 import { openOverview } from "./overview.js";
 import { openPlay } from "./play.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
+import { ReviewPanel } from "./review-ui.js";
+import { isLockedState } from "./review-model.js";
 
 const SAVE_DELAY_MS = 1500;
 /** After a writer's own save, the new version's fidelity check waits for this long with no edits. */
@@ -130,6 +134,16 @@ function mount(
   let baseNumber = payload.version.number;
   let warnings: VersionWarning[] = payload.version.warnings ?? [];
   const canWrite = viewer.kind === "member" && atLeast(viewer.access, "write");
+  // An approved or archived design opens read-only. The board editor's editability is fixed when it
+  // is mounted (createBoardsEditor), so a lock that changes while the page is open stops the saves
+  // and asks for a reload (lockedNow, the review panel's onLock below).
+  const startLocked = isLockedState(payload.review.state);
+  const canEdit = canWrite && !startLocked;
+  /** The server says approved or archived: nothing is saved from this page. */
+  let lockedNow = startLocked;
+  /** The lock the page shows (its tabs and the lock banner), which can trail lockedNow by one refetch. */
+  let shownLock = startLocked;
+  let lockState: string = payload.review.state;
 
   // ---- layout ----
   const title = h("b", { class: "title" }, payload.document.title);
@@ -145,6 +159,8 @@ function mount(
     "This design changed. Reload to see the latest version. ",
     h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
   );
+  const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
+  const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const saveBanner = h("div", { class: "banner bad", hidden: true, role: "alert" });
 
   const deviceButtons = DEVICE_IDS.map((id) =>
@@ -162,7 +178,7 @@ function mount(
   const commentBtn = h("button", { type: "button", class: "primary", data: { action: "comment" } }, "💬 Comment");
 
   const boardsList = h("ul", { class: "boards", aria: { label: "Boards" } });
-  const addBoardBtn = h("button", { type: "button", class: "add-board", hidden: !canWrite }, "+ Board");
+  const addBoardBtn = h("button", { type: "button", class: "add-board", hidden: !canEdit }, "+ Board");
   const layersPanel = h("div", { class: "gjs-host layers" });
   const stylesPanel = h("div", { class: "gjs-host styles" });
   const selectorsPanel = h("div", { class: "gjs-host selectors" });
@@ -176,20 +192,23 @@ function mount(
   const commentsPanel = h("div", { class: "panel" });
   const count = h("span", { class: "ccount" });
   const historyPanel = h("div", { class: "panel" });
-  type Tab = "style" | "settings" | "comments" | "history";
+  const reviewPanelEl = h("div", { class: "panel" });
+  type Tab = "style" | "settings" | "comments" | "review" | "history";
   const tabs: Record<Tab, HTMLButtonElement> = {
-    style: h("button", { type: "button", role: "tab", data: { tab: "style" }, hidden: !canWrite }, "Style"),
-    settings: h("button", { type: "button", role: "tab", data: { tab: "settings" }, hidden: !canWrite }, "Settings"),
+    style: h("button", { type: "button", role: "tab", data: { tab: "style" }, hidden: !canEdit }, "Style"),
+    settings: h("button", { type: "button", role: "tab", data: { tab: "settings" }, hidden: !canEdit }, "Settings"),
     comments: h("button", { type: "button", role: "tab", data: { tab: "comments" } }, "Comments ", count),
+    review: h("button", { type: "button", role: "tab", data: { tab: "review" } }, "Review"),
     history: h("button", { type: "button", role: "tab", data: { tab: "history" } }, "History"),
   };
   const panes: Record<Tab, HTMLElement> = {
     style: h("div", { class: "tabpane", role: "tabpanel" }, selectorsPanel, stylesPanel),
     settings: h("div", { class: "tabpane", role: "tabpanel" }, traitsPanel),
     comments: h("div", { class: "tabpane", role: "tabpanel" }, checks, commentsPanel),
+    review: h("div", { class: "tabpane", role: "tabpanel" }, reviewPanelEl),
     history: h("div", { class: "tabpane", role: "tabpanel" }, historyPanel),
   };
-  const TABS: Tab[] = ["style", "settings", "comments", "history"];
+  const TABS: Tab[] = ["style", "settings", "comments", "review", "history"];
   const showTab = (which: Tab) => {
     for (const k of TABS) {
       const on = k === which;
@@ -204,7 +223,7 @@ function mount(
       if (k === "history") void designHistory.open();
     });
   }
-  showTab(canWrite ? "style" : "comments");
+  showTab(canEdit ? "style" : "comments");
 
   const leftSide = h(
     "aside",
@@ -212,8 +231,8 @@ function mount(
     h("h2", {}, "Boards"),
     boardsList,
     addBoardBtn,
-    h("h2", { hidden: !canWrite }, "Layers"),
-    h("div", { hidden: !canWrite }, layersPanel),
+    h("h2", { hidden: !canEdit }, "Layers"),
+    h("div", { hidden: !canEdit }, layersPanel),
   );
   clear(root);
   append(
@@ -235,15 +254,17 @@ function mount(
           version,
         ),
         h("div", { class: "group", role: "group", aria: { label: "Device" } }, ...deviceButtons),
-        h("div", { class: "group", hidden: !canWrite }, undoBtn, redoBtn),
+        h("div", { class: "group", hidden: !canEdit }, undoBtn, redoBtn),
         h("div", { class: "group" }, overviewBtn, playBtn, exportBtn, commentBtn),
         saveState,
         liveNote,
         who,
         account,
       ),
+      reviewBanner,
       banner,
       changedBanner,
+      lockBanner,
       saveBanner,
       h(
         "div",
@@ -252,11 +273,20 @@ function mount(
         canvasWrap,
         h(
           "aside",
-          { class: "dside right", aria: { label: "Style, settings and comments" } },
-          h("div", { class: "tabs", role: "tablist" }, tabs.style, tabs.settings, tabs.comments, tabs.history),
+          { class: "dside right", aria: { label: "Style, settings, comments and review" } },
+          h(
+            "div",
+            { class: "tabs", role: "tablist" },
+            tabs.style,
+            tabs.settings,
+            tabs.comments,
+            tabs.review,
+            tabs.history,
+          ),
           panes.style,
           panes.settings,
           panes.comments,
+          panes.review,
           panes.history,
         ),
       ),
@@ -270,7 +300,7 @@ function mount(
       container: canvasEl,
       panels: { layers: layersPanel, styles: stylesPanel, selectors: selectorsPanel, traits: traitsPanel },
       files,
-      editable: canWrite,
+      editable: canEdit,
     });
   } catch (err) {
     if (err instanceof ManifestUnreadableError) return fatal(root, MANIFEST_UNREADABLE);
@@ -338,7 +368,7 @@ function mount(
         if (!measuring) boards.selectBoard(b.id);
       });
       const li = h("li", { class: on ? "on" : "", data: { board: b.id } }, pick);
-      if (canWrite) {
+      if (canEdit && !shownLock) {
         const menu = h("div", { class: "bmenu", role: "menu", hidden: measuring || openMenu !== b.id });
         const item = (label: string, run: () => void, disabled = false) =>
           h(
@@ -487,7 +517,7 @@ function mount(
     api,
     panel: historyPanel,
     stage: canvasWrap,
-    canRestore: () => canWrite,
+    canRestore: () => canWrite && !lockedNow,
     latest: () => ({ number: baseNumber, busy: dirty() || saving || measuring || conflict }),
     onViewing: (viewing) => {
       // The editor stays as it is under the older version; it cannot be reached, and comments wait.
@@ -505,7 +535,8 @@ function mount(
     onRestored: () => void refresh(),
   });
   let historyNumber = baseNumber;
-  const applyPayload = (p: DocumentPayload) => {
+  /** Threads, the boards list and History; the mount shows the first payload's review through the panel itself. */
+  const applyThreads = (p: DocumentPayload) => {
     comments.apply(p);
     commentBtn.hidden = !comments.canComment;
     renderBoards();
@@ -514,9 +545,15 @@ function mount(
       void designHistory.refresh();
     }
   };
+  /** A refetched payload (after the mount): its review too. `review` is created below, once refresh exists. */
+  const applyPayload = (p: DocumentPayload) => {
+    applyThreads(p);
+    review.apply(p.review);
+    lockedNow = review.locked;
+  };
 
   renderViewer();
-  applyPayload(payload);
+  applyThreads(payload);
   void comments.loadMentions();
   // The agent-run poll is a fallback for when live updates are not connected.
   let liveUp = false;
@@ -539,7 +576,13 @@ function mount(
       reload ? h("button", { type: "button", onClick: () => location.reload() }, "Reload") : null,
     );
   };
-  const dirty = () => canWrite && boards.dirty();
+  const dirty = () => canEdit && !lockedNow && boards.dirty();
+  /** The save state when nothing is being saved: what this viewer can do with the design now. */
+  const restingSaveText = () => {
+    if (lockedNow) return `Read only: ${lockState}`;
+    if (canEdit) return dirty() ? "Unsaved changes" : "Saved";
+    return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
+  };
 
   /** Refetches threads and this version's warnings without touching the boards. */
   const refreshPayload = async () => {
@@ -561,7 +604,7 @@ function mount(
   };
 
   const save = async (): Promise<void> => {
-    if (saving || conflict || measuring) return;
+    if (saving || conflict || measuring || lockedNow) return;
     // Text still being typed in the canvas is synced when its editing ends: save after that.
     if (boards.editor.getEditing()) return schedule();
     const changed = boards.changedFiles();
@@ -579,6 +622,7 @@ function mount(
       noteSaved(changed);
       baseNumber = r.version.number;
       version.textContent = `design · v${baseNumber}`;
+      review.markRead(baseNumber);
       saveBanner.hidden = true;
       showSave(dirty() ? "Unsaved changes" : "Saved");
       // The server re-anchored the threads against the new version; the warnings are the new version's.
@@ -588,6 +632,12 @@ function mount(
       if (err instanceof ApiError && err.code === "document_version_conflict") {
         conflict = true;
         showSave(errorMessage(err), true);
+      } else if (err instanceof ApiError && err.code === "document_locked") {
+        // Approved or archived since the edit began: retrying cannot help. Saves stop, and the
+        // refetch below shows the lock (a live event may not have arrived yet).
+        lockedNow = true;
+        showSave(errorMessage(err));
+        pendingRefresh = true;
       } else if (err instanceof ApiError && err.code === "board_format_invalid") {
         // The changes stay in the editor; the problem is the server's own fixed text.
         clear(saveBanner);
@@ -608,7 +658,7 @@ function mount(
 
   boards.onChange(() => {
     renderBoards();
-    if (!canWrite || conflict || measuring) return;
+    if (!canEdit || lockedNow || conflict || measuring) return;
     clearTimeout(fidelityTimer);
     showSave("Unsaved changes");
     schedule();
@@ -627,7 +677,7 @@ function mount(
    * measured first and in place, so a check after a save on that board switches nothing.
    */
   const runFidelity = async (forVersion: number, carried = new Map<string, FidelityEntry>()): Promise<void> => {
-    if (!canWrite || measuring || warnings.some((w) => w.kind === "fidelity")) return;
+    if (!canEdit || measuring || warnings.some((w) => w.kind === "fidelity")) return;
     measuring = true;
     renderBoards();
     const start = boards.currentBoard();
@@ -783,6 +833,54 @@ function mount(
     applyPayload(next);
   });
 
+  // ---- the review banner and Review tab ----
+  const review = new ReviewPanel(
+    {
+      api,
+      banner: reviewBanner,
+      panel: reviewPanelEl,
+      showReviewTab: () => showTab("review"),
+      showChanges: (_from, to) => {
+        showTab("history");
+        void designHistory.open();
+        void designHistory.view(to);
+      },
+      loadLatest: () => refresh(),
+      onLock: (on, state) => {
+        lockedNow = on;
+        lockState = state;
+        if (on === shownLock) return;
+        shownLock = on;
+        if (!conflict) showSave(restingSaveText());
+        if (on === startLocked) {
+          // Back to how the page was mounted (approved, then reopened, then approved again).
+          lockBanner.hidden = true;
+        } else {
+          clear(lockBanner);
+          lockBanner.append(
+            on
+              ? `This design was ${state}, so it can't be edited now. Reload to see it read-only. `
+              : "This design was reopened for review. Reload to edit it. ",
+            h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
+          );
+          lockBanner.hidden = false;
+        }
+        // Only a page mounted editable has Style, Settings and + Board to hide or show again.
+        if (canEdit) {
+          tabs.style.hidden = on;
+          tabs.settings.hidden = on;
+          addBoardBtn.hidden = on;
+          if (on && (!panes.style.hidden || !panes.settings.hidden)) showTab("comments");
+          renderBoards();
+          if (!on && dirty()) schedule();
+        }
+      },
+      onState: (s) => root.querySelector(".app")?.classList.toggle("archived", s === "archived"),
+    },
+    payload.review,
+    payload.version.number,
+  );
+
   let serverHears = true;
   type LiveState = "connecting" | "live" | "offline" | "stopped";
   let liveState: LiveState = "connecting";
@@ -831,13 +929,11 @@ function mount(
   };
   startLive();
 
-  if (canWrite) {
-    showSave("Saved");
+  showSave(restingSaveText());
+  if (canEdit) {
     addEventListener("beforeunload", (e) => {
       if (dirty() || saving) e.preventDefault();
     });
-  } else {
-    showSave(atLeast(viewer.access, "comment") ? "Comment only" : "Read only");
   }
 
   void boards.ready.then(async () => {

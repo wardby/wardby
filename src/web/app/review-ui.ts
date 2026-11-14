@@ -375,9 +375,17 @@ export class ReviewPanel {
     if (code !== "document_version_conflict") return;
     // Lost the race: inline (not a toast), the note stays typed, the page loads the latest version,
     // the changes since the version they read open, and the buttons name the new version.
+    const conflictError = this.error;
     this.error = "";
     const before = this.read;
     await this.host.loadLatest();
+    if (this.review.currentVersion === before) {
+      // The refetch failed or was put off (the page is saving): the newer version is not known yet,
+      // so there is nothing to show. The usual message stands; the note stays typed.
+      this.error = conflictError;
+      this.render();
+      return;
+    }
     this.read = this.review.currentVersion;
     this.raced = { verdict };
     this.host.showChanges(before, this.read);

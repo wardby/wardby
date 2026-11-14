@@ -2,12 +2,22 @@
  * Document review on the Markdown and design pages in headless Chromium, against the real server and
  * bundle (run `npm run build` first). Skipped without DATABASE_URL or a Playwright Chromium.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishVersion } from "../core/documents/service.js";
-import { reviewDocument, submitForReview } from "../core/documents/review.js";
+import { reopenDocument, reviewDocument, submitForReview } from "../core/documents/review.js";
 import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
+
+const CANVAS = "iframe.gjs-frame";
+const coffee = (p: string) =>
+  readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+const files = (): Record<string, string> => ({
+  "manifest.json": coffee("manifest.json"),
+  ...Object.fromEntries(
+    ["home", "menu", "about", "visit"].map((id) => [`boards/${id}.html`, coffee(`boards/${id}.html`)]),
+  ),
+});
 
 describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath()))(
   "document review (browser)",
@@ -149,6 +159,136 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => banner(a)).toContain("Approved · v3");
       const row = await server.db.documentReviewer.findFirstOrThrow({ where: { documentId: d.documentId } });
       expect([row.verdict, row.versionNumber, row.note]).toEqual(["approved", 3, "Keep this note"]);
+    }, 90_000);
+
+    it("an approved document offers no Restore; reopening gives each viewer back their own save state", async () => {
+      const d = await server.design({ title: "Lock", kind: "document", markdown: "# L\n\nfirst\n", access: "comment" });
+      await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        markdown: "# L\n\nsecond\n",
+        via: "mcp",
+      });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      const save = (p: Page) => p.locator(".save").textContent();
+      const o = await open(d.ownerCookie, d.documentId);
+      const a = await open(d.cookie, d.documentId);
+      expect(await save(o)).toBe("Saved");
+      expect(await save(a)).toBe("Comment only");
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.first },
+        verdict: "approve",
+        versionNumber: 2,
+      });
+      await expect.poll(() => save(o)).toBe("Read only: approved");
+      await expect.poll(() => save(a)).toBe("Read only: approved");
+      // Opened while approved: the same text from the start.
+      const later = await open(d.secondCookie, d.documentId);
+      expect(await save(later)).toBe("Read only: approved");
+      await later.context().close();
+      const viewV1 = async () => {
+        await o.getByRole("tab", { name: "Edits" }).click();
+        await expect.poll(() => o.locator(".ed-row").count()).toBe(2);
+        await o.locator(".ed-row").last().click();
+        await expect.poll(() => o.locator(".vbar").textContent()).toContain("Viewing v1");
+      };
+      await viewV1();
+      expect(await o.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
+      await o.getByRole("button", { name: "Back to latest" }).click();
+
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await expect.poll(() => save(o)).toBe("Saved");
+      await expect.poll(() => save(a)).toBe("Comment only");
+      await viewV1();
+      expect(await o.getByRole("button", { name: "Restore this version" }).count()).toBe(1);
+    }, 90_000);
+
+    it("an approved design opens read-only: no Style tab, no save, Send hidden, comments still work", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.first },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.url()));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      await expect.poll(() => h1.textContent(), { timeout: 20_000 }).toMatch(/\S/);
+      expect(await banner(page)).toContain("Approved · v1");
+      expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
+      await h1.dblclick();
+      await page.keyboard.type("x");
+      await page.waitForTimeout(2500);
+      expect(puts).toEqual([]);
+      expect(await page.locator("[data-tab=review]").isVisible()).toBe(true);
+      await context.close();
+    }, 90_000);
+
+    it("a design approved while open stops saving and says to reload", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      await expect
+        .poll(() => page.locator(".lock-banner").textContent())
+        .toContain("This design was approved, so it can't be edited now. Reload to see it read-only.");
+      expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
+      await context.close();
+    }, 90_000);
+
+    it("an approved design's History offers no Restore", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      const home = files()["boards/home.html"].replace("</body>", "<p>v2</p></body>");
+      await publishVersion(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        files: { ...files(), "boards/home.html": home },
+        via: "mcp",
+      });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 2,
+      });
+      const page = await open(d.cookie, d.documentId);
+      expect(await page.locator(".save").textContent()).toBe("Read only: approved");
+      await page.locator("[data-tab=history]").click();
+      await page.locator('.tp-row[data-version="1"]').click();
+      await expect.poll(() => page.locator(".vbar").textContent()).toContain("Viewing v1");
+      expect(await page.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
+      await page.context().close();
     }, 90_000);
   },
 );

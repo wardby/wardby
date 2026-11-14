@@ -274,7 +274,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     stage,
     page,
     live: [editorEl, margin],
-    canRestore: () => viewer.kind === "member" && atLeast(viewer.access, "write"),
+    canRestore: () => viewer.kind === "member" && atLeast(viewer.access, "write") && !locked,
     latest: () => ({ number: baseNumber, busy: saving || dirty || conflict }),
     onViewing: (viewing) => {
       comments.suspend(viewing);
@@ -376,15 +376,23 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
 
   // ---- the review lock: an approved or archived document is read only ----
   let locked = false;
+  let lockState: ReviewState = "draft";
   /** The live editor takes edits; the toolbar also hides while a version is being viewed. */
   const canEditText = () => editable && !lossyLocked && !locked && !conflict;
   const canEditNow = () => canEditText() && !edits.isViewing;
+  /** The save state when nothing is being saved: what this viewer can do with the document now. */
+  const restingSaveText = () => {
+    if (locked) return lockState === "archived" ? "Read only: archived" : "Read only: approved";
+    if (editable && !lossyLocked) return dirty ? "Unsaved changes" : "Saved";
+    return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
+  };
   const applyLock = (on: boolean, state: ReviewState) => {
     locked = on;
+    lockState = state;
     editor.setEditable(canEditText(), false);
     toolbar.hidden = !canEditNow();
-    if (on) showSave(state === "archived" ? "Read only: archived" : "Read only: approved");
-    else if (editable && !conflict) showSave("Saved");
+    // A conflict keeps its own message (with Reload).
+    if (!conflict) showSave(restingSaveText());
   };
 
   // ---- live updates ----
@@ -509,8 +517,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   };
   startLive();
 
+  showSave(restingSaveText());
   if (editable) {
-    if (!locked) showSave("Saved");
     editor.on("update", ({ transaction }) => {
       if (!transaction.docChanged || conflict || locked) return;
       dirty = true;
@@ -520,8 +528,6 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     addEventListener("beforeunload", (e) => {
       if (dirty || saving) e.preventDefault();
     });
-  } else {
-    showSave(atLeast(viewer.access, "comment") ? "Comment only" : "Read only");
   }
 }
 
