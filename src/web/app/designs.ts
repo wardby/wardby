@@ -847,12 +847,14 @@ function mount(
     // Back to how the page was mounted (approved, then reopened, then approved again): no banner.
     lockBanner.hidden = shownLock === startLocked;
     if (lockBanner.hidden) return;
-    lockBanner.append(
-      shownLock
-        ? `This design was ${lockState}, so it can't be edited now. Reload to see it read-only. `
-        : "This design was reopened for review. Reload to edit it. ",
-      h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
-    );
+    // Locked in place needs no reload; a page opened read-only must reload to edit after a reopen.
+    if (shownLock)
+      lockBanner.append(`This design was ${lockState}, so it's read-only now. Reopen it for review to edit it.`);
+    else
+      lockBanner.append(
+        "This design was reopened for review. Reload to edit it. ",
+        h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
+      );
   };
   const review = new ReviewPanel(
     {

@@ -214,7 +214,10 @@ first it is refused with `document_version_conflict`, and the page offers
 - **The lock**: an approved or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
   threads cannot be sent to an agent: all are refused with `document_locked`.
-  Comments stay open. A page open when the lock lands turns read-only in place.
+  Comments stay open. A page open when the lock lands turns read-only in place,
+  with no reload. After a reopen, edits made before the lock are kept and saved
+  with the next edit, never on a timer; a Markdown page is editable again in
+  place, and a design page that was opened read-only must be reloaded to edit.
   An agent edit that finishes after the lock is not applied; each thread gets a
   reply naming the branch with the edit.
 

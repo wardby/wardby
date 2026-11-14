@@ -87,6 +87,10 @@ function unlockTree(c: Component): void {
     c.set(flags, QUIET);
     unlocked.delete(c);
   }
+  // GrapesJS builds an element's toolbar once; one selected while locked kept a trimmed copy (no move,
+  // copy or delete), so it is built again. A toolbar change is not board content (nothing to save).
+  c.unset("toolbar", { silent: true });
+  c.initToolbar();
   c.components().forEach(unlockTree);
 }
 
@@ -532,8 +536,9 @@ export function createBoardsEditor(opts: {
       if (!on) {
         const typing = editor.getEditing()?.getView() as { disableEditing?: () => Promise<void> } | undefined;
         void typing?.disableEditing?.();
-        editor.select();
       }
+      // Unlocking deselects too: an element selected while locked shows its rebuilt toolbar once selected again.
+      editor.select();
       if (on) {
         for (const [id, k] of Object.entries(keymapDefaults)) editor.Keymaps.add(id, k.keys, k.handler, k.opts);
       } else {

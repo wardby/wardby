@@ -252,6 +252,13 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.locator(".cpop textarea").press(SUBMIT);
       expect((await created).status()).toBe(201);
       await expect.poll(() => page.locator(".pin").count(), { timeout: 10_000 }).toBeGreaterThan(0);
+      // Opened read-only, then reopened: a reload is needed to edit it.
+      await page.keyboard.press("Escape");
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await expect
+        .poll(() => page.locator(".lock-banner").textContent(), { timeout: 10_000 })
+        .toBe("This design was reopened for review. Reload to edit it. Reload");
+      expect(await page.locator(".lock-banner button", { hasText: "Reload" }).isVisible()).toBe(true);
       await context.close();
     }, 90_000);
 
@@ -293,6 +300,10 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await h1.dblclick();
       await page.keyboard.type("x");
       await h1.click();
+      // Selected while locked: its toolbar keeps no move, copy or delete.
+      const moveTool = page.locator(".gjs-toolbar .gjs-toolbar-item.gjs-no-touch-actions");
+      await expect.poll(() => page.locator(".gjs-toolbar [title=Comment]").count()).toBe(1);
+      expect(await moveTool.count()).toBe(0);
       await page.keyboard.press("Delete");
       await page.keyboard.press("Backspace");
       expect(await h1.textContent()).toBe(before);
@@ -317,6 +328,11 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
       expect(await h1.textContent()).toBe(before);
+      // The element selected while locked gets its full toolbar back: move, copy and delete, and 💬.
+      await h1.click();
+      await expect.poll(() => moveTool.count()).toBe(1);
+      expect(await page.locator(".gjs-toolbar .gjs-toolbar-item").count()).toBe(5);
+      expect(await page.locator(".gjs-toolbar [title=Comment]").count()).toBe(1);
       // The next edit saves.
       await h1.dblclick();
       await page.keyboard.press("End");
@@ -370,7 +386,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await context.close();
     }, 90_000);
 
-    it("a design approved while open stops saving and says to reload", async () => {
+    it("a design approved while open stops saving and says it is read-only now, with no Reload", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
       await submitForReview(server.db, {
         documentId: d.documentId,
@@ -390,7 +406,8 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       });
       await expect
         .poll(() => page.locator(".lock-banner").textContent())
-        .toContain("This design was approved, so it can't be edited now. Reload to see it read-only.");
+        .toBe("This design was approved, so it's read-only now. Reopen it for review to edit it.");
+      expect(await page.locator(".lock-banner button").count()).toBe(0);
       expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
       await context.close();
     }, 90_000);
