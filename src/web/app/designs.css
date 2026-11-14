@@ -38,6 +38,7 @@
   border-right: 1px solid var(--border);
 }
 .dside.right {
+  overflow-x: hidden;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -51,13 +52,17 @@
 }
 .dside .tabs {
   display: flex;
-  gap: 0.25rem;
+  flex-wrap: wrap;
+  gap: 0.2rem;
   padding: 0.6rem 0.6rem 0;
   border-bottom: 1px solid var(--border);
 }
 .dside .tabs button {
   border-bottom: 0;
   border-radius: 6px 6px 0 0;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.82rem;
+  white-space: nowrap;
 }
 .dside .tabs button.on {
   background: var(--bg);

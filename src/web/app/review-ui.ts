@@ -21,6 +21,9 @@ import {
   verdictControls,
 } from "./review-model.js";
 
+/** The review panel's button styles (styles.css, under .rv-panel / .review-banner). */
+type ButtonVariant = "primary" | "tonal" | "neutral" | "danger";
+
 export interface ReviewHost {
   api: Api;
   banner: HTMLElement;
@@ -194,40 +197,45 @@ export class ReviewPanel {
     });
     note.value = this.note;
     box.append(note);
-    const btn = (label: string, run: () => void, primary: boolean) =>
-      h("button", { type: "button", class: primary ? "primary" : "", disabled: this.busy, onClick: run }, label);
+    const btn = (label: string, run: () => void, variant: ButtonVariant) =>
+      h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
     if (c.review) {
-      box.append(btn(c.review, () => void this.reviewNewer(), true));
+      box.append(btn(c.review, () => void this.reviewNewer(), "primary"));
       return box;
     }
-    if (c.approve) box.append(btn(c.approve, () => void this.verdict("approve"), true));
-    if (c.changes) box.append(btn(c.changes, () => void this.verdict("request_changes"), false));
+    if (c.approve) box.append(btn(c.approve, () => void this.verdict("approve"), "primary"));
+    if (c.changes) box.append(btn(c.changes, () => void this.verdict("request_changes"), "tonal"));
     return box;
   }
 
   private actions(): HTMLElement {
     const { can, state } = this.review;
     const bar = h("div", { class: "rv-actions" });
-    const btn = (label: string, run: () => void, primary = false) =>
-      h("button", { type: "button", class: primary ? "primary" : "", disabled: this.busy, onClick: run }, label);
+    const btn = (label: string, run: () => void, variant: ButtonVariant = "neutral") =>
+      h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
     if (can.submit)
       bar.append(
         btn(
           state === "draft" ? "Submit for review" : "Edit reviewers",
           () => void this.openSubmit(),
-          state === "draft",
+          state === "draft" ? "primary" : "neutral",
         ),
       );
     if (can.force)
       bar.append(
-        btn("Force approve", () => {
-          this.form = "force";
-          this.render();
-        }),
+        btn(
+          "Force approve",
+          () => {
+            this.form = "force";
+            this.render();
+          },
+          "danger",
+        ),
       );
-    if (can.reopen) bar.append(btn("Reopen for review", () => void this.act({ action: "reopen" }), true));
+    if (can.reopen) bar.append(btn("Reopen for review", () => void this.act({ action: "reopen" }), "primary"));
     if (can.archive) bar.append(btn("Archive", () => void this.act({ action: "archive", archived: true })));
-    if (can.unarchive) bar.append(btn("Unarchive", () => void this.act({ action: "archive", archived: false }), true));
+    if (can.unarchive)
+      bar.append(btn("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary"));
     return bar;
   }
 
@@ -290,6 +298,7 @@ export class ReviewPanel {
           "button",
           {
             type: "button",
+            class: "neutral",
             onClick: () => {
               this.form = "none";
               this.render();
@@ -338,6 +347,7 @@ export class ReviewPanel {
           "button",
           {
             type: "button",
+            class: "neutral",
             onClick: () => {
               this.form = "none";
               this.render();
