@@ -172,6 +172,17 @@ const agentOpen = atom(
   null as { id: string; tab: "detail" | "flow" } | null,
   { shape: "agent-open-1" },
 );
+// The Detail tab's get_agent reply for the agent last opened there, read once and kept for the session
+// (r reads it again). As the server sent it: names only, never a secret's value.
+const agentInfo = atom(
+  { plugin: "wardby-runs", key: "agentInfo" } as const,
+  null as { id: string; at: number; value: Record<string, unknown> | null; error: string | null } | null,
+  { shape: "agent-info-1" },
+);
+// The agent whose system prompt is shown in full on Detail (Show all), by agent id.
+const promptOpen = atom({ plugin: "wardby-runs", key: "promptOpen" } as const, null as string | null, {
+  shape: "prompt-open-1",
+});
 // The agents and their links change rarely: the Agents tab reads them again after this long, or on r.
 const LINKS_REFRESH_MS = 5 * 60_000;
 // An older server without list_agent_links costs two calls an agent to draw flows: only up to this many.
@@ -400,6 +411,85 @@ const agentKind = (agent: LinkAgent): string =>
     : "native";
 /** A model's short name: Claude models without the "claude-" prefix. */
 const shortModel = (model: string): string => model.replace(/^claude-/, "");
+
+/** What Detail shows from get_agent's reply: the prompt, the overrun, and the names of what is attached. */
+type AgentConfig = {
+  systemPrompt: string;
+  model: string | null;
+  budgetUsd: number | null;
+  overrunPercent: number;
+  mcpServers: string[];
+  tools: string[];
+  secrets: string[];
+  // Claude Code agents only.
+  claudeCode: { repoSkills: boolean; sessionResume: boolean } | null;
+};
+/**
+ * get_agent's reply as Detail draws it. Secret names come from each attached tool's allowedSecrets, as
+ * get_agent returns them: names only, never a value.
+ */
+function agentConfig(value: Record<string, unknown>): AgentConfig {
+  const list = (v: unknown): Record<string, unknown>[] =>
+    Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === "object") : [];
+  const tools = list(value.tools);
+  const profile = value.codingProfile && typeof value.codingProfile === "object" ? value.codingProfile : null;
+  const p = (profile ?? {}) as Record<string, unknown>;
+  return {
+    systemPrompt: typeof value.systemPrompt === "string" ? plainText(value.systemPrompt) : "",
+    model: str(value.model),
+    budgetUsd: value.budgetUsd == null ? null : num(value.budgetUsd),
+    overrunPercent: num(value.allowedOverrunPercent),
+    mcpServers: list(value.mcpServers)
+      .map((m) => str(m.serverName))
+      .filter((n): n is string => n !== null),
+    tools: tools
+      .map((t) => (t.tool && typeof t.tool === "object" ? str((t.tool as Record<string, unknown>).name) : null))
+      .filter((n): n is string => n !== null),
+    secrets: [
+      ...new Set(
+        tools.flatMap((t) =>
+          Array.isArray(t.allowedSecrets) ? t.allowedSecrets.filter((x) => typeof x === "string") : [],
+        ),
+      ),
+    ] as string[],
+    claudeCode:
+      profile && p.provider === "claude-code"
+        ? { repoSkills: p.repoSkills !== false, sessionResume: p.sessionResume === true }
+        : null,
+  };
+}
+
+/** The middle value (the mean of the two middle ones for an even count); 0 for none. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** An agent's finished runs in the window: their median cost, how many succeeded, of how many. */
+function agentTypical(rows: RunRow[], agentId: string): { median: number; ok: number; n: number } {
+  const done = rows.filter((row) => row.agentId === agentId && !ACTIVE.has(row.status));
+  return {
+    median: median(done.map((row) => row.costUsd)),
+    ok: done.filter((row) => row.status === "succeeded").length,
+    n: done.length,
+  };
+}
+
+/** How an agent starts, one chip per entry (or the link into it), then its repositories' settings. */
+function runsWhen(agent: LinkAgent, data: AgentLinks): string[] {
+  const entries =
+    agent.entry.length > 0
+      ? agent.entry.map((entry) => entryChip({ ...agent, entry: [entry] }, data))
+      : [entryChip(agent, data)];
+  const notes = agent.repositories.flatMap((r) => [
+    ...(r.triggers.includes("review_fix") ? [`↺ review_fix ≤${r.reviewFixMaxRounds ?? FIX_ROUNDS}`] : []),
+    ...(r.waitForCi ? ["waits for CI"] : []),
+    ...(r.markReadyWhenPassing ? ["ready when passing"] : []),
+  ]);
+  return [...new Set([...entries.filter((c): c is string => c !== null), ...notes])];
+}
 
 /** Whether the filter text (lower case, trimmed) is in the agent's name, model or a repository. */
 const agentMatches = (agent: LinkAgent, text: string): boolean =>
@@ -1133,6 +1223,18 @@ const CARD_ALT: Record<CardKind, string> = {
   error: "Error",
   continue: "Continue locally",
 };
+/** The Detail tab's sections: each card's colour bar on the desktop, and its heading. */
+const AGENT_SECTIONS = {
+  prompt: { colour: WARDBY.navy, title: "System prompt" },
+  when: { colour: WARDBY.sky, title: "Runs when" },
+  budget: { colour: WARDBY.gold, title: "Model & budget" },
+  tools: { colour: WARDBY.mint, title: "Tools & connections" },
+  last: { colour: WARDBY.slate, title: "Last runs" },
+} as const;
+type AgentSection = keyof typeof AGENT_SECTIONS;
+// How many of an agent's runs Detail lists, and the rows of its system prompt shown before Show all.
+const AGENT_LAST_RUNS = 5;
+const PROMPT_ROWS = 6;
 // Shell tools: their rows show the command alone, since nearly every step is one.
 const SHELL_TOOLS = new Set(["Bash", "shell", "exec", "exec_command", "run_command", "local_shell"]);
 // A failed step's exit code sits on a soft tint of wardby red (14%, see-through on light and dark).
@@ -1948,7 +2050,44 @@ export const register: Register = (on, options) => {
       return { at: now, data: fallbackLinks(agentsNow, children), error: null, notice: APPROXIMATE_NOTICE };
     }
 
+    /**
+     * Detail's get_agent, once per agent for the session (force: r). A reply for an agent no longer open
+     * is dropped. The reply is kept as the server sent it; secrets appear in it by name only.
+     */
+    let agentLoading: string | null = null;
+    async function loadAgent(id: string, force = false): Promise<void> {
+      if (agentLoading === id) return;
+      const held = await read($, agentInfo);
+      if (!force && held?.id === id) return;
+      agentLoading = id;
+      try {
+        let fresh: { value: Record<string, unknown> | null; error: string | null };
+        try {
+          const value = (await call("get_agent", { id })) as Record<string, unknown> | null;
+          fresh = { value: value && typeof value === "object" ? value : null, error: null };
+        } catch (err) {
+          const raw = err instanceof Error ? err.message : "get_agent failed";
+          fresh = {
+            value: null,
+            error: /auto mode/i.test(raw)
+              ? `auto mode refused the call. Allow mcp__${server}__get_agent in /permissions, then press r.`
+              : raw,
+          };
+        }
+        if ((await read($, agentOpen))?.id !== id) return;
+        const at = await $.clock.now();
+        await update($, agentInfo, () => ({ id, at, ...fresh }));
+      } finally {
+        if (agentLoading === id) agentLoading = null;
+      }
+    }
+
     // Called without await from the pane's handlers: a pane closed or reloaded mid-search drops it quietly.
+    pane.loadAgent = (id, force) => loadAgent(id, force).catch(() => {});
+    pane.openAgent = async (id, choice) => {
+      await update($, agentOpen, () => ({ id, tab: choice }));
+      if (choice === "detail") await pane.loadAgent(id, false);
+    };
     pane.searchOlder = (text, more) => searchOlder(text, more).catch(() => {});
     pane.continueLocally = continueLocally;
     pane.cloneAndContinue = cloneAndContinue;
@@ -1982,6 +2121,8 @@ export const register: Register = (on, options) => {
     loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
     refreshLinks: (force?: boolean) => Promise<void>;
+    loadAgent: (id: string, force?: boolean) => Promise<void>;
+    openAgent: (id: string, tab: "detail" | "flow") => Promise<void>;
     searchOlder: (text: string, more: boolean) => Promise<void>;
     start: () => void;
     continueLocally: (runId: string, dir: string, repo: ResumeRepo) => Promise<void>;
@@ -1993,6 +2134,8 @@ export const register: Register = (on, options) => {
     loadMoreSteps: async () => {},
     refresh: async () => {},
     refreshLinks: async () => {},
+    loadAgent: async () => {},
+    openAgent: async () => {},
     searchOlder: async () => {},
     start: () => {},
     continueLocally: async () => {},
@@ -2135,6 +2278,33 @@ export const register: Register = (on, options) => {
         <Text color={TONES[tone].fg}>{mark ? (label ? `${mark} ${label}` : mark) : `[${label}]`}</Text>
       );
 
+    /**
+     * A desktop card: a soft panel with no border, so its colour bar sits flush on the top edge (a border's
+     * inset would leave a row of space above it); the content has its own padding below the bar.
+     */
+    const panelCard = (key: string, colour: string, alt: string, children: unknown) => (
+      <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
+        {Svg && (
+          <Box key={`${key}-bar`} paddingX={1}>
+            <Svg source={cardBarSvg(colour)} alt={alt} height={3} />
+          </Box>
+        )}
+        <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+          {children as never}
+        </Box>
+      </Box>
+    );
+    /**
+     * Copies text the pane already holds (as the server sent it, already redacted) and says how it went.
+     * Never adds a field: each caller copies exactly what it was given.
+     */
+    const copyText = (text: string) => (press: { surface: UiCopyArgs["surface"] }) =>
+      void $.ui
+        .copy({ text, surface: press.surface })
+        .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
+        .catch(() => $.ui.toast("Couldn't copy"));
+    const opened = await read($, agentOpen);
+
     const header = (
       <Box flexDirection="column">
         <Box gap={1}>
@@ -2142,7 +2312,12 @@ export const register: Register = (on, options) => {
             key="refresh"
             label="Refresh"
             {...(e.surface === "desktop" ? {} : { hotkey: "r" })}
-            onPress={() => void (currentTab === "agents" ? pane.refreshLinks(true) : pane.refresh())}
+            onPress={() => {
+              if (currentTab !== "agents") return void pane.refresh();
+              void pane.refreshLinks(true);
+              // An agent open on Detail reads get_agent again too.
+              if (opened?.tab === "detail") void pane.loadAgent(opened.id, true);
+            }}
           />
           {!isDesktop && tabButtons}
           {/* The desktop pane has its own close control. */}
@@ -2199,7 +2374,6 @@ export const register: Register = (on, options) => {
 
     if (currentTab === "agents") {
       const data = linksState.data;
-      const opened = await read($, agentOpen);
       const toggles = await read($, flowOpen);
       // The filter's text: an agent shows when its name, model or a repository holds it.
       const text = f.text.trim().toLowerCase();
@@ -2219,7 +2393,7 @@ export const register: Register = (on, options) => {
           )}
         </>
       );
-      const openOn = (id: string, choice: "detail" | "flow") => void update($, agentOpen, () => ({ id, tab: choice }));
+      const openOn = (id: string, choice: "detail" | "flow") => void pane.openAgent(id, choice);
       const flowOf = (all: AgentLinks, id: string): LinkFlow | null =>
         all.flows.find((flow) => flow.agentIds.includes(id) || flow.related.includes(id)) ?? null;
 
@@ -2227,7 +2401,12 @@ export const register: Register = (on, options) => {
        * An open agent's header: the breadcrumb (its Agents goes back to the list), the agent's name, and
        * its Detail and Flow tabs (Flow only for an agent in a flow). Detail and Flow draw their bodies below.
        */
-      const agentScreenHeader = (all: AgentLinks, agent: LinkAgent, current: "detail" | "flow") => {
+      const agentScreenHeader = (
+        all: AgentLinks,
+        agent: LinkAgent,
+        current: "detail" | "flow",
+        config: Record<string, unknown> | null,
+      ) => {
         const flow = flowOf(all, agent.id);
         const choices = flow ? (["detail", "flow"] as const) : (["detail"] as const);
         const tabLabel = (choice: "detail" | "flow") => (choice === "detail" ? "Detail" : "Flow");
@@ -2242,7 +2421,33 @@ export const register: Register = (on, options) => {
                 <Text dimColor>{`Agents › ${flow ? flow.name : "Unlinked"} › ${agent.name}`}</Text>
               </Button>
             </Box>
-            {isDesktop ? <Text weight="semibold">{agent.name}</Text> : <Text bold>{agent.name}</Text>}
+            <Box gap={1} alignItems="center">
+              {isDesktop ? <Text weight="semibold">{agent.name}</Text> : <Text bold>{agent.name}</Text>}
+              {pill(agentKind(agent), "grey")}
+              <Text dimColor>{`you: ${agent.access}`}</Text>
+            </Box>
+            <Box gap={1} alignItems="center">
+              {/* The agent's runs: the Runs tab, filtered to its name. */}
+              <Button
+                key="agent-runs"
+                label="Runs →"
+                {...(isDesktop ? {} : { hotkey: "n" })}
+                onPress={() => {
+                  void update($, filter, (old): Filter => ({ ...old, text: agent.name }));
+                  void pane.searchOlder(agent.name, false);
+                  void update($, tab, () => "runs" as const);
+                }}
+              />
+              {/* get_agent's reply as the server sent it, system prompt included; secrets in it are names only. */}
+              {config && (
+                <Button
+                  key="copy-config"
+                  label="Copy config"
+                  {...(isDesktop ? { dimColor: true } : { hotkey: "c" })}
+                  onPress={copyText(JSON.stringify(config, null, 2))}
+                />
+              )}
+            </Box>
             <Box gap={1} alignItems="center">
               {choices.map((choice) =>
                 isDesktop ? (
@@ -2271,14 +2476,178 @@ export const register: Register = (on, options) => {
         );
       };
 
+      /**
+       * The Detail tab: get_agent's prompt, how the agent starts, its model and budget, what is attached
+       * (secrets by name only), and its last runs from the pane's window. Cards on the desktop, labelled
+       * blocks in the terminal.
+       */
+      const agentDetail = (
+        all: AgentLinks,
+        agent: LinkAgent,
+        info: { value: Record<string, unknown> | null; error: string | null } | null,
+        showAll: boolean,
+      ) => {
+        if (!info) return <Text dimColor>Loading…</Text>;
+        if (info.error || !info.value) {
+          return (
+            <Box key="agent-error">
+              <Text color={FAILED_COLOR} wrap="wrap">
+                {`wardby: ${info.error ?? "get_agent returned nothing"}`}
+              </Text>
+            </Box>
+          );
+        }
+        const config = agentConfig(info.value);
+        const section = (key: AgentSection, children: unknown, copy?: string) => {
+          const { colour, title } = AGENT_SECTIONS[key];
+          if (isDesktop) {
+            const head =
+              copy !== undefined ? (
+                <Box key={`agent-${key}-head`} alignItems="center">
+                  <Text weight="semibold" size="footnote">
+                    {title}
+                  </Text>
+                  <Box flexGrow={1} />
+                  <Button key={`copy-${key}`} label="Copy" dimColor onPress={copyText(copy)} />
+                </Box>
+              ) : (
+                <Box key={`agent-${key}-head`}>
+                  <Text weight="semibold" size="footnote">
+                    {title}
+                  </Text>
+                </Box>
+              );
+            return panelCard(`agent-${key}`, colour, `${title} card`, [head, children]);
+          }
+          return (
+            <Box key={`agent-${key}`} flexDirection="column">
+              <Text bold>{title.toUpperCase()}</Text>
+              {children as never}
+            </Box>
+          );
+        };
+        const inner = Math.max(20, width - 4);
+        const cut = showAll
+          ? { text: config.systemPrompt, more: 0 }
+          : collapse(config.systemPrompt, inner, PROMPT_ROWS);
+        const prompt = (
+          <Box key="agent-prompt-text" flexDirection="column">
+            <Text wrap="wrap">{cut.text || "(no system prompt)"}</Text>
+            {(cut.more > 0 || showAll) && (
+              <Button
+                key="prompt-all"
+                label={showAll ? "Show less" : `Show all (${cut.more} more ${cut.more === 1 ? "line" : "lines"})`}
+                {...(isDesktop ? { dimColor: true } : { hotkey: "m" })}
+                onPress={() => void update($, promptOpen, () => (showAll ? null : agent.id))}
+              />
+            )}
+          </Box>
+        );
+        const chips = runsWhen(agent, all);
+        const when = (
+          <Box key="agent-when-chips" gap={1} flexWrap="wrap">
+            {chips.length === 0 ? (
+              <Text dimColor>Nothing starts it but a lead or a person.</Text>
+            ) : (
+              chips.map((chip) => (
+                <Box key={`when-${chip}`}>{pill(chip, chip === "waits for CI" ? "amber" : "blue")}</Box>
+              ))
+            )}
+          </Box>
+        );
+        const budget = config.budgetUsd ?? agent.budgetUsd;
+        const typical = agentTypical(rows, agent.id);
+        const budgetLine =
+          `${usd(budget)} per run` +
+          (config.overrunPercent > 0 ? ` · +${config.overrunPercent}% overrun` : "") +
+          (agent.budgetGroup ? ` · group "${agent.budgetGroup.name}"` : "");
+        const money = (
+          <Box key="agent-budget-lines" flexDirection="column">
+            <Text>{shortModel(config.model ?? agent.model)}</Text>
+            <Text>{budgetLine}</Text>
+            {typical.n > 0 && (
+              <Text dimColor>{`Typical: ${usd(typical.median)} median · ${typical.ok} of ${typical.n} succeeded`}</Text>
+            )}
+          </Box>
+        );
+        const attached = [
+          ...config.mcpServers.map((name) => `MCP: ${name}`),
+          ...config.tools.map((name) => `tool: ${name}`),
+          ...config.secrets.map((name) => `secret: ${name} (name only)`),
+          ...(config.claudeCode
+            ? [
+                `repo skills: ${config.claudeCode.repoSkills ? "on" : "off"}`,
+                `sessionResume: ${config.claudeCode.sessionResume ? "on" : "off"}`,
+              ]
+            : []),
+        ];
+        const tools = (
+          <Box key="agent-tools-lines" flexDirection="column">
+            {attached.length === 0 ? (
+              <Text dimColor>Nothing attached.</Text>
+            ) : (
+              attached.map((line) => (
+                <Box key={`attached-${line}`}>
+                  <Text wrap="truncate-end">{line}</Text>
+                </Box>
+              ))
+            )}
+          </Box>
+        );
+        const own = rows
+          .filter((row) => row.agentId === agent.id)
+          .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+          .slice(0, AGENT_LAST_RUNS);
+        const last = (
+          <Box key="agent-last-rows" flexDirection="column">
+            {own.length === 0 ? (
+              <Text dimColor>No runs in the pane's window.</Text>
+            ) : (
+              own.map((row) => (
+                <Box key={`agent-last-${row.id}`} gap={1}>
+                  <Button
+                    key={`agent-run-${row.id}`}
+                    onPress={() => {
+                      void update($, tab, () => "runs" as const);
+                      void update($, selected, () => row.id);
+                      void pane.loadDetail(row.id);
+                    }}
+                  >
+                    {pill(row.status, statusTone(row.status), "●")}
+                  </Button>
+                  <Text
+                    dimColor
+                  >{`${ago(row.startedAt, now)} ago · ${usd(row.costUsd)} · ${triggerLabel(row.trigger)}`}</Text>
+                </Box>
+              ))
+            )}
+          </Box>
+        );
+        return (
+          <Box key="agent-detail" flexDirection="column" gap={1}>
+            {section("prompt", prompt, config.systemPrompt)}
+            {section("when", when)}
+            {section("budget", money)}
+            {section("tools", tools)}
+            {section("last", last)}
+          </Box>
+        );
+      };
+
       const openAgent = opened && data?.agents.find((a) => a.id === opened.id);
       if (data && opened && openAgent) {
+        const held = await read($, agentInfo);
+        const info = held?.id === openAgent.id ? held : null;
+        // Opened before a reload, or the reply was dropped: read it now (once; loadAgent skips a held one).
+        if (opened.tab === "detail" && !info) void pane.loadAgent(openAgent.id, false);
+        const showAll = (await read($, promptOpen)) === openAgent.id;
         return (
           <Box flexDirection="column" gap={1}>
             {header}
             {tabBar}
             {notices}
-            {agentScreenHeader(data, openAgent, opened.tab)}
+            {agentScreenHeader(data, openAgent, opened.tab, info?.value ?? null)}
+            {opened.tab === "detail" && agentDetail(data, openAgent, info, showAll)}
           </Box>
         );
       }
@@ -2578,15 +2947,6 @@ export const register: Register = (on, options) => {
           <Text bold>{text}</Text>
         );
       /**
-       * Copies text the pane already holds (as the server sent it, already redacted) and says how it went.
-       * Never adds a field: each section copies exactly what it was given.
-       */
-      const copyText = (text: string) => (press: { surface: UiCopyArgs["surface"] }) =>
-        void $.ui
-          .copy({ text, surface: press.surface })
-          .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
-          .catch(() => $.ui.toast("Couldn't copy"));
-      /**
        * Copies one of get_run's long fields. When the server sent only its first page, the rest is read
        * first (get_run_text), so Copy gives the whole text; an older server's first page is copied as is.
        */
@@ -2600,22 +2960,12 @@ export const register: Register = (on, options) => {
       };
       /**
        * Each section is a rounded card with its kind's colour from the wardby.com palette: on the desktop a
-       * thin bar along the card's top (the theme's prompt-box border stays, visible in light and dark); on
-       * the terminal, which draws no SVG, the card's rounded border in that colour.
+       * thin bar along the card's top (panelCard); on the terminal, which draws no SVG, the card's rounded
+       * border in that colour.
        */
-      // Desktop: a soft panel with no border, so its colour bar sits flush on the top edge (a border's
-      // inset would leave a row of space above it); the content has its own padding below the bar.
-      // Terminal: the rounded border, in the card's colour.
       const card = (key: string, kind: CardKind, children: unknown) =>
         D && Svg ? (
-          <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
-            <Box key={`${key}-bar`} paddingX={1}>
-              <Svg source={cardBarSvg(CARD_COLOR[kind])} alt={`${CARD_ALT[kind]} card`} height={3} />
-            </Box>
-            <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
-              {children as never}
-            </Box>
-          </Box>
+          panelCard(key, CARD_COLOR[kind], `${CARD_ALT[kind]} card`, children)
         ) : (
           <Box key={key} flexDirection="column" {...GROUP_BOX} borderColor={CARD_COLOR[kind]}>
             {children as never}

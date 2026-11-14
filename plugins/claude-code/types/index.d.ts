@@ -207,6 +207,8 @@ declare module "claude-code" {
       links: Shaped<LinksState>;
       flowOpen: Shaped<Record<string, boolean>>;
       agentOpen: Shaped<{ id: string; tab: "detail" | "flow" } | null>;
+      agentInfo: Shaped<{ id: string; at: number; value: Record<string, unknown> | null; error: string | null } | null>;
+      promptOpen: Shaped<string | null>;
     };
   }
 }

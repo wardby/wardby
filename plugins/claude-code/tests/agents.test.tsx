@@ -130,9 +130,19 @@ export type Links = typeof LINKS;
 /**
  * A fake wardby server with list_agent_links (or, with hasTool false, an older one without it, answered
  * from per-agent calls). `data` defaults to a copy of LINKS, so a test can change its own copy; `runs` is
- * what list_runs answers (none by default).
+ * what list_runs answers (none by default). `agent` is merged over get_agent's reply (its shape: the agent row,
+ * access, mcpServers, and tools as attachments with allowedSecrets names); `agentError` makes get_agent fail.
  */
-export function linksServer(on: On, opts: { hasTool?: boolean; data?: Links; runs?: unknown[] } = {}) {
+export function linksServer(
+  on: On,
+  opts: {
+    hasTool?: boolean;
+    data?: Links;
+    runs?: unknown[];
+    agent?: Record<string, unknown>;
+    agentError?: string;
+  } = {},
+) {
   const data = opts.data ?? structuredClone(LINKS);
   const calls: string[] = [];
   on("mcp.call", (_, e) => {
@@ -164,16 +174,24 @@ export function linksServer(on: On, opts: { hasTool?: boolean; data?: Links; run
     if (e.tool === "list_repositories")
       return reply({ repositories: data.agents.find((a) => a.id === e.args.agentId)?.repositories ?? [] });
     if (e.tool === "list_runs") return reply(e.args.query === undefined ? (opts.runs ?? []) : []);
-    if (e.tool === "get_agent")
+    if (e.tool === "get_agent") {
+      if (opts.agentError) return { value: { content: [{ type: "text", text: opts.agentError }], isError: true } };
       return reply({
         id: e.args.id,
         name: "delivery",
         systemPrompt: "Routes requests to the right coding sub-agent.\nMore.",
         model: "claude-sonnet-5-5",
         budgetUsd: "21",
+        allowedOverrunPercent: 0,
+        kind: "native",
+        codingProfile: null,
+        access: "owner",
+        mcpServers: [],
         tools: [],
         repositories: [],
+        ...opts.agent,
       });
+    }
     return reply(null);
   });
   return calls;
@@ -525,5 +543,237 @@ test("the text filter narrows agents and drops empty flows", async ($, on) => {
   expect(await ui.find({ key: "agent-d" })).toBeUndefined();
   expect(await ui.find({ key: "agent-v" })).toBeUndefined();
   expect(text).not.toContain("solo");
+  await ui.unmount();
+});
+
+/** get_agent's reply for delivery with an MCP server, a tool and the secret name that tool may use. */
+const DELIVERY_AGENT = {
+  allowedOverrunPercent: 10,
+  mcpServers: [{ serverId: "m1", serverName: "github", allowedTools: ["search"], exposedNames: [] }],
+  tools: [
+    {
+      agentId: "d",
+      toolId: "t1",
+      allowedSecrets: ["GITHUB_TOKEN"],
+      allowedHosts: [],
+      tool: { id: "t1", name: "fetch_page" },
+    },
+  ],
+};
+
+test("Detail shows the prompt, entry, budget and tools from get_agent, on every surface", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const calls = linksServer(on, {
+    agent: DELIVERY_AGENT,
+    runs: [
+      run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000),
+      run("r2", "d", "delivery", "failed", "0.750000", 7_200_000),
+      run("r3", "v", "reviewer", "succeeded", "0.100000", 600_000),
+    ],
+  });
+  await openPane($, clock);
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    await ui.press({ key: "agent-d" });
+    await clock.settle();
+    const text = await texts(ui);
+    // Fetched once for the session: the second surface uses what the pane holds.
+    expect(calls.filter((c) => c === "get_agent")).toHaveLength(1);
+    expect(text).toContain("you: owner");
+    expect(text).toMatch(/SYSTEM PROMPT/i);
+    expect(text).toContain("Routes requests to the right coding sub-agent.");
+    expect(text).toMatch(/RUNS WHEN/i);
+    expect(text).toContain("mention");
+    expect(text).toMatch(/MODEL & BUDGET/i);
+    expect(text).toContain("$21.00 per run · +10% overrun");
+    expect(text).toContain("Typical: $0.50 median · 1 of 2 succeeded");
+    expect(text).toMatch(/TOOLS & CONNECTIONS/i);
+    expect(text).toContain("MCP: github");
+    expect(text).toContain("tool: fetch_page");
+    expect(text).toContain("secret: GITHUB_TOKEN (name only)");
+    expect(text).toMatch(/LAST RUNS/i);
+    expect(await ui.find({ key: "agent-run-r1" })).toBeDefined();
+    expect(await ui.find({ key: "agent-run-r2" })).toBeDefined();
+    // Another agent's run is not this agent's.
+    expect(await ui.find({ key: "agent-run-r3" })).toBeUndefined();
+    expect(await ui.find({ key: "agent-runs" })).toBeDefined();
+    expect(await ui.find({ key: "copy-config" })).toBeDefined();
+    expect(text).not.toMatch(/workflow/i);
+    if (surface === "terminal") {
+      for (const el of await ui.findAll({ type: "Text" })) {
+        expect(el.props.backgroundColor).toBeUndefined();
+        if (typeof el.props.color === "string") expect(el.props.color.startsWith("#"), el.props.color).toBe(false);
+      }
+    }
+    await ui.press({ key: "crumb-agents" });
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});
+
+test("the budget line names the budget group and leaves out a zero overrun and an empty window", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  (data.agents[0] as { budgetGroup: unknown }).budgetGroup = { id: "g1", name: "WMD Shop" };
+  linksServer(on, { data });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain('$21.00 per run · group "WMD Shop"');
+  expect(text).not.toContain("overrun");
+  expect(text).not.toContain("Typical");
+  await ui.unmount();
+});
+
+test("a Claude Code agent shows repo skills and sessionResume", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, {
+    agent: {
+      name: "builder",
+      kind: "coding",
+      codingProfile: { provider: "claude-code", repoSkills: true, sessionResume: false },
+    },
+  });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-b" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("repo skills: on");
+  expect(text).toContain("sessionResume: off");
+  await ui.unmount();
+});
+
+test("a long prompt is collapsed until Show all", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const prompt = Array.from({ length: 12 }, (_, i) => `Prompt line ${i + 1}.`).join("\n");
+  linksServer(on, { agent: { systemPrompt: prompt } });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  expect(await texts(ui)).toContain("Prompt line 1.");
+  expect(await texts(ui)).not.toContain("Prompt line 12.");
+  await ui.press({ key: "prompt-all" });
+  expect(await texts(ui)).toContain("Prompt line 12.");
+  await ui.unmount();
+});
+
+test("the Flow tab is hidden for an agent in no flow", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "unlinked" });
+  await ui.press({ key: "agent-s" });
+  await clock.settle();
+  expect(await texts(ui)).not.toContain("Flow");
+  expect(await ui.find({ key: "agent-tab-flow" })).toBeUndefined();
+  await ui.unmount();
+});
+
+test("Runs → filters the Runs tab to the agent", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-v" });
+  await clock.settle();
+  await ui.press({ key: "agent-runs" });
+  await clock.settle();
+  // The filter box shows the agent name, on the Runs tab.
+  expect((await ui.find({ key: "filter-text" }))?.props.value).toBe("reviewer");
+  expect(await texts(ui)).toContain("[Runs]");
+  await ui.unmount();
+});
+
+test("a last run opens in the Runs tab", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const calls = linksServer(on, { runs: [run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000)] });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  await ui.press({ key: "agent-run-r1" });
+  await clock.settle();
+  // The Runs tab's run detail: its back button and the run's spend.
+  expect(calls).toContain("get_run");
+  expect(await ui.find({ key: "back" })).toBeDefined();
+  expect(await texts(ui)).toContain("$0.25 of $21.00 budget");
+  await ui.unmount();
+});
+
+test("Copy config copies get_agent's JSON, system prompt included", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const copies: string[] = [];
+  on("ui.copy", (_, e) => {
+    copies.push(String(e.text));
+    return { value: { isCopied: true } };
+  });
+  linksServer(on, { agent: DELIVERY_AGENT });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  await ui.press({ key: "copy-config" });
+  await clock.settle();
+  expect(copies).toHaveLength(1);
+  const copied = JSON.parse(copies[0]) as Record<string, unknown>;
+  expect(copied.systemPrompt).toBe("Routes requests to the right coding sub-agent.\nMore.");
+  expect(copied.allowedOverrunPercent).toBe(10);
+  // The desktop's prompt card has its own Copy: the prompt alone.
+  await ui.press({ key: "copy-prompt" });
+  await clock.settle();
+  expect(copies[1]).toBe("Routes requests to the right coding sub-agent.\nMore.");
+  await ui.unmount();
+});
+
+test("get_agent failing shows the error; r reads it again", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const calls = linksServer(on, { agentError: "MCP error: agent not found" });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  expect(await texts(ui)).toContain("agent not found");
+  // Back to the list and in again uses what the pane holds; Refresh asks again.
+  await ui.press({ key: "crumb-agents" });
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  expect(calls.filter((c) => c === "get_agent")).toHaveLength(1);
+  await ui.press({ key: "refresh" });
+  await clock.settle();
+  expect(calls.filter((c) => c === "get_agent")).toHaveLength(2);
   await ui.unmount();
 });
