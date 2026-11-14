@@ -39,7 +39,13 @@ import { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
-import { agentEditFormat, REPLIES_FENCE, THREADS_HEADING, type AgentEditFormat } from "./agent-formats.js";
+import {
+  agentEditFormat,
+  REPLIES_FENCE,
+  THREADS_HEADING,
+  type AgentEditFormat,
+  type EarlierEditForm,
+} from "./agent-formats.js";
 import { assertAgentRepository, assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
 import { authorLabel, listThreads, postAgentReply } from "./comments.js";
 import { contentHash, type VersionContent } from "./content.js";
@@ -72,6 +78,10 @@ export const EDIT_NOT_APPLIED_NOTE = "(The edit could not be applied.)";
 /** The reply when the document got a newer version after the send and neither a merge nor a reconcile run applied the edit. */
 export function versionConflictReply(branch: string): string {
   return `The document changed after this was sent, so the agent's edit was not applied. It is on branch ${branch}.`;
+}
+/** The reply when the edit conflicted and is too large, even as a diff, to send back to the agent to re-apply. */
+export function reconcileTooLargeReply(branch: string): string {
+  return `The document changed after this was sent, and the agent's edit is too large to re-apply automatically, so it was not applied. It is on branch ${branch}.`;
 }
 /** The reply when a reconcile run ends without succeeding: the conflicted run's edit is still on its branch. */
 export function reconcileFailedReply(branch: string): string {
@@ -421,11 +431,14 @@ export function reconcilingReply(n: number): string {
  * Layer 2 of a conflicted edit: one follow-up run, as the original sender, on the latest version,
  * holding the current content and the agent's earlier edit, for the threads still open or outdated
  * (a thread closed meanwhile is left out and gets no reply). Everything a send checks is checked
- * again; a refusal of any kind (including a second reconcile for the same send, no thread left
- * open, or a task that does not fit) answers false and starts nothing. Once the run is dispatched
- * the answer is true whatever follows: a note that cannot be posted is only logged. Never throws.
- * Exported for tests.
+ * again. The earlier edit goes as the files the agent left, or as a diff of them when those do not
+ * fit. A refusal of any kind (a second reconcile for the same send, no thread left open, a failed
+ * check) answers "refused", and a task that does not fit even as a diff "too_large"; either starts
+ * nothing. Once the run is dispatched the answer is "started" whatever follows: a note that cannot
+ * be posted is only logged. Never throws. Exported for tests.
  */
+export type ReconcileStart = "started" | "refused" | "too_large";
+
 export async function startReconcileRun(
   db: PrismaClient,
   deps: DocumentAgentDeps,
@@ -437,7 +450,7 @@ export async function startReconcileRun(
     ours: VersionContent;
     secretValues: readonly string[];
   },
-): Promise<boolean> {
+): Promise<ReconcileStart> {
   const { runId, threads } = input;
   const documentId = threads[0].documentId;
   let run: { id: string; status: string };
@@ -446,9 +459,9 @@ export async function startReconcileRun(
   let versionNumber: number;
   try {
     // One reconcile per send: these threads were sent by a reconcile run already.
-    if (threads.some((t) => t.reconcileOfRunId !== null)) return false;
+    if (threads.some((t) => t.reconcileOfRunId !== null)) return "refused";
     const sender = threads[0].sentById;
-    if (sender === null || threads.some((t) => t.sentById !== sender)) return false;
+    if (sender === null || threads.some((t) => t.sentById !== sender)) return "refused";
     senderId = sender;
     const viewer: Viewer = { kind: "principal", principalId: senderId };
     const link = await sendableLink(db, documentId, viewer);
@@ -459,7 +472,7 @@ export async function startReconcileRun(
     const views = (await listThreads(db, { documentId, viewer, filter: "all" })).filter(
       (t) => idSet.has(t.id) && (t.status === "open" || t.status === "outdated"),
     );
-    if (views.length === 0) return false;
+    if (views.length === 0) return "refused";
     const openIds = new Set(views.map((t) => t.id));
     reconciled = threads.filter((t) => openIds.has(t.id));
     const context = await ef.sendContext(
@@ -467,22 +480,32 @@ export async function startReconcileRun(
       { repository: doc.repository, path, baseRef },
       { number: version.number, content },
     );
-    const earlier = ef.earlierEdit({ path }, input.base, input.ours, input.sentVersion);
     const secretValues = await taskSecretValues(db, deps.cipher, doc.agentId);
-    const task = buildTask(
-      ef.reconcileInstructions(
-        { path, baseRef },
-        version.number,
-        views.map((t) => t.number),
-        context,
-        earlier,
-      ),
-      `${context.heading}\n${context.body}\n\n${earlier.heading}\n${earlier.body}`,
-      doc.kind,
-      views,
-      link.agent.systemPrompt,
-      (text) => redactExactSecretValues(text, secretValues),
-    );
+    const taskWith = (form: EarlierEditForm) => {
+      const earlier = ef.earlierEdit({ path }, input.base, input.ours, input.sentVersion, form);
+      return buildTask(
+        ef.reconcileInstructions(
+          { path, baseRef },
+          version.number,
+          views.map((t) => t.number),
+          context,
+          earlier,
+        ),
+        `${context.heading}\n${context.body}\n\n${earlier.heading}\n${earlier.body}`,
+        doc.kind,
+        views,
+        link.agent.systemPrompt,
+        (text) => redactExactSecretValues(text, secretValues),
+      );
+    };
+    // The files as the agent left them are clearest; a diff of them when they do not fit.
+    let task: string;
+    try {
+      task = taskWith("files");
+    } catch (err) {
+      if (!(err instanceof Error) || err.message !== "document_too_large_for_agent") throw err;
+      task = taskWith("diff");
+    }
     run = await startDocumentRun(db, deps, {
       link,
       ids: reconciled.map((t) => t.id),
@@ -491,8 +514,9 @@ export async function startReconcileRun(
       reconcileOf: runId,
     });
   } catch (err) {
-    log.info({ runId, documentId, code: codeOf(err) }, "no reconcile run for the conflicted document edit");
-    return false;
+    const code = codeOf(err);
+    log.info({ runId, documentId, code }, "no reconcile run for the conflicted document edit");
+    return code === "document_too_large_for_agent" ? "too_large" : "refused";
   }
   // Dispatched: the reconcile run owns these threads now, whatever happens below.
   // Said first, so people see why the threads are still going (the conflicted run's answer).
@@ -511,7 +535,7 @@ export async function startReconcileRun(
   }
   // Refused or failed at dispatch: the reconcile run is already over, so it is answered now (never throws).
   if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
-  return true;
+  return "started";
 }
 
 const replyEntry = z.object({
@@ -592,10 +616,14 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
 
     const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
     if (edit.kind === "conflict") {
-      const reconciling =
-        edit.reconcile !== null &&
-        (await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues }));
-      if (!reconciling) for (const t of threads) await reply(t, versionConflictReply(edit.branch));
+      const start =
+        edit.reconcile === null
+          ? "refused"
+          : await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues });
+      if (start !== "started") {
+        const text = start === "too_large" ? reconcileTooLargeReply(edit.branch) : versionConflictReply(edit.branch);
+        for (const t of threads) await reply(t, text);
+      }
       return;
     }
     const replies = parseThreadReplies(run.finalText);

@@ -32,6 +32,7 @@ import {
   startReconcileRun,
   sweepUnansweredDocumentRuns,
   versionConflictReply,
+  reconcileTooLargeReply,
 } from "./agent-loop.js";
 import { createThread, listThreads, setThreadStatus } from "./comments.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
@@ -715,6 +716,33 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     });
   });
 
+  it("sends the earlier edit as a diff when the whole document and the edit together do not fit", async () => {
+    // Each ~34 KB: the current document plus the whole edited one is over the 64 KB coding task.
+    const pad = Array.from({ length: 1050 }, (_, i) => `Filler paragraph ${i} for size.\n\n`).join("");
+    const docId = await linkedDoc(`hello world\n\n${pad}`);
+    const t1 = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId],
+    });
+    await publishVersion(db, cipher, { documentId: docId, markdown: `hello there world\n\n${pad}`, via: "editor" });
+    const sha = await finish(runId, "succeeded", repliesBlock([{ thread: t1.number, reply: "Done." }]));
+    files.set(`${sha}:${path}`, `hello lovely world\n\n${pad}`);
+    const before = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await runsOf()).toBe(before + 1);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
+    expect(row).toMatchObject({ reconcileOfRunId: runId });
+    const run = await db.run.findUniqueOrThrow({ where: { id: row.sentRunId! }, include: { codingRun: true } });
+    const [instructions, context] = run.codingRun!.request!.split(`<${UNTRUSTED_CONTEXT_TAG}>`);
+    expect(instructions).toMatch(/unified diff/);
+    expect(context).toContain("YOUR EARLIER EDIT AS A DIFF (made against version 1):\n@@ -1,");
+    expect(context).toContain("-hello world\n+hello lovely world\n");
+    // Only the changed lines and their context: the filler appears once, in the current document.
+    expect(context.split("Filler paragraph 600 ").length).toBe(2);
+  });
+
   it("no reconcile run when the sender lost write, the hourly limit is reached, or the task does not fit", async () => {
     const editor = "hello there world\n\nsecond para";
     // Lost write access.
@@ -740,7 +768,9 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       const row = await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } });
       expect(row).toMatchObject({ sentRunId: runId, answeredRunId: runId, reconcileOfRunId: null });
       const [v] = await db.comment.findMany({ where: { threadId: t1.threadId, runId } });
-      expect(v.body).toBe(versionConflictReply(`wardby/run-${runId}`));
+      const branch = `wardby/run-${runId}`;
+      // Too large even as a diff says so; any other refusal gets the plain conflict reply.
+      expect(v.body).toBe(runId === c.runId ? reconcileTooLargeReply(branch) : versionConflictReply(branch));
       expect(await db.comment.count({ where: { threadId: t1.threadId, runId } })).toBe(1);
       expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
     }
@@ -940,7 +970,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       ours: md("hello there lovely world\n\nsecond para"),
       secretValues: [],
     });
-    expect(started).toBe(false);
+    expect(started).toBe("refused");
     expect(await runsOf()).toBe(before);
     expect(await db.commentThread.findUniqueOrThrow({ where: { id: t1.threadId } })).toMatchObject({
       sentRunId: reconcile,

@@ -74,3 +74,53 @@ export function myers(a: readonly number[], b: readonly number[], maxEdits = MAX
 export function splitLines(s: string): string[] {
   return s.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }
+
+/**
+ * A unified diff (hunks only, no file header) turning `a` into `b`, with `context` unchanged lines
+ * around each change; "" when they are equal, null when the diff gives up (past `maxEdits`).
+ */
+export function unifiedDiff(a: string, b: string, context = 3, maxEdits = MAX_EDITS): string | null {
+  if (a === b) return "";
+  const la = splitLines(a);
+  const lb = splitLines(b);
+  const ids = new Map<string, number>();
+  const intern = (lines: string[]) =>
+    lines.map((l) => {
+      let id = ids.get(l);
+      if (id === undefined) ids.set(l, (id = ids.size));
+      return id;
+    });
+  const steps = myers(intern(la), intern(lb), maxEdits);
+  if (steps === null) return null;
+  // Each step with the line it shows and its 0-based position in a (before it) and b.
+  const ops: { step: Step; line: string; ai: number; bi: number }[] = [];
+  let ai = 0;
+  let bi = 0;
+  for (const step of steps) {
+    ops.push({ step, line: step === "+" ? lb[bi] : la[ai], ai, bi });
+    if (step !== "+") ai++;
+    if (step !== "-") bi++;
+  }
+  const changed = ops.flatMap((o, i) => (o.step === "=" ? [] : [i]));
+  const out: string[] = [];
+  let i = 0;
+  while (i < changed.length) {
+    // Grow a hunk while the next change is within two contexts of the last.
+    let j = i;
+    while (j + 1 < changed.length && changed[j + 1] - changed[j] <= 2 * context) j++;
+    const from = Math.max(0, changed[i] - context);
+    const to = Math.min(ops.length - 1, changed[j] + context);
+    const slice = ops.slice(from, to + 1);
+    const aCount = slice.filter((o) => o.step !== "+").length;
+    const bCount = slice.filter((o) => o.step !== "-").length;
+    const aStart = aCount ? slice.find((o) => o.step !== "+")!.ai + 1 : slice[0].ai;
+    const bStart = bCount ? slice.find((o) => o.step !== "-")!.bi + 1 : slice[0].bi;
+    out.push(`@@ -${aStart},${aCount} +${bStart},${bCount} @@\n`);
+    for (const o of slice) {
+      const mark = o.step === "=" ? " " : o.step;
+      out.push(o.line.endsWith("\n") ? `${mark}${o.line}` : `${mark}${o.line}\n\\ No newline at end of file\n`);
+    }
+    i = j + 1;
+  }
+  return out.join("");
+}

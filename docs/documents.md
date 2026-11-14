@@ -397,7 +397,9 @@ tries three things in order:
    the threads still open or outdated (a thread closed meanwhile is left out and
    gets no reply). Its task holds the current content (built as for a send) and
    the agent's earlier edit (a design's changed files, or the whole edited
-   Markdown), all redacted against the agent's current secret values and
+   Markdown; when those and the current content together do not fit the
+   coding-task limit, a unified diff of each changed file against the version
+   that was sent instead), all redacted against the agent's current secret values and
    wrapped as untrusted content, and asks the agent to re-apply its change on
    top of the current version and reply on the threads. Every check a send makes is made again: the sender's
    `write` access, the owner's `execute` on the agent, the agent's link and
@@ -406,7 +408,10 @@ tries three things in order:
    worked, so it is re-applying its edit on version N." The reconcile run is a
    fresh run for every coding agent kind, not a resumed session; its result is
    published like a send's, merge included.
-3. **The conflict note.** If a reconcile run cannot start, or a reconcile run's
+3. **The conflict note.** If the edit is too large to send back even as a diff,
+   each thread gets "The document changed after this was sent, and the agent's
+   edit is too large to re-apply automatically, so it was not applied. It is on
+   branch …". If a reconcile run cannot start for another reason, or a reconcile run's
    own edit conflicts and cannot be merged, each thread gets "The document
    changed after this was sent, so the agent's edit was not applied. It is on
    branch …" and stays open. If the reconcile run itself fails, times out or is
