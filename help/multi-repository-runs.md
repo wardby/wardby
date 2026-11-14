@@ -137,3 +137,11 @@ Related: [Git history in coding runs](git-history.md), [Fork sync](fork-sync.md)
 recipes](agent-recipes.md), [Local repositories](local-repositories.md) and
 [Related pull requests](related-pull-requests.md). Operator guide:
 [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md#several-repositories-in-one-run).
+
+## Substrate launcher
+
+The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
+run that needs it fails with
+`substrate_feature_unsupported`. Use the
+Docker or Kubernetes launcher. See
+the `job-launcher-substrate` help article.

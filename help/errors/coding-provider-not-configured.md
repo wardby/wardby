@@ -52,8 +52,8 @@ Choose one:
 2. **Switch the agent to a configured provider.** Use `update_agent` to change
    its `codingProfile.provider` and pick a model for that provider.
 
-The server refuses to start with a coding launcher (`JOB_LAUNCHER=docker` or
-`kubernetes`) when neither provider has images. That startup error names both
+The server refuses to start with a coding launcher (`JOB_LAUNCHER=docker`,
+`kubernetes` or `substrate`) when neither provider has images. That startup error names both
 options.
 
 Related: [Local git repositories](../local-repositories.md),

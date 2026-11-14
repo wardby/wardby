@@ -21,6 +21,12 @@ Investigate the host configuration instead of bypassing the refusal.
 Codex and Claude Code workers have different supported launcher combinations.
 Review the deployment guide for your target before assigning a coding profile.
 
+On the experimental Substrate launcher, see
+the `job-launcher-substrate` help article and its error
+articles (`substrate_unavailable`, `substrate_capacity`,
+`substrate_startup_timeout`, `substrate_collect_timeout`,
+`substrate_feature_unsupported`).
+
 For the specific isolation refusal, read [Coding-worker isolation unavailable](../errors/docker-isolation-unsupported.md).
 
 ## Cluster preflight at start-up (Kubernetes)

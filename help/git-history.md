@@ -154,3 +154,10 @@ Related: [Several repositories in one coding run](multi-repository-runs.md),
 [Fork sync](fork-sync.md), [Build a custom worker image](build-worker-image.md).
 Operator guide:
 [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md#git-history-in-a-run).
+
+## Substrate launcher
+
+With the experimental `JOB_LAUNCHER=substrate`, a history run uploads the
+repository's whole `.git` with the workspace, so the coding proxy's
+`SUBSTRATE_WORKSPACE_MAX_MB` must allow for the history size. See
+the `job-launcher-substrate` help article.

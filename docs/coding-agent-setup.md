@@ -653,6 +653,21 @@ See [release verification](release-verification.md) for the complete gate.
 If the repository has `docs/knowledge/index.md`, every coding run's prompt
 includes it. See [Architecture knowledge bundles](knowledge.md).
 
+## Choosing a job launcher
+
+`JOB_LAUNCHER` selects where coding runs execute:
+
+- `docker`: a container per run on the control-plane host; the simplest setup
+  and the one this guide walks through.
+- `kubernetes`: a pod per run; see
+  [Coding-worker isolation](coding-worker-isolation.md#kubernetes-launcher-job_launcherkubernetes).
+- `substrate` (**experimental**): two gVisor-sandboxed Agent Substrate actors
+  per run, with no Wardby secret in either. Claude Code only, and without
+  coding services, MCP tools, the dependency cache or extra repositories. See
+  [Substrate job launcher](substrate-backend.md).
+
+`local` (the default) runs no coding agents.
+
 ## Repository instructions
 
 Every coding run loads the repository's own instructions; there is no
