@@ -905,6 +905,45 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(listed.find((d: any) => d.documentId === id).reviewState).toBe("approved");
     }, 60_000);
 
+    it("wait_for_review also wakes on a comment by someone else, and says why it returned", async () => {
+      const { createThread, reply } = await import("../../core/documents/comments.js");
+      const callOwner = await connect(owner);
+      const id = (await callOwner("create_document", { title: "Wake", markdown: "hello world" })).json
+        .documentId as string;
+      await callOwner("submit_for_review", { documentId: id, reviewers: [other.id] });
+      const me = { kind: "principal" as const, principalId: owner.id };
+      const them = { kind: "principal" as const, principalId: other.id };
+      // A comment from before the wait does not wake it.
+      const first = await createThread(db, cipher, { documentId: id, viewer: them, anchor, body: "Earlier" });
+      const idle = await callOwner("wait_for_review", { documentId: id, state: "in_review", timeoutSeconds: 1 });
+      expect(idle.json).toMatchObject({ changed: false, reason: "timeout" });
+
+      // The caller's own thread and reply do not wake it.
+      const own = callOwner("wait_for_review", { documentId: id, state: "in_review", timeoutSeconds: 2 });
+      await new Promise((r) => setTimeout(r, 300));
+      await createThread(db, cipher, { documentId: id, viewer: me, anchor, body: "Mine" });
+      await reply(db, cipher, { threadId: first.threadId, viewer: me, body: "My reply" });
+      expect((await own).json).toMatchObject({ changed: false, reason: "timeout" });
+
+      // A reply by someone else does: reason comment, the state unchanged.
+      const waiting = callOwner("wait_for_review", { documentId: id, state: "in_review", timeoutSeconds: 20 });
+      await new Promise((r) => setTimeout(r, 300));
+      await reply(db, cipher, { threadId: first.threadId, viewer: them, body: "One more thing" });
+      expect((await waiting).json).toMatchObject({ changed: false, reason: "comment", reviewState: "in_review" });
+
+      // A new thread by someone else does too.
+      const again = callOwner("wait_for_review", { documentId: id, state: "in_review", timeoutSeconds: 20 });
+      await new Promise((r) => setTimeout(r, 300));
+      await createThread(db, cipher, { documentId: id, viewer: them, anchor, body: "Another" });
+      expect((await again).json).toMatchObject({ changed: false, reason: "comment" });
+
+      // A state change says state.
+      const callOther = await connect(other);
+      await callOther("review_document", { documentId: id, verdict: "approve", versionNumber: 1 });
+      const state = await callOwner("wait_for_review", { documentId: id, state: "in_review", timeoutSeconds: 5 });
+      expect(state.json).toMatchObject({ changed: true, reason: "state", reviewState: "approved" });
+    }, 60_000);
+
     it("enforces who may act, with the documented statuses", async () => {
       const callOwner = await connect(owner);
       const callOther = await connect(other);

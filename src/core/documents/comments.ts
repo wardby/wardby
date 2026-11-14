@@ -166,6 +166,33 @@ export async function reply(
   return { commentId: c.id, mentionsWithoutAccess: await mentionsWithoutAccess(db, doc.id, input.body) };
 }
 
+/** When the document's newest comment (thread or reply, any author) was written; the epoch when it has none. */
+export async function newestCommentAt(db: CommentDb, documentId: string): Promise<Date> {
+  const last = await db.comment.aggregate({ where: { thread: { documentId } }, _max: { createdAt: true } });
+  return last._max.createdAt ?? new Date(0);
+}
+
+/**
+ * Whether someone other than `viewer` commented on the document (a new thread or a reply) after `since`.
+ * An agent's reply counts as someone else's, whoever sent the thread.
+ */
+export async function commentByOthersSince(
+  db: CommentDb,
+  documentId: string,
+  viewer: Viewer,
+  since: Date,
+): Promise<boolean> {
+  const others: Prisma.CommentWhereInput =
+    viewer.kind === "principal"
+      ? { OR: [{ authorId: null }, { authorId: { not: viewer.principalId } }, { runId: { not: null } }] }
+      : { OR: [{ guestId: null }, { guestId: { not: viewer.guestId } }] };
+  const found = await db.comment.findFirst({
+    where: { thread: { documentId }, deletedAt: null, createdAt: { gt: since }, ...others },
+    select: { id: true },
+  });
+  return found !== null;
+}
+
 export async function setThreadStatus(
   db: CommentDb,
   input: { threadId: string; viewer: Viewer; status: "open" | "resolved" },

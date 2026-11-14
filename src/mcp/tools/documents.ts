@@ -26,7 +26,14 @@ import {
   MAX_VERSIONS_PAGE,
   restoreVersion,
 } from "../../core/documents/versions.js";
-import { authorLabel, listThreads, reply, setThreadStatus } from "../../core/documents/comments.js";
+import {
+  authorLabel,
+  commentByOthersSince,
+  listThreads,
+  newestCommentAt,
+  reply,
+  setThreadStatus,
+} from "../../core/documents/comments.js";
 import type { ThreadView } from "../../core/documents/comments.js";
 import { listDocumentsFor } from "../../core/documents/list.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "../../core/untrusted-content.js";
@@ -182,21 +189,35 @@ export const WAIT_FOR_REVIEW_DEFAULT_SECONDS = 300;
 export const WAIT_FOR_REVIEW_MAX_SECONDS = 600;
 const REVIEW_POLL_MAX_MS = 2_000;
 
-/** Returns as soon as the stored state differs from `seen`, or at the timeout; read access is checked first and at the end. */
+export type ReviewWaitReason = "state" | "comment" | "timeout";
+
+/**
+ * Returns as soon as the stored state differs from `seen` (reason "state"), or a comment or reply by
+ * someone else is posted after the wait started (reason "comment"), or at the timeout (reason "timeout").
+ * Read access is checked first and at the end.
+ */
 export async function waitForReviewChange(
   db: PrismaClient,
   documentId: string,
   viewer: Viewer,
   seen: ReviewState,
   timeoutMs: number,
-): Promise<{ changed: boolean; view: ReviewView }> {
+): Promise<{ changed: boolean; reason: ReviewWaitReason; view: ReviewView }> {
   await requireDocumentAccess(db, documentId, viewer, "read");
   const until = Date.now() + timeoutMs;
+  // The newest comment when the wait starts, by the stored timestamps: anything later is new.
+  const since = await newestCommentAt(db, documentId);
+  const done = async (changed: boolean, reason: ReviewWaitReason) => ({
+    changed,
+    reason,
+    view: await getReviewView(db, documentId, viewer),
+  });
   for (let gap = 250; ; gap = Math.min(gap * 2, REVIEW_POLL_MAX_MS)) {
     const state = await documentReviewState(db, documentId);
     if (state === null) throw new Error("document_not_found");
-    if (state !== seen) return { changed: true, view: await getReviewView(db, documentId, viewer) };
-    if (Date.now() + gap > until) return { changed: false, view: await getReviewView(db, documentId, viewer) };
+    if (state !== seen) return done(true, "state");
+    if (await commentByOthersSince(db, documentId, viewer, since)) return done(false, "comment");
+    if (Date.now() + gap > until) return done(false, "timeout");
     await new Promise((resolve) => setTimeout(resolve, gap));
   }
 }
@@ -1083,7 +1104,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "wait_for_review",
     scope: "documents:read",
-    description: `Waits until a document's review state differs from state (the state you last saw), or until timeoutSeconds (default ${WAIT_FOR_REVIEW_DEFAULT_SECONDS}, at most ${WAIT_FOR_REVIEW_MAX_SECONDS}). Returns changed (false at the timeout: call again) and the current review. Use it to wait for approval before implementing a plan: on changes_requested read the notes and threads, revise with publish_version, reply, and wait again; on approved continue, citing the approved version.`,
+    description: `Waits until a document's review state differs from state (the state you last saw), or someone else posts a comment thread or reply on it, or until timeoutSeconds (default ${WAIT_FOR_REVIEW_DEFAULT_SECONDS}, at most ${WAIT_FOR_REVIEW_MAX_SECONDS}). Returns changed (whether the state differs), reason (state, comment or timeout) and the current review. On reason comment read the threads with list_comment_threads, reply, and wait again with the same state; on timeout call again. Many MCP clients give up on a request after 60 seconds: pass timeoutSeconds of 50 or less and call again while changed is false. Use it to wait for approval before implementing a plan: on changes_requested read the notes and threads, revise with publish_version, reply, and wait again; on approved continue, citing the approved version.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1104,7 +1125,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           (input.timeoutSeconds ?? WAIT_FOR_REVIEW_DEFAULT_SECONDS) * 1000,
         ),
       );
-      return textResult({ changed: out.changed, ...reviewPayload(out.view) });
+      return textResult({ changed: out.changed, reason: out.reason, ...reviewPayload(out.view) });
     },
   });
   mcp.registerTool({
