@@ -99,16 +99,17 @@ pane's own hints name it too.
 
 The pane reads only, with the caller's own access:
 
-| Pane feature         | MCP tool             | Scope         | What you see                                                                   |
-| -------------------- | -------------------- | ------------- | ------------------------------------------------------------------------------ |
-| Run list             | `list_runs`          | `agents:read` | All runs of agents you own, and the runs you started on agents shared with you |
-| Agent names, budgets | `list_agents`        | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
-| Run detail           | `get_run`            | `agents:read` | Runs you started, or of agents you own                                         |
-| Recent steps, Steps  | `get_run_steps`      | `agents:read` | Same as `get_run`                                                              |
-| Show full text, Copy | `get_run_text`       | `agents:read` | Same as `get_run`                                                              |
-| Continue locally     | `get_run_transcript` | `agents:read` | Same as `get_run`                                                              |
-| Agents tab, flows    | `list_agent_links`   | `agents:read` | Agents you can read, how they link and start (0.9.14 or later)                 |
-| Agents tab, Detail   | `get_agent`          | `agents:read` | An agent you can read                                                          |
+| Pane feature             | MCP tool                              | Scope         | What you see                                                                   |
+| ------------------------ | ------------------------------------- | ------------- | ------------------------------------------------------------------------------ |
+| Run list                 | `list_runs`                           | `agents:read` | All runs of agents you own, and the runs you started on agents shared with you |
+| Agent names, budgets     | `list_agents`                         | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
+| Run detail               | `get_run`                             | `agents:read` | Runs you started, or of agents you own                                         |
+| Recent steps, Steps      | `get_run_steps`                       | `agents:read` | Same as `get_run`                                                              |
+| Show full text, Copy     | `get_run_text`                        | `agents:read` | Same as `get_run`                                                              |
+| Continue locally         | `get_run_transcript`                  | `agents:read` | Same as `get_run`                                                              |
+| Agents tab, flows        | `list_agent_links`                    | `agents:read` | Agents you can read, how they link and start (0.9.14 or later)                 |
+| Agents tab, Detail       | `get_agent`                           | `agents:read` | An agent you can read                                                          |
+| Agents tab, older server | `list_subagents`, `list_repositories` | `agents:read` | Each agent's sub-agents and repositories, before 0.9.14                        |
 
 Under Claude Code's auto mode, a plugin's MCP calls go through the same safety
 check as any other, and calls the pane makes on its own timer are refused
@@ -116,7 +117,9 @@ unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
 `mcp__wardby__get_run`, `mcp__wardby__get_run_transcript`,
 `mcp__wardby__get_run_steps`, `mcp__wardby__get_run_text`,
-`mcp__wardby__list_agent_links` and `mcp__wardby__get_agent`. The pane never
+`mcp__wardby__list_agent_links`, `mcp__wardby__get_agent`,
+`mcp__wardby__list_subagents` and `mcp__wardby__list_repositories` (the last
+two only for the Agents tab on a server older than 0.9.14). The pane never
 calls `stop_run` or any other tool that changes something. When a call is
 refused, the pane says which rules to add.
 
@@ -153,7 +156,9 @@ buttons under the map open an agent. Under either come the flow's recent run
 chains and the agents that look related but have no link.
 
 The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
-server it reads each agent with `get_agent`, for up to 30 agents; with more it
+server it lists your agents with `list_agents` and reads each one's sub-agents
+and repositories with `list_subagents` and `list_repositories`, for up to 30
+agents; with more it
 shows "Drawing flows needs wardby 0.9.14 or later." See the `agent-flows` help
 article for how links are worked out.
 

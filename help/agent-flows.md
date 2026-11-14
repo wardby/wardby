@@ -20,7 +20,10 @@ you already have; there is nothing new to configure.
 | After merge | A coding agent that can write to a repository, and an agent with the `push` trigger on it                            |
 
 Each agent's entry points are listed too: `mention`, a Jira project with triggers, a schedule, a
-webhook, or `manual`. An agent's notes also name the MCP servers it uses (`mcp:<server>`) and the
+webhook, or `manual`. A reviewer or after-merge agent whose pull requests or merges come from
+people, not from a coding agent you can see, gets `pull_request:<repo>` or `push:<repo>` (for
+example `pull_request:github:your-org/your-repo`): it starts when a pull request is opened or a
+change is merged there. An agent's notes also name the MCP servers it uses (`mcp:<server>`) and the
 run hooks on it (`runHook:<event>`, or `runHook:all` for a hook with no event filter).
 
 Agents that only share a repository, with no trigger between them, are not joined into a flow. An
@@ -34,8 +37,10 @@ Detail tab and a Flow tab with the map. In the terminal the Flow tab is a tree. 
 [The Claude Code run pane](claude-code-run-pane.md). Allow `mcp__<server>__list_agent_links` and
 `mcp__<server>__get_agent` for it in auto mode.
 
-The tab needs wardby 0.9.14 or later on the server. On an older server it reads each agent on its
-own (up to 30 agents); with more, it shows "Drawing flows needs wardby 0.9.14 or later."
+The tab needs wardby 0.9.14 or later on the server. On an older server it lists your agents with
+`list_agents`, then calls `list_subagents` and `list_repositories` for each one (up to 30 agents;
+with more, it shows "Drawing flows needs wardby 0.9.14 or later."). Allow
+`mcp__<server>__list_subagents` and `mcp__<server>__list_repositories` too for that.
 
 ## With MCP
 

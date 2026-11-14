@@ -5,6 +5,7 @@
  * A sub-agent link to an agent the caller cannot read is counted in `hidden`, never named.
  */
 import { buildAgentFlows, type AgentLinkFacts, type SubAgentFact } from "../../core/agent-flows.js";
+import { stripControlSequences } from "../../core/run-steps/control-chars.js";
 import { agentAccessResolver, readableAgentsWhere } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -12,9 +13,10 @@ import { textResult } from "./text-result.js";
 
 const PROMPT_LINE_MAX = 200;
 
+/** The prompt's first non-blank line, without terminal control sequences (a reader may draw it in a terminal). */
 function firstLine(prompt: string): string {
   const line =
-    prompt
+    stripControlSequences(prompt)
       .split("\n")
       .map((l) => l.trim())
       .find((l) => l !== "") ?? "";

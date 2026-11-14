@@ -13,6 +13,8 @@ const db = createPrismaClient();
 const principalIds: string[] = [];
 const agentIds: string[] = [];
 const groupIds: string[] = [];
+const toolIds: string[] = [];
+const secretIds: string[] = [];
 const CANONICAL = "https://host/mcp";
 const tag = randomUUID().slice(0, 8);
 const REPO = `your-org/flows-${tag}`;
@@ -66,6 +68,13 @@ async function connect(who: Principal, admin = false) {
 }
 
 afterAll(async () => {
+  await db.runHook.deleteMany({ where: { agentId: { in: agentIds } } });
+  await db.agentTool.deleteMany({ where: { agentId: { in: agentIds } } });
+  await db.agentSecret.deleteMany({ where: { agentId: { in: agentIds } } });
+  await db.agentMcpServer.deleteMany({ where: { agentId: { in: agentIds } } });
+  await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
+  await db.tool.deleteMany({ where: { id: { in: toolIds } } });
+  await db.secret.deleteMany({ where: { id: { in: secretIds } } });
   await db.agentSubAgent.deleteMany({
     where: { OR: [{ parentAgentId: { in: agentIds } }, { childAgentId: { in: agentIds } }] },
   });
@@ -134,10 +143,78 @@ describe("list_agent_links", () => {
       },
     });
 
+    // A tool, a run hook, a bound secret and an MCP server on the lead, all with fake values.
+    const tool = await db.tool.create({
+      data: {
+        name: `notify-${tag}`,
+        description: "FAKE-TOOL-DESCRIPTION",
+        paramsZod: "z.object({})",
+        jsonSchema: {},
+        code: "return 'FAKE-TOOL-CODE';",
+        ownerId: me.id,
+      },
+    });
+    toolIds.push(tool.id);
+    await db.agentTool.create({
+      data: {
+        agentId: lead.id,
+        toolId: tool.id,
+        allowedSecrets: ["FAKE_TOOL_SECRET_NAME"],
+        allowedHosts: ["fake-tool-host.example"],
+      },
+    });
+    await db.runHook.createMany({
+      data: [
+        {
+          agentId: lead.id,
+          toolId: tool.id,
+          events: ["run_completed"],
+          config: { channel: "FAKE-HOOK-CONFIG" },
+          allowedSecrets: ["FAKE_HOOK_SECRET_NAME"],
+          allowedHosts: ["fake-hook-host.example"],
+          createdById: me.id,
+        },
+        { agentId: lead.id, toolId: tool.id, events: [], createdById: me.id },
+      ],
+    });
+    const secret = await db.secret.create({
+      data: { name: "FAKE_BOUND_SECRET_NAME", ciphertext: "FAKE-SECRET-CIPHERTEXT", keyId: "fake-key", ownerId: me.id },
+    });
+    secretIds.push(secret.id);
+    await db.agentSecret.create({ data: { agentId: lead.id, secretId: secret.id, boundName: "FAKE_BOUND_NAME" } });
+    const mcpServer = await db.mcpServer.create({
+      data: {
+        ownerId: me.id,
+        name: `docs-${tag}`,
+        url: "https://mcp.example/FAKE-MCP-URL-PATH",
+        secretNames: ["FAKE_MCP_SECRET_NAME"],
+      },
+    });
+    await db.agentMcpServer.create({
+      data: { agentId: lead.id, serverId: mcpServer.id, allowedTools: ["search"], attachedById: me.id },
+    });
+
     const call = await connect(me);
     const { text, value } = await call();
 
-    for (const fake of ["FAKE-WEBHOOK-SECRET-HASH", "FAKE-JQL-FILTER", "FAKE-ACCOUNT-ID", "FAKE-FIELD"])
+    for (const fake of [
+      "FAKE-WEBHOOK-SECRET-HASH",
+      "FAKE-JQL-FILTER",
+      "FAKE-ACCOUNT-ID",
+      "FAKE-FIELD",
+      "FAKE-TOOL-DESCRIPTION",
+      "FAKE-TOOL-CODE",
+      "FAKE_TOOL_SECRET_NAME",
+      "fake-tool-host.example",
+      "FAKE-HOOK-CONFIG",
+      "FAKE_HOOK_SECRET_NAME",
+      "fake-hook-host.example",
+      "FAKE_BOUND_SECRET_NAME",
+      "FAKE-SECRET-CIPHERTEXT",
+      "FAKE_BOUND_NAME",
+      "FAKE-MCP-URL-PATH",
+      "FAKE_MCP_SECRET_NAME",
+    ])
       expect(text).not.toContain(fake);
     expect(text).not.toContain(hiddenChild.id);
     expect(text).not.toContain("secret-child");
@@ -148,6 +225,7 @@ describe("list_agent_links", () => {
     expect(leadRow.entry).toEqual([`mention:github:${REPO}`, "jira:FLW", "webhook"]);
     expect(leadRow.budgetGroup).toEqual({ id: group.id, name: `Shop-${tag}` });
     expect(leadRow.access).toBe("owner");
+    expect(leadRow.notes).toEqual([`mcp:docs-${tag}`, "runHook:all", "runHook:run_completed"]);
 
     const flow = value.flows.find((f: { key: string }) => f.key === lead.id);
     expect(flow.name).toBe(REPO);
@@ -159,6 +237,16 @@ describe("list_agent_links", () => {
         { from: reviewer.id, to: lead.id, kind: "fixes", repository: `github:${REPO}`, label: "fix ≤2" },
       ]),
     );
+  });
+
+  it("strips terminal control sequences from the prompt's first line", async () => {
+    const me = await principal();
+    const a = await agent(me.id, "escapes", {
+      systemPrompt: "\x1b]8;;https://evil.example\x07Click\x1b]8;;\x07 \x1b[31mred\x1b[0m line\x07\r\nsecond",
+    });
+    const { value } = await (await connect(me))();
+    const row = value.agents.find((r: { id: string }) => r.id === a.id);
+    expect(row.promptFirstLine).toBe("Click red line");
   });
 
   it("refuses all: true without admin:view, and an admin sees every agent", async () => {
