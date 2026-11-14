@@ -240,6 +240,30 @@ describe("finalizing a history run from its result bundle (real git, #536)", { t
     expect(await git(f.fork, ["branch", "--list", "wardby/run-r1"])).toBe("");
   });
 
+  it.each([
+    ["the sandbox's npm config in a built-in excluded folder (.cache)", ".cache/npm/npmrc", {}],
+    ["a dependency folder at any depth (node_modules)", "pkg/node_modules/x/index.js", {}],
+    ["a path the agent's collectExclude names", "build/out/app.js", { collectExclude: ["build/out"] }],
+  ] satisfies [string, string, Partial<VcsPrepareInput>][])(
+    "refuses an agent commit that adds %s, a path no run ever collects",
+    async (_label, path, overrides) => {
+      const f = await fixture();
+      const prepared = await f.provider.prepareWorkspace(input(f, overrides));
+      const fakeToken = "rrg_FAKEregistrytoken0123456789abcdefFAKE";
+      // As `git add -A` does: the sandbox-only file is committed beside the agent's real change.
+      await agentCommit(
+        prepared,
+        { "b.txt": "b\n", [path]: `//proxy/registry/npm/:_authToken=${fakeToken}\n` },
+        "add b",
+      );
+      const resultBundle = await collect(f, prepared);
+      const error = await errorOf(f.provider.finalizeChanges(prepared, { resultBundle }));
+      expect(error.message).toBe("vcs_result_commit_unsafe");
+      expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(fakeToken);
+      expect(await git(f.fork, ["branch", "--list", "wardby/run-r1"])).toBe("");
+    },
+  );
+
   it("allows a protected path that only the upstream tip changed, brought in unchanged by a merge", async () => {
     const f = await fixture();
     const prepared = await f.provider.prepareWorkspace(input(f));

@@ -15,7 +15,7 @@ import {
 import type { Dirent } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
+import { gitExcludePathspecs, isCollectExcluded, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import {
   WARDBY_PROTECTED_PATHS,
   isProtectedPathException,
@@ -986,15 +986,20 @@ export class GitVcsProvider implements VcsProvider {
             maxChangedFiles: this.maxChangedFiles,
           })
         : undefined;
+    const exclusions = normalizeCollectExclusions(prepared.collectExclude);
+    // A path no run ever collects (dependency and cache folders, the agent's collectExclude) is
+    // never published from a commit either: the sandbox writes files there that are not the
+    // agent's work, its package manager config with the run's registry token among them.
+    if (imported?.agentPaths.some((path) => isCollectExcluded(path, exclusions))) {
+      throw new Error("vcs_result_commit_unsafe");
+    }
     const start = imported?.tip ?? historyBase;
     // The index starts at the start's tree, so excluded paths (never collected) keep the start's
     // version, and the staged diff is only what the agent left uncommitted.
     await this.gitFor(prepared, ["read-tree", start], { timeoutMs: TREE_STEP_TIMEOUT_MS });
-    await this.gitFor(
-      prepared,
-      ["add", "--all", "--", ":/", ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude))],
-      { timeoutMs: TREE_STEP_TIMEOUT_MS },
-    );
+    await this.gitFor(prepared, ["add", "--all", "--", ":/", ...gitExcludePathspecs(exclusions)], {
+      timeoutMs: TREE_STEP_TIMEOUT_MS,
+    });
     const staged = nullSeparated(
       (
         await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", start, "--"], {
