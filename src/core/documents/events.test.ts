@@ -4,6 +4,7 @@ import { DocumentEventSchema, notifyDocumentChange } from "./events.js";
 describe("document events", () => {
   it("accept ids and a kind only: any other field (content) is refused", () => {
     expect(DocumentEventSchema.safeParse({ documentId: "doc_1", kind: "comment" }).success).toBe(true);
+    expect(DocumentEventSchema.safeParse({ documentId: "doc_1", kind: "review" }).success).toBe(true);
     expect(DocumentEventSchema.safeParse({ documentId: "doc_1", kind: "comment", body: "hi" }).success).toBe(false);
     expect(DocumentEventSchema.safeParse({ documentId: "doc_1", kind: "title" }).success).toBe(false);
     expect(DocumentEventSchema.safeParse({ documentId: "a b", kind: "thread" }).success).toBe(false);

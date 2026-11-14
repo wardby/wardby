@@ -19,7 +19,7 @@ import { logger } from "../logger.js";
 
 export const DOCUMENTS_CHANNEL = "wardby_documents";
 
-export const DOCUMENT_EVENT_KINDS = ["thread", "comment", "version", "share"] as const;
+export const DOCUMENT_EVENT_KINDS = ["thread", "comment", "version", "share", "review"] as const;
 export type DocumentEventKind = (typeof DOCUMENT_EVENT_KINDS)[number];
 
 export const DocumentEventSchema = z

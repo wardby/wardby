@@ -65,6 +65,9 @@ const EXACT_STATUS: Record<string, number> = {
   export_failed: 502,
   export_renderer_unavailable: 503,
   export_format_unsupported: 400,
+  document_locked: 409,
+  document_review_state_invalid: 409,
+  document_review_forbidden: 403,
 };
 
 /** The HTTP status for a documents error code; undefined when it is not one. */

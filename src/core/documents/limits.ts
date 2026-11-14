@@ -8,3 +8,9 @@ export const MAX_CONTEXT_CHARS = 64;
  * backoff in withSerializableRetry six attempts span about half a second before a 409.
  */
 export const DOCUMENT_WRITE_ATTEMPTS = 6;
+/** Named reviewers per document (submit_for_review). */
+export const MAX_REVIEWERS = 50;
+/** A review note (verdict or force), the same cap as a comment; longer is comment_too_long. */
+export const MAX_REVIEW_NOTE_CHARS = MAX_COMMENT_CHARS;
+/** Review events returned with a document (newest first). */
+export const MAX_REVIEW_EVENTS = 20;

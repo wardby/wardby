@@ -24,6 +24,9 @@ const EXPECTED: Record<string, number> = {
   export_too_large: 413,
   export_failed: 502,
   export_renderer_unavailable: 503,
+  document_locked: 409,
+  document_review_forbidden: 403,
+  document_review_state_invalid: 409,
 };
 
 describe("send-to-agent and design error statuses", () => {
