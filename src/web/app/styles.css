@@ -929,3 +929,17 @@ img.ProseMirror-separator {
   align-items: center;
   margin: 0.2rem 0;
 }
+.rv-panel {
+  padding: 0.7rem 0.9rem;
+}
+.rv-form {
+  margin: 0.5rem 0;
+}
+.rv-form h3 {
+  margin: 0.25rem 0;
+  font-size: 0.95rem;
+}
+.rv-form .rv-pick select {
+  flex: 1;
+  min-width: 0;
+}

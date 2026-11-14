@@ -119,6 +119,7 @@ export class ReviewPanel {
     const r = this.review;
     const { panel } = this.host;
     clear(panel);
+    panel.classList.add("rv-panel");
     panel.append(
       h(
         "div",
@@ -277,26 +278,30 @@ export class ReviewPanel {
     form.append(h("label", { class: "rv-pick" }, "Final approver (optional) ", select));
     form.append(
       h(
-        "button",
-        {
-          type: "button",
-          class: "primary",
-          disabled: this.busy || this.picked.size === 0,
-          onClick: () =>
-            void this.act({ action: "submit", reviewers: [...this.picked], finalApproverId: this.approver || null }),
-        },
-        this.review.state === "draft" ? "Submit for review" : "Save reviewers",
-      ),
-      h(
-        "button",
-        {
-          type: "button",
-          onClick: () => {
-            this.form = "none";
-            this.render();
+        "div",
+        { class: "rv-actions" },
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            disabled: this.busy || this.picked.size === 0,
+            onClick: () =>
+              void this.act({ action: "submit", reviewers: [...this.picked], finalApproverId: this.approver || null }),
           },
-        },
-        "Cancel",
+          this.review.state === "draft" ? "Submit for review" : "Save reviewers",
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: () => {
+              this.form = "none";
+              this.render();
+            },
+          },
+          "Cancel",
+        ),
       ),
     );
     return form;
@@ -330,17 +335,21 @@ export class ReviewPanel {
     );
     form.append(
       note,
-      confirm,
       h(
-        "button",
-        {
-          type: "button",
-          onClick: () => {
-            this.form = "none";
-            this.render();
+        "div",
+        { class: "rv-actions" },
+        confirm,
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: () => {
+              this.form = "none";
+              this.render();
+            },
           },
-        },
-        "Cancel",
+          "Cancel",
+        ),
       ),
     );
     return form;
