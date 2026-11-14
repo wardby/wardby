@@ -202,8 +202,8 @@ counting. A reviewer's verdict names the version they read
 (`review_document` takes `versionNumber`); if a newer version was published
 first it is refused with `document_version_conflict`, and the page offers
 **Review vN** to see what changed. A reviewer is offered only the verdict they
-have not already given on the current version (on an approved document, only
-**Request changes on vN**); repeating a verdict changes nothing and records no
+have not already given on the current version (on a document every reviewer
+approved, only **Request changes on vN**; on a force approval, nothing); repeating a verdict changes nothing and records no
 event.
 
 - **Force approve**: the owner or the final approver approves the current
@@ -212,8 +212,10 @@ event.
   changes requested.
 - **Reopen**: a writer reopens an approved document (back to in review). Every
   reviewer then reviews again, even for the same version. A named reviewer can
-  also request changes on an approved document, which moves it to changes
-  requested and unlocks it.
+  also request changes on a document every reviewer approved, which moves it to
+  changes requested and unlocks it. A force approval is final: reviewers cannot
+  change it (`review_document` is refused with `document_review_state_invalid`),
+  and a writer reopens it for review.
 - **Archive**: the owner archives and unarchives; unarchive returns the state it
   had before.
 - **The lock**: an approved or archived document takes no new version by any

@@ -1015,7 +1015,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "review_document",
     scope: "documents:write",
     description:
-      "Gives your verdict as a named reviewer: approve or request_changes, on versionNumber (required: the version you read). If a newer version was published it is refused with document_version_conflict naming the current version: read it with get_document and review again. note is optional (stored redacted, returned as untrusted text). Approved when every reviewer approved the current version. Repeating the verdict you already gave on the current version changes nothing (a new note with it is not stored).",
+      "Gives your verdict as a named reviewer: approve or request_changes, on versionNumber (required: the version you read). If a newer version was published it is refused with document_version_conflict naming the current version: read it with get_document and review again. note is optional (stored redacted, returned as untrusted text). Approved when every reviewer approved the current version. Repeating the verdict you already gave on the current version changes nothing (a new note with it is not stored). A force approval is final: on a document the owner or final approver force approved, this is refused with document_review_state_invalid (a writer reopens it for review).",
     inputSchema: {
       type: "object",
       properties: {

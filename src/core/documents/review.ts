@@ -30,6 +30,7 @@ import {
   approvedCount,
   computeReviewState,
   countsNow,
+  forceCounts,
   isLocked,
   isReviewState,
   overriddenReviewerIds,
@@ -338,6 +339,8 @@ export async function reviewDocument(
     );
     if (!mine) throw new Error("document_review_forbidden");
     if (!REVIEWABLE.has(row.reviewState)) invalid();
+    // A force approval is final: only a writer's reopen takes the document back to review.
+    if (row.reviewState === "approved" && forceCounts(rule)) invalid();
     if (input.versionNumber !== rule.currentVersion) throw new ReviewVersionConflictError(rule.currentVersion);
     // A repeat of the verdict that counts now changes nothing: no row update, no event (a new note is dropped).
     const counted = rule.reviewers.find((r) => r.id === mine.id);
@@ -595,7 +598,11 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
     })),
     can: {
       submit: owner && SUBMITTABLE.has(state),
-      review: listed && REVIEWABLE.has(state) && atLeast("document", access, "comment"),
+      review:
+        listed &&
+        REVIEWABLE.has(state) &&
+        !(state === "approved" && forceCounts(rule)) &&
+        atLeast("document", access, "comment"),
       force:
         FORCEABLE.has(state) &&
         (owner ||

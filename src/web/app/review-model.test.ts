@@ -141,6 +141,14 @@ describe("review model", () => {
       expect(at("approved", "changes_requested")).toEqual({ ...none, status: "You requested changes on v4" });
     });
 
+    it("a forced approval is final: no buttons, the status line stays", () => {
+      const forced = (mine: "none" | "approved" | "changes_requested") =>
+        verdictControls({ state: "approved", mine, read: 4, current: 4, raced: false, forced: true });
+      expect(forced("none")).toEqual(none);
+      expect(forced("approved")).toEqual({ ...none, status: "You approved v4" });
+      expect(forced("changes_requested")).toEqual({ ...none, status: "You requested changes on v4" });
+    });
+
     it("draft and archived take no verdict", () => {
       for (const state of ["draft", "archived"] as const) {
         for (const mine of ["none", "approved", "changes_requested"] as const) expect(at(state, mine)).toEqual(none);

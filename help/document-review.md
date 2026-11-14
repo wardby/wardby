@@ -38,7 +38,7 @@ A reviewer approves or requests changes on the version they read, with an option
 
 A reviewer is offered only the verdict they have not already given on the current version. With no verdict yet, they see **Approve** and **Request changes**. After approving, they see "You approved vN" and only **Request changes**; after requesting changes, "You requested changes on vN" and only **Approve**. Giving the same verdict again (for example `review_document` with `approve` twice) changes nothing: no event is recorded and a new note sent with it is not stored. A verdict from before a reopen does not count, so the same verdict after the reopen is recorded.
 
-A named reviewer can also request changes on an approved document: the Review tab offers only **Request changes on vN** (no Approve). It moves the document to Changes requested and unlocks it, so a new version can be published.
+A named reviewer can also request changes on a document every reviewer approved: the Review tab offers only **Request changes on vN** (no Approve). It moves the document to Changes requested and unlocks it, so a new version can be published. A force approval is final: reviewers are offered no verdict on it, `review_document` is refused with `document_review_state_invalid`, and a writer reopens the document for review.
 
 **Force approve**: while the document is in review or has changes requested, the owner or the final approver approves the current version over missing verdicts and requested changes. A note is required, and the history records who was overridden.
 

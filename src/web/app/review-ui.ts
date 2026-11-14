@@ -187,6 +187,7 @@ export class ReviewPanel {
       read: this.read,
       current: r.currentVersion,
       raced: this.raced !== null,
+      forced: r.forced !== null,
     });
     if (c.status) box.append(h("div", { class: "rv-mine", role: "status" }, c.status));
     if (!c.review && !c.approve && !c.changes) return box;

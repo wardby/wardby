@@ -70,8 +70,11 @@ export function reviewerCounts(r: RuleReviewer, input: RuleInput): boolean {
   return countsNow({ versionNumber: r.versionNumber, at: r.verdictAt }, input);
 }
 
+/** A force approval counts now: it decides the state, and no reviewer verdict can change it. */
+export const forceCounts = (input: RuleInput): boolean => countsNow(input.force, input);
+
 export function computeReviewState(input: RuleInput): ComputedState {
-  if (countsNow(input.force, input)) return "approved";
+  if (forceCounts(input)) return "approved";
   const current = input.reviewers.filter((r) => reviewerCounts(r, input));
   if (current.some((r) => r.verdict === "changes_requested")) return "changes_requested";
   if (

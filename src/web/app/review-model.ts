@@ -57,7 +57,8 @@ export const myCurrentVerdict = (r: ReviewPayload): MyVerdict =>
 
 /**
  * What a reviewer is offered, as labels (null: not shown). `review` ("Review vN") replaces everything
- * while a newer version than the one read is current. Approved: only Request changes. In review or
+ * while a newer version than the one read is current. Approved: only Request changes, unless a force
+ * approval made it (final: no buttons). In review or
  * changes requested: the verdict the viewer has not already given on the current version, with a
  * status line for the one they have. A repeat verdict would change nothing, so it is never offered.
  */
@@ -74,12 +75,15 @@ export function verdictControls(i: {
   read: number;
   current: number;
   raced: boolean;
+  /** The approval is a force approval, which is final: no verdict is offered. */
+  forced?: boolean;
 }): VerdictControls {
   const out: VerdictControls = { review: null, status: null, approve: null, changes: null };
   if (i.state !== "in_review" && i.state !== "changes_requested" && i.state !== "approved") return out;
   if (i.current !== i.read && !i.raced) return { ...out, review: `Review v${i.current}` };
   if (i.mine === "approved") out.status = `You approved v${i.current}`;
   if (i.mine === "changes_requested") out.status = `You requested changes on v${i.current}`;
+  if (i.forced && i.state === "approved") return out;
   const labels = verdictLabels(i.read, i.raced || i.state === "approved");
   if (i.state !== "approved" && i.mine !== "approved") out.approve = labels.approve;
   if (i.mine !== "changes_requested") out.changes = labels.changes;

@@ -484,6 +484,34 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(view.forced?.notes).toEqual(["Ann Reviewer had not reviewed v1"]);
   });
 
+  it("a force approval is final: a reviewer cannot request changes, and can.review is false", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Ship" });
+    await expect(
+      reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 }),
+    ).rejects.toThrow("document_review_state_invalid");
+    expect(await stateOf(id)).toBe("approved");
+    expect((await getReviewView(db, id, as(ann))).can.review).toBe(false);
+    // A writer reopens it for review.
+    expect((await reopenDocument(db, { documentId: id, viewer: as(owner) })).state).toBe("in_review");
+  });
+
+  it("an approval by every reviewer is not final: a reviewer may still request changes, which unlocks it", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    expect(await stateOf(id)).toBe("approved");
+    expect((await getReviewView(db, id, as(ann))).can.review).toBe(true);
+    const view = await reviewDocument(db, cipher, {
+      documentId: id,
+      viewer: as(ann),
+      verdict: "request_changes",
+      versionNumber: 1,
+    });
+    expect(view.state).toBe("changes_requested");
+  });
+
   it("archive and unarchive (owner only) return to the state before", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
