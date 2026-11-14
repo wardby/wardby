@@ -886,6 +886,8 @@ test("the desktop Flow tab draws an SVG map with node buttons", async ($, on) =>
   expect(source).toContain('stroke="#a8a29e"');
   expect(source).toContain("fix ≤2");
   expect(source).toContain("@mention your-org/mobile");
+  // A delegation's bound name is written once, inside the box it hands to.
+  expect(source.match(/⇢ build/g)).toHaveLength(1);
   expect(source).not.toMatch(/workflow/i);
   for (const id of ["d", "b", "v"]) expect(await ui.find({ key: `node-${id}` })).toBeDefined();
   await ui.press({ key: "node-b" });

@@ -433,6 +433,17 @@ function entryLine(entry: string): string {
   return entryLabel(entry);
 }
 
+/** An agent's entry points on one line for the map: several mentions read as a count of repositories. */
+function entryText(agent: LinkAgent): string {
+  const mentions = agent.entry.filter((entry) => entry.startsWith("mention:"));
+  const rest = agent.entry.filter((entry) => !entry.startsWith("mention:"));
+  const parts = [
+    ...(mentions.length > 1 ? [`@mention · ${mentions.length} repositories`] : mentions.map(entryLine)),
+    ...rest.map(entryLine),
+  ];
+  return parts.join(" · ") || "▶ manual";
+}
+
 /** One line of the terminal's Flow tree: its depth, the agent it names (null for an entry or an event). */
 type TreeLine = { depth: number; agentId: string | null; text: string; ref?: boolean };
 // The order an agent's links are walked in the tree: hand-offs first, the loop back last.
@@ -492,6 +503,8 @@ type MapNode = {
   id: string;
   kind: "agent" | "event" | "entry";
   label: string;
+  /** The names a lead hands to this agent by (its delegation's bound name), written in its box. */
+  tag?: string;
   x: number;
   y: number;
   w: number;
@@ -535,7 +548,7 @@ function flowMap(
   for (const id of members) nodes.set(id, { kind: "agent", label: byId.get(id)!.name });
   for (const id of flow.entryAgentIds.filter((id) => inFlow.has(id))) {
     const entry = `entry:${id}`;
-    nodes.set(entry, { kind: "entry", label: byId.get(id)!.entry.map(entryLine).join(" · ") || "▶ manual" });
+    nodes.set(entry, { kind: "entry", label: entryText(byId.get(id)!) });
     row.set(entry, 0);
     row.set(id, 1);
     addEdge({ from: entry, to: id, dashed: false, label: null });
@@ -580,25 +593,49 @@ function flowMap(
   const rows: string[][] = [];
   for (const [id, r] of row) (rows[r] ??= []).push(id);
   const placed: MapNode[] = [];
-  const heightOf = (kind: MapNode["kind"]) => (kind === "agent" ? 50 : 28);
+  const tags = new Map<string, string>();
+  for (const edge of links)
+    if (edge.kind === "delegates" && edge.label) {
+      const had = tags.get(edge.to);
+      const names = had ? had.slice(2).split(" · ") : [];
+      if (!names.includes(edge.label)) tags.set(edge.to, `⇢ ${[...names, edge.label].join(" · ")}`);
+    }
+  const heightOf = (id: string) => (nodes.get(id)!.kind !== "agent" ? 28 : tags.has(id) ? 64 : 50);
   const widthOf = (id: string) => {
     const { kind, label } = nodes.get(id)!;
-    return nodeWidth(label, kind === "agent" ? detail(id) : "");
+    return Math.max(nodeWidth(label, kind === "agent" ? detail(id) : ""), nodeWidth("", tags.get(id) ?? ""));
   };
   const rowWidth = (ids: string[]) =>
     ids.reduce((sum, id) => sum + widthOf(id), 0) + MAP_COL_GAP * Math.max(0, ids.length - 1);
   const used = rows.filter((ids) => ids && ids.length > 0);
   const inner = Math.max(0, ...used.map(rowWidth));
+  // Each row under its parents: ordered by the mean centre of the nodes above that lead into it (fix
+  // rounds, which loop back up, do not count), so arrows cross as little as they can; then by name.
+  const centre = new Map<string, number>();
+  const byName = (a: string, b: string) => nodes.get(a)!.label.localeCompare(nodes.get(b)!.label) || a.localeCompare(b);
+  const pull = (id: string): number | null => {
+    const above = edges.filter((e) => e.to === id && centre.has(e.from)).map((e) => centre.get(e.from)!);
+    return above.length === 0 ? null : above.reduce((sum, x) => sum + x, 0) / above.length;
+  };
   let y = MAP_PAD;
   for (const ids of used) {
-    ids.sort((a, b) => nodes.get(a)!.label.localeCompare(nodes.get(b)!.label) || a.localeCompare(b));
-    const tall = Math.max(...ids.map((id) => heightOf(nodes.get(id)!.kind)));
+    const keys = new Map(ids.map((id) => [id, pull(id)]));
+    ids.sort((a, b) => {
+      const ka = keys.get(a) ?? null;
+      const kb = keys.get(b) ?? null;
+      if (ka !== null && kb !== null && ka !== kb) return ka - kb;
+      if ((ka === null) !== (kb === null)) return ka === null ? 1 : -1;
+      return byName(a, b);
+    });
+    const tall = Math.max(...ids.map(heightOf));
     let x = MAP_PAD + (inner - rowWidth(ids)) / 2;
     for (const id of ids) {
       const { kind, label } = nodes.get(id)!;
       const w = widthOf(id);
-      const h = heightOf(kind);
-      placed.push({ id, kind, label, x, y: y + (tall - h) / 2, w, h });
+      const h = heightOf(id);
+      const tag = tags.get(id);
+      placed.push({ id, kind, label, ...(tag ? { tag } : {}), x, y: y + (tall - h) / 2, w, h });
+      centre.set(id, x + w / 2);
       x += w + MAP_COL_GAP;
     }
     y += tall + MAP_ROW_GAP;
@@ -634,6 +671,30 @@ function flowMapSvg(
   const parts: string[] = [
     `<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="${EVENT_STROKE}" /></marker></defs>`,
   ];
+  // Straight arrows leave a box's bottom and enter a box's top at points spread across its width, in the
+  // order of the box at the other end, so they neither meet in one point nor cross at the box. A box a fix
+  // round loops back into keeps its right quarter for that loop.
+  const isDown = (edge: MapEdge) => {
+    const a = at.get(edge.from);
+    const b = at.get(edge.to);
+    return !!a && !!b && b.y > a.y;
+  };
+  const midX = (id: string) => {
+    const node = at.get(id)!;
+    return node.x + node.w / 2;
+  };
+  const port = (node: MapNode, list: string[], id: string, hasLoop: boolean) => {
+    const span = hasLoop ? node.w * 0.66 : node.w;
+    return node.x + (span * (list.indexOf(id) + 1)) / (list.length + 1);
+  };
+  const ins = new Map<string, string[]>();
+  const outs = new Map<string, string[]>();
+  for (const edge of map.edges.filter(isDown)) {
+    (ins.get(edge.to) ?? ins.set(edge.to, []).get(edge.to)!).push(edge.from);
+    (outs.get(edge.from) ?? outs.set(edge.from, []).get(edge.from)!).push(edge.to);
+  }
+  for (const list of [...ins.values(), ...outs.values()]) list.sort((p, q) => midX(p) - midX(q));
+  const loopsInto = new Set(map.edges.filter((edge) => !isDown(edge)).map((edge) => edge.to));
   for (const edge of map.edges) {
     const a = at.get(edge.from);
     const b = at.get(edge.to);
@@ -647,9 +708,11 @@ function flowMapSvg(
       const sy = a.y + a.h / 2;
       const tx = b.x + (b.w * 3) / 4;
       const top = b.y - 22;
-      const bend = map.width - MAP_PAD;
+      // Square to the right margin (clear of every box), up it, across over the target and down.
+      const bend = map.width - MAP_PAD - 8;
+      const r = 10;
       parts.push(
-        `<path d="M${sx},${sy} C${bend},${sy} ${bend},${top} ${(bend + tx) / 2},${top} Q${tx},${top} ${tx},${b.y - 2}" ${line} />`,
+        `<path d="M${sx},${sy} L${bend - r},${sy} Q${bend},${sy} ${bend},${sy - r} L${bend},${top + r} Q${bend},${top} ${bend - r},${top} L${tx + r},${top} Q${tx},${top} ${tx},${top + r} L${tx},${b.y - 2}" ${line} />`,
       );
       if (edge.label)
         parts.push(
@@ -657,16 +720,13 @@ function flowMapSvg(
         );
       continue;
     }
-    const sx = a.x + a.w / 2;
+    const sx = port(a, outs.get(a.id) ?? [a.id], b.id, false);
     const sy = a.y + a.h;
-    const tx = b.x + b.w / 2;
+    const tx = port(b, ins.get(b.id) ?? [b.id], a.id, loopsInto.has(b.id));
     const ty = b.y - 2;
     parts.push(`<path d="M${sx},${sy} L${tx},${ty}" ${line} />`);
-    if (edge.label)
-      parts.push(
-        `<text x="${(sx + tx) / 2 + 4}" y="${(sy + ty) / 2 + 3}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
-      );
   }
+
   for (const node of map.nodes) {
     const cx = node.x + node.w / 2;
     if (node.kind === "entry") {
@@ -692,8 +752,13 @@ function flowMapSvg(
       );
     group.push(
       `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="7" fill="${colour}2a" stroke="${stroke}" stroke-width="${isSelected ? 2 : 1}" />`,
-      `<text x="${cx}" y="${node.y + 21}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
-      `<text x="${cx}" y="${node.y + 38}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
+      ...(node.tag
+        ? [
+            `<text x="${cx}" y="${node.y + 17}" text-anchor="middle" font-size="10" font-style="italic" fill="${EVENT_STROKE}" ${font}>${svgText(node.tag)}</text>`,
+          ]
+        : []),
+      `<text x="${cx}" y="${node.y + (node.tag ? 35 : 21)}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
+      `<text x="${cx}" y="${node.y + (node.tag ? 52 : 38)}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
     );
     parts.push(isSelected || opts.dimOthers === false ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
   }
