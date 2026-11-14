@@ -8,8 +8,8 @@ finished Claude Code run in your own terminal.
 The plugin lives in this repository under `plugins/claude-code/`, and the
 repository is its marketplace (`.claude-plugin/marketplace.json`). It talks only
 to the wardby MCP server your Claude Code session already has, through
-`list_runs`, `list_agents`, `get_run`, `get_run_steps`, `get_run_text` and
-`get_run_transcript`, so it shows exactly what those tools show you and needs no
+`list_runs`, `list_agents`, `get_run`, `get_run_steps`, `get_run_text`,
+`get_run_transcript`, `list_agent_links` and `get_agent`, so it shows exactly what those tools show you and needs no
 token of its own.
 
 Against a server older than 0.8.0, which can't list runs across agents, the pane
@@ -99,21 +99,27 @@ pane's own hints name it too.
 
 The pane reads only, with the caller's own access:
 
-| Pane feature         | MCP tool             | Scope         | What you see                                                                   |
-| -------------------- | -------------------- | ------------- | ------------------------------------------------------------------------------ |
-| Run list             | `list_runs`          | `agents:read` | All runs of agents you own, and the runs you started on agents shared with you |
-| Agent names, budgets | `list_agents`        | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
-| Run detail           | `get_run`            | `agents:read` | Runs you started, or of agents you own                                         |
-| Recent steps, Steps  | `get_run_steps`      | `agents:read` | Same as `get_run`                                                              |
-| Show full text, Copy | `get_run_text`       | `agents:read` | Same as `get_run`                                                              |
-| Continue locally     | `get_run_transcript` | `agents:read` | Same as `get_run`                                                              |
+| Pane feature             | MCP tool                              | Scope         | What you see                                                                   |
+| ------------------------ | ------------------------------------- | ------------- | ------------------------------------------------------------------------------ |
+| Run list                 | `list_runs`                           | `agents:read` | All runs of agents you own, and the runs you started on agents shared with you |
+| Agent names, budgets     | `list_agents`                         | `agents:read` | Agents you can see (the pane asks for `summary: true`)                         |
+| Run detail               | `get_run`                             | `agents:read` | Runs you started, or of agents you own                                         |
+| Recent steps, Steps      | `get_run_steps`                       | `agents:read` | Same as `get_run`                                                              |
+| Show full text, Copy     | `get_run_text`                        | `agents:read` | Same as `get_run`                                                              |
+| Continue locally         | `get_run_transcript`                  | `agents:read` | Same as `get_run`                                                              |
+| Agents tab, flows        | `list_agent_links`                    | `agents:read` | Agents you can read, how they link and start (0.9.14 or later)                 |
+| Agents tab, Detail       | `get_agent`                           | `agents:read` | An agent you can read                                                          |
+| Agents tab, older server | `list_subagents`, `list_repositories` | `agents:read` | Each agent's sub-agents and repositories, before 0.9.14                        |
 
 Under Claude Code's auto mode, a plugin's MCP calls go through the same safety
 check as any other, and calls the pane makes on its own timer are refused
 unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
 `mcp__wardby__get_run`, `mcp__wardby__get_run_transcript`,
-`mcp__wardby__get_run_steps` and `mcp__wardby__get_run_text`. The pane never
+`mcp__wardby__get_run_steps`, `mcp__wardby__get_run_text`,
+`mcp__wardby__list_agent_links`, `mcp__wardby__get_agent`,
+`mcp__wardby__list_subagents` and `mcp__wardby__list_repositories` (the last
+two only for the Agents tab on a server older than 0.9.14). The pane never
 calls `stop_run` or any other tool that changes something. When a call is
 refused, the pane says which rules to add.
 
@@ -137,6 +143,34 @@ repository only: a resumed session maps just `/workspace`. The pane lists each
 other repository of the run with its branch (or, for a read-only one, its
 commit) and a `git clone` line to copy.
 
+## Agents tab
+
+The **Agents** tab shows how your agents work together. The list is grouped by
+flow (agents that hand work to each other through sub-agents, pull request
+review, fix rounds, after-merge runs or Jira ticket statuses), with agents that share a repository
+or budget group but no trigger shown separately as related. Pick an agent for
+its **Detail** tab (settings, entry points, notes) and its **Flow** tab (the
+map of what it receives from and hands to). In the terminal the Flow tab is a
+tree: j and k move between its agents and o opens one. On the desktop, the
+buttons under the map open an agent. A Jira status that starts an agent is a
+pill on the map ("status: Plan review"); a status only a person sets, such as
+an approval column, is drawn in gold as "<status> · person". Under either come the flow's recent run
+chains and the agents that look related but have no link.
+
+**Open larger** on the desktop (w in the terminal) opens the flow's map in your
+browser at full size, with its agents and recent runs. The pane writes the page
+to a `wardby-flows` folder in your temporary folder and opens it with `open`
+(macOS), `xdg-open` (Linux) or `start` (Windows); if no browser starts, a
+message gives the file's path. The page is a snapshot: press the button again
+for fresh numbers.
+
+The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
+server it lists your agents with `list_agents` and reads each one's sub-agents
+and repositories with `list_subagents` and `list_repositories`, for up to 30
+agents; with more it
+shows "Drawing flows needs wardby 0.9.14 or later." See the `agent-flows` help
+article for how links are worked out.
+
 ## Using the pane
 
 - **Ledger** (desktop): runs grouped by pull request (or Jira issue), each group
@@ -150,7 +184,9 @@ commit) and a `git clone` line to copy.
 - **Strips** (desktop): one card per pull request, its steps drawn as a row of
   dots; click a step's name to see it.
 - **Filters**: show all, active, failed or finished runs, or type to match an
-  agent, status, trigger or task.
+  agent, status, trigger or task. Commas separate terms that each match
+  (`builder, reviewer`); **Open in Runs →** on a Flow tab fills in the flow's
+  agents this way.
 - **Run detail**: a header with the run's status, short id, repository, model,
   duration and budget bar, then a card each for what started the run (with its
   request), what it produced, the run tree, services (ready, starting or
