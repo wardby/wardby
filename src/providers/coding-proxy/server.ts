@@ -28,7 +28,8 @@ export function logProxyAudit(event: ProxyAuditEvent, sink: Pick<typeof proxyLog
 export interface CodingProxyServerConfig {
   host: string;
   port: number;
-  expectedHost?: string;
+  /** Exact `Host` values accepted (DNS-rebinding guard); absent means no check. */
+  expectedHosts?: string[];
   registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan" | "refusals">>;
   /** The dependency cache (`/cache/...`); absent when the deployment has it off. */
   dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
@@ -200,7 +201,7 @@ export async function startCodingProxyServer(
       }
     });
     void (async () => {
-      if (config.expectedHost && request.headers.host !== config.expectedHost) {
+      if (config.expectedHosts && !config.expectedHosts.includes(request.headers.host ?? "")) {
         closeIfBodyUnread(request, response);
         sendError(response, 403, "invalid_host");
         return;

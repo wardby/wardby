@@ -51,7 +51,7 @@ describe("configured coding proxy runtime", () => {
       expect.objectContaining({
         host: "0.0.0.0",
         port: CODING_PROXY_PORT,
-        expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+        expectedHosts: [`${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`],
         registry: expect.any(RegistryService),
       }),
     );
@@ -154,8 +154,15 @@ describe("configured coding proxy runtime", () => {
       ...blob,
       SUBSTRATE_ATESPACE: "wardby-runs",
       SUBSTRATE_ACTOR_JWT_ISSUER: "https://idp.example.invalid",
+      SUBSTRATE_PROXY_HOST: "coding-proxy.example.svc.cluster.local",
     };
     expect(typeof (await substrateOf(on)).substrate).toBe("function");
+    const hostsOf = async (env: NodeJS.ProcessEnv) =>
+      ((await substrateOf(env)) as unknown as { expectedHosts: string[] }).expectedHosts;
+    expect(await hostsOf(base)).toEqual(["wardby-proxy:8787"]);
+    expect(await hostsOf(on)).toEqual(["wardby-proxy:8787", "coding-proxy.example.svc.cluster.local:8787"]);
+    for (const bad of ["", "http://proxy.example", "proxy.example:8787", "proxy.example/x", "a b"])
+      await expect(substrateOf({ ...on, SUBSTRATE_PROXY_HOST: bad })).rejects.toThrow("SUBSTRATE_PROXY_HOST");
     await expect(substrateOf({ ...on, SUBSTRATE_ACTOR_JWT_ISSUER: "" })).rejects.toThrow(
       "SUBSTRATE_ACTOR_JWT_ISSUER is required",
     );

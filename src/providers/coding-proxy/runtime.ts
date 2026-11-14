@@ -129,6 +129,8 @@ export function loadRunStepsUrl(env: NodeJS.ProcessEnv): string | undefined {
 
 export interface SubstrateProxyConfig {
   atespace: string;
+  /** Hostname actors use to reach this proxy (SUBSTRATE_PROXY_HOST). */
+  proxyHost: string;
   issuer: string;
   jwksUrl: URL;
   blobStore: BlobStoreConfig;
@@ -154,8 +156,13 @@ export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxy
   }
   const blobStore = loadBlobStoreConfig(env);
   if (!blobStore) throw new Error("BLOB_STORE is required when SUBSTRATE_ATESPACE is set");
+  const proxyHost = env.SUBSTRATE_PROXY_HOST?.trim() ?? "";
+  if (!proxyHost) throw new Error("SUBSTRATE_PROXY_HOST is required when SUBSTRATE_ATESPACE is set");
+  if (!/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(proxyHost))
+    throw new Error("SUBSTRATE_PROXY_HOST must be a bare hostname (no scheme, port, or path)");
   return {
     atespace,
+    proxyHost,
     issuer,
     jwksUrl,
     blobStore,
@@ -327,7 +334,10 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     server = await startServer(proxy, {
       host: "0.0.0.0",
       port: CODING_PROXY_PORT,
-      expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+      expectedHosts: [
+        `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+        ...(substrateConfig ? [`${substrateConfig.proxyHost}:${CODING_PROXY_PORT}`] : []),
+      ],
       registry,
       ...(dependencyCache ? { dependencyCache } : {}),
       mcp: createMcpRoute({ ledger, gatewayUrl: mcpGatewayUrl }),

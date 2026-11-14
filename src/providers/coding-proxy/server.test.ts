@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createServer, type Server } from "node:http";
+import http, { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { createMcpRoute } from "./mcp-route.js";
@@ -326,7 +326,6 @@ describe("coding proxy registry routing", () => {
     const server = await startCodingProxyServer(fakeProxy(), {
       host: "127.0.0.1",
       port: 0,
-      expectedHost: undefined,
       registry,
     });
     const base = `http://127.0.0.1:${server.port}/registry`;
@@ -441,12 +440,62 @@ describe("coding proxy registry routing", () => {
     const server = await startCodingProxyServer(fakeProxy(), {
       host: "127.0.0.1",
       port: 0,
-      expectedHost: "wardby-proxy:8787",
+      expectedHosts: ["wardby-proxy:8787"],
       registry,
     });
     const response = await fetch(`http://127.0.0.1:${server.port}/registry/npm/react`);
     expect(response.status).toBe(403);
     await server.close();
+  });
+
+  it("accepts any exactly listed host and rejects the rest", async () => {
+    const registry = {
+      handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
+    };
+    const hosts = ["wardby-proxy:8787", "coding-proxy.example.svc.cluster.local:8787"];
+    const server = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHosts: hosts,
+      registry,
+    });
+    const status = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port: server.port, path: "/registry/npm/react", headers: { host } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    expect(await status("coding-proxy.example.svc.cluster.local:8787")).toBe(200);
+    expect(await status("wardby-proxy:8787")).toBe(200);
+    expect(await status("coding-proxy.example.svc.cluster.local:9999")).toBe(403);
+    expect(await status("evil.example:8787")).toBe(403);
+    await server.close();
+    const only = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHosts: [hosts[0]],
+      registry,
+    });
+    expect(
+      await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port: only.port, path: "/registry/npm/react", headers: { host: hosts[1] } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      }),
+    ).toBe(403);
+    await only.close();
   });
 
   it("returns 404 for /registry/ when no registry is configured", async () => {
@@ -472,7 +521,6 @@ describe("coding proxy registry routing", () => {
     const server = await startCodingProxyServer(fakeProxy(), {
       host: "127.0.0.1",
       port: 0,
-      expectedHost: undefined,
       registry,
     });
     // The failure can surface either as the fetch() call itself rejecting
