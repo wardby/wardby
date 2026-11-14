@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../../core/db.js";
 import { PrismaRelayStore } from "./prisma-relay-store.js";
 import { relayStoreContract } from "./relay-store-contract.js";
-import { createSubstrateRunFixture } from "./substrate-fixture.js";
+import { createSubstrateRunFixture } from "./substrate-fixture.test-support.js";
 
 const db = createPrismaClient();
 const fixtures: string[] = [];

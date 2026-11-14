@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../../core/db.js";
-import { createSubstrateRunFixture } from "../../coding-proxy/substrate/substrate-fixture.js";
+import { createSubstrateRunFixture } from "../../coding-proxy/substrate/substrate-fixture.test-support.js";
 import { PrismaSubstrateRunStore } from "./run-store.js";
 
 const db = createPrismaClient();

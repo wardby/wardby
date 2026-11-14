@@ -18,6 +18,14 @@ export class RelayUnknownError extends Error {
   }
 }
 
+/** A transient store failure (for example a transaction timeout under lock contention): retry shortly. */
+export class RelayBusyError extends Error {
+  readonly code = "relay_busy";
+  constructor() {
+    super("relay_busy");
+  }
+}
+
 /** Default cap on undelivered relay line text per run. */
 export const DEFAULT_MAX_BUFFERED_BYTES_PER_RUN = 8 * 1024 * 1024;
 

@@ -3,6 +3,7 @@ import {
   type AgentEvent,
   DEFAULT_MAX_BUFFERED_BYTES_PER_RUN,
   RelayBackpressureError,
+  RelayBusyError,
   type RelayStore,
   RelayUnknownError,
   type ToolEvent,
@@ -10,6 +11,8 @@ import {
 
 const DEFAULT_POLL_INTERVAL_MS = 200;
 const TOOL_QUEUE = "tool";
+/** Interactive transaction limits: a write waits at most MAX_WAIT for a connection and TIMEOUT to finish. */
+const TX_OPTIONS = { timeout: 5_000, maxWait: 2_000 };
 
 interface RunCounters {
   toolSeq: number;
@@ -36,13 +39,19 @@ export class PrismaRelayStore implements RelayStore {
 
   /** Runs `fn` in a transaction holding the run row's lock. */
   private locked<T>(token: string, fn: (tx: Prisma.TransactionClient, run: RunCounters) => Promise<T>): Promise<T> {
-    return this.db.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<RunCounters[]>`
+    return this.db
+      .$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<RunCounters[]>`
         SELECT "toolSeq", "nextChannel", "relayBytes" FROM "SubstrateRun" WHERE "token" = ${token} FOR UPDATE`;
-      const run = rows[0];
-      if (!run) throw new RelayUnknownError();
-      return fn(tx, run);
-    });
+        const run = rows[0];
+        if (!run) throw new RelayUnknownError();
+        return fn(tx, run);
+      }, TX_OPTIONS)
+      .catch((error: unknown) => {
+        // P2028: the interactive transaction timed out or could not start in time.
+        if ((error as { code?: string } | null)?.code === "P2028") throw new RelayBusyError();
+        throw error;
+      });
   }
 
   private async requireChannel(tx: Prisma.TransactionClient, token: string, channel: string) {
@@ -53,23 +62,22 @@ export class PrismaRelayStore implements RelayStore {
     return row;
   }
 
-  private appendTool(
+  private async appendTool(
     tx: Prisma.TransactionClient,
     token: string,
     run: RunCounters,
     event: { type: string; channel?: string; line?: string },
     bytes: number,
-  ): Promise<unknown> {
+  ): Promise<void> {
     const seq = run.toolSeq + 1;
-    return Promise.all([
-      tx.substrateRun.update({
-        where: { token },
-        data: { toolSeq: seq, relayBytes: run.relayBytes + bytes },
-      }),
-      tx.substrateRelayEvent.create({
-        data: { runToken: token, queue: TOOL_QUEUE, seq, type: event.type, channel: event.channel, line: event.line },
-      }),
-    ]);
+    // Sequential: an interactive transaction runs on one connection.
+    await tx.substrateRun.update({
+      where: { token },
+      data: { toolSeq: seq, relayBytes: run.relayBytes + bytes },
+    });
+    await tx.substrateRelayEvent.create({
+      data: { runToken: token, queue: TOOL_QUEUE, seq, type: event.type, channel: event.channel, line: event.line },
+    });
   }
 
   async openChannel(runToken: string): Promise<string> {

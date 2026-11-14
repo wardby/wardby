@@ -66,6 +66,24 @@ export function relayStoreContract(
       await store.fromAgent("wr-00000000000000000006", ch, 2, "x".repeat(30));
     });
 
+    it("does not return a channel poll early because of traffic on another channel", async () => {
+      const token = "wr-00000000000000000008";
+      const store = await create(token, 1 << 20);
+      const c1 = await store.openChannel(token);
+      const c2 = await store.openChannel(token);
+      const started = Date.now();
+      const waiting = store.pollAgent(token, c1, 0, 600);
+      setTimeout(() => void store.fromTool(token, c2, 1, "other"), 50);
+      setTimeout(() => void store.fromTool(token, c1, 1, "mine"), 250);
+      expect(await waiting).toEqual([{ seq: 1, type: "line", line: "mine" }]);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+      const idle = Date.now();
+      const none = store.pollAgent(token, c2, 1, 300);
+      setTimeout(() => void store.fromTool(token, c1, 2, "noise"), 50);
+      expect(await none).toEqual([]);
+      expect(Date.now() - idle).toBeGreaterThanOrEqual(250);
+    });
+
     it("keeps channels separate and drops a relay", async () => {
       const store = await create("wr-00000000000000000007", 1 << 20);
       const a = await store.openChannel("wr-00000000000000000007");

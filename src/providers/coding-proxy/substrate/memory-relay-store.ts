@@ -154,20 +154,23 @@ export class MemoryRelayStore implements RelayStore {
       queue.splice(0, queue.length, ...remaining);
       return remaining.map((q) => q.event);
     };
-    const first = take();
-    if (first.length > 0 || waitMs <= 0 || signal?.aborted) return first;
-    await new Promise<void>((resolve) => {
-      const done = (): void => {
-        clearTimeout(timer);
-        run.waiters.delete(done);
-        signal?.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = setTimeout(done, waitMs);
-      run.waiters.add(done);
-      signal?.addEventListener("abort", done, { once: true });
-    });
-    return take();
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const events = take();
+      const remaining = deadline - Date.now();
+      if (events.length > 0 || remaining <= 0 || signal?.aborted) return events;
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer);
+          run.waiters.delete(done);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, remaining);
+        run.waiters.add(done);
+        signal?.addEventListener("abort", done, { once: true });
+      });
+    }
   }
 
   async dropRelay(runToken: string): Promise<void> {
