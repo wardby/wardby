@@ -2274,6 +2274,12 @@ model Document {
   /// repo-relative Markdown file (documents) or design directory (designs)
   path             String?
   baseRef          String?
+  /// draft | in_review | changes_requested | approved | archived (src/core/documents/review-state.ts)
+  reviewState              String                @default("draft")
+  /// the state when it was archived; unarchive returns to it
+  reviewStateBeforeArchive String?
+  /// a principal id (plain text, like DocumentVersion.createdById): may force approve
+  finalApproverId          String?
   currentVersionId String?             @unique
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
@@ -2283,6 +2289,8 @@ model Document {
   shareLinks       DocumentShareLink[]
   contents         DocumentContent[]
   exports          DocumentExport[]
+  reviewers                DocumentReviewer[]
+  reviewEvents             DocumentReviewEvent[]
 
   @@index([ownerId])
   @@index([agentId])
@@ -2447,8 +2455,52 @@ model DocumentGuest {
   lastUsedAt  DateTime          @default(now())
   comments    Comment[]
   sessions    WebSession[]
+  reviewers   DocumentReviewer[]
 
   @@index([shareLinkId])
+}
+
+model DocumentReviewer {
+  id            String         @id @default(cuid())
+  documentId    String
+  document      Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// exactly one of principalId and guestId is set (hand-written CHECK DocumentReviewer_one_reviewer)
+  principalId   String?
+  guestId       String?
+  guest         DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  /// none | approved | changes_requested
+  verdict       String         @default("none")
+  /// the version the verdict was given on
+  versionNumber Int?
+  /// redacted against the document agent's secret values before it is stored
+  note          String?
+  verdictAt     DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@unique([documentId, principalId])
+  @@unique([documentId, guestId])
+  @@index([documentId])
+}
+
+/// Append-only review history: ids, states, version numbers and notes, never document content.
+model DocumentReviewEvent {
+  id               String   @id @default(cuid())
+  documentId       String
+  document         Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  actorPrincipalId String?
+  actorGuestId     String?
+  /// submitted | reviewers_changed | approved | changes_requested | force_approved | reopened | archived | unarchived
+  kind             String
+  fromState        String
+  toState          String
+  versionNumber    Int
+  /// redacted like DocumentReviewer.note
+  note             String?
+  /// force_approved only: DocumentReviewer ids that had not approved the current version
+  overridden       Json?
+  createdAt        DateTime @default(now())
+
+  @@index([documentId, createdAt])
 }
 
 model WebSession {
