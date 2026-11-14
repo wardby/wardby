@@ -158,6 +158,23 @@ describe("mergeLines (line-level three-way merge of one file)", () => {
     );
   });
 
+  it("ignores blank lines at the end of the file: both sides dropping them is not a conflict", () => {
+    // The case seen live: both agent edits ended with one newline where the sent version had a blank line more,
+    // and one of them also changed the last paragraph.
+    const b = "Checklist.\n\nPara 1, favourite.\n\nPara 2, favourite.\n\n";
+    const theirs = "Checklist.\n\nPara 1, favorite.\n\nPara 2, favorite.\n";
+    const ours = "Checklist, with export steps.\n\nPara 1, favourite.\n\nPara 2, favourite.\n";
+    expect(mergeLines(b, theirs, ours)).toBe(
+      "Checklist, with export steps.\n\nPara 1, favorite.\n\nPara 2, favorite.\n",
+    );
+    // The end of the file is merged on its own: one side's change to it wins over an unchanged other side.
+    expect(mergeLines("a\n\nb\n", "a\n\nb\n\n\n", "A\n\nb\n")).toBe("A\n\nb\n\n\n");
+    // Both changed it differently: one newline.
+    expect(mergeLines("a\n\nb\n\n", "a\n\nb", "A\n\nb\n\n\n")).toBe("A\n\nb\n");
+    // Content at the end still conflicts as before.
+    expect(mergeLines("a\n\nb\n\n", "a\n\nB\n", "a\n\nb, ours\n")).toBeNull();
+  });
+
   it("keeps a file without a final newline exactly", () => {
     const b = "one\n\ntwo\n\nthree";
     expect(mergeLines(b, "one\n\ntwo\n\nthree, theirs", "one, ours\n\ntwo\n\nthree")).toBe(

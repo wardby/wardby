@@ -59,7 +59,28 @@ const sameHunk = (a: Hunk, b: Hunk) =>
 /** Lines a file may have for a line merge; a longer file is a conflict (bounds the work in the completion hook). */
 export const MAX_MERGE_LINES = 20_000;
 
+/** A file's blank lines at its end (newlines, with any spaces after them), and what comes before. */
+function splitTail(s: string): [body: string, tail: string] {
+  const tail = /(?:\n[ \t]*)*$/.exec(s)![0];
+  return [s.slice(0, s.length - tail.length), tail];
+}
+
+/**
+ * The line merge, with the blank lines at the end of the file set aside on all three sides and merged on
+ * their own (a side that changed them wins; both changed differently gives one newline): an agent
+ * that drops or adds a trailing blank line must not turn edits elsewhere into a conflict.
+ */
 export function mergeLines(base: string, theirs: string, ours: string): string | null {
+  const [b, bt] = splitTail(base);
+  const [t, tt] = splitTail(theirs);
+  const [o, ot] = splitTail(ours);
+  const body = mergeBody(b, t, o);
+  if (body === null) return null;
+  const tail = ot === bt ? tt : tt === bt || ot === tt ? ot : "\n";
+  return body + tail;
+}
+
+function mergeBody(base: string, theirs: string, ours: string): string | null {
   const ids = new Map<string, number>();
   const intern = (lines: string[]) =>
     lines.map((l) => {

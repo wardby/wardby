@@ -385,7 +385,8 @@ tries three things in order:
    kept. A file both changed is merged line by line when the two sides' changes
    neither overlap nor touch (adjacent lines count as touching): an edit to one
    paragraph and an edit to another both land, as do edits to two separate
-   style rules of a board. Changes to the same or adjacent lines, or a file too
+   style rules of a board. Blank lines at the end of a file are set aside
+   first, so adding or dropping one is never a conflict. Changes to the same or adjacent lines, or a file too
    different to compare line by line, make that file a conflict; no conflict
    markers are ever written. If no file conflicts, the merge is published
    through the normal publish path (normalising, sanitising and redaction; a
