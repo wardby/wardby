@@ -204,7 +204,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const id2 = await doc();
     await submitForReview(db, { documentId: id2, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
-    await reopenDocument(db, { documentId: id2, viewer: as(owner) });
+    await reopenDocument(db, cipher, { documentId: id2, viewer: as(owner) });
     await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 2 });
     expect((await eventsOf(id2)).map((e) => e.kind)).toEqual(["submitted", "approved", "reopened", "approved"]);
   });
@@ -261,7 +261,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const v = await reviewDocument(db, cipher, { documentId: id, viewer: guest, verdict: "approve", versionNumber: 1 });
     expect(v.state).toBe("approved");
     expect(v.reviewers[0]).toMatchObject({ kind: "guest", name: "Gail (guest)", ref: `guest:${guestId}`, me: true });
-    await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     await db.documentShareLink.update({ where: { id: link.id }, data: { revokedAt: new Date() } });
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: guest, verdict: "approve", versionNumber: 1 }),
@@ -434,17 +434,19 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
   it("reopen (writers only, approved only) then publish and re-approve", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
-    await expect(reopenDocument(db, { documentId: id, viewer: as(owner) })).rejects.toThrow(
+    await expect(reopenDocument(db, cipher, { documentId: id, viewer: as(owner) })).rejects.toThrow(
       "document_review_state_invalid",
     );
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
-    await expect(reopenDocument(db, { documentId: id, viewer: as(ann) })).rejects.toThrow("document_access_denied");
-    const reopened = await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    await expect(reopenDocument(db, cipher, { documentId: id, viewer: as(ann) })).rejects.toThrow(
+      "document_access_denied",
+    );
+    const reopened = await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     expect([reopened.state, reopened.currentVersion]).toEqual(["in_review", 2]);
     // The approval of v1 is on an older version now.
     expect(reopened.reviewers[0]).toMatchObject({ verdict: "approved", versionNumber: 1, current: false });
     // A refused reopen wrote no version.
-    await expect(reopenDocument(db, { documentId: id, viewer: as(owner) })).rejects.toThrow(
+    await expect(reopenDocument(db, cipher, { documentId: id, viewer: as(owner) })).rejects.toThrow(
       "document_review_state_invalid",
     );
     expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(2);
@@ -471,7 +473,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 2 });
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Ship" });
-    const view = await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    const view = await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     expect([view.state, view.currentVersion, view.forced]).toEqual(["in_review", 3, null]);
     expect(view.progress).toEqual({ approved: 0, total: 2 });
     expect(view.can.review).toBe(false);
@@ -519,7 +521,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const texts = await db.documentContent.count({ where: { documentId: design.id } });
     const { getDocument } = await import("./service.js");
     const approved = (await getDocument(db, design.id)).content;
-    const view = await reopenDocument(db, { documentId: design.id, viewer: as(owner) });
+    const view = await reopenDocument(db, cipher, { documentId: design.id, viewer: as(owner) });
     expect([view.state, view.currentVersion]).toEqual(["in_review", 2]);
     const current = await getDocument(db, design.id);
     expect(current.version).toMatchObject({ number: 2, via: "review", summary: "Reopened for review from v1" });
@@ -541,7 +543,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     const [reopen, publish] = await Promise.allSettled([
-      reopenDocument(db, { documentId: id, viewer: as(owner) }),
+      reopenDocument(db, cipher, { documentId: id, viewer: as(owner) }),
       publishVersion(db, cipher, { documentId: id, markdown: "racing", via: "editor", expectedNumber: 1 }),
     ]);
     expect(reopen.status).toBe("fulfilled");
@@ -559,7 +561,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
-    await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
     ).rejects.toThrow(ReviewVersionConflictError);
@@ -578,7 +580,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "First" });
-    await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     const { view } = await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Second" });
     expect(view.forced?.notes).toEqual(["Ann Reviewer had not reviewed v2"]);
   });
@@ -593,7 +595,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(await stateOf(id)).toBe("approved");
     expect((await getReviewView(db, id, as(ann))).can.review).toBe(false);
     // A writer reopens it for review.
-    expect((await reopenDocument(db, { documentId: id, viewer: as(owner) })).state).toBe("in_review");
+    expect((await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) })).state).toBe("in_review");
   });
 
   it("an approval by every reviewer is not final: a reviewer may still request changes, which unlocks it", async () => {
@@ -676,6 +678,21 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(JSON.stringify(await getReviewView(db, id, as(owner)))).not.toContain(SECRET);
   });
 
+  it("reopen redacts a value that became an agent secret after the approved version was published", async () => {
+    const id = (
+      await createDocument(db, cipher, { ownerId: owner.id, title: "Plan", markdown: `# Plan\n\nkey ${SECRET} end` })
+    ).id;
+    await db.document.update({ where: { id }, data: { agentId } });
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
+    const versions = await db.documentVersion.findMany({ where: { documentId: id }, orderBy: { number: "asc" } });
+    expect(versions.map((v) => v.number)).toEqual([1, 2]);
+    expect(versions[0].markdown).toContain(SECRET);
+    expect(versions[1].markdown).not.toContain(SECRET);
+    expect(versions[1].markdown).toContain("[REDACTED]");
+  });
+
   it("tells live pages about each review change (ids and kind only)", async () => {
     const id = await doc();
     const bus = createDocumentEventBus({ connectionString: process.env.DATABASE_URL! });
@@ -691,7 +708,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       // A reopen writes a version too: open pages load it.
       await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
       seen.length = 0;
-      await reopenDocument(db, { documentId: id, viewer: as(owner) });
+      await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
       await expect.poll(() => [...new Set(seen.map((e) => e.kind))].sort()).toEqual(["review", "version"]);
       expect(seen.every((e) => Object.keys(e).sort().join() === "documentId,kind")).toBe(true);
     } finally {

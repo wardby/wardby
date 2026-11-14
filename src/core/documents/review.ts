@@ -28,8 +28,8 @@ import { notifyDocumentChange } from "./events.js";
 import { loadContent } from "./files.js";
 import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
-import { redactForDocumentAgent } from "./redact.js";
-import { stageVersion, storedVersionWarnings, writeVersion } from "./version-write.js";
+import { documentSecretValues, redactForDocumentAgent } from "./redact.js";
+import { stageVersion, writeVersion } from "./version-write.js";
 import {
   approvedCount,
   computeReviewState,
@@ -423,11 +423,13 @@ export async function forceApprove(
  * as N+1 (via "review") in the same transaction as the state change and the `reopened` event, which names N+1.
  * N stays the approved record; nothing given on N counts on N+1, so every review after a reopen is on a new number.
  * The copy goes through the shared version writer but not publishVersion, whose lock check refuses every other
- * route while the document is approved. The content is N's as stored (already redacted), so nothing new is
- * redacted here.
+ * route while the document is approved. N's stored content is prepared again against the agent's current secret
+ * values, as a restore is, so a value that became a secret after N was published is redacted from the copy (N
+ * itself is never rewritten).
  */
 export async function reopenDocument(
   db: PrismaClient,
+  cipher: Cipher,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ReviewView> {
   await requireDocumentAccess(db, input.documentId, input.viewer, "write");
@@ -439,8 +441,9 @@ export async function reopenDocument(
       where: { id: input.documentId },
       select: {
         kind: true,
+        agentId: true,
         reviewState: true,
-        currentVersion: { select: { id: true, number: true, format: true, markdown: true, warnings: true } },
+        currentVersion: { select: { id: true, number: true, format: true, markdown: true } },
       },
     });
     if (!row?.currentVersion) throw new Error("document_not_found");
@@ -448,7 +451,8 @@ export async function reopenDocument(
     if (row.reviewState !== "approved") invalid();
     const approved = row.currentVersion;
     const fmt = formatFor(row.kind);
-    const prepared = { content: await loadContent(db, approved), warnings: storedVersionWarnings(approved.warnings) };
+    const secrets = await documentSecretValues(db, cipher, row.agentId);
+    const prepared = fmt.prepare(await loadContent(db, approved), secrets);
     const staged = await stageVersion(db, input.documentId, fmt, prepared);
     try {
       await inReviewTx(db, async (tx) => {

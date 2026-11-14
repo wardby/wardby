@@ -850,6 +850,10 @@ function mount(
       version.textContent = `design · v${baseNumber}`;
       warnings = next.version.warnings ?? [];
       renderChecks();
+      applyPayload(next);
+      // As loadVersion does: the copy has no fidelity result yet.
+      void runFidelity(baseNumber);
+      return;
     }
     applyPayload(next);
   });

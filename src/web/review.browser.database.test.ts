@@ -305,7 +305,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
 
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save()).toBe("Unsaved changes");
       // The reopen's v2 is a copy of v1: the page moves to it and keeps the edits.
       await expect.poll(() => shownVersion(page)).toBe("v2");
@@ -361,7 +361,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await o.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
       await o.getByRole("button", { name: "Back to latest" }).click();
 
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save(o)).toBe("Saved");
       await expect.poll(() => save(a)).toBe("Comment only");
       // The reopen's copy of v2 is the newest row; v2 stays in the list as the approved version.
@@ -416,7 +416,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => page.locator(".pin").count(), { timeout: 10_000 }).toBeGreaterThan(0);
       // Opened read-only, then reopened: a reload is needed to edit it.
       await page.keyboard.press("Escape");
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect
         .poll(() => page.locator(".lock-banner").textContent(), { timeout: 10_000 })
         .toBe("This design was reopened for review. Reload to edit it. Reload");
@@ -484,7 +484,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => save()).toBe("Read only: approved");
 
       // Reopened: v2, a copy of v1, editable again, and nothing was published on a timer.
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save()).toBe("Saved");
       await expect.poll(() => page.locator(".version").textContent()).toBe("design · v2");
       expect(await page.getByText("This design changed.").isVisible()).toBe(false);
@@ -627,7 +627,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(typed).toContain("!");
 
       held = new Promise<void>((r) => (release = r));
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       const home = files()["boards/home.html"].replace("</body>", "<p>v2</p></body>");
       await publishVersion(server.db, TEST_CIPHER, {
         documentId: d.documentId,
@@ -657,6 +657,16 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const page = await context.newPage();
       const puts: string[] = [];
       page.on("request", (r) => r.method() === "PUT" && puts.push(r.postData() ?? ""));
+      // Saves wait here until the lock and the reopen are seen, so an autosave cannot land before the approval.
+      let releaseSaves: () => void = () => undefined;
+      const savesHeld = new Promise<void>((r) => (releaseSaves = r));
+      await page.route(
+        (url) => url.pathname === `/d/api/${d.documentId}`,
+        async (route) => {
+          if (route.request().method() === "PUT") await savesHeld;
+          return route.fallback();
+        },
+      );
       await page.goto(`${server.origin}/d/${d.documentId}`);
       await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
       const h1 = page.frameLocator(CANVAS).locator("h1").first();
@@ -671,11 +681,12 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       });
       const save = () => page.locator(".save").textContent();
       await expect.poll(() => save()).toBe("Read only: approved · unsaved changes");
-      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => page.locator(".version").textContent()).toBe("design · v2");
       await expect.poll(() => save()).toBe("Unsaved changes");
       expect(await page.getByText("This design changed.").isVisible()).toBe(false);
       expect(puts).toEqual([]);
+      releaseSaves();
       // The next edit saves the waiting edits over v2.
       await h1.dblclick();
       await page.keyboard.press("End");

@@ -2310,7 +2310,7 @@ model DocumentVersion {
   files       DocumentFile[]
   /// sha256 hex of the content (see src/core/documents/content.ts)
   contentHash String
-  /// "editor" | "agent" | "mcp" | "import"
+  /// "editor" | "agent" | "mcp" | "import" | "review"
   via         String
   createdById String?
   runId       String?

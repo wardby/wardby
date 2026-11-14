@@ -8,7 +8,6 @@ import type { Prisma, PrismaClient } from "#prisma";
 import { contentHash, type VersionContent } from "./content.js";
 import { storeDocumentContent, storeVersionFileRows } from "./files.js";
 import type { DocumentFormat, PreparedContent } from "./formats/index.js";
-import type { VersionWarning } from "./warnings.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -115,7 +114,3 @@ export async function writeVersion(
     reanchored: { kept: threads.length - outdatedIds.length, outdated: outdatedIds.length },
   };
 }
-
-/** A stored version's warnings column as the list it was written from. */
-export const storedVersionWarnings = (value: Prisma.JsonValue | null): VersionWarning[] =>
-  Array.isArray(value) ? (value as unknown as VersionWarning[]) : [];

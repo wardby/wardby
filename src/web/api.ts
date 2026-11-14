@@ -218,7 +218,7 @@ export async function postReview(
       break;
     }
     case "reopen":
-      view = await reopenDocument(deps.db, { documentId, viewer });
+      view = await reopenDocument(deps.db, deps.cipher, { documentId, viewer });
       break;
     case "archive":
       if (typeof body.archived !== "boolean") return invalid();

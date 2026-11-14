@@ -1074,7 +1074,9 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       const input = docOnly.parse(args);
       return textResult(
         reviewPayload(
-          await mapped(() => reopenDocument(ctx.db, { documentId: input.documentId, viewer: viewerOf(ctx) })),
+          await mapped(() =>
+            reopenDocument(ctx.db, ctx.providers.secrets, { documentId: input.documentId, viewer: viewerOf(ctx) }),
+          ),
         ),
       );
     },
