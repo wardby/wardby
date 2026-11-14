@@ -109,7 +109,7 @@ fix rounds at once.
 A repository that is only an extra in a run's set gets fix rounds only when it
 has its own link with `review_fix`; a fix round works in the set of the run
 that opened the pull request. See
-Several repositories in one coding run (help article `multi-repository-runs`).
+[Several repositories in one coding run](multi-repository-runs.md).
 
 See [`docs/code-review-agents.md`](../docs/code-review-agents.md#automatic-review-fix-rounds)
 for the full trigger rules, the App's required permissions, and the related

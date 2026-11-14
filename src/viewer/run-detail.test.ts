@@ -44,6 +44,7 @@ describe("loadRunDetail coding.repositories", () => {
         {
           name: "tools",
           access: "write",
+          asRemote: false,
           repository: "your-org/tools",
           requestedRef: "main",
           resolvedSha: null,
@@ -62,6 +63,7 @@ describe("loadRunDetail coding.repositories", () => {
         {
           name: "upstream",
           access: "read",
+          asRemote: true,
           repository: "upstream-org/upstream",
           requestedRef: "v1",
           resolvedSha: "a".repeat(40),
@@ -76,6 +78,7 @@ describe("loadRunDetail coding.repositories", () => {
       {
         name: "tools",
         access: "write",
+        asRemote: false,
         repository: "your-org/tools",
         requestedRef: "main",
         resolvedSha: null,
@@ -87,6 +90,7 @@ describe("loadRunDetail coding.repositories", () => {
       {
         name: "upstream",
         access: "read",
+        asRemote: true,
         repository: "upstream-org/upstream",
         requestedRef: "v1",
         resolvedSha: "a".repeat(40),

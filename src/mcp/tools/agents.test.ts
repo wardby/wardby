@@ -509,6 +509,61 @@ describe("agent CRUD tools", () => {
     }
   });
 
+  it("stores gitHistory as depth/full columns, clears it with null, and keeps it across unrelated updates (#536)", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const profileOf = (r: { content: unknown }) =>
+      JSON.parse((r.content as { text: string }[])[0].text).codingProfile as Record<string, unknown>;
+    try {
+      const created = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "coder",
+          systemPrompt: "Make the requested change.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", gitHistory: { depth: 50 } },
+        },
+      });
+      expect(created.isError).toBeFalsy();
+      const id = JSON.parse((created.content as { text: string }[])[0].text).id as string;
+      expect(profileOf(created)).toMatchObject({ gitHistoryDepth: 50, gitHistoryFull: false });
+      expect(profileOf(created)).not.toHaveProperty("gitHistory");
+
+      const unrelated = await client.callTool({ name: "update_agent", arguments: { id, name: "renamed" } });
+      expect(profileOf(unrelated)).toMatchObject({ gitHistoryDepth: 50, gitHistoryFull: false });
+      const unrelatedProfile = await client.callTool({
+        name: "update_agent",
+        arguments: { id, codingProfile: { baseRef: "develop" } },
+      });
+      expect(profileOf(unrelatedProfile)).toMatchObject({ gitHistoryDepth: 50, gitHistoryFull: false });
+
+      const full = await client.callTool({
+        name: "update_agent",
+        arguments: { id, codingProfile: { gitHistory: { depth: "full" } } },
+      });
+      expect(profileOf(full)).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: true });
+
+      const cleared = await client.callTool({
+        name: "update_agent",
+        arguments: { id, codingProfile: { gitHistory: null } },
+      });
+      expect(profileOf(cleared)).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: false });
+
+      const bad = await client.callTool({
+        name: "update_agent",
+        arguments: { id, codingProfile: { gitHistory: { depth: 0 } } },
+      });
+      expect(bad.isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
   it.each([
     { label: "rename", patch: { name: "renamed" }, expectedSize: 4096, refused: false },
     {

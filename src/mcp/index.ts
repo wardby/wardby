@@ -79,6 +79,7 @@ import { registerStopRunTool } from "./tools/stop-run.js";
 import { registerCostReportTools } from "./tools/cost-report.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
+import { registerAgentLinkTools } from "./tools/agent-links.js";
 import { registerGrantTools } from "./tools/grants.js";
 import { registerHostProviderTools } from "./tools/host-providers.js";
 import { registerMcpServerTools } from "./tools/mcp-servers.js";
@@ -189,6 +190,7 @@ export function registerAllTools(
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
+  registerAgentLinkTools(mcp);
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
   registerHostProviderTools(mcp);

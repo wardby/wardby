@@ -1,8 +1,9 @@
 /**
  * Paths a coding run's workspace never sends back: dependency and cache folders
  * (matched by name at any depth) plus per-agent repository-relative paths. The
- * same set is rendered three ways so the Kubernetes keeper's tar, the Docker
- * staging prune, and Git staging all agree on what "excluded" means.
+ * same set is rendered four ways so the Kubernetes keeper's tar, the Docker
+ * staging prune (isCollectExcluded), Git staging, and a history run's worker
+ * `.git/info/exclude` all agree on what "excluded" means.
  */
 export const BUILTIN_COLLECT_EXCLUDE_NAMES = [
   "node_modules",
@@ -82,4 +83,22 @@ export function gitExcludePathspecs(exclusions: CollectExclusions): string[] {
     ...exclusions.names.flatMap((name) => [`:(exclude,glob)**/${name}`, `:(exclude,glob)**/${name}/**`]),
     ...exclusions.paths.map((path) => `:(exclude,literal)${path}`),
   ];
+}
+
+/**
+ * A history run's worker `.git/info/exclude` (#536), so that the agent's own `git add -A` never
+ * stages what no run collects (the sandbox's npm config with the run's registry token lives under
+ * `.cache`). Names have no slash, so they match at any depth; paths get a leading "/", which anchors
+ * them to the repository root and keeps a leading "!" or "#" literal. validateCollectExcludePath has
+ * already refused globs, backslashes, control characters and surrounding whitespace. This only steers
+ * staging in the worker: files left uncommitted are still collected by the normal path, and
+ * finalize still refuses any agent commit that touches an excluded path.
+ */
+export function gitInfoExcludeFile(exclusions: CollectExclusions): string {
+  return [
+    "# Paths a Wardby run never collects (dependency and cache folders, collectExclude).",
+    ...exclusions.names,
+    ...exclusions.paths.map((path) => `/${path}`),
+    "",
+  ].join("\n");
 }

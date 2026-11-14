@@ -24,6 +24,14 @@ describe("Claude coding worker image policy", () => {
     }
   });
 
+  it("stays git-free on a history run too (#536): only the tool runner has git", async () => {
+    const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
+    expect(dockerfile).toContain("test ! -e /usr/bin/git");
+    expect(dockerfile).not.toMatch(/apt-get install[^\n]*\bgit\b/);
+    // The worker asks the tool runner for the bundle; it never ships the bundle module itself.
+    expect(dockerfile).not.toContain("result-bundle.mjs");
+  });
+
   it("copies every module the worker's entry points import", async () => {
     const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
     const closure = relativeImportClosure([

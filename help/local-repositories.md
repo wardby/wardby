@@ -207,7 +207,7 @@ article it follows; see [Get started](getting-started.md).
 
 A `local:` repository can also be an extra, read-only or writable, in a run
 with several repositories: see
-Several repositories in one coding run (help article `multi-repository-runs`).
+[Several repositories in one coding run](multi-repository-runs.md).
 
 Related: [Get started](getting-started.md),
 [Connect GitHub repositories](github.md) (the alternative to a local

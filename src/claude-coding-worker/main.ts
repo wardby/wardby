@@ -6,7 +6,7 @@ import { readMcpToken } from "../coding-worker/mcp-config.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
-import { assertToolRunnerReachable, callPrepareDependencies } from "./tool-socket.js";
+import { assertToolRunnerReachable, callGitCheck, callPrepareDependencies, callResultBundle } from "./tool-socket.js";
 import { runTitle, TRANSCRIPT_OUTPUT_PATH, writeWorkerTranscript } from "./transcript.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -44,6 +44,9 @@ try {
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
+    // A run with git history (#536): the tool runner has the workspace and git; this container has neither.
+    gitCheck: () => callGitCheck({ signal: controller.signal }),
+    resultBundle: (repository, timeoutMs) => callResultBundle(repository, { signal: controller.signal, timeoutMs }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
     onSessionId: (id) => {

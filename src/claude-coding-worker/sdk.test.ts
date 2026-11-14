@@ -66,12 +66,16 @@ describe("Claude SDK configuration", () => {
     expect(tools.timeout).toBeLessThanOrEqual(2_147_483_647);
   });
 
-  it("never lets the agent call the worker's own dependency-cache tool, in any mode", () => {
+  it("never lets the agent call the worker's own dependency-cache and git tools, in any mode", () => {
     for (const options of [
       buildClaudeSdkOptions(config()),
       buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true }),
     ]) {
-      expect(options.disallowedTools).toEqual(["mcp__wardby_tools__wardby_prepare_dependencies"]);
+      expect(options.disallowedTools).toEqual([
+        "mcp__wardby_tools__wardby_prepare_dependencies",
+        "mcp__wardby_tools__wardby_git_check",
+        "mcp__wardby_tools__wardby_result_bundle",
+      ]);
       expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_prepare_dependencies");
       expect(options.allowedTools).not.toContain("mcp__wardby_tools");
     }

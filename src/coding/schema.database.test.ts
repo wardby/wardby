@@ -173,6 +173,60 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
       prDescriptionOutcome: "written",
     });
   });
+
+  it("git history columns default to off on profiles and runs, and asRemote to false on link rows (#536)", async () => {
+    const columns = await db.$queryRaw<{ table_name: string; column_name: string; is_nullable: string }[]>`
+      SELECT table_name, column_name, is_nullable FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND ((table_name IN ('CodingAgentProfile', 'CodingRun') AND column_name IN ('gitHistoryDepth', 'gitHistoryFull'))
+          OR (table_name IN ('AgentRepository', 'CodingRunRepository') AND column_name = 'asRemote'))
+      ORDER BY table_name, column_name`;
+    expect(columns).toEqual([
+      { table_name: "AgentRepository", column_name: "asRemote", is_nullable: "NO" },
+      { table_name: "CodingAgentProfile", column_name: "gitHistoryDepth", is_nullable: "YES" },
+      { table_name: "CodingAgentProfile", column_name: "gitHistoryFull", is_nullable: "NO" },
+      { table_name: "CodingRun", column_name: "gitHistoryDepth", is_nullable: "YES" },
+      { table_name: "CodingRun", column_name: "gitHistoryFull", is_nullable: "NO" },
+      { table_name: "CodingRunRepository", column_name: "asRemote", is_nullable: "NO" },
+    ]);
+
+    const agent = await db.agent.create({
+      data: {
+        name: `git-history-${randomUUID()}`,
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { create: { repository: "openai/example", protectedPaths: [] } },
+      },
+      include: { codingProfile: true },
+    });
+    agentIds.push(agent.id);
+    expect(agent.codingProfile).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: false });
+    const run = await db.run.create({ data: { agentId: agent.id, status: "cancelled", executionManaged: true } });
+    runIds.push(run.id);
+    const coding = await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "x",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${run.id}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 1800,
+        allowedEgress: [],
+        protectedPaths: [],
+        budgetReservedUsd: 0.25,
+        repositories: {
+          create: { position: 0, name: "up", access: "read", provider: "github", repository: "acme/up" },
+        },
+      },
+      include: { repositories: true },
+    });
+    expect(coding).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: false });
+    expect(coding.repositories[0].asRemote).toBe(false);
+  });
 });
 
 const MIGRATIONS = join(process.cwd(), "prisma", "migrations");

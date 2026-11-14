@@ -636,6 +636,9 @@
                           "write"
                         ]
                       },
+                      "asRemote": {
+                        "type": "boolean"
+                      },
                       "repository": {
                         "type": "string"
                       },
@@ -683,6 +686,7 @@
                     "required": [
                       "name",
                       "access",
+                      "asRemote",
                       "repository",
                       "requestedRef",
                       "resolvedSha",

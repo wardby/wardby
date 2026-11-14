@@ -104,6 +104,15 @@ const workerImageRefSchema = z
   .refine(isImmutableDockerImage, "must be an immutable repository digest")
   .nullable();
 const workspaceDiskMbSchema = z.number().int().min(64).max(32_768).nullable();
+/**
+ * Git history in runs (#536): the clone depth (1..100000) or "full"; null = off, today's behaviour.
+ * Strict: any other key is rejected.
+ */
+export const MAX_GIT_HISTORY_DEPTH = 100_000;
+const gitHistorySchema = z
+  .object({ depth: z.union([z.number().int().min(1).max(MAX_GIT_HISTORY_DEPTH), z.literal("full")]) })
+  .strict()
+  .nullable();
 /** Claude Code runs only: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
 const maxTurnsSchema = z.number().int().min(1).max(MAX_CODING_TURNS).nullable();
 /**
@@ -155,6 +164,7 @@ const codingProfileFields = {
   toolchainVersion: toolchainVersionSchema,
   workerImageRef: workerImageRefSchema,
   workspaceDiskMb: workspaceDiskMbSchema,
+  gitHistory: gitHistorySchema,
   maxTurns: maxTurnsSchema,
   maxOutputTokens: maxOutputTokensSchema,
   protectedPaths: z
@@ -193,6 +203,7 @@ export const CodingProfileSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.default(null),
     workerImageRef: codingProfileFields.workerImageRef.default(null),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
+    gitHistory: codingProfileFields.gitHistory.default(null),
     maxTurns: codingProfileFields.maxTurns.default(null),
     maxOutputTokens: codingProfileFields.maxOutputTokens.default(null),
     packageAllowlist: codingProfileFields.packageAllowlist.default({}),
@@ -235,6 +246,7 @@ export const CodingProfilePatchSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.optional(),
     workerImageRef: codingProfileFields.workerImageRef.optional(),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
+    gitHistory: codingProfileFields.gitHistory.optional(),
     maxTurns: codingProfileFields.maxTurns.optional(),
     maxOutputTokens: codingProfileFields.maxOutputTokens.optional(),
     packageAllowlist: codingProfileFields.packageAllowlist.optional(),

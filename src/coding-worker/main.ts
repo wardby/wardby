@@ -9,6 +9,8 @@ import { createCodexSdkClient } from "./sdk.js";
 const INPUT_PATH = "/run/wardby/input/input.json";
 const OUTPUT_PATH = "/run/wardby/output/result.json";
 const WORKSPACE_PATH = "/workspace";
+/** Where the extra repositories are mounted; a run with git history bundles each one there (#536). */
+const REPOS_PATH = "/repos";
 
 function required(name: "WARDBY_PROXY_URL" | "WARDBY_RUN_CAPABILITY"): string {
   const value = process.env[name];
@@ -33,6 +35,7 @@ try {
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
+    reposRoot: REPOS_PATH,
     proxyBaseUrl,
     capability,
     ...(mcpToken ? { mcpToken } : {}),

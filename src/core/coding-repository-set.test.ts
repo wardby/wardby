@@ -19,6 +19,7 @@ const link = (over: Partial<RepositorySetLink>): RepositorySetLink => ({
   ref: "main",
   refFromFile: null,
   inDefaultSet: false,
+  asRemote: false,
   createdAt: at(1),
   ...over,
 });
@@ -31,7 +32,7 @@ const workspace = { provider: "github", repository: "your-org/your-fork" };
 
 describe("planRepositorySet", () => {
   it("is the default set, in link order", () => {
-    const plan = planRepositorySet({ links, workspace, limit: 5, profileBaseRef: "main" });
+    const plan = planRepositorySet({ links, workspace, limit: 5, profileBaseRef: "main", historyOn: false });
     expect(plan.map((p) => [p.position, p.name, p.access, p.requestedRef, p.refFromFile])).toEqual([
       [0, "base", "read", null, "upstream-sync"],
       [1, "upstream", "read", "main", null],
@@ -39,14 +40,21 @@ describe("planRepositorySet", () => {
   });
   it("is replaced by a per-run list, in the list's order; [] is the default repository only", () => {
     expect(
-      planRepositorySet({ links, workspace, requested: ["tools", "upstream"], limit: 5, profileBaseRef: "main" }).map(
-        (p) => [p.name, p.baseRef],
-      ),
+      planRepositorySet({
+        links,
+        workspace,
+        requested: ["tools", "upstream"],
+        limit: 5,
+        profileBaseRef: "main",
+        historyOn: false,
+      }).map((p) => [p.name, p.baseRef]),
     ).toEqual([
       ["tools", "main"],
       ["upstream", null],
     ]);
-    expect(planRepositorySet({ links, workspace, requested: [], limit: 5, profileBaseRef: "main" })).toEqual([]);
+    expect(
+      planRepositorySet({ links, workspace, requested: [], limit: 5, profileBaseRef: "main", historyOn: false }),
+    ).toEqual([]);
   });
   it("refuses an unknown name without echoing it", () => {
     const run = () =>
@@ -56,6 +64,7 @@ describe("planRepositorySet", () => {
         requested: ["sk-ant-FAKEsecret0123456789abcdef"],
         limit: 5,
         profileBaseRef: "main",
+        historyOn: false,
       });
     expect(run).toThrow(RepositorySetRefusedError);
     expect(run).toThrow(/^repository_not_listed: .*base, upstream, tools/);
@@ -63,7 +72,14 @@ describe("planRepositorySet", () => {
   });
   it("refuses a duplicate name and a set over the limit", () => {
     expect(() =>
-      planRepositorySet({ links, workspace, requested: ["base", "base"], limit: 5, profileBaseRef: "main" }),
+      planRepositorySet({
+        links,
+        workspace,
+        requested: ["base", "base"],
+        limit: 5,
+        profileBaseRef: "main",
+        historyOn: false,
+      }),
     ).toThrow(/^invalid_repositories:/);
     expect(() =>
       planRepositorySet({
@@ -72,6 +88,7 @@ describe("planRepositorySet", () => {
         requested: ["base", "upstream", "tools"],
         limit: 3,
         profileBaseRef: "main",
+        historyOn: false,
       }),
     ).toThrow(/^repository_set_too_large:/);
   });
@@ -82,6 +99,7 @@ describe("planRepositorySet", () => {
       requested: ["tools", "base"],
       limit: 5,
       profileBaseRef: "main",
+      historyOn: false,
     });
     expect(plan.map((p) => p.name)).toEqual(["base"]);
   });
@@ -99,7 +117,7 @@ describe("parseRefFile", () => {
 });
 
 describe("resolveRepositorySetRefs", () => {
-  const planned = planRepositorySet({ links, workspace, limit: 5, profileBaseRef: "main" });
+  const planned = planRepositorySet({ links, workspace, limit: 5, profileBaseRef: "main", historyOn: false });
   it("reads fromFile at the default repository's baseRef, then resolves every ref to a SHA", async () => {
     const readFile = vi.fn(async () => `${"c".repeat(40)}\n`);
     const resolveRef = vi.fn(async ({ ref }: { ref: string }) => (ref === "main" ? "d".repeat(40) : ref));
@@ -166,7 +184,7 @@ describe("resolveRepositorySetRefs", () => {
     expect(String((err as Error).stack)).not.toContain(secret);
   });
   it("names a link's own ref when the host cannot find it", async () => {
-    const own = planRepositorySet({ links: [links[1]], workspace, limit: 5, profileBaseRef: "main" });
+    const own = planRepositorySet({ links: [links[1]], workspace, limit: 5, profileBaseRef: "main", historyOn: false });
     await expect(
       resolveRepositorySetRefs(own, {
         workspace: { repository: "your-org/your-fork", baseRef: "main" },
@@ -176,7 +194,7 @@ describe("resolveRepositorySetRefs", () => {
     ).rejects.toThrow('repository_ref_unreadable: link "upstream" names ref main and it does not exist.');
   });
   it("wraps a host error as unavailable instead of letting it escape", async () => {
-    const own = planRepositorySet({ links: [links[1]], workspace, limit: 5, profileBaseRef: "main" });
+    const own = planRepositorySet({ links: [links[1]], workspace, limit: 5, profileBaseRef: "main", historyOn: false });
     const err = await resolveRepositorySetRefs(own, {
       workspace: { repository: "your-org/your-fork", baseRef: "main" },
       readFile: async () => null,
@@ -200,6 +218,30 @@ describe("resolveRepositorySetRefs", () => {
       }),
     ).rejects.toThrow(
       'repository_ref_unreadable: the ref file upstream-sync for link "base" is longer than 255 bytes.',
+    );
+  });
+});
+
+describe("planRepositorySet remote links (#536)", () => {
+  const remote = link({ id: "r1", name: "upstream", inDefaultSet: true, asRemote: true });
+  const plan = (over: { historyOn: boolean; workspace?: { provider: string; repository: string } }) =>
+    planRepositorySet({
+      links: [remote],
+      workspace: over.workspace ?? workspace,
+      limit: 5,
+      profileBaseRef: "main",
+      historyOn: over.historyOn,
+    });
+
+  it("carries asRemote to the planned row when history is on", () => {
+    expect(plan({ historyOn: true }).map((r) => [r.name, r.asRemote])).toEqual([["upstream", true]]);
+  });
+  it("refuses a remote link while history is off", () => {
+    expect(() => plan({ historyOn: false })).toThrow(/^repository_remote_needs_history:/);
+  });
+  it("refuses a remote link on another host than the default repository", () => {
+    expect(() => plan({ historyOn: true, workspace: { provider: "local", repository: "/srv/repo" } })).toThrow(
+      /^repository_remote_invalid:/,
     );
   });
 });

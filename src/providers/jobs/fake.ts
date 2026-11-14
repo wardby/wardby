@@ -1,5 +1,15 @@
+import { cp, rm } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import type { JobHandle, JobLauncher, JobResult, JobSpec, JobStatus } from "./types.js";
+import type {
+  JobHandle,
+  JobResult,
+  JobSpec,
+  JobStatus,
+  MaterializedWorkspace,
+  MaterializeWorkspaceOptions,
+  WorkspaceJobLauncher,
+} from "./types.js";
+import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
 
 const BACKEND = "fake";
 const TERMINAL_STATES = new Set<JobStatus["state"]>(["succeeded", "failed", "stopped", "lost"]);
@@ -19,6 +29,8 @@ interface FakeJobRecord {
   result?: JobResult;
   plannedResult?: JobResult;
   removed: boolean;
+  /** Host folders standing in for the job's /workspace ("") and /repos/<name>, for materializeWorkspace. */
+  workspaces: Map<string, string>;
 }
 
 function clone<T>(value: T): T {
@@ -55,7 +67,7 @@ function statusFor(result: JobResult): JobStatus {
   }
 }
 
-export class FakeJobLauncher implements JobLauncher {
+export class FakeJobLauncher implements WorkspaceJobLauncher {
   private readonly jobs = new Map<string, FakeJobRecord>();
   private readonly runIds = new Map<string, string>();
   private readonly plans: FakeJobPlan[] = [];
@@ -85,6 +97,7 @@ export class FakeJobLauncher implements JobLauncher {
       statusCursor: 0,
       plannedResult: plan.result ? clone(plan.result) : undefined,
       removed: false,
+      workspaces: new Map(),
     };
     this.jobs.set(handle.id, record);
     this.runIds.set(spec.runId, handle.id);
@@ -118,6 +131,48 @@ export class FakeJobLauncher implements JobLauncher {
     if (!record || record.removed) return;
     if (!TERMINAL_STATES.has(record.status.state)) throw new Error("job_not_terminal");
     record.removed = true;
+  }
+
+  /** Stands a host folder in for the job's /workspace (or, with `name`, its /repos/<name>). */
+  setJobWorkspace(handle: JobHandle, directory: string, name?: string): void {
+    this.requireRecord(handle).workspaces.set(name ?? "", directory);
+  }
+
+  /**
+   * Copies the job's stand-in folder to `destination` the way the real collectors do: through a
+   * validated staging swap, and for a history run taking the result bundle and dropping the root .git.
+   */
+  async materializeWorkspace(
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options: MaterializeWorkspaceOptions = {},
+  ): Promise<MaterializedWorkspace> {
+    const record = this.requireRecord(handle);
+    if (record.status.state !== "succeeded") throw new Error("job_not_succeeded");
+    const source = record.workspaces.get(name ?? "");
+    if (!source) throw new Error("job_workspace_missing");
+    const maxBytes = record.spec.limits.diskMb * 1024 * 1024;
+    const gitHistory = options.gitHistory && {
+      ...options.gitHistory,
+      maxBundleBytes: Math.min(options.gitHistory.maxBundleBytes, maxBytes),
+    };
+    let bundle = false;
+    try {
+      await replaceDirectoryFromStaging(
+        destination,
+        maxBytes,
+        "fake_workspace_destination_invalid",
+        async (staging) => {
+          await cp(source, staging, { recursive: true, verbatimSymlinks: true });
+          if (gitHistory) bundle = await takeResultBundle(staging, gitHistory);
+        },
+      );
+    } catch (error) {
+      if (bundle && gitHistory) await rm(gitHistory.bundleDestination, { force: true });
+      throw error;
+    }
+    return { bundle };
   }
 
   async finish(handle: JobHandle, result: JobResult = { exitCode: 0, reason: "completed" }): Promise<void> {

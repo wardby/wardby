@@ -189,6 +189,12 @@ function fakeDb(
         return data;
       }) as any,
       findUnique: (async ({ where }: any) => codingRuns.get(where.runId) ?? null) as any,
+      // dispatch's resolveCodingBranch: a continuation root's git history (column defaults for rows seeded without it).
+      findUniqueOrThrow: (async ({ where }: any) => {
+        const row = codingRuns.get(where.runId);
+        if (!row) throw new Error(`fakeDb: no coding run "${where.runId}"`);
+        return { gitHistoryDepth: null, gitHistoryFull: false, ...row };
+      }) as any,
       // dispatch's effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
       findFirst: (async ({ where }: any) => {
         const [{ runId: rootId }] = where.OR;

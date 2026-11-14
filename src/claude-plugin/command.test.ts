@@ -341,6 +341,10 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
       "mcp__wardby-prod__get_run_transcript",
       "mcp__wardby-prod__get_run_steps",
       "mcp__wardby-prod__get_run_text",
+      "mcp__wardby-prod__list_agent_links",
+      "mcp__wardby-prod__get_agent",
+      "mcp__wardby-prod__list_subagents",
+      "mcp__wardby-prod__list_repositories",
     ]);
     const bad = fakeDeps({ hasServer: true });
     expect(await claudePluginCommand(["install", "--server-name", "x y"], bad.deps)).toBe(1);
@@ -375,17 +379,23 @@ describe("review fixes: broken settings, server names, quickstart's offer", () =
     expect(doctor).toMatch(/claude-plugin install --allow-tools/);
 
     await claudePluginCommand(["install", "--allow-tools"], deps);
-    expect(lines).toContain("✓ Allowed mcp__wardby__get_run_steps, mcp__wardby__get_run_text.");
+    expect(lines).toContain(
+      "✓ Allowed mcp__wardby__get_run_steps, mcp__wardby__get_run_text, mcp__wardby__list_agent_links, mcp__wardby__get_agent, mcp__wardby__list_subagents, mcp__wardby__list_repositories.",
+    );
     expect((settings().permissions as { allow: string[] }).allow).toEqual([
       "Bash(git status)",
       ...earlier,
       "mcp__wardby__get_run_steps",
       "mcp__wardby__get_run_text",
+      "mcp__wardby__list_agent_links",
+      "mcp__wardby__get_agent",
+      "mcp__wardby__list_subagents",
+      "mcp__wardby__list_repositories",
     ]);
     // A third run changes nothing.
     await claudePluginCommand(["install", "--allow-tools"], deps);
     expect(lines).toContain("✓ The pane's tools are already allowed.");
-    expect((settings().permissions as { allow: string[] }).allow).toHaveLength(7);
+    expect((settings().permissions as { allow: string[] }).allow).toHaveLength(11);
 
     await claudePluginCommand(["uninstall"], deps);
     expect((settings().permissions as { allow: string[] }).allow).toEqual(["Bash(git status)"]);

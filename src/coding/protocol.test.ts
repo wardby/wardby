@@ -14,6 +14,7 @@ import {
   isSafeContextPath,
   normalizeCodingTag,
   CodingTaskInputSchema,
+  GitHistoryInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
   CLAUDE_CONTEXT_LIMITS,
@@ -848,5 +849,52 @@ describe("output pullRequests", () => {
       CodingAgentOutputSchema.safeParse({ ...output, pullRequests: [{ name: "x", description: "d", mergeOrder: 100 }] })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("input.gitHistory", () => {
+  const sha = "a".repeat(40);
+  const entry = { path: "/workspace", baseCommit: sha, excludeCommits: [] as string[] };
+  const base = { ...input, deadlineAt: "2026-09-06T15:00:00Z" };
+
+  it("accepts a repository list with baseCommit and excludeCommits", () => {
+    const history = {
+      repositories: [entry, { path: "/repos/tools", baseCommit: sha, excludeCommits: ["b".repeat(40)] }],
+    };
+    expect(GitHistoryInputSchema.parse(history)).toEqual(history);
+    expect(CodingTaskInputSchema.parse({ ...base, gitHistory: history }).gitHistory).toEqual(history);
+  });
+
+  it("rejects a bad SHA, extra keys and an empty list", () => {
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, baseCommit: "abc" }] }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, baseCommit: "A".repeat(40) }] }).success).toBe(
+      false,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, excludeCommits: ["xyz"] }] }).success).toBe(
+      false,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, extra: 1 }] }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [entry], extra: 1 }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [] }).success).toBe(false);
+  });
+
+  it("caps the repositories and each exclude list at 17", () => {
+    expect(GitHistoryInputSchema.safeParse({ repositories: Array.from({ length: 17 }, () => entry) }).success).toBe(
+      true,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: Array.from({ length: 18 }, () => entry) }).success).toBe(
+      false,
+    );
+    const excludes = (n: number) => ({
+      repositories: [{ ...entry, excludeCommits: Array.from({ length: n }, () => sha) }],
+    });
+    expect(GitHistoryInputSchema.safeParse(excludes(17)).success).toBe(true);
+    expect(GitHistoryInputSchema.safeParse(excludes(18)).success).toBe(false);
+  });
+
+  it("serializes with no gitHistory key when history is off", () => {
+    const parsed = CodingTaskInputSchema.parse(base);
+    expect("gitHistory" in parsed).toBe(false);
+    expect("gitHistory" in JSON.parse(JSON.stringify(parsed))).toBe(false);
   });
 });
