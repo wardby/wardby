@@ -16,11 +16,11 @@ import { pathToFileURL } from "node:url";
 import {
   postBestEffort,
   postCapped,
-  readRunToken,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
   uploadFile,
+  waitForRunToken,
   type Logger,
 } from "./common.js";
 import { DEFAULT_METADATA_DIR, DEFAULT_READY_PORT, DEFAULT_TOOL_SOCKET, PLACEHOLDER_CAPABILITY } from "./constants.js";
@@ -47,6 +47,12 @@ export interface AgentOptions {
   socketPath?: string;
   /** 0 picks a free port (tests). */
   readyPort?: number;
+  /** Called once the readiness server listens, before the actor's identity is known. */
+  onReady?: (port: number) => void;
+  /** How often the actor's name is re-read while it is not a run actor's name (default 200 ms). */
+  identityPollMs?: number;
+  /** Ends a wait for the actor's identity (substrate_bridge_stopped). */
+  signal?: AbortSignal;
   /** Starts the worker with this environment. The default spawns `node /opt/wardby/claude-coding-worker/main.js`. */
   launchWorker?: (env: NodeJS.ProcessEnv) => WorkerHandle;
   log?: Logger;
@@ -84,13 +90,22 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   const resultPath = options.resultPath ?? "/run/wardby/output/result.json";
   const transcriptPath = options.transcriptPath ?? "/run/wardby/output/session.jsonl";
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
-  const token = await readRunToken(options.metadataDir ?? DEFAULT_METADATA_DIR, "agent");
+  // The readiness server first: Substrate's wake-up probe must answer for the golden actor too, which
+  // never gets a run actor's name (see waitForRunToken). Nothing touches the network before the name.
+  const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);
+  options.onReady?.(ready.port);
+  const token = await waitForRunToken(options.metadataDir ?? DEFAULT_METADATA_DIR, "agent", {
+    log,
+    pollMs: options.identityPollMs,
+    signal: options.signal,
+  }).catch((error: unknown) => {
+    ready.server.close();
+    throw error;
+  });
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
   const headers = { "x-api-key": PLACEHOLDER_CAPABILITY };
   const shutdown = new AbortController();
   const sockets = new Set<Socket>();
-
-  const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);
 
   // 1. The input.
   await mkdir(dirname(inputPath), { recursive: true });

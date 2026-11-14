@@ -527,20 +527,9 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
     expect(busy).toBeLessThan(0);
   });
 
-  it("refuses a run whose actor name is not a run token", async () => {
+  it("refuses an actor named for the other role, and keeps waiting on a name that is not a run name", async () => {
     const metadata = join(dir, "bad");
     await mkdir(metadata, { recursive: true });
-    await writeFile(join(metadata, "name"), "wr-nothex-agent\n");
-    await expect(
-      runAgent({
-        proxyUrl,
-        metadataDir: metadata,
-        readyPort: 0,
-        log,
-        policy: FAST,
-        socketPath: join(dir, "s", "x.sock"),
-      }),
-    ).rejects.toMatchObject({ code: "substrate_bridge_identity_invalid" });
     await writeFile(join(metadata, "name"), `${TOKEN}-tool\n`);
     await expect(
       runAgent({
@@ -552,7 +541,88 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
         socketPath: join(dir, "s", "x.sock"),
       }),
     ).rejects.toMatchObject({ code: "substrate_bridge_identity_invalid" });
+    await writeFile(join(metadata, "name"), `${TOKEN}-agent\n`);
+    await expect(
+      runTool({
+        proxyUrl,
+        metadataDir: metadata,
+        readyPort: 0,
+        log,
+        policy: FAST,
+        tempRoot: dir,
+        socketPath: join(dir, "s", "y.sock"),
+      }),
+    ).rejects.toMatchObject({ code: "substrate_bridge_identity_invalid" });
+    // Not a run name at all (a golden actor's, or a malformed one): the bridge waits, until stopped.
+    await writeFile(join(metadata, "name"), "wr-nothex-agent\n");
+    const stop = new AbortController();
+    const waiting = runAgent({
+      proxyUrl,
+      metadataDir: metadata,
+      readyPort: 0,
+      log,
+      policy: FAST,
+      identityPollMs: 10,
+      signal: stop.signal,
+      socketPath: join(dir, "s", "x.sock"),
+    });
+    await waitFor(() => (logs.some((l) => l.includes("substrate_bridge_waiting_for_identity")) ? true : undefined));
+    stop.abort();
+    await expect(waiting).rejects.toMatchObject({ code: "substrate_bridge_stopped" });
   });
+
+  for (const role of ["agent", "tool"] as const) {
+    it(`${role} bridge: answers readyz before its identity is known, then proceeds once the name becomes a run name`, async () => {
+      const { workspace } = await stage();
+      const metadata = join(dir, `golden-${role}`);
+      await mkdir(metadata, { recursive: true });
+      // A golden actor's name: Substrate snapshots the actor while the bridge waits on it.
+      await writeFile(join(metadata, "name"), "d0275793-6b1a-4c1e-9f3e-0123456789ab\n");
+      let readyPort: number | undefined;
+      const common = {
+        proxyUrl,
+        metadataDir: metadata,
+        readyPort: 0,
+        log,
+        policy: FAST,
+        identityPollMs: 10,
+        onReady: (port: number) => {
+          readyPort = port;
+        },
+      };
+      const started =
+        role === "agent"
+          ? runAgent({
+              ...common,
+              inputPath: join(dir, "in", "input.json"),
+              resultPath: join(dir, "out", "result.json"),
+              transcriptPath: join(dir, "out", "session.jsonl"),
+              socketPath: join(dir, "agent", "runner.sock"),
+              launchWorker: () => ({ exited: new Promise<number>(() => undefined) }),
+            })
+          : runTool({
+              ...common,
+              workspace,
+              socketPath: join(dir, "tool", "runner.sock"),
+              tempRoot: dir,
+              tarCommand: await tarForTests(dir),
+              launchRunner: () => ({ ready: Promise.resolve(), exited: new Promise<number>(() => undefined) }),
+            });
+      const port = await waitFor(() => readyPort);
+      expect((await fetch(`http://127.0.0.1:${port}/readyz`)).status).toBe(200);
+      await waitFor(() => (logs.some((l) => l.includes("substrate_bridge_waiting_for_identity")) ? true : undefined));
+      // Nothing fetched while waiting.
+      expect(logs.filter((l) => /input_ready|setup_ready/.test(l))).toEqual([]);
+      await writeFile(join(metadata, "name"), `${TOKEN}-${role}\n`);
+      const handle = await started;
+      if (role === "agent") agent = handle as AgentHandle;
+      else tool = handle as ToolHandle;
+      expect(handle.runToken).toBe(TOKEN);
+      expect(handle.readyPort).toBe(port);
+      expect(logs.filter((l) => l.includes("substrate_bridge_waiting_for_identity"))).toHaveLength(1);
+      expect(logs.some((l) => /input_ready|setup_ready/.test(l))).toBe(true);
+    });
+  }
 
   it("refuses an unsafe seed", async () => {
     await stage();

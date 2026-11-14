@@ -14,18 +14,60 @@ export const stderrLogger: Logger = (event, fields = {}) => {
   process.stderr.write(`${JSON.stringify({ event, ...fields })}\n`);
 };
 
-/** Reads `<dir>/name`, strips the role suffix, and checks the run token's shape. */
-export async function readRunToken(metadataDir: string, role: "agent" | "tool"): Promise<string> {
-  let name: string;
-  try {
-    name = (await readFile(`${metadataDir}/name`, "utf8")).trim();
-  } catch {
-    throw new BridgeError("substrate_bridge_identity_invalid");
-  }
+/** Any run actor's name: the run token and a role suffix. */
+const RUN_ACTOR_NAME = new RegExp(`^${RUN_TOKEN_PATTERN.source.slice(1, -1)}(${AGENT_SUFFIX}|${TOOL_SUFFIX})$`);
+export const DEFAULT_IDENTITY_POLL_MS = 200;
+
+export interface IdentityWaitOptions {
+  log: Logger;
+  /** How often `<dir>/name` is re-read while it is not a run actor's name. */
+  pollMs?: number;
+  /** Ends the wait with substrate_bridge_stopped. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Waits until `<dir>/name` is a run actor's name and returns its run token.
+ *
+ * Substrate boots each template once as a golden actor and snapshots it; run actors resume from that
+ * snapshot. The golden actor's name is not a run actor's name, so a name that is not one (or a file
+ * not there yet) means "keep waiting", with no timeout: the snapshot is taken while this loop waits,
+ * and after a restore the file holds the run actor's name. A run actor's name of the other role is
+ * a misconfiguration: substrate_bridge_identity_invalid.
+ */
+export async function waitForRunToken(
+  metadataDir: string,
+  role: "agent" | "tool",
+  options: IdentityWaitOptions,
+): Promise<string> {
   const suffix = role === "agent" ? AGENT_SUFFIX : TOOL_SUFFIX;
-  const token = name.endsWith(suffix) ? name.slice(0, -suffix.length) : "";
-  if (!RUN_TOKEN_PATTERN.test(token)) throw new BridgeError("substrate_bridge_identity_invalid");
-  return token;
+  const pollMs = options.pollMs ?? DEFAULT_IDENTITY_POLL_MS;
+  let logged = false;
+  for (;;) {
+    if (options.signal?.aborted) throw new BridgeError("substrate_bridge_stopped");
+    const name = await readFile(`${metadataDir}/name`, "utf8").then(
+      (text) => text.trim(),
+      () => "",
+    );
+    const match = RUN_ACTOR_NAME.exec(name);
+    if (match) {
+      if (match[1] !== suffix) throw new BridgeError("substrate_bridge_identity_invalid");
+      return name.slice(0, -suffix.length);
+    }
+    if (!logged) {
+      options.log("substrate_bridge_waiting_for_identity");
+      logged = true;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, pollMs);
+      function done(): void {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", done);
+        resolve();
+      }
+      options.signal?.addEventListener("abort", done, { once: true });
+    });
+  }
 }
 
 export function requireProxyUrl(env: NodeJS.ProcessEnv): string {

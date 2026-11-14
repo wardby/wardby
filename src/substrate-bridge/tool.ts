@@ -19,11 +19,11 @@ import { createInterface } from "node:readline";
 import {
   postBestEffort,
   postCapped,
-  readRunToken,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
   uploadFile,
+  waitForRunToken,
   type Logger,
 } from "./common.js";
 import {
@@ -58,6 +58,12 @@ export interface ToolOptions {
   socketPath?: string;
   /** 0 picks a free port (tests). */
   readyPort?: number;
+  /** Called once the readiness server listens, before the actor's identity is known. */
+  onReady?: (port: number) => void;
+  /** How often the actor's name is re-read while it is not a run actor's name (default 200 ms). */
+  identityPollMs?: number;
+  /** Ends a wait for the actor's identity (substrate_bridge_stopped). */
+  signal?: AbortSignal;
   /** Starts the tool runner with this tool setup. The default spawns `node /opt/wardby/claude-tool-runner/main.mjs`. */
   launchRunner?: (toolSetup: string, env: NodeJS.ProcessEnv) => RunnerHandle;
   log?: Logger;
@@ -129,12 +135,22 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const workspace = options.workspace ?? "/workspace";
   const tar = options.tarCommand ?? "tar";
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
-  const token = await readRunToken(options.metadataDir ?? DEFAULT_METADATA_DIR, "tool");
+  // The readiness server first: Substrate's wake-up probe must answer for the golden actor too, which
+  // never gets a run actor's name (see waitForRunToken). Nothing touches the network before the name.
+  const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);
+  options.onReady?.(ready.port);
+  const token = await waitForRunToken(options.metadataDir ?? DEFAULT_METADATA_DIR, "tool", {
+    log,
+    pollMs: options.identityPollMs,
+    signal: options.signal,
+  }).catch((error: unknown) => {
+    ready.server.close();
+    throw error;
+  });
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
   const headers = { [ACTOR_JWT_HEADER]: GATEWAY_ACTOR_JWT_PLACEHOLDER };
   const shutdown = new AbortController();
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
-  const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);
   const connections = new Map<string, { socket: Socket; relayClosed(): void }>();
   let stopped = false;
 
