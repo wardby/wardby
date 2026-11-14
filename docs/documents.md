@@ -41,6 +41,7 @@ directory.
 | Tool                                                         | Scope             | Purpose                                                                                     |
 | ------------------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------- |
 | `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent |
+| `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link       |
 | `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)              |
 | `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                    |
 | `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                |
@@ -308,8 +309,8 @@ public.
 
 ## Sending threads to a coding agent
 
-Link a document to a repository file at creation: `create_document` with
-`agentId`, `repository` and `path` together. (A design links to a directory
+Link a document to a repository file at creation (`create_document` with
+`agentId`, `repository` and `path` together), or later with `link_document`. (A design links to a directory
 instead; see [Sending design threads](#sending-design-threads).) The agent must be a coding
 agent you own, or one whose owner set `codingProfile.allowWebhookTaskOverride`
 and granted you `execute`: a send hands the agent task text, the same rule as
@@ -320,6 +321,14 @@ authorized for (its coding repository, or one on its repository list that is
 linked), so linking a document never widens what an agent can reach; otherwise
 `create_document` answers `document_repo_link_invalid`, and a send re-checks it.
 An `agentId` without a repository follows the same rule.
+
+`link_document` takes the same `agentId`, `repository`, `path` and `baseRef` for
+a document you own, and replaces its link; for a design it needs `baseRef`.
+`unlink: true` clears the link. The content is not changed, and the next send
+uses the new link. Only the owner may change a link (`document_access_denied`
+for anyone else), and not while threads are with the agent: a run publishes
+back through the link it started with, so a change then answers
+`document_link_busy`.
 Then a person with `write` access sends open threads (up to 50) from the page or
 with `send_threads_to_agent`. Wardby starts one coding run (run trigger
 `comment`) with the document, the threads and the file path; when it ends, the

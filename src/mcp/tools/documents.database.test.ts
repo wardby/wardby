@@ -179,6 +179,23 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       );
     });
 
+    it("link_document needs a baseRef to link a design to a repository directory", async () => {
+      const call = await connect(owner);
+      const created = await call("create_document", { kind: "design", title: "Linkable", files: coffeeFiles() });
+      const target = {
+        documentId: created.json.documentId,
+        agentId: codingAgentId,
+        repository: "acme/docs",
+        path: ".",
+      };
+      expect((await call("link_document", target)).text).toContain("document_repo_link_invalid");
+      expect((await call("link_document", { ...target, path: "../boards", baseRef: "main" })).text).toContain(
+        "document_repo_link_invalid",
+      );
+      const ok = await call("link_document", { ...target, baseRef: "main" });
+      expect(ok.json).toMatchObject({ linked: true, path: ".", baseRef: "main" });
+    });
+
     it("refuses an external reference without echoing it", async () => {
       const call = await connect(owner);
       const files = coffeeFiles();
@@ -634,6 +651,78 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       await connect(owner)
     )("create_document", { title: "O", markdown: "x", agentId: profiledAgentId });
     expect(mine.isError).toBe(false);
+  });
+
+  it("link_document links, relinks and unlinks a document its owner holds, under create_document's rules", async () => {
+    const call = await connect(owner);
+    const made = await call("create_document", { title: "L", markdown: "# L\n" });
+    const documentId = made.json.documentId as string;
+    const target = { documentId, agentId: codingAgentId, repository: "acme/docs", path: "docs/l.md" };
+    // The same checks as create_document.
+    for (const extra of [
+      { agentId: undefined },
+      { path: undefined },
+      { agentId: nativeAgentId },
+      { path: "../outside.md" },
+      { repository: "acme/elsewhere" },
+      { unlink: true },
+    ]) {
+      const out = await call("link_document", { ...target, ...extra });
+      expect(out.isError, JSON.stringify(extra)).toBe(true);
+      expect(out.text).toContain("document_repo_link_invalid");
+    }
+    expect((await call("link_document", { documentId })).text).toContain("document_repo_link_invalid");
+    // Only the owner: a writer is refused, and a stranger with the agent's grant too.
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: documentId,
+        granteeKind: "principal",
+        granteePrincipalId: other.id,
+        granteeKey: `principal:${other.id}`,
+        level: "write",
+      },
+    });
+    try {
+      const writer = await connect(other);
+      expect((await writer("link_document", target)).text).toContain("document_access_denied");
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceType: "document", resourceId: documentId } });
+    }
+    const linked = await call("link_document", target);
+    expect(linked.isError).toBe(false);
+    expect(linked.json).toMatchObject({
+      linked: true,
+      agentId: codingAgentId,
+      repository: "acme/docs",
+      path: "docs/l.md",
+    });
+    expect((await call("get_document", { documentId })).json).toMatchObject({
+      repository: "acme/docs",
+      path: "docs/l.md",
+    });
+    // Relinking while a send is in flight is refused; once answered it is allowed.
+    const version = await db.documentVersion.findFirstOrThrow({ where: { documentId } });
+    const thread = await db.commentThread.create({
+      data: {
+        documentId,
+        number: 1,
+        versionId: version.id,
+        anchor: {},
+        sentRunId: "run-in-flight",
+        sentAt: new Date(),
+      },
+    });
+    const busy = await call("link_document", { ...target, path: "docs/m.md" });
+    expect(busy.text).toContain("document_link_busy");
+    expect((await db.document.findUniqueOrThrow({ where: { id: documentId } })).path).toBe("docs/l.md");
+    await db.commentThread.update({ where: { id: thread.id }, data: { answeredRunId: "run-in-flight" } });
+    expect((await call("link_document", { ...target, path: "docs/m.md" })).json).toMatchObject({ path: "docs/m.md" });
+    // unlink clears every field.
+    const cleared = await call("link_document", { documentId, unlink: true });
+    expect(cleared.json).toMatchObject({ linked: false, agentId: null, repository: null, path: null, baseRef: null });
+    const row = await db.document.findUniqueOrThrow({ where: { id: documentId } });
+    expect([row.agentId, row.repository, row.path, row.baseRef]).toEqual([null, null, null, null]);
   });
 
   it("refuses an unsafe path or base ref: document_repo_link_invalid", async () => {

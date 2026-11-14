@@ -21,7 +21,7 @@ A document is a Markdown file (or a [design](designs.md): a set of HTML boards) 
 
 ## Tools
 
-- Documents and designs (`kind: "design"` takes `files` instead of `markdown`): `create_document`, `publish_version`, `get_document` (`versionNumber` for an earlier version), `list_documents`.
+- Documents and designs (`kind: "design"` takes `files` instead of `markdown`): `create_document`, `publish_version`, `get_document` (`versionNumber` for an earlier version), `list_documents`, and `link_document` to link a document you own to a coding agent and repository file later (or change or clear the link).
 - Versions: `list_document_versions`, `restore_document_version`.
 - Comments: `list_comment_threads`, `get_comment_thread`, `reply_to_thread`, `resolve_thread`.
 - Sharing: `create_share_link`, `list_share_links`, `revoke_share_link`, and `grant_access` / `revoke_access` / `list_access` for people.

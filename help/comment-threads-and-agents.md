@@ -22,7 +22,7 @@ appliesTo: ">=0.10.0"
 
 # Send comment threads to a coding agent
 
-A document can be linked, at creation, to a Markdown file in a repository and to a coding agent you own (or one whose owner granted you `execute` and set `codingProfile.allowWebhookTaskOverride`, the same rule as `trigger_agent` task text):
+A document can be linked, at creation or later with `link_document`, to a Markdown file in a repository and to a coding agent you own (or one whose owner granted you `execute` and set `codingProfile.allowWebhookTaskOverride`, the same rule as `trigger_agent` task text):
 
 ```json
 {
@@ -34,7 +34,7 @@ A document can be linked, at creation, to a Markdown file in a repository and to
 }
 ```
 
-`repository` is `owner/name`, or `local:/abs/path` inside your trusted folders, and must be a repository the agent is already authorized for (otherwise `document_repo_link_invalid`). The link cannot be added later.
+`repository` is `owner/name`, or `local:/abs/path` inside your trusted folders, and must be a repository the agent is already authorized for (otherwise `document_repo_link_invalid`). The document's owner can add, change or clear the link later with `link_document` (the same arguments plus `documentId`; `unlink: true` clears it). The content is not changed, and the next send uses the new link. While threads are with the agent the link cannot change ([`document_link_busy`](errors/document-link-busy.md)).
 
 ## Designs and pins
 

@@ -200,6 +200,7 @@ const STATUS = {
   document_version_is_latest: 409,
   comment_thread_closed: 409,
   comment_thread_already_sent: 409,
+  document_link_busy: 409,
   document_too_large: 413,
   board_too_large: 413,
   document_too_large_for_agent: 413,

@@ -6,7 +6,7 @@ import { createShareLink, listShareLinks, MAX_SHARE_DAYS, revokeShareLink } from
 import type { Viewer } from "../../core/documents/access.js";
 import { textResult } from "./text-result.js";
 import { requireDocumentAccess } from "../../core/documents/access.js";
-import { createDocument, publishVersion } from "../../core/documents/service.js";
+import { createDocument, linkDocument, publishVersion } from "../../core/documents/service.js";
 import { type VersionContent } from "../../core/documents/content.js";
 import { loadContent } from "../../core/documents/files.js";
 import {
@@ -49,6 +49,7 @@ import type { McpRequestContext } from "../context.js";
 const EXACT_STATUS: Record<string, number> = {
   comment_thread_closed: 409,
   comment_thread_already_sent: 409,
+  document_link_busy: 409,
   document_version_conflict: 409,
   document_version_is_latest: 409,
   document_too_large: 413,
@@ -245,6 +246,14 @@ const pageLink = (ctx: McpRequestContext, path: string, key: "path" | "pagePath"
 const linkNote = (ctx: McpRequestContext) => (linkOrigin(ctx) ? {} : { note: NO_ORIGIN_NOTE });
 const id = z.string().min(1);
 
+const linkArgs = z.object({
+  documentId: id,
+  agentId: id.optional(),
+  repository: z.string().min(1).optional(),
+  path: z.string().min(1).optional(),
+  baseRef: z.string().min(1).optional(),
+  unlink: z.boolean().optional(),
+});
 const createDocArgs = z.object({
   title: z.string().trim().min(1).max(200),
   kind: z.enum(["document", "design"]).optional(),
@@ -302,6 +311,53 @@ function threadsPayload(threads: ThreadView[]) {
   };
 }
 
+/**
+ * Checks an agent and repository link the way create_document and link_document both need it, and returns the
+ * canonical repository, path and baseRef. Any agent link takes execute on the agent plus the coding-task override
+ * rule (owner, or the owner's allowWebhookTaskOverride): the same rule as trigger_agent, re-checked at every send.
+ * Without it, a stranger's agentId would make every write to the document redact against that agent's secret
+ * values: an oracle for them.
+ */
+async function checkedLink(
+  ctx: McpRequestContext,
+  input: { agentId?: string; repository?: string; path?: string; baseRef?: string },
+  design: boolean,
+): Promise<{ repository?: string; path?: string; baseRef?: string }> {
+  if ((input.repository === undefined) !== (input.path === undefined)) {
+    throw new McpError(400, "document_repo_link_invalid");
+  }
+  let repository = input.repository;
+  let path = input.path;
+  let baseRef = input.baseRef;
+  if (repository !== undefined && input.agentId === undefined) {
+    throw new McpError(400, "document_repo_link_invalid");
+  }
+  if (input.agentId !== undefined) {
+    const row = await ctx.db.agent.findUnique({
+      where: { id: input.agentId },
+      include: {
+        codingProfile: {
+          select: { allowWebhookTaskOverride: true, repository: true, repositoryAuthorizedVia: true },
+        },
+        repositories: { select: { repository: true, authorizedVia: true } },
+      },
+    });
+    const { agent } = await assertAgentAccess(ctx, row, input.agentId, "execute");
+    await mapped(async () => assertDocumentAgentOverride(ctx.principal.id, agent));
+    if (repository !== undefined) {
+      if (agent.kind !== "coding") throw new McpError(400, "document_repo_link_invalid");
+      path = await mapped(async () => (design ? validDesignDir(input.path!) : validDocumentPath(input.path!)));
+      if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
+      if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
+      else repository = await mapped(async () => validDocumentRepository(repository!));
+      // Import reads files with the server's repository credentials: stay inside the agent's own.
+      await mapped(async () => assertAgentRepository(agent, repository!));
+    }
+  }
+  if (repository === undefined && baseRef !== undefined) throw new McpError(400, "document_repo_link_invalid");
+  return { repository, path, baseRef };
+}
+
 function registerContentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_document",
@@ -336,42 +392,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       if (design && input.files === undefined && input.repository === undefined) {
         throw new McpError(400, "document_format_mismatch");
       }
-      if ((input.repository === undefined) !== (input.path === undefined)) {
-        throw new McpError(400, "document_repo_link_invalid");
-      }
-      let repository = input.repository;
-      let path = input.path;
-      let baseRef = input.baseRef;
-      if (repository !== undefined && input.agentId === undefined) {
-        throw new McpError(400, "document_repo_link_invalid");
-      }
-      if (input.agentId !== undefined) {
-        // Any agent link (with or without a repository) takes execute on the agent plus the coding-task
-        // override rule (owner, or the owner's allowWebhookTaskOverride): the same rule as trigger_agent,
-        // re-checked at every send. Without it, a stranger's agentId would make every write to the
-        // document redact against that agent's secret values: an oracle for them.
-        const row = await ctx.db.agent.findUnique({
-          where: { id: input.agentId },
-          include: {
-            codingProfile: {
-              select: { allowWebhookTaskOverride: true, repository: true, repositoryAuthorizedVia: true },
-            },
-            repositories: { select: { repository: true, authorizedVia: true } },
-          },
-        });
-        const { agent } = await assertAgentAccess(ctx, row, input.agentId, "execute");
-        await mapped(async () => assertDocumentAgentOverride(ctx.principal.id, agent));
-        if (repository !== undefined) {
-          if (agent.kind !== "coding") throw new McpError(400, "document_repo_link_invalid");
-          path = await mapped(async () => (design ? validDesignDir(input.path!) : validDocumentPath(input.path!)));
-          if (baseRef !== undefined) baseRef = await mapped(async () => validDocumentBaseRef(input.baseRef!));
-          if (isLocalRepository(repository)) repository = await canonicalLocalRepository(repository);
-          else repository = await mapped(async () => validDocumentRepository(repository!));
-          // Import reads files with the server's repository credentials: stay inside the agent's own.
-          await mapped(async () => assertAgentRepository(agent, repository!));
-        }
-      }
-      if (repository === undefined && baseRef !== undefined) throw new McpError(400, "document_repo_link_invalid");
+      const { repository, path, baseRef } = await checkedLink(ctx, input, design);
       // A linked design with no files is imported from the repository at baseRef.
       let files = input.files;
       let imported = false;
@@ -403,6 +424,67 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         kind: design ? "design" : "document",
         warnings: created.warnings.map(warningText),
         ...pageLink(ctx, `/d/${created.id}`),
+        ...linkNote(ctx),
+      });
+    },
+  });
+
+  mcp.registerTool({
+    name: "link_document",
+    scope: "documents:write",
+    description:
+      "Links a document or design you own to a coding agent and a repository file, or changes or clears that link, so " +
+      "comment threads can be sent to the agent. The same rules as create_document: give agentId (a coding agent you own, " +
+      "or one whose owner allows others' task text) with repository and path; for a Markdown document path is a " +
+      "repo-relative .md file and baseRef is optional; for a design path is the boards directory (. for the root) and " +
+      "baseRef is required. agentId alone links the agent without a repository. unlink: true clears the link. The " +
+      "content is not changed; the next send uses the new link. Refused with document_link_busy while a send is in flight.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: { type: "string" },
+        agentId: { type: "string" },
+        repository: { type: "string", description: "owner/name, or local:/abs/path inside the trusted roots" },
+        path: { type: "string", description: "repo-relative Markdown path, or a design's directory (. for the root)" },
+        baseRef: { type: "string" },
+        unlink: { type: "boolean", description: "true clears the agent and repository link" },
+      },
+      required: ["documentId"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = linkArgs.parse(args);
+      const viewer = viewerOf(ctx);
+      const doc = await mapped(() => requireDocumentAccess(ctx.db, input.documentId, viewer, "owner"));
+      const design = doc.kind === "design";
+      const given = [input.agentId, input.repository, input.path, input.baseRef].some((v) => v !== undefined);
+      if (input.unlink === true ? given : !given || input.agentId === undefined) {
+        throw new McpError(400, "document_repo_link_invalid");
+      }
+      let link = {
+        agentId: null as string | null,
+        repository: null as string | null,
+        path: null as string | null,
+        baseRef: null as string | null,
+      };
+      if (input.unlink !== true) {
+        // A design is read from its directory at baseRef when sent, so a design link needs one.
+        if (design && input.repository !== undefined && input.baseRef === undefined) {
+          throw new McpError(400, "document_repo_link_invalid");
+        }
+        const checked = await checkedLink(ctx, input, design);
+        link = {
+          agentId: input.agentId!,
+          repository: checked.repository ?? null,
+          path: checked.path ?? null,
+          baseRef: checked.baseRef ?? null,
+        };
+      }
+      await mapped(() => linkDocument(ctx.db, { documentId: input.documentId, viewer, link }));
+      return textResult({
+        documentId: input.documentId,
+        linked: link.agentId !== null,
+        ...link,
+        ...pageLink(ctx, `/d/${input.documentId}`),
         ...linkNote(ctx),
       });
     },

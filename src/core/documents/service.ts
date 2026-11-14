@@ -4,6 +4,7 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { contentHash, type VersionContent } from "./content.js";
+import { requireDocumentAccess, type Viewer } from "./access.js";
 import { notifyDocumentChange } from "./events.js";
 import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
 import { loadContent, storeDocumentContent, storeVersionFileRows, storeVersionFiles } from "./files.js";
@@ -213,4 +214,29 @@ export async function getDocument(
   if (!document || !document.currentVersion) throw new Error("document_not_found");
   const { currentVersion, ...rest } = document;
   return { document: rest, version: currentVersion, content: await loadContent(db, currentVersion) };
+}
+
+/**
+ * Sets or clears a document's agent and repository link. The caller has already checked the link itself (the
+ * agent, the repository and the path). Only the owner may change it, and not while a send is in flight: that run
+ * publishes back through the link it started with. Content is untouched; the next send uses the new link.
+ */
+export async function linkDocument(
+  db: DocumentServiceDb,
+  input: {
+    documentId: string;
+    viewer: Viewer;
+    link: { agentId: string | null; repository: string | null; path: string | null; baseRef: string | null };
+  },
+): Promise<void> {
+  await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
+  const updated = await db.document.updateMany({
+    where: {
+      id: input.documentId,
+      threads: { none: { sentRunId: { not: null }, answeredRunId: null } },
+    },
+    data: input.link,
+  });
+  if (updated.count === 0) throw new Error("document_link_busy");
+  await notifyDocumentChange(db, input.documentId, "thread");
 }
