@@ -570,6 +570,12 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.locator(".tp-row", { hasText: "Make the prices bigger" }).click();
     await expect.poll(() => pin1.count()).toBe(1);
     expect(await pin1.getAttribute("class")).toContain("resolved");
+    // All lists open and resolved threads together; Open lists only the open one.
+    await page.keyboard.press("Escape");
+    await page.getByRole("tab", { name: /^All/ }).click();
+    await expect.poll(() => page.locator(".tp-row").count()).toBe(2);
+    await page.getByRole("tab", { name: /^Open/ }).click();
+    await expect.poll(() => page.locator(".tp-row").count()).toBe(1);
     expect(seen.violations).toEqual([]);
     expect(seen.errors).toEqual([]);
     expect(seen.external).toEqual([]);

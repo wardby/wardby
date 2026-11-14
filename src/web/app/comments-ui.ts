@@ -29,9 +29,10 @@ import type { AnchorSurface, DraftStart } from "./surface.js";
 const RANK: Record<string, number> = { none: 0, read: 1, comment: 2, write: 3, owner: 4 };
 export const atLeast = (access: string, need: string) => (RANK[access] ?? 0) >= RANK[need];
 
-type Filter = "open" | "resolved" | "sent" | "mine";
+type Filter = "open" | "all" | "resolved" | "sent" | "mine";
 const FILTERS: [Filter, string][] = [
   ["open", "Open"],
+  ["all", "All"],
   ["resolved", "Resolved"],
   ["sent", "Sent to agent"],
   ["mine", "Mine"],
@@ -859,7 +860,7 @@ export class CommentsUI {
   // ---- panel, badges -----------------------------------------------------------------
 
   private counts(): Record<Filter, number> {
-    const c = { open: 0, resolved: 0, sent: 0, mine: 0 };
+    const c = { open: 0, all: this.threads.length, resolved: 0, sent: 0, mine: 0 };
     for (const t of this.threads) {
       if (t.status === "resolved") c.resolved++;
       else c.open++;
@@ -870,6 +871,7 @@ export class CommentsUI {
   }
 
   private visible(): ThreadView[] {
+    if (this.filter === "all") return [...this.threads];
     return this.threads.filter((t) =>
       this.filter === "open"
         ? t.status !== "resolved"
