@@ -168,7 +168,7 @@ The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
 server it lists your agents with `list_agents` and reads each one's sub-agents
 and repositories with `list_subagents` and `list_repositories`, for up to 30
 agents; with more it
-shows "Drawing flows needs wardby 0.9.14 or later." See the `agent-flows` help
+shows "Drawing flows needs wardby 0.9.14 or later." See the [agent-flows](../help/agent-flows.md) help
 article for how links are worked out.
 
 ## Using the pane

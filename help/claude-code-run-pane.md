@@ -105,7 +105,7 @@ at the pane's next check.
 
 The **Agents** tab draws how your agents work together: a list grouped by flow,
 and a Detail and Flow tab for each agent. It needs wardby 0.9.14 or later. See
-`agent-flows`.
+[See how your agents work together](agent-flows.md).
 
 See also [Several repositories in one coding run](multi-repository-runs.md).
 
