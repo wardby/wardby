@@ -208,15 +208,18 @@ first it is refused with `document_version_conflict`, and the page offers
   the history lists who was overridden. It is only possible in review or with
   changes requested.
 - **Reopen**: a writer reopens an approved document (back to in review). Every
-  reviewer then reviews again, even for the same version.
+  reviewer then reviews again, even for the same version. A named reviewer can
+  also request changes on an approved document, which moves it to changes
+  requested and unlocks it.
 - **Archive**: the owner archives and unarchives; unarchive returns the state it
   had before.
 - **The lock**: an approved or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
   threads cannot be sent to an agent: all are refused with `document_locked`.
   Comments stay open. A page open when the lock lands turns read-only in place,
-  with no reload. After a reopen, edits made before the lock show as "Unsaved
-  changes" and are saved with the next edit, never on a timer; a Markdown page
+  with no reload; edits not yet saved are kept ("Read only: approved · unsaved
+  changes"). After a reopen they show as "Unsaved changes" and are saved with
+  the next edit, never on a timer; a Markdown page
   is editable again in place, and a design page that was opened read-only must
   be reloaded to edit.
   An agent edit that finishes after the lock is not applied; each thread gets a

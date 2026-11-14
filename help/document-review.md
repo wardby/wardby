@@ -34,7 +34,9 @@ Reviewers act only with live access: a member needs at least comment access, and
 
 ## Approving
 
-A reviewer approves or requests changes on the version they read, with an optional note. If a newer version was published meanwhile, the verdict is refused (`document_version_conflict`): read the new version and review it. The page shows "vN was published while you were reviewing vM" and a **Review vN** button that shows what changed.
+A reviewer approves or requests changes on the version they read, with an optional note. If a newer version was published meanwhile, the verdict is refused (`document_version_conflict`): read the new version and review it. The page shows "vN was published while you were reviewing vM" and a **Review vN** button that shows what changed since vM (on a design, vN opens in History with the boards changed since vM marked "changed").
+
+A named reviewer can also request changes on an approved document: it moves to Changes requested and unlocks, so a new version can be published.
 
 **Force approve**: while the document is in review or has changes requested, the owner or the final approver approves the current version over missing verdicts and requested changes. A note is required, and the history records who was overridden.
 
@@ -42,7 +44,7 @@ A reviewer approves or requests changes on the version they read, with an option
 
 An approved or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
 
-A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. After a reopen, edits made before the lock show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
+A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. Edits not yet saved when the lock lands are kept: while locked the page says so ("Read only: approved · unsaved changes"), and after a reopen they show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
 
 ## The page and the Viewer
 
@@ -59,14 +61,14 @@ Every document and design page shows a banner with the state and the approval co
 | `archive_document`       | owner                   | `archived: true` or `false`                                                                                                                                         |
 | `wait_for_review`        | `documents:read`        | waits until the state differs from `state` or `timeoutSeconds` (default 300, at most 600) passes                                                                    |
 
-`get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events, and gives the owner `reviewCandidates` (the people and guests that can be named). Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
+`get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events. Only the owner gets the ids of people: each reviewer's `ref`, each event's `actorRef`, `finalApproverId`, and `reviewCandidates` (the people and guests that can be named); everyone else gets names and verdicts. Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
 
 ## Make an agent session wait for approval
 
 1. `create_document` with the plan.
 2. `submit_for_review` with the reviewers.
 3. `create_share_link` (comment) if reviewers have no account, and send them the link; once they have opened it and given a name, they appear in `reviewCandidates`.
-4. `wait_for_review` with the state you saw (`in_review`); call it again when it returns `changed: false`.
+4. `wait_for_review` with the state you saw (`in_review`); call it again when it returns `changed: false`. If your MCP client times out before the wait returns, pass a smaller `timeoutSeconds` (for example 50) and loop.
 5. On `changes_requested`: read the notes (`get_document`) and threads (`list_comment_threads`), revise with `publish_version`, reply to or resolve the threads, and wait again.
 6. On `approved`: continue, citing the approved version number.
 
