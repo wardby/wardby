@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { markdownAgentFormat, designAgentFormat } from "./agent-formats.js";
-import { editedFiles, mergeContent, mergeFiles, mergeLines } from "./merge.js";
+import { editedFiles, MAX_MERGE_LINES, mergeContent, mergeFiles, mergeLines } from "./merge.js";
 import { MAX_EDITS } from "./text-diff.js";
 
 describe("mergeFiles (per-file three-way merge)", () => {
@@ -101,6 +101,22 @@ describe("editedFiles", () => {
 });
 
 describe("mergeLines (line-level three-way merge of one file)", () => {
+  it("treats a file over MAX_MERGE_LINES as a conflict, even with edits far apart", () => {
+    const base = Array.from({ length: MAX_MERGE_LINES + 1 }, (_, i) => `line ${i}\n`).join("");
+    const theirs = base.replace("line 0\n", "first\n");
+    const ours = base.replace(`line ${MAX_MERGE_LINES}\n`, "last\n");
+    expect(mergeLines(base, theirs, ours)).toBeNull();
+    // Just under the cap the same edits merge.
+    const small = Array.from({ length: MAX_MERGE_LINES }, (_, i) => `line ${i}\n`).join("");
+    const merged = mergeLines(
+      small,
+      small.replace("line 0\n", "first\n"),
+      small.replace(`line ${MAX_MERGE_LINES - 1}\n`, "last\n"),
+    );
+    expect(merged?.startsWith("first\n")).toBe(true);
+    expect(merged?.endsWith("last\n")).toBe(true);
+  });
+
   const base = "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
 
   it("merges edits to different paragraphs", () => {

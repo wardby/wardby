@@ -100,8 +100,8 @@ export interface DocumentSweepDeps {
   /** A whole executor: answering a conflicted run can start its reconcile run. */
   executor: Executor;
   rateLimiter?: RateLimiter;
-  /** Files a reconcile run's start failure as a self-defect, as a send does. */
-  selfDefects?: DispatchRunOptions["selfDefects"];
+  /** Files a reconcile run's start failure as a self-defect, as a send does. Required, so every entry point wires it. */
+  selfDefects: DispatchRunOptions["selfDefects"];
 }
 
 export interface DocumentAgentDeps {
@@ -757,9 +757,18 @@ async function publishRunEdit(
     // Layer 1: the per-file three-way merge with the version the threads were sent with. Base and
     // theirs are prepared with the same secret values as ours, so a value that became a secret since
     // (redacted in ours only) does not make an untouched file differ.
-    const base = fmt.prepare(await versionContent(db, documentId, sentVersion), secretValues).content;
+    // A stored version the checks now refuse (e.g. a near-limit board that the longer redaction marker
+    // pushes over) is compared as stored: at worst a false conflict, which the reconcile run handles.
+    const prep = (c: VersionContent): VersionContent => {
+      try {
+        return fmt.prepare(c, secretValues).content;
+      } catch {
+        return c;
+      }
+    };
+    const base = prep(await versionContent(db, documentId, sentVersion));
     const reconcile = { sentVersion, base, ours: prepared };
-    const theirs = fmt.prepare(await loadContent(db, current), secretValues).content;
+    const theirs = prep(await loadContent(db, current));
     const merged = mergeContent(ef, base, theirs, prepared);
     if (merged.kind === "conflict") return { kind: "conflict", branch, reconcile };
     // A line-merged file is new text: it must pass the format's checks (sanitiser, board rules,

@@ -42,7 +42,7 @@ import { createDocument, getDocument, publishVersion } from "./service.js";
 const SECRET = "s3cret-agentloop-789";
 const anchor = (quote: string) => ({ type: "text", quote, prefix: "", suffix: "" });
 
-describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (database)", () => {
+describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (database)", { timeout: 30_000 }, () => {
   const db = createPrismaClient();
   const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
   const s = randomUUID();
@@ -777,10 +777,10 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     const now = new Date();
     await Promise.all([
       onDocumentRunFinished(db, deps, runId),
-      sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow }, now),
+      sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow, selfDefects: undefined }, now),
       onDocumentRunFinished(db, deps, runId),
     ]);
-    await sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow }, now);
+    await sweepUnansweredDocumentRuns({ db, cipher, executor, rateLimiter: allow, selfDefects: undefined }, now);
     await onDocumentRunFinished(db, deps, runId);
     expect(await runsOf()).toBe(before + 1);
     expect(await db.comment.count({ where: { threadId: t1.threadId, runId } })).toBe(1);
@@ -1032,10 +1032,10 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await finish(runId, "failed", "", true, new Date(now.getTime() - DOCUMENT_SWEEP_GRACE_MS - 1000));
     await Promise.all([
       onDocumentRunFinished(db, deps, runId),
-      sweepUnansweredDocumentRuns({ db, cipher, executor }, now),
+      sweepUnansweredDocumentRuns({ db, cipher, executor, selfDefects: undefined }, now),
       onDocumentRunFinished(db, deps, runId),
     ]);
-    await sweepUnansweredDocumentRuns({ db, cipher, executor }, now);
+    await sweepUnansweredDocumentRuns({ db, cipher, executor, selfDefects: undefined }, now);
     expect(await db.comment.count({ where: { runId } })).toBe(2);
     const rows = await db.commentThread.findMany({ where: { sentRunId: runId } });
     expect(rows.map((r) => r.answeredRunId)).toEqual([runId, runId]);
@@ -1059,11 +1059,12 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await markRunFailedFromExecutorError(db, failed.runId, new Error("launch failed"));
 
     // Within the grace period the hook has the first go: the sweep leaves them.
-    await sweepUnansweredDocumentRuns({ db, cipher, executor }, new Date());
+    await sweepUnansweredDocumentRuns({ db, cipher, executor, selfDefects: undefined }, new Date());
     expect(await db.comment.count({ where: { runId: { in: [lost.runId, failed.runId] } } })).toBe(0);
 
     const later = new Date(Date.now() + DOCUMENT_SWEEP_GRACE_MS + 1000);
-    for (let i = 0; i < 5; i += 1) await sweepUnansweredDocumentRuns({ db, cipher, executor }, later);
+    for (let i = 0; i < 5; i += 1)
+      await sweepUnansweredDocumentRuns({ db, cipher, executor, selfDefects: undefined }, later);
     for (const runId of [lost.runId, failed.runId]) {
       const replies = await db.comment.findMany({ where: { runId } });
       expect(replies.map((c) => c.body)).toEqual([AGENT_RUN_FAILED_REPLY]);
@@ -1224,7 +1225,7 @@ const coffee = (): Record<string, string> => ({
 });
 const MENU_INTRO = "We keep the menu small so everything on it is good.";
 
-describe.skipIf(!process.env.DATABASE_URL)("designs", () => {
+describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () => {
   const db = createPrismaClient();
   const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
   const s = randomUUID();

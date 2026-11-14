@@ -56,6 +56,9 @@ const sameHunk = (a: Hunk, b: Hunk) =>
  * touching, as in git) are both applied; identical hunks once. Any other overlapping or touching
  * pair, or a diff past the Myers cap, makes the whole file a conflict: null, never conflict markers.
  */
+/** Lines a file may have for a line merge; a longer file is a conflict (bounds the work in the completion hook). */
+export const MAX_MERGE_LINES = 20_000;
+
 export function mergeLines(base: string, theirs: string, ours: string): string | null {
   const ids = new Map<string, number>();
   const intern = (lines: string[]) =>
@@ -67,6 +70,7 @@ export function mergeLines(base: string, theirs: string, ours: string): string |
   const b = splitLines(base);
   const t = splitLines(theirs);
   const o = splitLines(ours);
+  if (Math.max(b.length, t.length, o.length) > MAX_MERGE_LINES) return null;
   const bIds = intern(b);
   const tSteps = myers(bIds, intern(t));
   const oSteps = myers(bIds, intern(o));
