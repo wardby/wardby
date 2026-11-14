@@ -135,6 +135,58 @@ export type Older = {
   error: string | null;
 };
 
+/** One agent's repository link, as list_agent_links (or list_repositories) sends it. */
+export type LinkRepository = {
+  provider: string;
+  repository: string;
+  access: string;
+  triggers: string[];
+  reviewFixMaxRounds: number | null;
+  waitForCi: boolean;
+  markReadyWhenPassing: boolean;
+};
+
+/** An agent as list_agent_links sends it (wardby 0.9.14+): link facts only, never secrets. */
+export type LinkAgent = {
+  id: string;
+  name: string;
+  kind: string;
+  codingProvider: string | null;
+  model: string;
+  budgetUsd: number;
+  access: string;
+  budgetGroup: { id: string; name: string } | null;
+  promptFirstLine: string;
+  entry: string[];
+  repositories: LinkRepository[];
+  notes: string[];
+};
+export type LinkEdge = {
+  from: string;
+  to: string;
+  kind: "delegates" | "reviews" | "fixes" | "after_merge";
+  repository: string | null;
+  label: string | null;
+};
+/** A flow: a group of agents that work together. */
+export type LinkFlow = {
+  key: string;
+  name: string;
+  agentIds: string[];
+  entryAgentIds: string[];
+  repositories: string[];
+  related: string[];
+};
+export type AgentLinks = {
+  agents: LinkAgent[];
+  edges: LinkEdge[];
+  flows: LinkFlow[];
+  unlinked: string[];
+  hidden: { agents: number; edges: number };
+};
+/** The Agents tab's data: when it was read, what came back, an error, and a notice about an older server. */
+export type LinksState = { at: number; data: AgentLinks | null; error: string | null; notice: string | null };
+
 declare module "claude-code" {
   interface PluginState {
     "wardby-runs": {
@@ -151,6 +203,10 @@ declare module "claude-code" {
       groupOpen: Shaped<Record<string, boolean>>;
       view: "ledger" | "strips";
       picked: Shaped<Record<string, string>>;
+      tab: "runs" | "agents";
+      links: Shaped<LinksState>;
+      flowOpen: Shaped<Record<string, boolean>>;
+      agentOpen: Shaped<{ id: string; tab: "detail" | "flow" } | null>;
     };
   }
 }

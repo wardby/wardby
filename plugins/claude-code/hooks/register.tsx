@@ -2,7 +2,13 @@ import { atom, read, update } from "claude-code";
 import type { Register, UiCopyArgs } from "claude-code";
 
 import type {
+  AgentLinks,
   Filter,
+  LinkAgent,
+  LinkEdge,
+  LinkFlow,
+  LinkRepository,
+  LinksState,
   Older,
   OpenStep,
   Poll,
@@ -148,6 +154,162 @@ const SEARCH_PAUSE_MS = 600;
 // A query no run's id, agent name, status, trigger, repository or branch holds: a server that answers it
 // with runs ignores query (older than 0.9.7), so the pane doesn't search it.
 const PROBE_QUERY = "wardby-runs-probe-no-such-run-3f9c1d";
+
+// The pane's two tabs: runs (the list and a run's detail) and agents (flows: agents that work together).
+const tab = atom({ plugin: "wardby-runs", key: "tab" } as const, "runs" as "runs" | "agents");
+// list_agent_links' reply (wardby 0.9.14+), or what the pane built from per-agent calls on an older server.
+const links = atom(
+  { plugin: "wardby-runs", key: "links" } as const,
+  { at: 0, data: null, error: null, notice: null } as LinksState,
+  { shape: "links-1" },
+);
+// The Agents tab's flows the person opened or folded, by flow key; and the agent open in Detail or Flow.
+const flowOpen = atom({ plugin: "wardby-runs", key: "flowOpen" } as const, {} as Record<string, boolean>, {
+  shape: "flow-open-1",
+});
+const agentOpen = atom(
+  { plugin: "wardby-runs", key: "agentOpen" } as const,
+  null as { id: string; tab: "detail" | "flow" } | null,
+  { shape: "agent-open-1" },
+);
+// The agents and their links change rarely: the Agents tab reads them again after this long, or on r.
+const LINKS_REFRESH_MS = 5 * 60_000;
+// An older server without list_agent_links costs two calls an agent to draw flows: only up to this many.
+const FALLBACK_MAX_AGENTS = 30;
+const FLOWS_NOTICE = "Drawing flows needs wardby 0.9.14 or later.";
+const APPROXIMATE_NOTICE = "Older wardby: flows are approximate.";
+const FIX_ROUNDS = 2;
+const EDGE_ORDER: LinkEdge["kind"][] = ["delegates", "fixes", "reviews", "after_merge"];
+
+/** A repository as the server keys it in flows: "provider:name", a GitHub name in lower case. */
+const linkRepoKey = (provider: string, repository: string): string =>
+  `${provider}:${provider === "github" ? repository.toLowerCase() : repository}`;
+
+/**
+ * An older server's links, from list_subagents and list_repositories, by the rules list_agent_links uses:
+ * a lead delegates to its sub-agents; on a repository, a coding agent with write access is reviewed by each
+ * agent with the pull_request trigger, a reviewer's findings go to each agent with review_fix, and a merge
+ * starts each agent with push. Without the coding profile's own repository, so links may be missing.
+ */
+function fallbackEdges(
+  agents: LinkAgent[],
+  children: Record<string, { boundName: string; agentId: string }[]>,
+): LinkEdge[] {
+  const ids = new Set(agents.map((a) => a.id));
+  const edges = new Map<string, LinkEdge>();
+  const add = (edge: LinkEdge) => {
+    if (edge.from === edge.to) return;
+    const id = `${edge.from}\u0000${edge.to}\u0000${edge.kind}\u0000${edge.repository ?? ""}`;
+    if (!edges.has(id)) edges.set(id, edge);
+  };
+  for (const a of agents)
+    for (const child of children[a.id] ?? [])
+      if (ids.has(child.agentId))
+        add({ from: a.id, to: child.agentId, kind: "delegates", repository: null, label: child.boundName });
+  const on = (key: string, trigger: string): { agent: LinkAgent; link: LinkRepository }[] =>
+    agents.flatMap((agent) =>
+      agent.repositories
+        .filter((link) => linkRepoKey(link.provider, link.repository) === key && link.triggers.includes(trigger))
+        .map((link) => ({ agent, link })),
+    );
+  const keys = [
+    ...new Set(agents.flatMap((a) => a.repositories.map((l) => linkRepoKey(l.provider, l.repository)))),
+  ].sort();
+  for (const key of keys) {
+    const writers = agents.filter(
+      (a) =>
+        a.kind === "coding" &&
+        a.repositories.some((l) => linkRepoKey(l.provider, l.repository) === key && l.access === "write"),
+    );
+    const reviewers = on(key, "pull_request");
+    for (const w of writers)
+      for (const v of reviewers)
+        add({ from: w.id, to: v.agent.id, kind: "reviews", repository: key, label: "PR opened" });
+    for (const v of reviewers)
+      for (const f of on(key, "review_fix"))
+        add({
+          from: v.agent.id,
+          to: f.agent.id,
+          kind: "fixes",
+          repository: key,
+          label: `fix ≤${f.link.reviewFixMaxRounds ?? FIX_ROUNDS}`,
+        });
+    for (const w of writers)
+      for (const p of on(key, "push"))
+        add({ from: w.id, to: p.agent.id, kind: "after_merge", repository: key, label: "merged" });
+  }
+  return [...edges.values()].sort(
+    (a, b) =>
+      EDGE_ORDER.indexOf(a.kind) - EDGE_ORDER.indexOf(b.kind) ||
+      a.from.localeCompare(b.from) ||
+      a.to.localeCompare(b.to) ||
+      (a.repository ?? "").localeCompare(b.repository ?? ""),
+  );
+}
+
+/**
+ * AgentLinks built on the pane from an older server's per-agent replies: entry points from mention
+ * triggers ("manual" for an agent nothing starts), and flows as the groups the links connect, each named
+ * by its one repository or its lead's name.
+ */
+function fallbackLinks(
+  agents: LinkAgent[],
+  children: Record<string, { boundName: string; agentId: string }[]>,
+): AgentLinks {
+  const edges = fallbackEdges(agents, children);
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const byName = (a: string, b: string) => byId.get(a)!.name.localeCompare(byId.get(b)!.name) || a.localeCompare(b);
+  const withEntry = agents.map((a): LinkAgent => {
+    const mentions = a.repositories
+      .filter((l) => l.triggers.includes("mention"))
+      .map((l) => `mention:${linkRepoKey(l.provider, l.repository)}`);
+    const isStarted = edges.some((e) => e.to === a.id);
+    return { ...a, entry: mentions.length > 0 ? mentions : isStarted ? [] : ["manual"] };
+  });
+  const entries = new Map(withEntry.map((a) => [a.id, a.entry]));
+
+  // Union-find over every edge.
+  const parent = new Map(agents.map((a) => [a.id, a.id]));
+  const find = (id: string): string => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(id, root);
+    return root;
+  };
+  for (const e of edges) parent.set(find(e.from), find(e.to));
+  const groups = new Map<string, string[]>();
+  for (const a of agents) groups.set(find(a.id), [...(groups.get(find(a.id)) ?? []), a.id]);
+
+  const flows: LinkFlow[] = [];
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const ids = [...members].sort(byName);
+    const incoming = new Set(edges.filter((e) => members.includes(e.to)).map((e) => e.to));
+    const triggered = ids.filter((id) => entries.get(id)!.some((p) => p.startsWith("mention:")));
+    const key = triggered[0] ?? ids.find((id) => !incoming.has(id)) ?? ids[0];
+    const repos = new Set<string>();
+    for (const e of edges) if (e.repository && members.includes(e.from)) repos.add(e.repository);
+    for (const id of ids)
+      for (const p of entries.get(id)!) if (p.startsWith("mention:")) repos.add(p.slice("mention:".length));
+    const repositories = [...repos].sort();
+    const lead = byId.get(key)!.name;
+    const name =
+      repositories.length === 1
+        ? repositories[0].replace(/^github:/, "")
+        : repositories.length === 0
+          ? lead
+          : `${lead} · ${repositories.length} repositories`;
+    const entryAgentIds = ids.filter((id) => entries.get(id)!.length > 0);
+    flows.push({ key, name, agentIds: ids, entryAgentIds, repositories, related: [] });
+  }
+  flows.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+  const inFlow = new Set(flows.flatMap((f) => f.agentIds));
+  const unlinked = agents
+    .map((a) => a.id)
+    .filter((id) => !inFlow.has(id))
+    .sort(byName);
+  return { agents: withEntry, edges, flows, unlinked, hidden: { agents: 0, edges: 0 } };
+}
 
 // The status filter's choices: label, hotkey, and which statuses each keeps.
 const STATUS_FILTERS: { value: Filter["status"]; label: string; hotkey: string; keeps: (status: string) => boolean }[] =
@@ -1101,7 +1263,7 @@ export const register: Register = (on, options) => {
         const raw = err instanceof Error ? err.message : "could not reach the wardby server";
         // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools.
         const message = /auto mode/i.test(raw)
-          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run, mcp__${server}__get_run_steps and mcp__${server}__get_run_text in /permissions, then press r.`
+          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run, mcp__${server}__get_run_steps, mcp__${server}__get_run_text, mcp__${server}__list_agent_links and mcp__${server}__get_agent in /permissions, then press r.`
           : raw;
         await update($, poll, (p): Poll => ({ ...p, at: now, error: message }));
         failures += 1;
@@ -1583,6 +1745,95 @@ export const register: Register = (on, options) => {
       }
     }
 
+    /**
+     * The Agents tab's data: list_agent_links in one call (wardby 0.9.14+). An older server without it gets
+     * flows built here from list_agents, list_subagents and list_repositories, when it has at most
+     * FALLBACK_MAX_AGENTS agents; past that the tab says which wardby draws flows. Skipped while what the
+     * pane holds is younger than LINKS_REFRESH_MS, unless forced (r). Only the pane calls it, so nothing is
+     * read while the pane is closed.
+     */
+    let isLinking = false;
+    async function refreshLinks(force = false): Promise<void> {
+      if (isLinking) return;
+      isLinking = true;
+      let isFallback = false;
+      try {
+        const now = await $.clock.now();
+        const held = await read($, links);
+        if (!force && held.at !== 0 && now - held.at < LINKS_REFRESH_MS) return;
+        try {
+          let fresh: LinksState;
+          try {
+            const data = (await call("list_agent_links", {})) as AgentLinks;
+            fresh = { at: now, data, error: null, notice: null };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "";
+            if (/auto mode/i.test(message) || !UNKNOWN_TOOL.test(message)) throw err;
+            isFallback = true;
+            fresh = await linksFromOlderServer(now);
+          }
+          await update($, links, () => fresh);
+        } catch (err) {
+          const raw = err instanceof Error ? err.message : "could not reach the wardby server";
+          const tools = isFallback
+            ? ["list_agents", "list_subagents", "list_repositories", "list_agent_links", "get_agent"]
+            : ["list_agent_links", "get_agent"];
+          const named = tools.map((t) => `mcp__${server}__${t}`);
+          // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools the tab uses.
+          const error = /auto mode/i.test(raw)
+            ? `auto mode refused the call. Allow ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]} in /permissions, then press r.`
+            : raw;
+          await update($, links, (old): LinksState => ({ ...old, at: now, error }));
+        }
+      } finally {
+        isLinking = false;
+      }
+    }
+
+    /** An older server's links: per-agent calls up to FALLBACK_MAX_AGENTS agents, else a notice. */
+    async function linksFromOlderServer(now: number): Promise<LinksState> {
+      const list = (await call("list_agents", { summary: true })) as Record<string, unknown>[];
+      if (list.length > FALLBACK_MAX_AGENTS) return { at: now, data: null, error: null, notice: FLOWS_NOTICE };
+      const children: Record<string, { boundName: string; agentId: string }[]> = {};
+      const agentsNow = await Promise.all(
+        list.map(async (row): Promise<LinkAgent> => {
+          const id = String(row.id);
+          const [subs, repos] = await Promise.all([
+            call("list_subagents", { agentId: id }) as Promise<{ children?: { boundName: string; agentId: string }[] }>,
+            call("list_repositories", { agentId: id }) as Promise<{ repositories?: Record<string, unknown>[] }>,
+          ]);
+          children[id] = (subs.children ?? []).map((c) => ({
+            boundName: String(c.boundName),
+            agentId: String(c.agentId),
+          }));
+          return {
+            id,
+            name: String(row.name),
+            kind: String(row.kind ?? "native"),
+            codingProvider: str(row.codingProvider),
+            model: String(row.model ?? ""),
+            budgetUsd: num(row.budgetUsd),
+            access: String(row.access ?? "read"),
+            budgetGroup: null,
+            promptFirstLine: "",
+            entry: [],
+            repositories: (repos.repositories ?? []).map((l): LinkRepository => ({
+              provider: String(l.provider),
+              repository: String(l.repository),
+              access: l.access === "write" ? "write" : "read",
+              triggers: Array.isArray(l.triggers) ? l.triggers.map(String) : [],
+              reviewFixMaxRounds: typeof l.reviewFixMaxRounds === "number" ? l.reviewFixMaxRounds : null,
+              waitForCi: l.waitForCi === true,
+              markReadyWhenPassing: l.markReadyWhenPassing === true,
+            })),
+            notes: [],
+          };
+        }),
+      );
+      agentsNow.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      return { at: now, data: fallbackLinks(agentsNow, children), error: null, notice: APPROXIMATE_NOTICE };
+    }
+
     // Called without await from the pane's handlers: a pane closed or reloaded mid-search drops it quietly.
     pane.searchOlder = (text, more) => searchOlder(text, more).catch(() => {});
     pane.continueLocally = continueLocally;
@@ -1593,6 +1844,7 @@ export const register: Register = (on, options) => {
     pane.loadFullText = loadFullText;
     pane.loadMoreSteps = (runId) => loadSteps(runId, false, null, true);
     pane.refresh = refresh;
+    pane.refreshLinks = refreshLinks;
     pane.start = () => {
       timer ??= $.clock.every(TICK_MS, () => {
         void $.clock.now().then((now) => {
@@ -1615,6 +1867,7 @@ export const register: Register = (on, options) => {
     loadFullText: (runId: string) => Promise<RunDetail | null>;
     loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
+    refreshLinks: (force?: boolean) => Promise<void>;
     searchOlder: (text: string, more: boolean) => Promise<void>;
     start: () => void;
     continueLocally: (runId: string, dir: string, repo: ResumeRepo) => Promise<void>;
@@ -1625,6 +1878,7 @@ export const register: Register = (on, options) => {
     loadFullText: async () => null,
     loadMoreSteps: async () => {},
     refresh: async () => {},
+    refreshLinks: async () => {},
     searchOlder: async () => {},
     start: () => {},
     continueLocally: async () => {},
@@ -1720,6 +1974,40 @@ export const register: Register = (on, options) => {
     const rows = await read($, runs);
     const width = Math.max(24, (e.props.bodyColumns ?? 40) - 2);
     const isDesktop = e.surface === "desktop";
+    const currentTab = await read($, tab);
+    const linksState = await read($, links);
+    // The Agents tab reads its data when first shown and again once it is LINKS_REFRESH_MS old.
+    if (currentTab === "agents") void pane.refreshLinks(false);
+    const selectTab = (choice: "runs" | "agents") => {
+      void update($, tab, () => choice);
+      if (choice === "agents") void pane.refreshLinks(false);
+    };
+    // Runs | Agents: hotkeys 1 and 2 beside Refresh in the terminal; on the desktop a button bar, the
+    // tab in force the primary button.
+    const tabButtons = (["runs", "agents"] as const).map((t) =>
+      isDesktop ? (
+        <Button
+          key={`tab-${t}`}
+          label={t === "runs" ? "Runs" : "Agents"}
+          variant={currentTab === t ? "primary" : "secondary"}
+          onPress={() => selectTab(t)}
+        />
+      ) : (
+        <Button key={`tab-${t}`} hotkey={t === "runs" ? "1" : "2"} onPress={() => selectTab(t)}>
+          {currentTab === t ? (
+            <Text bold>[{t === "runs" ? "Runs" : "Agents"}]</Text>
+          ) : (
+            <Text dimColor>{t === "runs" ? "Runs" : "Agents"}</Text>
+          )}
+        </Button>
+      ),
+    );
+    const tabBar = isDesktop ? (
+      <Box key="tab-bar" gap={1} alignItems="center">
+        {tabButtons}
+      </Box>
+    ) : null;
+    const updatedAt = currentTab === "agents" ? linksState.at : status.at;
     /**
      * A status pill: on the desktop a word on a soft tint of its colour; on the terminal, which paints no
      * tint, the word in its colour, after `mark` when given ("● running") or in brackets ("[ready]").
@@ -1740,18 +2028,19 @@ export const register: Register = (on, options) => {
             key="refresh"
             label="Refresh"
             {...(e.surface === "desktop" ? {} : { hotkey: "r" })}
-            onPress={() => void pane.refresh()}
+            onPress={() => void (currentTab === "agents" ? pane.refreshLinks(true) : pane.refresh())}
           />
+          {!isDesktop && tabButtons}
           {/* The desktop pane has its own close control. */}
           {e.surface !== "desktop" && (
             <Button key="close" label="Close" hotkey="x" onPress={() => void $.ui.close({ id: PANE })} />
           )}
           <Text dimColor wrap="truncate-end">
-            {status.at ? `Updated ${ago(new Date(status.at).toISOString(), now)} ago` : "Loading…"}
+            {updatedAt ? `Updated ${ago(new Date(updatedAt).toISOString(), now)} ago` : "Loading…"}
           </Text>
         </Box>
-        {status.error && <Text color={FAILED_COLOR}>wardby: {status.error}</Text>}
-        {status.limited && (
+        {currentTab === "runs" && status.error && <Text color={FAILED_COLOR}>wardby: {status.error}</Text>}
+        {currentTab === "runs" && status.limited && (
           <Box key="limited-notice">
             <Text color={WARN_COLOR} wrap="wrap">
               {LIMITED_NOTICE}
@@ -1760,6 +2049,50 @@ export const register: Register = (on, options) => {
         )}
       </Box>
     );
+
+    if (currentTab === "agents") {
+      // A first Agents body: each flow's name and its agents, then the agents in no flow. The list,
+      // Detail and Flow screens replace it.
+      const data = linksState.data;
+      const nameOf = (id: string) => data?.agents.find((a) => a.id === id)?.name ?? id;
+      const title = (text: string) => (isDesktop ? <Text weight="semibold">{text}</Text> : <Text bold>{text}</Text>);
+      return (
+        <Box flexDirection="column" gap={1}>
+          {header}
+          {tabBar}
+          {linksState.error && (
+            <Text color={FAILED_COLOR} wrap="wrap">
+              wardby: {linksState.error}
+            </Text>
+          )}
+          {linksState.notice && (
+            <Box key="links-notice">
+              <Text color={WARN_COLOR} wrap="wrap">
+                {linksState.notice}
+              </Text>
+            </Box>
+          )}
+          {!data && !linksState.error && !linksState.notice && <Text dimColor>Loading agents…</Text>}
+          {data && data.agents.length === 0 && <Text dimColor>No agents you can read.</Text>}
+          {data?.flows.map((flow) => (
+            <Box key={`flow-${flow.key}`} flexDirection="column">
+              {title(flow.name)}
+              <Text dimColor wrap="wrap">
+                {flow.agentIds.map(nameOf).join(" · ")}
+              </Text>
+            </Box>
+          ))}
+          {data && data.unlinked.length > 0 && (
+            <Box key="unlinked" flexDirection="column">
+              {title(`Unlinked agents (${data.unlinked.length})`)}
+              <Text dimColor wrap="wrap">
+                {data.unlinked.map(nameOf).join(" · ")}
+              </Text>
+            </Box>
+          )}
+        </Box>
+      );
+    }
 
     const olderRuns = await read($, older);
     // A run opened from the older runs the search found is drawn the same way as one of the day's.
@@ -2613,6 +2946,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" gap={1}>
         {header}
+        {tabBar}
         {isDesktop ? (
           // One sentence, not tiles: the timeline below is the page's one bold element.
           <Text>
