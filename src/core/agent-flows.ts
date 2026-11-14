@@ -143,3 +143,96 @@ export function entryPoints(agent: AgentLinkFacts, edges: FlowEdge[]): string[] 
   if (out.length === 0 && incoming.length === 0) return ["manual"];
   return out;
 }
+
+export interface Flow {
+  key: string;
+  name: string;
+  agentIds: string[];
+  entryAgentIds: string[];
+  repositories: string[];
+  related: string[];
+}
+export interface AgentFlows {
+  edges: FlowEdge[];
+  entries: Record<string, string[]>;
+  flows: Flow[];
+  unlinked: string[];
+}
+
+const prefixOf = (name: string): string | null => {
+  const i = name.indexOf("-");
+  return i >= 3 ? name.slice(0, i) : null;
+};
+const shortRepo = (key: string): string => (key.startsWith("github:") ? key.slice("github:".length) : key);
+
+export function buildAgentFlows(agents: AgentLinkFacts[], subAgents: SubAgentFact[]): AgentFlows {
+  const edges = flowEdges(agents, subAgents);
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const byName = (a: string, b: string) => byId.get(a)!.name.localeCompare(byId.get(b)!.name) || a.localeCompare(b);
+  const entries: Record<string, string[]> = {};
+  for (const a of agents) entries[a.id] = entryPoints(a, edges);
+
+  // Union-find over every edge.
+  const parent = new Map(agents.map((a) => [a.id, a.id]));
+  const find = (id: string): string => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(id, root);
+    return root;
+  };
+  for (const e of edges) parent.set(find(e.from), find(e.to));
+  const groups = new Map<string, string[]>();
+  for (const a of agents) groups.set(find(a.id), [...(groups.get(find(a.id)) ?? []), a.id]);
+
+  const flows: Flow[] = [];
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const ids = [...members].sort(byName);
+    const incoming = new Set(edges.filter((e) => members.includes(e.to)).map((e) => e.to));
+    const triggered = ids.filter(
+      (id) =>
+        entries[id].some((p) => p.startsWith("mention:")) ||
+        byId.get(id)!.issueProjects.some((i) => i.triggers.length > 0),
+    );
+    const roots = ids.filter((id) => !incoming.has(id));
+    const key = triggered[0] ?? roots[0] ?? ids[0];
+    // Entry agents: every member a run can start at (a fix loop gives the lead an incoming edge,
+    // so "no incoming edge" would drop it).
+    const entryAgentIds = ids.filter((id) => entries[id].length > 0);
+    const repos = new Set<string>();
+    for (const e of edges) if (e.repository && members.includes(e.from)) repos.add(e.repository);
+    for (const id of ids)
+      for (const p of entries[id]) if (p.startsWith("mention:")) repos.add(p.slice("mention:".length));
+    const repositories = [...repos].sort();
+    const keyName = byId.get(key)!.name;
+    const groupIds = new Set(ids.map((id) => byId.get(id)!.budgetGroup?.id ?? null));
+    const sharedGroup = groupIds.size === 1 && !groupIds.has(null) ? byId.get(ids[0])!.budgetGroup : null;
+    const name =
+      repositories.length === 0
+        ? keyName
+        : repositories.length === 1
+          ? shortRepo(repositories[0])
+          : `${sharedGroup ? sharedGroup.name : keyName} · ${repositories.length} repositories`;
+    flows.push({ key, name, agentIds: ids, entryAgentIds, repositories, related: [] });
+  }
+  flows.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+
+  const inFlow = new Set(flows.flatMap((f) => f.agentIds));
+  const unlinked: string[] = [];
+  for (const id of agents
+    .map((a) => a.id)
+    .filter((id) => !inFlow.has(id))
+    .sort(byName)) {
+    const a = byId.get(id)!;
+    const touches = new Set(linksOf(a).map((l) => l.key));
+    const flow = flows.find(
+      (f) =>
+        f.repositories.some((r) => touches.has(r)) ||
+        (a.budgetGroup !== null && f.agentIds.some((m) => byId.get(m)!.budgetGroup?.id === a.budgetGroup!.id)) ||
+        (prefixOf(a.name) !== null && prefixOf(a.name) === prefixOf(byId.get(f.key)!.name)),
+    );
+    if (flow) flow.related.push(id);
+    else unlinked.push(id);
+  }
+  return { edges, entries, flows, unlinked };
+}

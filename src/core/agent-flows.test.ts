@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { entryPoints, flowEdges, profileRepoKey, repoKey, type AgentLinkFacts } from "./agent-flows.js";
+import {
+  buildAgentFlows,
+  entryPoints,
+  flowEdges,
+  profileRepoKey,
+  repoKey,
+  type AgentLinkFacts,
+} from "./agent-flows.js";
 
 const R = "your-org/mobile";
 function agent(over: Partial<AgentLinkFacts> & { id: string }): AgentLinkFacts {
@@ -107,5 +114,56 @@ describe("entryPoints", () => {
     expect(entryPoints(lone, [])).toEqual([`pull_request:github:${R}`]);
     const edges = flowEdges(MOBILE, MOBILE_SUBS);
     expect(entryPoints(MOBILE[3], edges)).toEqual([]);
+  });
+});
+
+describe("buildAgentFlows", () => {
+  it("groups the mobile-shaped setup into one flow keyed by the mention lead", () => {
+    const agents = [...MOBILE, agent({ id: "mobile-device-tester", name: "mobile-device-tester" })];
+    const named = agents.map((a) => (a.id === "delivery" ? { ...a, name: "mobile-delivery" } : a));
+    const result = buildAgentFlows(named, MOBILE_SUBS);
+    expect(result.flows).toHaveLength(1);
+    const flow = result.flows[0];
+    expect(flow.key).toBe("delivery");
+    expect(flow.name).toBe(R);
+    expect(flow.agentIds.sort()).toEqual(["builder", "delivery", "device-lead", "planner", "reviewer"]);
+    // Sorted by name: "device-lead" before "mobile-delivery". The lead counts although the fix loop
+    // gives it an incoming edge.
+    expect(flow.entryAgentIds).toEqual(["device-lead", "delivery"]);
+    expect(flow.related).toEqual(["mobile-device-tester"]);
+    expect(result.unlinked).toEqual([]);
+    expect(result.entries["device-lead"]).toEqual(["manual"]);
+  });
+
+  it("does not join an agent that only shares a repository without a trigger relation", () => {
+    const auditor = agent({ id: "auditor", scheduled: true, repositories: [link([], "read")] });
+    const result = buildAgentFlows([...MOBILE, auditor], MOBILE_SUBS);
+    expect(result.flows[0].agentIds).not.toContain("auditor");
+    // It touches the flow's repository, so it is listed as related, not unlinked.
+    expect(result.flows[0].related).toContain("auditor");
+  });
+
+  it("names a multi-repository flow after a shared budget group, else after its key agent", () => {
+    const group = { id: "g1", name: "Shop" };
+    const lead = agent({
+      id: "lead",
+      budgetGroup: group,
+      repositories: ["a", "b"].map((r) => ({ ...link(["mention"]), repository: `your-org/${r}` })),
+    });
+    const ba = agent({ id: "ba", kind: "coding", codingRepository: "your-org/a", budgetGroup: group });
+    const bb = agent({ id: "bb", kind: "coding", codingRepository: "your-org/b", budgetGroup: group });
+    const subs = [
+      { parentId: "lead", childId: "ba", boundName: "a" },
+      { parentId: "lead", childId: "bb", boundName: "b" },
+    ];
+    expect(buildAgentFlows([lead, ba, bb], subs).flows[0].name).toBe("Shop · 2 repositories");
+    const noGroup = [lead, ba, bb].map((a) => ({ ...a, budgetGroup: null }));
+    expect(buildAgentFlows(noGroup, subs).flows[0].name).toBe("lead · 2 repositories");
+  });
+
+  it("puts a lone agent with nothing related under unlinked", () => {
+    const result = buildAgentFlows([agent({ id: "solo", name: "solo" })], []);
+    expect(result.flows).toEqual([]);
+    expect(result.unlinked).toEqual(["solo"]);
   });
 });
