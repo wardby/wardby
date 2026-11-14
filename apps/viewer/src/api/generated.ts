@@ -334,6 +334,7 @@ export interface DocumentList {
     path: string | null;
     updatedAt: string;
     latestVersion: number;
+    reviewState: "draft" | "in_review" | "changes_requested" | "approved" | "archived";
     pagePath: string;
   }[];
   truncated: boolean;

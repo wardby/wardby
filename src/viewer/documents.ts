@@ -25,6 +25,7 @@ export async function loadViewerDocuments(
       path: d.path,
       updatedAt: d.updatedAt.toISOString(),
       latestVersion: d.latestVersion,
+      reviewState: d.reviewState,
       pagePath: `/d/${d.id}`,
     })),
     truncated,

@@ -665,6 +665,22 @@ button:disabled {
   font-style: italic;
 }
 
+.chip.review-in_review {
+  color: var(--warn);
+}
+
+.chip.review-changes_requested {
+  color: var(--bad);
+}
+
+.chip.review-approved {
+  color: var(--ok);
+}
+
+.chip.review-archived {
+  font-style: italic;
+}
+
 @keyframes node-pulse {
   0%,
   100% {

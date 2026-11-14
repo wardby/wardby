@@ -9,6 +9,14 @@ export const DOCUMENTS_LIMIT = 500;
 
 const ALL = "";
 
+const REVIEW_LABEL: Record<ListedDocument["reviewState"], string> = {
+  draft: "Draft",
+  in_review: "In review",
+  changes_requested: "Changes requested",
+  approved: "Approved",
+  archived: "Archived",
+};
+
 interface Props {
   server: ServerSummary;
   /** The top bar (with the tabs), rendered above the list. */
@@ -134,6 +142,7 @@ export function DocumentsScreen({ server, topBar }: Props) {
               <tr>
                 <th scope="col">Title</th>
                 <th scope="col">Kind</th>
+                <th scope="col">Review</th>
                 <th scope="col">Agent</th>
                 <th scope="col">Repository</th>
                 <th scope="col">Updated</th>
@@ -149,6 +158,9 @@ export function DocumentsScreen({ server, topBar }: Props) {
                     </button>
                   </td>
                   <td>{d.kind}</td>
+                  <td>
+                    <span className={`chip review-${d.reviewState}`}>{REVIEW_LABEL[d.reviewState]}</span>
+                  </td>
                   <td>{d.agent?.name ?? "–"}</td>
                   <td title={d.path ?? undefined}>{d.repository ?? "–"}</td>
                   <td>{formatEventTime(Date.parse(d.updatedAt))}</td>

@@ -17,6 +17,7 @@ const row = (over: Partial<DocumentList["documents"][number]> & { id: string }):
   path: null,
   updatedAt: "2026-11-01T10:00:00.000Z",
   latestVersion: 2,
+  reviewState: "draft",
   pagePath: `/d/${over.id}`,
   ...over,
 });
@@ -29,6 +30,7 @@ const LIST: DocumentList = {
       agent: { id: "a1", name: "planner" },
       repository: "acme/one",
       path: "docs/plan.md",
+      reviewState: "approved",
     }),
     row({
       id: "d2",
@@ -59,6 +61,14 @@ describe("DocumentsScreen", () => {
     expect(within(plan).getByText("acme/one")).toBeInTheDocument();
     expect(within(plan).getByText("v2")).toBeInTheDocument();
     expect(within(screen.getByText("Coffee shop").closest("tr")!).getByText("design")).toBeInTheDocument();
+  });
+
+  it("shows each document's review state as a chip", async () => {
+    renderScreen();
+    const plan = (await screen.findByText("Plan")).closest("tr")!;
+    expect(within(plan).getByText("Approved")).toHaveClass("chip", "review-approved");
+    const coffee = screen.getByText("Coffee shop").closest("tr")!;
+    expect(within(coffee).getByText("Draft")).toBeInTheDocument();
   });
 
   it("renders a title as text, never as HTML", async () => {

@@ -6,6 +6,7 @@
  * `npm run build:viewer-schemas`, and commit the regenerated files.
  */
 import { z } from "zod";
+import { REVIEW_STATES } from "../core/documents/review-state.js";
 import { legacyJsonSchema } from "../core/zod-json-schema.js";
 
 export const RunStatusSchema = z.enum([
@@ -277,6 +278,7 @@ export type InfraInfo = z.infer<typeof InfraInfoSchema>;
 /**
  * The documents and designs the signed-in admin owns or was granted read access to (GET /admin/api/documents).
  * Metadata only: never content or comments. `mine` is ownership by the caller.
+ * `reviewState` is the document review state (help: document-review).
  */
 export const DocumentListSchema = z.object({
   documents: z.array(
@@ -290,6 +292,8 @@ export const DocumentListSchema = z.object({
       path: z.string().nullable(),
       updatedAt: z.string(),
       latestVersion: z.number().int(),
+      /** The document review state (help: document-review). */
+      reviewState: z.enum(REVIEW_STATES),
       /** The page that opens it: "/d/<id>", relative to the server's origin. */
       pagePath: z.string(),
     }),

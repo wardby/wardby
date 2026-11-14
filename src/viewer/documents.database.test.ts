@@ -17,7 +17,19 @@ import { createViewerApi, type ViewerApi } from "./http.js";
 const SECRET = "fake-doc-list-secret-9f3a";
 const coffee = (p: string) =>
   readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
-const KEYS = ["agent", "id", "kind", "latestVersion", "mine", "pagePath", "path", "repository", "title", "updatedAt"];
+const KEYS = [
+  "agent",
+  "id",
+  "kind",
+  "latestVersion",
+  "mine",
+  "pagePath",
+  "path",
+  "repository",
+  "reviewState",
+  "title",
+  "updatedAt",
+];
 
 describe.skipIf(!process.env.DATABASE_URL)("viewer documents route (PostgreSQL)", () => {
   const db = createPrismaClient();
@@ -147,8 +159,12 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer documents route (PostgreSQL)"
       agent: null,
       repository: null,
       latestVersion: 1,
+      reviewState: "draft",
       pagePath: `/d/${ids.plain}`,
     });
+    await db.document.update({ where: { id: ids.granted }, data: { reviewState: "approved" } });
+    const after = (await list()).documents;
+    expect(after.find((d) => d.id === ids.granted)?.reviewState).toBe("approved");
     expect(got.find((d) => d.id === ids.design)?.kind).toBe("design");
     expect(got.find((d) => d.id === ids["linked-a"])).toMatchObject({
       agent: { id: agentA, name: `name-${agentA}` },

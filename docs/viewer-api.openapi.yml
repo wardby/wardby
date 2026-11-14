@@ -1635,6 +1635,14 @@ components:
                 type: string
               latestVersion:
                 type: integer
+              reviewState:
+                type: string
+                enum:
+                  - draft
+                  - in_review
+                  - changes_requested
+                  - approved
+                  - archived
               pagePath:
                 type: string
             required:
@@ -1647,6 +1655,7 @@ components:
               - path
               - updatedAt
               - latestVersion
+              - reviewState
               - pagePath
             additionalProperties: false
         truncated:
