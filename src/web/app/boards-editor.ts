@@ -16,7 +16,13 @@
  * GrapesJS's HTML parser drops scripts and on* attributes too, and the page CSP lets no script run in
  * the canvas. Nothing here loads from outside the origin (no icon CDN, no canvas scripts or styles).
  */
-import grapesjs, { type Component, type CssRuleJSON, type Editor, type SelectorProps } from "grapesjs";
+import grapesjs, {
+  type Component,
+  type ComponentProperties,
+  type CssRuleJSON,
+  type Editor,
+  type SelectorProps,
+} from "grapesjs";
 import parserPostCSS from "grapesjs-parser-postcss";
 import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
@@ -61,9 +67,27 @@ const RESIZE = {
   keyHeight: "min-height",
 };
 
+type LockFlags = Pick<ComponentProperties, keyof typeof LOCKED>;
+/** Each locked element's own flags from before its lock, put back when the board is unlocked in place. */
+const unlocked = new WeakMap<Component, LockFlags>();
+// avoidStore: locking is not an edit (no editor "update", nothing to save).
+const QUIET = { avoidStore: true };
+
 function lockTree(c: Component): void {
-  c.set(LOCKED);
+  if (!unlocked.has(c)) {
+    unlocked.set(c, Object.fromEntries(Object.keys(LOCKED).map((k) => [k, c.get(k as keyof typeof LOCKED)])));
+  }
+  c.set(LOCKED, QUIET);
   c.components().forEach(lockTree);
+}
+
+function unlockTree(c: Component): void {
+  const flags = unlocked.get(c);
+  if (flags) {
+    c.set(flags, QUIET);
+    unlocked.delete(c);
+  }
+  c.components().forEach(unlockTree);
 }
 
 export interface Panels {
@@ -107,7 +131,14 @@ export interface BoardsEditor {
    */
   storedIds(): ReadonlySet<string>;
   /** Whether the editor edits (writers); commenters and readers get a locked board. */
-  editable: boolean;
+  readonly editable: boolean;
+  /**
+   * Locks or unlocks the board in place, as if mounted that way (a review lock while the page is
+   * open). Locking deselects and stops the keyboard shortcuts; unlocking gives each element its own
+   * flags back. Neither is an edit: no change is reported and edits made before the lock stay as
+   * they are (unsaved, if they were).
+   */
+  setEditable(on: boolean): void;
   setDevice(id: DeviceId): void;
   /** Called when the content or the boards change (not debounced). */
   onChange(cb: () => void): void;
@@ -196,6 +227,7 @@ export function createBoardsEditor(opts: {
   const changeListeners: (() => void)[] = [];
   const boardListeners: ((id: string) => void)[] = [];
   let loading = false;
+  let editable = opts.editable;
 
   const changed = () => {
     if (!loading) for (const cb of changeListeners) cb();
@@ -333,7 +365,7 @@ export function createBoardsEditor(opts: {
       const root = wrapper();
       if (root) {
         root.setAttributes({ ...parts.bodyAttrs });
-        if (!opts.editable) lockTree(root);
+        if (!editable) lockTree(root);
       }
       injectBase();
       // Loaded as last saved: that is the baseline. It is taken on every such load, since GrapesJS
@@ -373,14 +405,15 @@ export function createBoardsEditor(opts: {
   });
   editor.on("canvas:frame:load", () => injectBase());
   editor.on("update", () => changed());
-  if (opts.editable) {
-    editor.on("component:selected", (c: Component) => {
-      if (!c.get("resizable")) c.set("resizable", RESIZE);
-    });
-  } else {
-    editor.on("component:add", (c: Component) => lockTree(c));
-    editor.Keymaps.removeAll();
-  }
+  editor.on("component:selected", (c: Component) => {
+    if (editable && !c.get("resizable")) c.set("resizable", RESIZE);
+  });
+  editor.on("component:add", (c: Component) => {
+    if (!editable) lockTree(c);
+  });
+  // A locked board has no shortcuts (undo, paste, delete, ...); unlocking adds GrapesJS's defaults back.
+  const keymapDefaults = editor.Keymaps.getConfig().defaults ?? {};
+  if (!editable) editor.Keymaps.removeAll();
 
   const api: BoardsEditor = {
     editor,
@@ -488,7 +521,35 @@ export function createBoardsEditor(opts: {
       const state = boards.get(current);
       return state ? storedIds(state.parts) : new Set<string>();
     },
-    editable: opts.editable,
+    get editable() {
+      return editable;
+    },
+    setEditable(on) {
+      if (on === editable) return;
+      editable = on;
+      // Nothing stays selected or being typed in: a selected element's toolbar and text editing end
+      // (what was typed is kept in the board, as an edit made before the lock).
+      if (!on) {
+        const typing = editor.getEditing()?.getView() as { disableEditing?: () => Promise<void> } | undefined;
+        void typing?.disableEditing?.();
+        editor.select();
+      }
+      if (on) {
+        for (const [id, k] of Object.entries(keymapDefaults)) editor.Keymaps.add(id, k.keys, k.handler, k.opts);
+      } else {
+        editor.Keymaps.removeAll();
+      }
+      const root = wrapper();
+      if (!root) return;
+      const um = editor.UndoManager;
+      um.stop();
+      try {
+        if (on) unlockTree(root);
+        else lockTree(root);
+      } finally {
+        um.start();
+      }
+    },
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),
     onBoard: (cb) => void boardListeners.push(cb),

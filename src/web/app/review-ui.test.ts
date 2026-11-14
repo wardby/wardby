@@ -82,3 +82,21 @@ describe("ReviewPanel: a verdict that lost the race", () => {
     expect(panel.querySelector("textarea")!.value).toBe("Keep me");
   });
 });
+
+describe("ReviewPanel: the lock", () => {
+  it("calls onLock on a lock flip and when a locked state changes word (approved to archived), not otherwise", () => {
+    const { host } = setup(null);
+    const panel = new ReviewPanel(host, payload(2), 2);
+    vi.mocked(host.onLock).mockClear();
+    panel.apply({ ...payload(2), state: "approved" });
+    panel.apply({ ...payload(2), state: "approved" });
+    panel.apply({ ...payload(2), state: "archived" });
+    panel.apply({ ...payload(2), state: "in_review" });
+    panel.apply({ ...payload(2), state: "draft" });
+    expect(vi.mocked(host.onLock).mock.calls).toEqual([
+      [true, "approved"],
+      [true, "archived"],
+      [false, "in_review"],
+    ]);
+  });
+});

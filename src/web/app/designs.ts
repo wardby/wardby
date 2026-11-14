@@ -134,9 +134,9 @@ function mount(
   let baseNumber = payload.version.number;
   let warnings: VersionWarning[] = payload.version.warnings ?? [];
   const canWrite = viewer.kind === "member" && atLeast(viewer.access, "write");
-  // An approved or archived design opens read-only. The board editor's editability is fixed when it
-  // is mounted (createBoardsEditor), so a lock that changes while the page is open stops the saves
-  // and asks for a reload (lockedNow, the review panel's onLock below).
+  // An approved or archived design opens read-only. A page opened editable that is locked while open
+  // turns read-only in place (the review panel's onLock below); a page opened locked and then
+  // reopened asks for a reload.
   const startLocked = isLockedState(payload.review.state);
   const canEdit = canWrite && !startLocked;
   /** The server says approved or archived: nothing is saved from this page. */
@@ -225,15 +225,18 @@ function mount(
   }
   showTab(canEdit ? "style" : "comments");
 
+  const layersHeading = h("h2", { hidden: !canEdit }, "Layers");
+  const layersHost = h("div", { hidden: !canEdit }, layersPanel);
   const leftSide = h(
     "aside",
     { class: "dside left", aria: { label: "Boards and layers" } },
     h("h2", {}, "Boards"),
     boardsList,
     addBoardBtn,
-    h("h2", { hidden: !canEdit }, "Layers"),
-    h("div", { hidden: !canEdit }, layersPanel),
+    layersHeading,
+    layersHost,
   );
+  const undoGroup = h("div", { class: "group", hidden: !canEdit }, undoBtn, redoBtn);
   clear(root);
   append(
     root,
@@ -254,7 +257,7 @@ function mount(
           version,
         ),
         h("div", { class: "group", role: "group", aria: { label: "Device" } }, ...deviceButtons),
-        h("div", { class: "group", hidden: !canEdit }, undoBtn, redoBtn),
+        undoGroup,
         h("div", { class: "group" }, overviewBtn, playBtn, exportBtn, commentBtn),
         saveState,
         liveNote,
@@ -548,8 +551,12 @@ function mount(
   /** A refetched payload (after the mount): its review too. `review` is created below, once refresh exists. */
   const applyPayload = (p: DocumentPayload) => {
     applyThreads(p);
+    const refused = lockedNow && !shownLock;
     review.apply(p.review);
     lockedNow = review.locked;
+    // A save refused as locked, and the design is open again (approved and reopened inside one save
+    // cycle): the edits wait, unsaved, for the next edit or Overview, Play or Export.
+    if (refused && !lockedNow && !conflict && !saving) showSave(restingSaveText());
   };
 
   renderViewer();
@@ -834,6 +841,19 @@ function mount(
   });
 
   // ---- the review banner and Review tab ----
+  /** The lock banner, for a lock that differs from how the page was mounted. */
+  const renderLockBanner = () => {
+    clear(lockBanner);
+    // Back to how the page was mounted (approved, then reopened, then approved again): no banner.
+    lockBanner.hidden = shownLock === startLocked;
+    if (lockBanner.hidden) return;
+    lockBanner.append(
+      shownLock
+        ? `This design was ${lockState}, so it can't be edited now. Reload to see it read-only. `
+        : "This design was reopened for review. Reload to edit it. ",
+      h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
+    );
+  };
   const review = new ReviewPanel(
     {
       api,
@@ -848,32 +868,35 @@ function mount(
       loadLatest: () => refresh(),
       onLock: (on, state) => {
         lockedNow = on;
+        const reworded = state !== lockState;
         lockState = state;
-        if (on === shownLock) return;
-        shownLock = on;
-        if (!conflict) showSave(restingSaveText());
-        if (on === startLocked) {
-          // Back to how the page was mounted (approved, then reopened, then approved again).
-          lockBanner.hidden = true;
-        } else {
-          clear(lockBanner);
-          lockBanner.append(
-            on
-              ? `This design was ${state}, so it can't be edited now. Reload to see it read-only. `
-              : "This design was reopened for review. Reload to edit it. ",
-            h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
-          );
-          lockBanner.hidden = false;
+        if (on === shownLock) {
+          // Still locked, in another word (approved to archived): the save state and banner follow.
+          if (on && reworded) {
+            if (!conflict && !saving) showSave(restingSaveText());
+            renderLockBanner();
+          }
+          return;
         }
-        // Only a page mounted editable has Style, Settings and + Board to hide or show again.
+        shownLock = on;
+        // A page mounted editable turns read-only in place, the way a page mounted locked is: the
+        // board takes no edits, and Style, Settings, + Board, Layers and undo are gone.
         if (canEdit) {
+          boards.setEditable(!on);
+          if (on) (document.activeElement as HTMLElement | null)?.blur();
           tabs.style.hidden = on;
           tabs.settings.hidden = on;
           addBoardBtn.hidden = on;
+          layersHeading.hidden = on;
+          layersHost.hidden = on;
+          undoGroup.hidden = on;
           if (on && (!panes.style.hidden || !panes.settings.hidden)) showTab("comments");
           renderBoards();
-          if (!on && dirty()) schedule();
+          // Reopened: edits from before the lock are not saved on a timer; they show as unsaved and
+          // go with the next edit (or Overview, Play or Export).
         }
+        if (!conflict) showSave(restingSaveText());
+        renderLockBanner();
       },
       onState: (s) => root.querySelector(".app")?.classList.toggle("archived", s === "archived"),
     },

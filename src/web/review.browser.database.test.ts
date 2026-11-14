@@ -6,10 +6,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishVersion } from "../core/documents/service.js";
-import { reopenDocument, reviewDocument, submitForReview } from "../core/documents/review.js";
+import { reopenDocument, reviewDocument, setArchived, submitForReview } from "../core/documents/review.js";
 import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
 
 const CANVAS = "iframe.gjs-frame";
+const SUBMIT = process.platform === "darwin" ? "Meta+Enter" : "Control+Enter";
 const coffee = (p: string) =>
   readFileSync(new URL(`../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
 const files = (): Record<string, string> => ({
@@ -209,6 +210,11 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("an approved design opens read-only: no Style tab, no save, Send hidden, comments still work", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      // Linked, so it could be sent to an agent: only the lock hides Send.
+      await server.db.document.update({
+        where: { id: d.documentId },
+        data: { repository: "acme/web", path: "designs/coffee", baseRef: "main" },
+      });
       await submitForReview(server.db, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
@@ -235,6 +241,132 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
       expect(await page.locator("[data-tab=review]").isVisible()).toBe(true);
+      // A comment can still be posted, and the composer offers no Send to agent.
+      await page.locator(".save").click();
+      await page.keyboard.press("c");
+      const created = page.waitForResponse((r) => r.request().method() === "POST" && r.url().endsWith("/threads"));
+      await h1.click();
+      await expect.poll(() => page.locator(".cpop textarea").count()).toBe(1);
+      expect(await page.locator(".cpop label", { hasText: "Send to agent" }).isVisible()).toBe(false);
+      await page.locator(".cpop textarea").fill("Looks good");
+      await page.locator(".cpop textarea").press(SUBMIT);
+      expect((await created).status()).toBe(201);
+      await expect.poll(() => page.locator(".pin").count(), { timeout: 10_000 }).toBeGreaterThan(0);
+      await context.close();
+    }, 90_000);
+
+    it("a design approved while open is read-only in place; the state word follows; reopening saves nothing on its own", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      const page = await (async () => {
+        const context = await browser.newContext();
+        await context.addCookies([d.cookie]);
+        return context.newPage();
+      })();
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.url()));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      const canvas = page.frameLocator(CANVAS);
+      const h1 = canvas.locator("h1").first();
+      const before = await h1.textContent();
+      const h1s = await canvas.locator("h1").count();
+      // Typing in the heading when the approval lands.
+      await h1.dblclick();
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const save = () => page.locator(".save").textContent();
+      await expect.poll(() => save()).toBe("Read only: approved");
+      // Locked live looks like locked at load: no undo or redo, no Layers.
+      expect(await page.getByRole("button", { name: "Undo" }).isVisible()).toBe(false);
+      expect(await page.getByRole("heading", { name: "Layers" }).isVisible()).toBe(false);
+      // The canvas takes no edits: typing (on, and after a new double click), then deleting the selected element.
+      await page.keyboard.type("x");
+      await h1.dblclick();
+      await page.keyboard.type("x");
+      await h1.click();
+      await page.keyboard.press("Delete");
+      await page.keyboard.press("Backspace");
+      expect(await h1.textContent()).toBe(before);
+      expect(await canvas.locator("h1").count()).toBe(h1s);
+      // The canvas still scrolls and takes comments: the pin mode starts.
+      await page.locator(".save").click();
+      await page.keyboard.press("c");
+      await expect.poll(() => page.getByText("Click anything on the board to comment").isVisible()).toBe(true);
+      await page.keyboard.press("Escape");
+
+      // Archived, then back to approved: the word follows each state.
+      await setArchived(server.db, { documentId: d.documentId, viewer: owner(d.principalIds), archived: true });
+      await expect.poll(() => save()).toBe("Read only: archived");
+      await setArchived(server.db, { documentId: d.documentId, viewer: owner(d.principalIds), archived: false });
+      await expect.poll(() => save()).toBe("Read only: approved");
+
+      // Reopened: editable again, and nothing was published on a timer.
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await expect.poll(() => save()).toBe("Saved");
+      expect(await page.locator(".lock-banner").isVisible()).toBe(false);
+      expect(await page.getByRole("button", { name: "Undo" }).isVisible()).toBe(true);
+      await page.waitForTimeout(2500);
+      expect(puts).toEqual([]);
+      expect(await h1.textContent()).toBe(before);
+      // The next edit saves.
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("!");
+      await page.locator(".save").click();
+      await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(1);
+      await page.context().close();
+    }, 90_000);
+
+    it("a save refused as locked, when the refetch finds it open again, keeps the edits unsaved until the next edit", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      // The first save is refused as locked (approved and reopened inside one save cycle).
+      let refused = 0;
+      await page.route(
+        (url) => url.pathname.startsWith("/d/api/"),
+        async (route) => {
+          if (route.request().method() === "PUT" && refused === 0) {
+            refused += 1;
+            return route.fulfill({
+              status: 409,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "document_locked" }),
+            });
+          }
+          return route.fallback();
+        },
+      );
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.url()));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("!");
+      await page.locator(".save").click();
+      const save = () => page.locator(".save").textContent();
+      await expect.poll(() => refused, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => save()).toBe("Unsaved changes");
+      await page.waitForTimeout(2500);
+      expect(puts.length).toBe(1);
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("?");
+      await page.locator(".save").click();
+      await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(2);
+      await expect.poll(() => save(), { timeout: 10_000 }).toBe("Saved");
       await context.close();
     }, 90_000);
 

@@ -27,7 +27,10 @@ export interface ReviewHost {
   showReviewTab(): void;
   showChanges(from: number, to: number): void;
   loadLatest(): Promise<void>;
-  /** Locked (approved or archived) changed, or is first known (called once from the constructor). */
+  /**
+   * Locked (approved or archived) changed, or is first known (called once from the constructor), or
+   * a locked state changed word (approved to archived and back).
+   */
   onLock(locked: boolean, state: ReviewState): void;
   onState(state: ReviewState): void;
 }
@@ -67,9 +70,10 @@ export class ReviewPanel {
   }
 
   apply(review: ReviewPayload): void {
+    const before = this.review.state;
     this.review = review;
     this.host.onState(review.state);
-    if (this.locked !== this.wasLocked) {
+    if (this.locked !== this.wasLocked || (this.locked && review.state !== before)) {
       this.wasLocked = this.locked;
       this.host.onLock(this.locked, review.state);
     }
