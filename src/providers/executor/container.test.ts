@@ -446,9 +446,18 @@ class FakeJobs implements WorkspaceJobLauncher {
     this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
     const destination = options?.gitHistory?.bundleDestination;
     if (destination === undefined) return { bundle: false };
-    this.destinationFreeAtCollect.set(name, !existsSync(destination));
-    if (!this.bundlesFor.has(name)) return { bundle: false };
-    await writeFile(destination, "a bundle");
+    // "wx" fails if the destination exists: the check and the write are one operation.
+    if (!this.bundlesFor.has(name)) {
+      this.destinationFreeAtCollect.set(name, !existsSync(destination));
+      return { bundle: false };
+    }
+    try {
+      await writeFile(destination, "a bundle", { flag: "wx" });
+      this.destinationFreeAtCollect.set(name, true);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      this.destinationFreeAtCollect.set(name, false);
+    }
     return { bundle: true };
   }
 }

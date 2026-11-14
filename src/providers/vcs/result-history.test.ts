@@ -292,6 +292,13 @@ describe("importResultBundle (real git, #536)", { timeout: 60_000 }, () => {
     expect((await errorOf(importIt(f))).message).toBe("vcs_result_bundle_invalid");
   });
 
+  it("refuses a FIFO at the bundle path without blocking", async () => {
+    const f = await fixture();
+    await rm(f.bundle, { force: true });
+    await promisify(execFile)("mkfifo", [f.bundle]);
+    expect((await errorOf(importIt(f))).message).toBe("vcs_result_bundle_invalid");
+  });
+
   it("refuses a head that does not descend from the history base", async () => {
     const f = await fixture();
     await git(f.worker, ["checkout", "-q", "-b", "side", f.forkPoint]);

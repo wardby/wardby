@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
+import { mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import type { Readable } from "node:stream";
 import { COMMIT_SHA } from "../../coding/protocol.js";
@@ -150,13 +150,13 @@ export async function importResultBundle(options: ImportResultBundleOptions): Pr
  * git whatever fetch.fsckObjects says); then the fetch, its own checks kept.
  */
 async function fetchBundle(git: ResultGit, bundlePath: string): Promise<string> {
-  // The collector moved it here; still never followed as a symlink.
-  const stat = await lstat(bundlePath).catch(() => null);
-  if (!stat || !stat.isFile()) fail("vcs_result_bundle_invalid");
+  // The collector moved it here; never followed as a symlink, and never blocked on by a FIFO.
   let handle: FileHandle | undefined;
   try {
-    handle = await open(bundlePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    handle = await open(bundlePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    if (!(await handle.stat()).isFile()) throw new Error("not a regular file");
   } catch {
+    await handle?.close().catch(() => undefined);
     fail("vcs_result_bundle_invalid");
   }
   let sha: string;
