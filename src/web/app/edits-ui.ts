@@ -218,6 +218,12 @@ export class EditsTray {
     return r.version.markdown;
   }
 
+  /** Opens the list if needed and shows version `to` with its changes since `from` (the review's newer-version flow). */
+  async viewChanges(from: number, to: number): Promise<void> {
+    if (!this.loaded && !this.loading) await this.fetchFirst();
+    await this.view({ first: Math.min(from + 1, to), last: to, items: [] });
+  }
+
   /** Shows the row's newest version read-only, with its changes since the version before the row. */
   async view(row: EditRow): Promise<void> {
     const seq = ++this.seq;

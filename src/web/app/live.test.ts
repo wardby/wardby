@@ -36,6 +36,7 @@ describe("what the page does for a message", () => {
     expect(liveAction(m("comment"))).toBe("threads");
     expect(liveAction(m("share"))).toBe("threads");
     expect(liveAction(m("version"))).toBe("version");
+    expect(liveAction(m("review"))).toBe("review");
     expect(liveAction(m("resync"))).toBe("resync");
     expect(liveAction(m("status"))).toBe("status");
     expect(liveAction(m("hello"))).toBe("status");

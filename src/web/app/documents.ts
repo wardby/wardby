@@ -5,7 +5,9 @@
  * with a debounced PUT carrying the version they were based on. Live
  * updates (live.ts) refetch threads and newer versions as they happen. The
  * side panel switches between the Comments tray and the Edits tray (version
- * history, edits-ui.ts).
+ * history, edits-ui.ts) and the Review tab (review-ui.ts); the review
+ * banner sits under the header, and an approved or archived document is
+ * read only.
  */
 import "./styles.css";
 import {
@@ -15,6 +17,7 @@ import {
   readBootstrap,
   type Bootstrap,
   type DocumentPayload,
+  type ReviewState,
   type Viewer,
 } from "./api.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
@@ -23,6 +26,7 @@ import { pdfExportButton } from "./exports-menu.js";
 import { EditsTray } from "./edits-ui.js";
 import { createEditor } from "./editor.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
+import { ReviewPanel } from "./review-ui.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 import { TextSurface } from "./text-surface.js";
 
@@ -83,6 +87,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   pdfExportButton(exportPdfBtn, exportNote, api);
   const who = h("span", { class: "who-am-i" });
   const account = h("span", { class: "account" });
+  const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
   const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
   const changedBanner = h(
@@ -97,6 +102,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const stage = h("div", { class: "stage" }, page);
   const panel = h("div", { class: "panel", role: "tabpanel", attrs: { id: "tray-comments" } });
   const editsPanel = h("div", { class: "panel", role: "tabpanel", hidden: true, attrs: { id: "tray-edits" } });
+  const reviewPanel = h("div", { class: "panel", role: "tabpanel", hidden: true, attrs: { id: "tray-review" } });
   const count = h("span", { class: "ccount" });
   const tab = (label: string, controls: string, on: boolean, ...extra: Node[]) =>
     h(
@@ -112,12 +118,14 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     );
   const commentsTab = tab("Comments ", "tray-comments", true, count);
   const editsTab = tab("Edits", "tray-edits", false);
+  const reviewTab = tab("Review", "tray-review", false);
   const side = h(
     "aside",
-    { class: "side", aria: { label: "Comments and edits" } },
-    h("div", { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } }, commentsTab, editsTab),
+    { class: "side", aria: { label: "Comments, edits and review" } },
+    h("div", { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } }, commentsTab, editsTab, reviewTab),
     panel,
     editsPanel,
+    reviewPanel,
   );
   const bubble = h("button", { type: "button", class: "bubble", hidden: true }, "💬 Comment");
   const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !canWrite });
@@ -147,6 +155,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         who,
         account,
       ),
+      reviewBanner,
       banner,
       changedBanner,
       lossyNotice,
@@ -269,7 +278,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     latest: () => ({ number: baseNumber, busy: saving || dirty || conflict }),
     onViewing: (viewing) => {
       comments.suspend(viewing);
-      toolbar.hidden = viewing || !editable || lossyLocked;
+      toolbar.hidden = viewing || !canEditNow();
     },
     onRestored: () => void refresh(),
     openThread: (n) => {
@@ -277,18 +286,23 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       comments.revealNumber(n);
     },
   });
-  const showTray = (which: "comments" | "edits") => {
-    const isEdits = which === "edits";
-    panel.hidden = isEdits;
-    editsPanel.hidden = !isEdits;
-    commentsTab.className = isEdits ? "" : "on";
-    editsTab.className = isEdits ? "on" : "";
-    commentsTab.setAttribute("aria-selected", String(!isEdits));
-    editsTab.setAttribute("aria-selected", String(isEdits));
-    if (isEdits) void edits.open();
+  const trays = [
+    { which: "comments", tab: commentsTab, panel },
+    { which: "edits", tab: editsTab, panel: editsPanel },
+    { which: "review", tab: reviewTab, panel: reviewPanel },
+  ] as const;
+  const showTray = (which: (typeof trays)[number]["which"]) => {
+    for (const t of trays) {
+      const on = t.which === which;
+      t.panel.hidden = !on;
+      t.tab.className = on ? "on" : "";
+      t.tab.setAttribute("aria-selected", String(on));
+    }
+    if (which === "edits") void edits.open();
   };
   commentsTab.addEventListener("click", () => showTray("comments"));
   editsTab.addEventListener("click", () => showTray("edits"));
+  reviewTab.addEventListener("click", () => showTray("review"));
 
   renderViewer();
   comments.apply(payload);
@@ -326,6 +340,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       baseNumber = r.version.number;
       version.textContent = `v${baseNumber}`;
       showSave(dirty ? "Unsaved changes" : "Saved");
+      review.markRead(baseNumber);
       // The server re-anchored the threads against the new version.
       await comments.reload().catch(() => undefined);
       void edits.refresh();
@@ -335,6 +350,12 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         conflict = true;
         editor.setEditable(false);
         showSave(errorMessage(err), true);
+      } else if (err instanceof ApiError && err.code === "document_locked") {
+        // Approved or archived since the edit began: not the user's fault, and retrying cannot help.
+        // Refetch so the review lock shows (a live event may not have arrived yet).
+        dirty = false;
+        showSave(errorMessage(err));
+        pendingRefresh = true;
       } else {
         showSave(`Not saved: ${errorMessage(err)}`);
       }
@@ -351,6 +372,19 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const schedule = () => {
     clearTimeout(timer);
     timer = setTimeout(() => void save(), SAVE_DELAY_MS);
+  };
+
+  // ---- the review lock: an approved or archived document is read only ----
+  let locked = false;
+  /** The live editor takes edits; the toolbar also hides while a version is being viewed. */
+  const canEditText = () => editable && !lossyLocked && !locked && !conflict;
+  const canEditNow = () => canEditText() && !edits.isViewing;
+  const applyLock = (on: boolean, state: ReviewState) => {
+    locked = on;
+    editor.setEditable(canEditText(), false);
+    toolbar.hidden = !canEditNow();
+    if (on) showSave(state === "archived" ? "Read only: archived" : "Read only: approved");
+    else if (editable && !conflict) showSave("Saved");
   };
 
   // ---- live updates ----
@@ -377,6 +411,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     // Re-anchor every thread against the new text.
     surface.reset();
     comments.apply(next);
+    review.apply(next.review);
   };
 
   /** Refetches the document and threads; a newer version loads in place unless there are unsaved edits. */
@@ -397,7 +432,27 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     if (act === "load") return loadVersion(next);
     if (act === "banner") changedBanner.hidden = false;
     comments.apply(next);
+    review.apply(next.review);
   });
+
+  // ---- the review banner and Review tab ----
+  const review = new ReviewPanel(
+    {
+      api,
+      banner: reviewBanner,
+      panel: reviewPanel,
+      showReviewTab: () => showTray("review"),
+      showChanges: (from, to) => {
+        showTray("edits");
+        void edits.viewChanges(from, to);
+      },
+      loadLatest: () => refresh(),
+      onLock: applyLock,
+      onState: (s) => root.querySelector(".app")?.classList.toggle("archived", s === "archived"),
+    },
+    payload.review,
+    payload.version.number,
+  );
 
   let serverHears = true;
   const showLive = (state: "connecting" | "live" | "offline" | "stopped") => {
@@ -455,9 +510,9 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   startLive();
 
   if (editable) {
-    showSave("Saved");
+    if (!locked) showSave("Saved");
     editor.on("update", ({ transaction }) => {
-      if (!transaction.docChanged || conflict) return;
+      if (!transaction.docChanged || conflict || locked) return;
       dirty = true;
       showSave("Unsaved changes");
       schedule();

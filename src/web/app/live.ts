@@ -64,7 +64,7 @@ export class SseParser {
 }
 
 /** What the page does for a stream message. */
-export type LiveAction = "threads" | "version" | "resync" | "status" | null;
+export type LiveAction = "threads" | "version" | "review" | "resync" | "status" | null;
 
 export function liveAction(message: SseMessage): LiveAction {
   switch (message.event) {
@@ -74,6 +74,8 @@ export function liveAction(message: SseMessage): LiveAction {
       return "threads";
     case "version":
       return "version";
+    case "review":
+      return "review";
     case "resync":
       return "resync";
     case "hello":

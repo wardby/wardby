@@ -63,7 +63,55 @@ export interface DocumentPayload {
   threads: ThreadView[];
   /** Names for @[guest:id] mentions in these threads (this document's own guests only). */
   mentionedGuests?: { guestId: string; name: string }[];
+  review: ReviewPayload;
 }
+
+/** A document's review state (the page shows it in the banner and the Review tab). */
+export type ReviewState = "draft" | "in_review" | "changes_requested" | "approved" | "archived";
+
+export interface ReviewerPayload {
+  id: string;
+  kind: "member" | "guest";
+  /** The reviewer's ref (principal id or guest:<id>): for the owner only. */
+  ref?: string;
+  name: string;
+  verdict: "none" | "approved" | "changes_requested";
+  versionNumber: number | null;
+  note: string | null;
+  /** Whether the verdict counts (given since the last reopen). */
+  current: boolean;
+  me: boolean;
+}
+
+export interface ReviewEventPayload {
+  id: string;
+  kind: string;
+  actorName: string;
+  fromState: ReviewState;
+  toState: ReviewState;
+  versionNumber: number;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface ReviewPayload {
+  state: ReviewState;
+  currentVersion: number;
+  progress: { approved: number; total: number };
+  reviewers: ReviewerPayload[];
+  finalApprover: { name: string; me: boolean; ref?: string } | null;
+  forced: { byName: string; versionNumber: number; notes: string[] } | null;
+  events: ReviewEventPayload[];
+  can: { submit: boolean; review: boolean; force: boolean; reopen: boolean; archive: boolean; unarchive: boolean };
+}
+
+/** One POST /review body. */
+export type ReviewAction =
+  | { action: "submit"; reviewers: string[]; finalApproverId?: string | null }
+  | { action: "verdict"; verdict: "approve" | "request_changes"; versionNumber: number; note?: string }
+  | { action: "force"; note: string }
+  | { action: "reopen" }
+  | { action: "archive"; archived: boolean };
 
 /** The current version: a document's Markdown, or a design's board files, by `format`. */
 export type PayloadVersion = { number: number; createdAt: string; warnings?: VersionWarning[] } & (
@@ -252,6 +300,19 @@ export class Api {
     return this.download(`/d/api/exports/${encodeURIComponent(exportId)}/file`);
   }
 
+  /** One review action (submit, verdict, force, reopen, archive); answers with the updated review. */
+  review(body: ReviewAction): Promise<{ review: ReviewPayload }> {
+    return this.request("POST", this.doc("/review"), body);
+  }
+
+  /** Whom the owner may name as reviewers: members with access and this document's comment-link guests. */
+  reviewCandidates(): Promise<{
+    members: { principalId: string; name: string }[];
+    guests: { guestId: string; name: string }[];
+  }> {
+    return this.request("GET", this.doc("/review-candidates"));
+  }
+
   send(threadIds: string[]): Promise<unknown> {
     return this.request("POST", this.doc("/send"), { threadIds });
   }
@@ -324,6 +385,9 @@ const MESSAGES: Record<string, string> = {
   export_failed: "The export couldn't be made. Try again.",
   export_too_large: "This is too large to export.",
   export_not_found: "That export is no longer available. Try again.",
+  document_locked: "This document is approved or archived, so it can't be changed. Reopen it for review first.",
+  document_review_forbidden: "You can't do that in this review.",
+  document_review_state_invalid: "That can't be done in the document's current review state. Reload to see it.",
   network_error: "Can't reach the server. Check your connection.",
 };
 
