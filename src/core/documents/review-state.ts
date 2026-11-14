@@ -7,6 +7,8 @@
  *   3. every reviewer's current verdict is approved → approved;
  *   4. else in_review.
  * A verdict or force on the current version given before the latest reopen of that version does not count.
+ * A reopen now starts a new version (a copy of the approved one) and its event names that version, so nothing
+ * on it can predate the reopen; the rule still guards reopens recorded on the approved version itself.
  */
 export const REVIEW_STATES = ["draft", "in_review", "changes_requested", "approved", "archived"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];

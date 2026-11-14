@@ -12,6 +12,7 @@ import {
   bannerText,
   EVENT_LABEL,
   isLockedState,
+  isReopenCopy,
   myCurrentVerdict,
   newerNote,
   pendingLines,
@@ -76,6 +77,8 @@ export class ReviewPanel {
   apply(review: ReviewPayload): void {
     const before = this.review.state;
     this.review = review;
+    // A reopen's copy of the version read holds the same content: it counts as read.
+    if (isReopenCopy(review, this.read, review.currentVersion)) this.read = review.currentVersion;
     this.host.onState(review.state);
     if (this.locked !== this.wasLocked || (this.locked && review.state !== before)) {
       this.wasLocked = this.locked;

@@ -966,7 +966,10 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(forced.json.reviewState).toBe("approved");
       expect(forced.json.overridden).toHaveLength(1);
       expect(forced.json.reviewText).toContain("had not reviewed v1");
-      expect((await callOwner("reopen_document", { documentId: id })).json.reviewState).toBe("in_review");
+      // Reopening starts the next version, a copy of the approved v1, and puts it in review.
+      const reopened = await callOwner("reopen_document", { documentId: id });
+      expect([reopened.json.reviewState, reopened.json.currentVersion]).toEqual(["in_review", 2]);
+      expect(reopened.json.events[0]).toMatchObject({ kind: "reopened", versionNumber: 2 });
       expect((await callOwner("archive_document", { documentId: id, archived: true })).json.reviewState).toBe(
         "archived",
       );

@@ -57,6 +57,11 @@ describe("what the page does for a message", () => {
     expect(versionAction({ shown: 3, latest: 3, dirty: true, saving: false })).toBe("none");
     expect(versionAction({ shown: 2, latest: 3, dirty: false, saving: true })).toBe("defer");
   });
+  it("adopts a newer version that is a reopen's copy of the shown one: unsaved edits stay and still save", () => {
+    expect(versionAction({ shown: 2, latest: 3, dirty: true, saving: false, copyOfShown: true })).toBe("adopt");
+    expect(versionAction({ shown: 2, latest: 3, dirty: false, saving: false, copyOfShown: true })).toBe("adopt");
+    expect(versionAction({ shown: 2, latest: 3, dirty: true, saving: true, copyOfShown: true })).toBe("defer");
+  });
 });
 
 describe("HiddenStopper", () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ReviewPayload, ReviewerPayload } from "./api.js";
 import {
   bannerText,
+  isReopenCopy,
   myCurrentVerdict,
   newerNote,
   pendingLines,
@@ -35,6 +36,25 @@ const review = (over: Partial<ReviewPayload>): ReviewPayload => ({
 });
 
 describe("review model", () => {
+  it("knows a reopen's copy: the version right after the shown one, named by a reopened event", () => {
+    const ev = (kind: string, versionNumber: number) => ({
+      id: kind,
+      kind,
+      actorName: "Chris",
+      fromState: "approved" as const,
+      toState: "in_review" as const,
+      versionNumber,
+      note: null,
+      createdAt: "2026-11-14T00:00:00Z",
+    });
+    const reopened = review({ currentVersion: 5, events: [ev("reopened", 5), ev("approved", 4)] });
+    expect(isReopenCopy(reopened, 4, 5)).toBe(true);
+    // Not right after the shown version, or no reopen names it: a real newer version.
+    expect(isReopenCopy(reopened, 3, 5)).toBe(false);
+    expect(isReopenCopy(review({ events: [ev("approved", 5)] }), 4, 5)).toBe(false);
+    expect(isReopenCopy(review({ events: [ev("reopened", 4)] }), 4, 5)).toBe(false);
+  });
+
   it("words the banner: state, version, progress; forced; draft and archived", () => {
     expect(bannerText(review({}))).toBe("In review · v4 · 1 of 2 approved");
     expect(bannerText(review({ state: "changes_requested" }))).toBe("Changes requested · v4 · 1 of 2 approved");

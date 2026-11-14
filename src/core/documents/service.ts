@@ -3,21 +3,22 @@ import type { Document, DocumentVersion, PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
-import { contentHash, type VersionContent } from "./content.js";
+import type { VersionContent } from "./content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import { notifyDocumentChange } from "./events.js";
 import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
-import { loadContent, storeDocumentContent, storeVersionFileRows, storeVersionFiles } from "./files.js";
-import { formatFor, type DocumentKind, type PreparedContent } from "./formats/index.js";
+import { loadContent, storeVersionFiles } from "./files.js";
+import { formatFor, type DocumentKind } from "./formats/index.js";
 import { documentSecretValues } from "./redact.js";
 import { isLocked } from "./review-state.js";
 import { assertNotLocked, recomputeAfterPublish } from "./review.js";
+import { stageVersion, versionColumns, writeVersion, type PublishVia } from "./version-write.js";
 import type { VersionWarning } from "./warnings.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
 export type DocumentServiceDb = PrismaClient;
 
-export type PublishVia = "editor" | "agent" | "mcp" | "import";
+export type { PublishVia } from "./version-write.js";
 
 /** Exactly one of markdown/files, matching the kind: a document takes Markdown, a design takes files. */
 function contentInput(
@@ -31,16 +32,6 @@ function contentInput(
     return { format: "boards-v1", files: input.files };
   }
   throw new Error("document_format_mismatch");
-}
-
-/** The DocumentVersion columns that hold prepared content (design files go to storeVersionFiles). */
-function versionColumns(format: VersionContent["format"], prepared: PreparedContent) {
-  return {
-    format,
-    markdown: prepared.content.format === "markdown" ? prepared.content.markdown : null,
-    contentHash: contentHash(prepared.content),
-    warnings: prepared.warnings.length ? (prepared.warnings as unknown as Prisma.InputJsonValue) : undefined,
-  };
 }
 
 export async function createDocument(
@@ -132,77 +123,22 @@ export async function publishVersion(
   const secrets = await documentSecretValues(db, cipher, doc.agentId);
   const prepared = fmt.prepare(content, secrets);
   const summary = input.summary === undefined ? null : redactExactSecretValues(input.summary, secrets);
-  // Re-anchoring parses the new content (jsdom for a design): done here, before the Serializable
-  // transaction, so the transaction stays short. Anchors never change after a thread is created, so
-  // the verdicts hold; a thread opened meanwhile is checked inside the transaction.
-  const checked = new Map<string, boolean>();
-  const openBefore = await db.commentThread.findMany({
-    where: { documentId: input.documentId, status: "open" },
-    select: { id: true, anchor: true },
-  });
-  const outdatedBefore = new Set(fmt.outdated(prepared.content, openBefore));
-  for (const t of openBefore) checked.set(t.id, outdatedBefore.has(t.id));
-  // A design's text goes in before the transaction too (idempotent per document), so the transaction
-  // only writes the version, its file rows and thread statuses.
-  const files = prepared.content.format === "boards-v1" ? prepared.content.files : null;
-  if (files && input.expectedNumber !== undefined) {
-    // A stale publisher fails here, before it stores text no version will use. The check in the
-    // transaction below still decides; this one only bounds the orphan text a conflict leaves.
-    const last = await db.documentVersion.aggregate({
-      where: { documentId: input.documentId },
-      _max: { number: true },
-    });
-    if ((last._max.number ?? 0) !== input.expectedNumber) throw new Error("document_version_conflict");
-  }
-  if (files) await storeDocumentContent(db, input.documentId, files);
+  const staged = await stageVersion(db, input.documentId, fmt, prepared, input.expectedNumber);
   const published = await withSerializableRetry(
     () =>
       db.$transaction(
         async (tx) => {
           await preferIndexScans(tx);
           await assertNotLocked(tx, input.documentId);
-          const last = await tx.documentVersion.aggregate({
-            where: { documentId: input.documentId },
-            _max: { number: true },
-          });
-          if (input.expectedNumber !== undefined && (last._max.number ?? 0) !== input.expectedNumber) {
-            throw new Error("document_version_conflict");
-          }
-          const number = (last._max.number ?? 0) + 1;
-          const version = await tx.documentVersion.create({
-            data: {
-              documentId: input.documentId,
-              number,
-              ...versionColumns(fmt.format, prepared),
-              via: input.via,
-              createdById: input.createdById ?? null,
-              runId: input.runId ?? null,
-              summary,
-            },
-          });
-          if (files) await storeVersionFileRows(tx, input.documentId, version.id, files);
-          await tx.document.update({
-            where: { id: input.documentId },
-            data: { currentVersionId: version.id },
+          const written = await writeVersion(tx, input.documentId, staged, {
+            via: input.via,
+            createdById: input.createdById,
+            runId: input.runId,
+            summary,
+            expectedNumber: input.expectedNumber,
           });
           await recomputeAfterPublish(tx, input.documentId);
-          const threads = await tx.commentThread.findMany({
-            where: { documentId: input.documentId, status: "open" },
-            select: { id: true, anchor: true },
-          });
-          const unchecked = threads.filter((t) => !checked.has(t.id));
-          const outdatedNew = new Set(unchecked.length ? fmt.outdated(prepared.content, unchecked) : []);
-          const outdatedIds = threads.filter((t) => checked.get(t.id) ?? outdatedNew.has(t.id)).map((t) => t.id);
-          const kept = threads.length - outdatedIds.length;
-          if (outdatedIds.length > 0) {
-            await tx.commentThread.updateMany({ where: { id: { in: outdatedIds } }, data: { status: "outdated" } });
-          }
-          return {
-            versionId: version.id,
-            number,
-            reanchored: { kept, outdated: outdatedIds.length },
-            warnings: prepared.warnings,
-          };
+          return { ...written, warnings: prepared.warnings };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),

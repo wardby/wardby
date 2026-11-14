@@ -11,6 +11,6 @@ appliesTo: ">=0.10.0"
 
 `document_locked` (HTTP 409). The document or design is **approved** or **archived**. No route can publish a new version (the editor, board saves, `publish_version`, restore, agent edits), and comment threads cannot be sent to the agent. Comments still work.
 
-To change an approved document, someone with write access reopens it (`reopen_document`, or **Reopen for review** on the page), publishes the change, and the reviewers approve again. To change an archived document, its owner unarchives it (`archive_document` with `archived: false`).
+To change an approved document, someone with write access reopens it (`reopen_document`, or **Reopen for review** on the page), which puts a new version, a copy of the approved one, in review; they publish the change, and the reviewers approve again. To change an archived document, its owner unarchives it (`archive_document` with `archived: false`).
 
 See [Review and approve documents](../document-review.md).

@@ -103,6 +103,16 @@ describe("describeRow", () => {
       versions: "v6",
       parts: ["Restored v3", "Chris Fields"],
     });
+    // A reopen's copy of the approved version says so, and never groups with editor saves.
+    const reopened = v(7, 0, { via: "review", summary: "Reopened for review from v6" });
+    expect(describeRow(one(reopened))).toEqual({
+      versions: "v7",
+      parts: ["Reopened for review from v6", "Chris Fields"],
+    });
+    expect(groupVersions([v(8, 1), reopened]).map((r) => [r.first, r.last])).toEqual([
+      [8, 8],
+      [7, 7],
+    ]);
     expect(restoredFrom(v(6, 0, { summary: "Restored v3 and more" }))).toBeNull();
   });
 

@@ -36,7 +36,7 @@ import { openOverview } from "./overview.js";
 import { openPlay } from "./play.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
 import { ReviewPanel } from "./review-ui.js";
-import { isLockedState } from "./review-model.js";
+import { isLockedState, isReopenCopy } from "./review-model.js";
 
 const SAVE_DELAY_MS = 1500;
 /** After a writer's own save, the new version's fidelity check waits for this long with no edits. */
@@ -834,6 +834,7 @@ function mount(
       latest: next.version.number,
       dirty: dirty() || conflict,
       saving: saving || measuring,
+      copyOfShown: !conflict && isReopenCopy(next.review, baseNumber, next.version.number),
     });
     if (act === "defer") {
       pendingRefresh = true;
@@ -843,6 +844,13 @@ function mount(
     void comments.loadMentions();
     if (act === "load") return loadVersion(next);
     if (act === "banner") changedBanner.hidden = false;
+    // A reopen's copy of the shown version: same boards, so only the number moves; unsaved edits save over it.
+    if (act === "adopt") {
+      baseNumber = next.version.number;
+      version.textContent = `design · v${baseNumber}`;
+      warnings = next.version.warnings ?? [];
+      renderChecks();
+    }
     applyPayload(next);
   });
 

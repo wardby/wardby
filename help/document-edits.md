@@ -16,7 +16,7 @@ The side panel of a document page has a **Comments** tab and an **Edits** tab. E
 - Editor saves by the same person, each within 5 minutes of the one before, share one row ("v4–v5 · Name · 2 edits").
 - An agent's version reads "Agent · via <the person who sent the threads>", with "for thread #N" links that open those threads in the Comments tab.
 - Two people with the same display name never share a row.
-- Versions published over MCP are marked "(MCP)"; restores read "Restored v<N> · Name". These always have their own row.
+- Versions published over MCP are marked "(MCP)"; restores read "Restored v<N> · Name"; a reopen for review reads "Reopened for review from v<N> · Name" (a copy of the approved v<N>). These always have their own row.
 
 Click a row to see that version read-only, with its changes against the version before the row: added text highlighted, removed text struck through where it was. Changes are compared word by word on the text, so a new heading or list item shows as added text, and formatting-only changes are not marked. **Back to latest** or Esc returns to the editor. New versions keep arriving in the list while you look.
 

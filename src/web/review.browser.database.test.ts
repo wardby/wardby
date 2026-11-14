@@ -45,6 +45,8 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     };
     const banner = (p: Page) => p.locator(".review-banner").textContent();
     const editable = (p: Page) => p.locator(".editor .ProseMirror").getAttribute("contenteditable");
+    /** The Markdown page's version badge ("v3"). */
+    const shownVersion = (p: Page) => p.locator(".badge", { hasText: /^v\d+$/ }).textContent();
     const owner = (ids: { owner: string }) => ({ kind: "principal" as const, principalId: ids.owner });
 
     it("the owner submits from the page; reviewers approve; the editor locks and reopens", async () => {
@@ -81,9 +83,21 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => banner(o)).toContain("Approved · v1 · 2 of 2 approved");
       await expect.poll(() => editable(o)).toBe("false");
       expect(await o.locator(".toolbar").isVisible()).toBe(false);
+      // Reopening starts v2, a copy of the approved v1, in review: the page moves to it, unlocked.
       await o.getByRole("button", { name: "Reopen for review" }).click();
-      await expect.poll(() => banner(o)).toContain("In review");
+      await expect.poll(() => banner(o)).toContain("In review · v2 · 0 of 2 approved");
+      await expect.poll(() => shownVersion(o)).toBe("v2");
       await expect.poll(() => editable(o)).toBe("true");
+      // The reviewer's page moves too: v2 holds what they read, so it is not news to review.
+      await expect.poll(() => banner(a)).toContain("In review · v2");
+      await expect.poll(() => shownVersion(a)).toBe("v2");
+      expect(await banner(a)).not.toContain("was published while");
+      // The owner's next edit saves over v2.
+      await o.locator(".editor .ProseMirror p").click();
+      await o.keyboard.press("End");
+      await o.keyboard.type(" again");
+      await expect.poll(() => shownVersion(o), { timeout: 10_000 }).toBe("v3");
+      expect(await o.locator(".save").textContent()).toBe("Saved");
     }, 90_000);
 
     it("a reviewer is offered only the verdict they have not given: once approved, only Request changes on vN", async () => {
@@ -293,6 +307,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
       await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save()).toBe("Unsaved changes");
+      // The reopen's v2 is a copy of v1: the page moves to it and keeps the edits.
+      await expect.poll(() => shownVersion(page)).toBe("v2");
+      expect(await page.getByText("This document changed").isVisible()).toBe(false);
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
       await page.locator(".editor .ProseMirror p").click();
@@ -300,6 +317,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.keyboard.type(" two");
       await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(1);
       expect(puts[0]).toContain("first one two");
+      expect(JSON.parse(puts[0]).baseNumber).toBe(2);
       await expect.poll(() => save(), { timeout: 10_000 }).toBe("Saved");
       await context.close();
     }, 90_000);
@@ -333,20 +351,22 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const later = await open(d.secondCookie, d.documentId);
       expect(await save(later)).toBe("Read only: approved");
       await later.context().close();
-      const viewV1 = async () => {
+      const viewV1 = async (rows: number) => {
         await o.getByRole("tab", { name: "Edits" }).click();
-        await expect.poll(() => o.locator(".ed-row").count()).toBe(2);
+        await expect.poll(() => o.locator(".ed-row").count()).toBe(rows);
         await o.locator(".ed-row").last().click();
         await expect.poll(() => o.locator(".vbar").textContent()).toContain("Viewing v1");
       };
-      await viewV1();
+      await viewV1(2);
       expect(await o.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
       await o.getByRole("button", { name: "Back to latest" }).click();
 
       await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save(o)).toBe("Saved");
       await expect.poll(() => save(a)).toBe("Comment only");
-      await viewV1();
+      // The reopen's copy of v2 is the newest row; v2 stays in the list as the approved version.
+      await viewV1(3);
+      expect(await o.locator(".ed-row").first().textContent()).toContain("Reopened for review from v2");
       expect(await o.getByRole("button", { name: "Restore this version" }).count()).toBe(1);
     }, 90_000);
 
@@ -401,6 +421,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         .poll(() => page.locator(".lock-banner").textContent(), { timeout: 10_000 })
         .toBe("This design was reopened for review. Reload to edit it. Reload");
       expect(await page.locator(".lock-banner button", { hasText: "Reload" }).isVisible()).toBe(true);
+      expect(await page.locator(".version").textContent()).toBe("design · v2");
       await context.close();
     }, 90_000);
 
@@ -462,9 +483,11 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await setArchived(server.db, { documentId: d.documentId, viewer: owner(d.principalIds), archived: false });
       await expect.poll(() => save()).toBe("Read only: approved");
 
-      // Reopened: editable again, and nothing was published on a timer.
+      // Reopened: v2, a copy of v1, editable again, and nothing was published on a timer.
       await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect.poll(() => save()).toBe("Saved");
+      await expect.poll(() => page.locator(".version").textContent()).toBe("design · v2");
+      expect(await page.getByText("This design changed.").isVisible()).toBe(false);
       expect(await page.locator(".lock-banner").isVisible()).toBe(false);
       expect(await page.getByRole("button", { name: "Undo" }).isVisible()).toBe(true);
       await page.waitForTimeout(2500);
@@ -481,6 +504,8 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.keyboard.type("!");
       await page.locator(".save").click();
       await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(1);
+      // Saved over the reopen's v2.
+      await expect.poll(() => page.locator(".version").textContent(), { timeout: 10_000 }).toBe("design · v3");
       await page.context().close();
     }, 90_000);
 
@@ -617,6 +642,48 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await h1.textContent()).toBe(typed);
       expect(await page.locator(".version").textContent()).toBe("design · v1");
       expect(puts).toEqual([]);
+      await context.close();
+    }, 90_000);
+
+    it("a design's edits from before a lock survive a reopen: the page moves to the copy and saves over it", async () => {
+      const d = await server.design({ title: "Coffee", files: files(), access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.postData() ?? ""));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+      const h1 = page.frameLocator(CANVAS).locator("h1").first();
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("!");
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const save = () => page.locator(".save").textContent();
+      await expect.poll(() => save()).toBe("Read only: approved · unsaved changes");
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await expect.poll(() => page.locator(".version").textContent()).toBe("design · v2");
+      await expect.poll(() => save()).toBe("Unsaved changes");
+      expect(await page.getByText("This design changed.").isVisible()).toBe(false);
+      expect(puts).toEqual([]);
+      // The next edit saves the waiting edits over v2.
+      await h1.dblclick();
+      await page.keyboard.press("End");
+      await page.keyboard.type("?");
+      await page.locator(".save").click();
+      await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(1);
+      expect(JSON.parse(puts[0]).baseNumber).toBe(2);
+      await expect.poll(() => page.locator(".version").textContent(), { timeout: 10_000 }).toBe("design · v3");
       await context.close();
     }, 90_000);
 

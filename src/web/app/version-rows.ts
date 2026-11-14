@@ -37,7 +37,7 @@ export function restoredFrom(v: VersionItem): number | null {
 
 const groupable = (v: VersionItem) => v.via === "editor" && v.author.kind === "member" && restoredFrom(v) === null;
 
-/** Groups versions (newest first) into rows; agent, MCP, import and restore versions always stand alone. */
+/** Groups versions (newest first) into rows; agent, MCP, import, restore and reopen versions always stand alone. */
 export function groupVersions(versions: readonly VersionItem[], windowMs = GROUP_WINDOW_MS): EditRow[] {
   const rows: EditRow[] = [];
   for (const v of versions) {
@@ -71,6 +71,8 @@ export function describeRow(row: EditRow): { versions: string; parts: string[] }
   const who = v.author.name + (VIA_SUFFIX[v.via] ?? "");
   const restored = restoredFrom(v);
   if (restored !== null) return { versions, parts: [`Restored v${restored}`, who] };
+  // A reopen for review's copy of the approved version: its summary says so.
+  if (v.via === "review" && v.summary) return { versions, parts: [v.summary, who] };
   if (v.author.kind === "agent") {
     return { versions, parts: ["Agent", ...(v.author.viaName ? [`via ${v.author.viaName}`] : [])] };
   }

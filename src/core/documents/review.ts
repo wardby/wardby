@@ -3,7 +3,8 @@
  * Serializable transaction (withSerializableRetry + preferIndexScans, as publishVersion) that reads
  * the document row, the current version number, the reviewers and the latest force and reopen
  * events, checks the action, writes, recomputes the state with the pure rule (review-state.ts) and
- * appends one event. Live pages are told after the commit (`review`).
+ * appends one event. Live pages are told after the commit (`review`; a reopen, which also writes a version,
+ * sends `version` too).
  *
  * Time: the state rule orders verdicts and forces against the latest reopen by timestamp, so one
  * action takes its verdict time and its event time from one clock, the database's, read inside the
@@ -24,8 +25,11 @@ import { preferIndexScans, withSerializableRetry } from "../serializable-retry.j
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
+import { loadContent } from "./files.js";
+import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
 import { redactForDocumentAgent } from "./redact.js";
+import { stageVersion, storedVersionWarnings, writeVersion } from "./version-write.js";
 import {
   approvedCount,
   computeReviewState,
@@ -414,29 +418,76 @@ export async function forceApprove(
   return { view: await getReviewView(db, input.documentId, input.viewer), overridden };
 }
 
+/**
+ * Reopens an approved document for review by starting its next version: a copy of the approved version N, written
+ * as N+1 (via "review") in the same transaction as the state change and the `reopened` event, which names N+1.
+ * N stays the approved record; nothing given on N counts on N+1, so every review after a reopen is on a new number.
+ * The copy goes through the shared version writer but not publishVersion, whose lock check refuses every other
+ * route while the document is approved. The content is N's as stored (already redacted), so nothing new is
+ * redacted here.
+ */
 export async function reopenDocument(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ReviewView> {
   await requireDocumentAccess(db, input.documentId, input.viewer, "write");
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
-  await inReviewTx(db, async (tx) => {
-    await requireDocumentAccess(tx, input.documentId, input.viewer, "write");
-    const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
-    if (doc.reviewState !== "approved") invalid();
-    await record(tx, {
-      documentId: doc.id,
-      viewer: input.viewer,
-      kind: "reopened",
-      from: "approved",
-      to: "in_review",
-      versionNumber: rule.currentVersion,
-      at: await actionTime(tx, lastEventAt),
+  const principalId = input.viewer.principalId;
+  for (let attempt = 1; ; attempt++) {
+    // Staged before the transaction, as a publish is (re-anchoring a design parses it).
+    const row = await db.document.findUnique({
+      where: { id: input.documentId },
+      select: {
+        kind: true,
+        reviewState: true,
+        currentVersion: { select: { id: true, number: true, format: true, markdown: true, warnings: true } },
+      },
     });
-  });
+    if (!row?.currentVersion) throw new Error("document_not_found");
+    // Early refusal (the transaction decides): nothing is staged for a document that is not approved.
+    if (row.reviewState !== "approved") invalid();
+    const approved = row.currentVersion;
+    const fmt = formatFor(row.kind);
+    const prepared = { content: await loadContent(db, approved), warnings: storedVersionWarnings(approved.warnings) };
+    const staged = await stageVersion(db, input.documentId, fmt, prepared);
+    try {
+      await inReviewTx(db, async (tx) => {
+        await requireDocumentAccess(tx, input.documentId, input.viewer, "write");
+        const { doc, lastEventAt } = await readReview(tx, input.documentId);
+        if (doc.reviewState !== "approved") invalid();
+        // A conflict means another reopen, publish and approval happened since the copy was staged.
+        const written = await writeVersion(tx, doc.id, staged, {
+          via: "review",
+          createdById: principalId,
+          summary: reopenedSummary(approved.number),
+          expectedNumber: approved.number,
+        });
+        await record(tx, {
+          documentId: doc.id,
+          viewer: input.viewer,
+          kind: "reopened",
+          from: "approved",
+          to: "in_review",
+          versionNumber: written.number,
+          at: await actionTime(tx, lastEventAt),
+        });
+      });
+      break;
+    } catch (err) {
+      if (attempt < DOCUMENT_WRITE_ATTEMPTS && err instanceof Error && err.message === "document_version_conflict") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  // As a publish does (open pages load the new version), and as a review action does.
+  await notifyDocumentChange(db, input.documentId, "version");
   await notifyDocumentChange(db, input.documentId, "review");
   return getReviewView(db, input.documentId, input.viewer);
 }
+
+/** The summary of the version a reopen starts. */
+export const reopenedSummary = (number: number) => `Reopened for review from v${number}`;
 
 export async function setArchived(
   db: PrismaClient,

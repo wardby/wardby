@@ -21,14 +21,14 @@ A whole [document](documents.md) or [design](designs.md) has a review state. Com
 | Approved          | Every reviewer approved the current version, or the owner or final approver forced it. Locked. |
 | Archived          | Set aside by the owner. Locked. Unarchive returns it to the state it had before.               |
 
-Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4). A verdict given before the latest reopen of the same version does not count either.
+Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4).
 
 ## Roles
 
 - **Reviewers**: the people the owner names: members, or guests of this document's comment share links who gave a name. Naming a member gives them comment access if they lack it. The owner is a reviewer only if listed.
 - **Owner**: submits, changes the reviewer list, names the final approver, archives, and can always force approve.
 - **Final approver** (optional, one person): can force approve; gives verdicts only if also listed as a reviewer.
-- **Writers** (write access) reopen an approved document for review.
+- **Writers** (write access) reopen an approved document for review: that creates a new version, a copy of the approved one, and puts it in review.
 
 Reviewers act only with live access: a member needs at least comment access, and a guest needs a comment share link that is not revoked or expired. A reviewer who loses access cannot act; they stay listed until the owner removes them, and a force approval covers them.
 
@@ -36,7 +36,7 @@ Reviewers act only with live access: a member needs at least comment access, and
 
 A reviewer approves or requests changes on the version they read, with an optional note. If a newer version was published meanwhile, the verdict is refused (`document_version_conflict`): read the new version and review it. The page shows "vN was published while you were reviewing vM" and a **Review vN** button that shows what changed since vM (on a design, vN opens in History with the boards changed since vM marked "changed").
 
-A reviewer is offered only the verdict they have not already given on the current version. With no verdict yet, they see **Approve** and **Request changes**. After approving, they see "You approved vN" and only **Request changes**; after requesting changes, "You requested changes on vN" and only **Approve**. Giving the same verdict again (for example `review_document` with `approve` twice) changes nothing: no event is recorded and a new note sent with it is not stored. A verdict from before a reopen does not count, so the same verdict after the reopen is recorded.
+A reviewer is offered only the verdict they have not already given on the current version. With no verdict yet, they see **Approve** and **Request changes**. After approving, they see "You approved vN" and only **Request changes**; after requesting changes, "You requested changes on vN" and only **Approve**. Giving the same verdict again (for example `review_document` with `approve` twice) changes nothing: no event is recorded and a new note sent with it is not stored. After a reopen, reviewers give their verdict again on the new version.
 
 A named reviewer can also request changes on a document every reviewer approved: the Review tab offers only **Request changes on vN** (no Approve). It moves the document to Changes requested and unlocks it, so a new version can be published. A force approval is final: reviewers are offered no verdict on it, `review_document` is refused with `document_review_state_invalid`, and a writer reopens the document for review.
 
@@ -46,7 +46,7 @@ A named reviewer can also request changes on a document every reviewer approved:
 
 An approved or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
 
-A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. Edits not yet saved when the lock lands are kept: while locked the page says so ("Read only: approved · unsaved changes"), and after a reopen they show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
+A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it: Reopen for review creates a new version (a copy of the approved one) and puts it in review, with every reviewer waiting again; the approved version stays in History as the approved record. The writer then publishes changes and the reviewers approve again. Open pages move to the new version. Edits not yet saved when the lock lands are kept: while locked the page says so ("Read only: approved · unsaved changes"), and after a reopen they show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
 
 ## The page and the Viewer
 
@@ -59,7 +59,7 @@ Every document and design page shows a banner with the state and the approval co
 | `submit_for_review`      | owner                   | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested |
 | `review_document`        | a named reviewer        | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                               |
 | `force_approve_document` | owner or final approver | `note` required; the result lists `overridden`                                                                                                                      |
-| `reopen_document`        | writers                 | approved to in review                                                                                                                                               |
+| `reopen_document`        | writers                 | approved to in review on a new version, a copy of the approved one; `currentVersion` in the result is the new version's number                                      |
 | `archive_document`       | owner                   | `archived: true` or `false`                                                                                                                                         |
 | `wait_for_review`        | `documents:read`        | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`            |
 

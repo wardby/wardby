@@ -1696,7 +1696,8 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       const locked = (await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any;
       expect(locked.document.canSend).toBe(false);
       const reopened = await post(id, o, { action: "reopen" });
-      expect(((await reopened.json()) as any).review.state).toBe("in_review");
+      const back = ((await reopened.json()) as any).review;
+      expect([back.state, back.currentVersion]).toEqual(["in_review", 2]);
     });
 
     it("shows an anonymous share-link reader a review with no actions and no reviewer refs", async () => {

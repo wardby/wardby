@@ -38,6 +38,13 @@ export function reviewerChip(r: ReviewerPayload, current: number): string {
     : `${label} v${r.versionNumber} · older version`;
 }
 
+/**
+ * Whether version `latest` is a reopen's copy of version `shown`: a reopen for review writes the next version as a
+ * copy of the approved one, and its event names that new version.
+ */
+export const isReopenCopy = (r: Pick<ReviewPayload, "events">, shown: number, latest: number): boolean =>
+  latest === shown + 1 && r.events.some((e) => e.kind === "reopened" && e.versionNumber === latest);
+
 export const newerNote = (read: number, current: number) =>
   `v${current} was published while you were reviewing v${read}`;
 

@@ -99,16 +99,21 @@ export function statusConnected(data: string): boolean | null {
 /**
  * What to do when the server has a version: nothing (already showing it),
  * load it in place, show the "document changed" banner (unsaved local
- * edits), or wait for an in-flight save to finish and decide again.
+ * edits), or wait for an in-flight save to finish and decide again. A newer
+ * version that is a copy of the shown one (a reopen for review starts one) is
+ * adopted: the page moves to its number and keeps its text and any unsaved
+ * edits, which then save over it.
  */
 export function versionAction(input: {
   shown: number;
   latest: number;
   dirty: boolean;
   saving: boolean;
-}): "none" | "load" | "banner" | "defer" {
+  copyOfShown?: boolean;
+}): "none" | "load" | "adopt" | "banner" | "defer" {
   if (input.saving) return "defer";
   if (input.latest <= input.shown) return "none";
+  if (input.copyOfShown) return "adopt";
   return input.dirty ? "banner" : "load";
 }
 

@@ -200,12 +200,12 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await changes();
     await changes();
     expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted", "approved", "approved", "changes_requested"]);
-    // A verdict from before a reopen does not count, so the same verdict after it is recorded.
+    // A reopen starts a new version, so the same verdict after it (on that version) is recorded.
     const id2 = await doc();
     await submitForReview(db, { documentId: id2, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     await reopenDocument(db, { documentId: id2, viewer: as(owner) });
-    await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 2 });
     expect((await eventsOf(id2)).map((e) => e.kind)).toEqual(["submitted", "approved", "reopened", "approved"]);
   });
 
@@ -439,11 +439,130 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     );
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     await expect(reopenDocument(db, { documentId: id, viewer: as(ann) })).rejects.toThrow("document_access_denied");
-    expect((await reopenDocument(db, { documentId: id, viewer: as(owner) })).state).toBe("in_review");
-    // The approval before the reopen does not count any more, even on the same version.
-    const view = await getReviewView(db, id, as(owner));
-    expect(view.reviewers[0]).toMatchObject({ verdict: "approved", versionNumber: 1, current: false });
-    await publishVersion(db, cipher, { documentId: id, markdown: "v2", via: "mcp" });
+    const reopened = await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    expect([reopened.state, reopened.currentVersion]).toEqual(["in_review", 2]);
+    // The approval of v1 is on an older version now.
+    expect(reopened.reviewers[0]).toMatchObject({ verdict: "approved", versionNumber: 1, current: false });
+    // A refused reopen wrote no version.
+    await expect(reopenDocument(db, { documentId: id, viewer: as(owner) })).rejects.toThrow(
+      "document_review_state_invalid",
+    );
+    expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(2);
+    await publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "mcp" });
+    const v = await reviewDocument(db, cipher, {
+      documentId: id,
+      viewer: as(ann),
+      verdict: "approve",
+      versionNumber: 3,
+    });
+    expect(v.state).toBe("approved");
+  });
+
+  it("reopen creates the next version, a copy of the approved one, and puts it in review", async () => {
+    const id = await doc();
+    await publishVersion(db, cipher, { documentId: id, markdown: "# Plan\n\nsecond", via: "mcp" });
+    const { createThread } = await import("./comments.js");
+    await createThread(db, cipher, {
+      documentId: id,
+      viewer: as(owner),
+      anchor: { type: "text", quote: "second", prefix: "", suffix: "" },
+      body: "Still open",
+    });
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 2 });
+    await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Ship" });
+    const view = await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    expect([view.state, view.currentVersion, view.forced]).toEqual(["in_review", 3, null]);
+    expect(view.progress).toEqual({ approved: 0, total: 2 });
+    expect(view.can.review).toBe(false);
+    const versions = await db.documentVersion.findMany({ where: { documentId: id }, orderBy: { number: "asc" } });
+    expect(versions.map((v) => v.number)).toEqual([1, 2, 3]);
+    const [v2, v3] = versions.slice(1);
+    expect(v3).toMatchObject({
+      markdown: v2.markdown,
+      contentHash: v2.contentHash,
+      format: "markdown",
+      via: "review",
+      summary: "Reopened for review from v2",
+      createdById: owner.id,
+      runId: null,
+    });
+    const docRow = await db.document.findUniqueOrThrow({ where: { id } });
+    expect([docRow.currentVersionId, docRow.reviewState]).toEqual([v3.id, "in_review"]);
+    // The content is the same, so every open thread keeps its anchor.
+    expect((await db.commentThread.findMany({ where: { documentId: id } })).map((t) => t.status)).toEqual(["open"]);
+    // v2 stays the approved record: its verdict and force events; the reopen is on v3.
+    const events = await eventsOf(id);
+    expect(events.map((e) => [e.kind, e.versionNumber, e.fromState, e.toState])).toEqual([
+      ["submitted", 2, "draft", "in_review"],
+      ["approved", 2, "in_review", "in_review"],
+      ["force_approved", 2, "in_review", "approved"],
+      ["reopened", 3, "approved", "in_review"],
+    ]);
+    // The next review action recomputes on v3: nothing given on v2 counts, so it stays in review.
+    const after = await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    expect(after.state).toBe("in_review");
+  });
+
+  it("reopening a design copies its files to the next version", async () => {
+    const { readFileSync } = await import("node:fs");
+    const coffee = (p: string) => readFileSync(new URL(`./boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+    const files = {
+      "manifest.json": coffee("manifest.json"),
+      ...Object.fromEntries(
+        ["home", "menu", "about", "visit"].map((b) => [`boards/${b}.html`, coffee(`boards/${b}.html`)]),
+      ),
+    };
+    const design = await createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "Coffee", files });
+    await submitForReview(db, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: design.id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    const texts = await db.documentContent.count({ where: { documentId: design.id } });
+    const { getDocument } = await import("./service.js");
+    const approved = (await getDocument(db, design.id)).content;
+    const view = await reopenDocument(db, { documentId: design.id, viewer: as(owner) });
+    expect([view.state, view.currentVersion]).toEqual(["in_review", 2]);
+    const current = await getDocument(db, design.id);
+    expect(current.version).toMatchObject({ number: 2, via: "review", summary: "Reopened for review from v1" });
+    expect(current.content).toEqual(approved);
+    expect(Object.keys(approved.format === "boards-v1" ? approved.files : {}).sort()).toEqual(
+      Object.keys(files).sort(),
+    );
+    const [v1, v2] = await db.documentVersion.findMany({
+      where: { documentId: design.id },
+      orderBy: { number: "asc" },
+    });
+    expect(v2.contentHash).toBe(v1.contentHash);
+    // The text is shared, not stored again.
+    expect(await db.documentContent.count({ where: { documentId: design.id } })).toBe(texts);
+  });
+
+  it("a publish racing a reopen never lands on the approved version", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    const [reopen, publish] = await Promise.allSettled([
+      reopenDocument(db, { documentId: id, viewer: as(owner) }),
+      publishVersion(db, cipher, { documentId: id, markdown: "racing", via: "editor", expectedNumber: 1 }),
+    ]);
+    expect(reopen.status).toBe("fulfilled");
+    // Refused as locked (before the reopen) or as stale (after it: v2 is the reopen's copy).
+    expect(publish.status).toBe("rejected");
+    expect(String((publish as PromiseRejectedResult).reason)).toMatch(/document_locked|document_version_conflict/);
+    const versions = await db.documentVersion.findMany({ where: { documentId: id }, orderBy: { number: "asc" } });
+    expect(versions.map((v) => [v.number, v.via])).toEqual([
+      [1, "editor"],
+      [2, "review"],
+    ]);
+  });
+
+  it("a verdict on the approved version after a reopen is stale; one on the new version counts", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    await reopenDocument(db, { documentId: id, viewer: as(owner) });
+    await expect(
+      reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
+    ).rejects.toThrow(ReviewVersionConflictError);
     const v = await reviewDocument(db, cipher, {
       documentId: id,
       viewer: as(ann),
@@ -451,27 +570,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       versionNumber: 2,
     });
     expect(v.state).toBe("approved");
-  });
-
-  it("a verdict on the same version after a reopen counts; one before it does not", async () => {
-    const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
-    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
-    await reopenDocument(db, { documentId: id, viewer: as(owner) });
-    const v = await reviewDocument(db, cipher, {
-      documentId: id,
-      viewer: as(ann),
-      verdict: "approve",
-      versionNumber: 1,
-    });
-    expect(v.state).toBe("approved");
-    expect(v.reviewers[0]).toMatchObject({ verdict: "approved", versionNumber: 1, current: true });
-    // The verdict and its event share one timestamp, after the reopen.
-    const [row] = await db.documentReviewer.findMany({ where: { documentId: id } });
-    const events = await eventsOf(id);
-    const reopen = events.find((e) => e.kind === "reopened")!;
-    expect(row.verdictAt?.getTime()).toBe(events.at(-1)!.createdAt.getTime());
-    expect(row.verdictAt!.getTime()).toBeGreaterThan(reopen.createdAt.getTime());
+    expect(v.reviewers[0]).toMatchObject({ verdict: "approved", versionNumber: 2, current: true });
   });
 
   it("the force banner does not report changes requested before a reopen as an overridden objection", async () => {
@@ -481,7 +580,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "First" });
     await reopenDocument(db, { documentId: id, viewer: as(owner) });
     const { view } = await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Second" });
-    expect(view.forced?.notes).toEqual(["Ann Reviewer had not reviewed v1"]);
+    expect(view.forced?.notes).toEqual(["Ann Reviewer had not reviewed v2"]);
   });
 
   it("a force approval is final: a reviewer cannot request changes, and can.review is false", async () => {
@@ -530,6 +629,8 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       "changes_requested",
     );
     expect((await eventsOf(id)).slice(-2).map((e) => e.kind)).toEqual(["archived", "unarchived"]);
+    // Archive and unarchive write no version.
+    expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(1);
   });
 
   it("a view's permissions follow the viewer", async () => {
@@ -587,6 +688,12 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       await live;
       await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
       await expect.poll(() => seen.map((e) => e.kind)).toContain("review");
+      // A reopen writes a version too: open pages load it.
+      await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+      seen.length = 0;
+      await reopenDocument(db, { documentId: id, viewer: as(owner) });
+      await expect.poll(() => [...new Set(seen.map((e) => e.kind))].sort()).toEqual(["review", "version"]);
+      expect(seen.every((e) => Object.keys(e).sort().join() === "documentId,kind")).toBe(true);
     } finally {
       off();
       await bus.close();

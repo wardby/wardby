@@ -54,7 +54,7 @@ directory.
 | `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`) |
 | `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)         |
 | `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)    |
-| `reopen_document`                                            | `documents:write` | Reopen an approved document for review (needs `write`)                                          |
+| `reopen_document`                                            | `documents:write` | Reopen an approved document for review as a new version, a copy of the approved one (`write`)   |
 | `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                         |
 | `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)     |
 | `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                     |
@@ -146,10 +146,12 @@ when:
 - Saves from the browser editor by the same person, each within 5 minutes of
   the one before, share one row ("v4–v5 · Name · 2 edits"); two people with the
   same display name never share a row. Versions from an
-  agent, from MCP (marked "(MCP)") and restores always have their own row.
+  agent, from MCP (marked "(MCP)"), restores and reopens always have their own row.
 - An agent's version reads "Agent · via <the person who sent the threads>"
   with a "for thread #N" link that opens that thread in the Comments tray.
 - A restore reads "Restored v3 · Name".
+- A reopen for review reads "Reopened for review from v3 · Name": its version
+  is a copy of the approved v3, which keeps its own row.
 
 Click a row to see that version read-only, with what it changed against the
 version before the row: added text highlighted, removed text struck through
@@ -210,8 +212,10 @@ event.
   version over missing verdicts and requested changes. A note is required and
   the history lists who was overridden. It is only possible in review or with
   changes requested.
-- **Reopen**: a writer reopens an approved document (back to in review). Every
-  reviewer then reviews again, even for the same version. A named reviewer can
+- **Reopen**: a writer reopens an approved document. Reopen for review creates a
+  new version (a copy of the approved one) and puts it in review; the approved
+  version stays in History as the approved record. Every reviewer then reviews
+  the new version. A named reviewer can
   also request changes on a document every reviewer approved, which moves it to
   changes requested and unlocks it. A force approval is final: reviewers cannot
   change it (`review_document` is refused with `document_review_state_invalid`),

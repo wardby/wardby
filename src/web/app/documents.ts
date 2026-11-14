@@ -26,6 +26,7 @@ import { pdfExportButton } from "./exports-menu.js";
 import { EditsTray } from "./edits-ui.js";
 import { createEditor } from "./editor.js";
 import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
+import { isReopenCopy } from "./review-model.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 import { TextSurface } from "./text-surface.js";
@@ -438,7 +439,13 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     } catch {
       return; // the next event, reconnect or save tries again
     }
-    const act = versionAction({ shown: baseNumber, latest: next.version.number, dirty: dirty || conflict, saving });
+    const act = versionAction({
+      shown: baseNumber,
+      latest: next.version.number,
+      dirty: dirty || conflict,
+      saving,
+      copyOfShown: !conflict && isReopenCopy(next.review, baseNumber, next.version.number),
+    });
     if (act === "defer") {
       pendingRefresh = true;
       return;
@@ -447,6 +454,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     void comments.loadMentions();
     if (act === "load") return loadVersion(next);
     if (act === "banner") changedBanner.hidden = false;
+    // A reopen's copy of the shown version: same text, so only the number moves; unsaved edits save over it.
+    if (act === "adopt") {
+      baseNumber = next.version.number;
+      version.textContent = `v${baseNumber}`;
+    }
     comments.apply(next);
     review.apply(next.review);
     // A refused save whose refetch finds it open again (reopened since): the edits wait for the next edit.
