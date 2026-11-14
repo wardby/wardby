@@ -335,10 +335,20 @@ function fallbackLinks(
   return { agents: withEntry, edges, flows, unlinked, hidden: { agents: 0, edges: 0 } };
 }
 
-/** How an agent starts, as a short label: "@mention", "Jira KEY", "schedule", "webhook" or "▶ manual". */
+/** A repository key as the pane writes it: "github:your-org/app" is "your-org/app"; "local:app" stays as it is. */
+function shortRepo(key: string): string {
+  return key.startsWith("github:") ? key.slice("github:".length) : key;
+}
+
+/**
+ * How an agent starts, as a short label: "@mention", "Jira KEY", "schedule", "webhook", "▶ manual", or for
+ * a reviewer or after-merge agent whose pull requests come from people, "⚡ PR opened · <repo>" or "⚡ merged · <repo>".
+ */
 function entryLabel(entry: string): string {
   if (entry.startsWith("mention:")) return "@mention";
   if (entry.startsWith("jira:")) return `Jira ${entry.slice("jira:".length)}`;
+  if (entry.startsWith("pull_request:")) return `⚡ PR opened · ${shortRepo(entry.slice("pull_request:".length))}`;
+  if (entry.startsWith("push:")) return `⚡ merged · ${shortRepo(entry.slice("push:".length))}`;
   if (entry === "manual") return "▶ manual";
   return entry;
 }
@@ -403,7 +413,8 @@ function entryChip(agent: LinkAgent, data: AgentLinks): string | null {
   if (entry?.startsWith("mention:")) return "⚡ mention";
   if (entry === "manual") return "▶ manual";
   if (entry === "schedule") return "⏱ schedule";
-  if (entry?.startsWith("jira:")) return entryLabel(entry);
+  if (entry?.startsWith("jira:") || entry?.startsWith("pull_request:") || entry?.startsWith("push:"))
+    return entryLabel(entry);
   if (entry) return `⚡ ${entry}`;
   const into = data.edges.filter((edge) => edge.to === agent.id);
   if (into.some((edge) => edge.kind === "reviews")) return "⚡ PR opened";
@@ -2294,12 +2305,22 @@ export const register: Register = (on, options) => {
       const list = (await call("list_agents", { summary: true })) as Record<string, unknown>[];
       if (list.length > FALLBACK_MAX_AGENTS) return { at: now, data: null, error: null, notice: FLOWS_NOTICE };
       const children: Record<string, { boundName: string; agentId: string }[]> = {};
+      // One agent's call failing (deleted meanwhile, no access) leaves that agent without children or
+      // repositories rather than failing the tab; an auto-mode refusal still fails it, to show the hint.
+      async function perAgent<T>(tool: string, agentId: string, empty: T): Promise<T> {
+        try {
+          return ((await call(tool, { agentId })) ?? empty) as T;
+        } catch (err) {
+          if (/auto mode/i.test(err instanceof Error ? err.message : String(err))) throw err;
+          return empty;
+        }
+      }
       const agentsNow = await Promise.all(
         list.map(async (row): Promise<LinkAgent> => {
           const id = String(row.id);
           const [subs, repos] = await Promise.all([
-            call("list_subagents", { agentId: id }) as Promise<{ children?: { boundName: string; agentId: string }[] }>,
-            call("list_repositories", { agentId: id }) as Promise<{ repositories?: Record<string, unknown>[] }>,
+            perAgent<{ children?: { boundName: string; agentId: string }[] }>("list_subagents", id, {}),
+            perAgent<{ repositories?: Record<string, unknown>[] }>("list_repositories", id, {}),
           ]);
           children[id] = (subs.children ?? []).map((c) => ({
             boundName: String(c.boundName),
@@ -2521,6 +2542,12 @@ export const register: Register = (on, options) => {
     const selectTab = (choice: "runs" | "agents") => {
       void update($, tab, () => choice);
       if (choice === "agents") void pane.refreshLinks(false);
+      // Typing on the Agents tab searches no runs; back on Runs, search for the filter's text if it changed.
+      if (choice === "runs")
+        void (async () => {
+          const text = (await read($, filter)).text;
+          if ((await read($, older)).text !== text.trim()) await pane.searchOlder(text, false);
+        })();
     };
     // Runs | Agents: hotkeys 1 and 2 beside Refresh in the terminal; on the desktop a button bar, the
     // tab in force the primary button.
@@ -2633,11 +2660,12 @@ export const register: Register = (on, options) => {
             value={f.text}
             onInput={(value: string) => {
               void update($, filter, (old): Filter => ({ ...old, text: value }));
-              void pane.searchOlder(value, false);
+              // The Agents tab filters what it holds; the runs search waits until Runs is shown.
+              if (currentTab === "runs") void pane.searchOlder(value, false);
             }}
             onSubmit={(value: string) => {
               void update($, filter, (old): Filter => ({ ...old, text: value }));
-              void pane.searchOlder(value, false);
+              if (currentTab === "runs") void pane.searchOlder(value, false);
             }}
           />
         )}
@@ -2856,7 +2884,8 @@ export const register: Register = (on, options) => {
         const attached = [
           ...config.mcpServers.map((name) => `MCP: ${name}`),
           ...config.tools.map((name) => `tool: ${name}`),
-          ...config.secrets.map((name) => `secret: ${name} (name only)`),
+          // A tool's allowedSecrets, so a section with only these still lists them.
+          ...config.secrets.map((name) => `tool secret: ${name} (name only)`),
           ...(config.claudeCode
             ? [
                 `repo skills: ${config.claudeCode.repoSkills ? "on" : "off"}`,
@@ -2867,7 +2896,7 @@ export const register: Register = (on, options) => {
         const tools = (
           <Box key="agent-tools-lines" flexDirection="column">
             {attached.length === 0 ? (
-              <Text dimColor>Nothing attached.</Text>
+              <Text dimColor>No tools or connections attached.</Text>
             ) : (
               attached.map((line) => (
                 <Box key={`attached-${line}`}>
@@ -3254,7 +3283,7 @@ export const register: Register = (on, options) => {
                 </Box>
                 {agent.promptFirstLine && (
                   <Text dimColor size="caption" wrap="truncate-end">
-                    {agent.promptFirstLine}
+                    {plainText(agent.promptFirstLine)}
                   </Text>
                 )}
                 <Box gap={1} flexWrap="wrap">
@@ -3360,7 +3389,7 @@ export const register: Register = (on, options) => {
               </Box>
               {agent.promptFirstLine && (
                 <Text dimColor wrap="truncate-end">
-                  {`  ${" ".repeat(prefix.length)}${agent.promptFirstLine}`}
+                  {`  ${" ".repeat(prefix.length)}${plainText(agent.promptFirstLine)}`}
                 </Text>
               )}
             </Box>

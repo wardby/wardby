@@ -132,6 +132,8 @@ export type Links = typeof LINKS;
  * from per-agent calls). `data` defaults to a copy of LINKS, so a test can change its own copy; `runs` is
  * what list_runs answers (none by default). `agent` is merged over get_agent's reply (its shape: the agent row,
  * access, mcpServers, and tools as attachments with allowedSecrets names); `agentError` makes get_agent fail.
+ * `fail` makes one per-agent call (list_subagents or list_repositories, for one agent id) answer with an
+ * error; `seen` gets every call's tool and arguments.
  */
 export function linksServer(
   on: On,
@@ -141,15 +143,20 @@ export function linksServer(
     runs?: unknown[];
     agent?: Record<string, unknown>;
     agentError?: string;
+    fail?: { tool: string; agentId: string; text: string };
+    seen?: { tool: string; args: Record<string, unknown> }[];
   } = {},
 ) {
   const data = opts.data ?? structuredClone(LINKS);
   const calls: string[] = [];
   on("mcp.call", (_, e) => {
     calls.push(e.tool);
+    opts.seen?.push({ tool: e.tool, args: { ...e.args } });
     const reply = (value: unknown) => ({
       value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
     });
+    if (opts.fail && e.tool === opts.fail.tool && e.args.agentId === opts.fail.agentId)
+      return { value: { content: [{ type: "text", text: opts.fail.text }], isError: true } };
     if (e.tool === "list_agent_links") {
       if (opts.hasTool === false)
         return { value: { content: [{ type: "text", text: "Tool list_agent_links not found" }], isError: true } };
@@ -594,7 +601,7 @@ test("Detail shows the prompt, entry, budget and tools from get_agent, on every 
     expect(text).toMatch(/TOOLS & CONNECTIONS/i);
     expect(text).toContain("MCP: github");
     expect(text).toContain("tool: fetch_page");
-    expect(text).toContain("secret: GITHUB_TOKEN (name only)");
+    expect(text).toContain("tool secret: GITHUB_TOKEN (name only)");
     expect(text).toMatch(/LAST RUNS/i);
     expect(await ui.find({ key: "agent-run-r1" })).toBeDefined();
     expect(await ui.find({ key: "agent-run-r2" })).toBeDefined();
@@ -968,4 +975,183 @@ test("the Flow tab lists agents that look related but are not linked", async ($,
     await clock.settle();
     await ui.unmount();
   }
+});
+
+test("a pull_request or push entry reads as PR opened or merged, with the short repository, on every surface", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents[3].entry = [`pull_request:${R}`, "push:local:app"];
+  data.agents[0].entry = [`mention:${R}`, `push:${R}`];
+  linksServer(on, { data });
+  await openPane($, clock);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    await ui.press({ key: "unlinked" });
+    let text = await texts(ui);
+    expect(text).toContain("⚡ PR opened · your-org/mobile");
+    expect(text).not.toContain("pull_request:");
+    // Detail's Runs when lists every entry; a local: repository keeps its prefix.
+    await ui.press({ key: "agent-s" });
+    await clock.settle();
+    text = await texts(ui);
+    expect(text).toContain("⚡ PR opened · your-org/mobile");
+    expect(text).toContain("⚡ merged · local:app");
+    expect(text).not.toContain("github:");
+    await ui.press({ key: "crumb-agents" });
+    await ui.press({ key: "unlinked" });
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+  // The Flow tab's tree and map write the entry line the same way.
+  const term = await openFlow($, clock, "terminal", "agent-d");
+  expect(await texts(term)).toContain("@mention your-org/mobile · ⚡ merged · your-org/mobile");
+  await term.press({ key: "crumb-agents" });
+  await term.press({ key: "tab-runs" });
+  await clock.settle();
+  await term.unmount();
+  const desk = await openFlow($, clock, "desktop", "agent-d");
+  const svg = (await desk.findAll({ type: "Svg" })).find((el) => String(el.props.alt).startsWith("Flow map"));
+  expect(String(svg?.props.source)).toContain("merged · your-org/mobile");
+  expect(String(svg?.props.source)).not.toContain("push:");
+  await desk.unmount();
+});
+
+test("Tools & connections lists tool secrets alone, and says when nothing is attached", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  // A tool attachment whose tool name the reply left out: only its secret name is listed.
+  linksServer(on, { agent: { tools: [{ agentId: "d", toolId: "t1", allowedSecrets: ["FAKE_ONLY_SECRET"] }] } });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "agent-d" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("tool secret: FAKE_ONLY_SECRET (name only)");
+  expect(text).not.toContain("No tools or connections attached.");
+  expect(text).not.toContain("Nothing attached.");
+  await ui.unmount();
+});
+
+test("an agent with no tools or connections says so", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    await ui.press({ key: "agent-d" });
+    await clock.settle();
+    expect(await texts(ui)).toContain("No tools or connections attached.");
+    await ui.press({ key: "crumb-agents" });
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});
+
+test("an older server: one agent's failing per-agent call leaves it without links, not the whole tab", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, {
+    hasTool: false,
+    fail: { tool: "list_subagents", agentId: "d", text: "MCP error: agent not found" },
+  });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).not.toContain("agent not found");
+  expect(text).toContain("flows are approximate");
+  // Without delivery's sub-agent, the fix loop still links delivery and reviewer; builder joins solo unlinked.
+  expect(text).toContain("delivery");
+  expect(text).toContain("reviewer");
+  expect(text).toContain("Unlinked agents (2)");
+  await ui.unmount();
+});
+
+test("an older server: auto mode refusing a per-agent call names the fallback's tools", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, {
+    hasTool: false,
+    fail: { tool: "list_repositories", agentId: "v", text: "Permission for this tool was denied by auto mode." },
+  });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("auto mode refused the call");
+  expect(text).toContain("mcp__wardby__list_subagents");
+  expect(text).toContain("mcp__wardby__list_repositories");
+  await ui.unmount();
+});
+
+test("typing in the filter on the Agents tab searches no runs until Runs is shown", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const seen: { tool: string; args: Record<string, unknown> }[] = [];
+  linksServer(on, { seen });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.input({ key: "filter-text", text: "deliv", kind: "change" });
+  await clock.advance(5_000);
+  await clock.settle();
+  const searches = () => seen.filter((c) => c.tool === "list_runs" && c.args.query !== undefined);
+  expect(searches()).toHaveLength(0);
+  expect(await texts(ui)).toContain("delivery");
+  // Back on Runs, the filter's text is searched.
+  await ui.press({ key: "tab-runs" });
+  await clock.advance(5_000);
+  await clock.settle();
+  expect(searches().map((c) => c.args.query)).toContain("deliv");
+  await ui.unmount();
+});
+
+test("the list shows a prompt's first line as plain text", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents[0].promptFirstLine = "\u001b[31mRoutes\u001b[0m requests\u0007 onward.";
+  linksServer(on, { data });
+  await openPane($, clock);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    const text = await texts(ui);
+    expect(text).toContain("Routes requests onward.");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\u0007");
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});
+
+test("an agent name with markup is escaped in the desktop map", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents[1].name = "a<b&c";
+  linksServer(on, { data });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "desktop", "agent-d");
+  const svg = (await ui.findAll({ type: "Svg" })).find((el) => String(el.props.alt).startsWith("Flow map"));
+  const source = String(svg?.props.source);
+  expect(source).toContain("a&lt;b&amp;c");
+  expect(source).not.toContain("<b");
+  expect(source).not.toContain("b&c");
+  await ui.unmount();
 });
