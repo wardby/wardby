@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -34,35 +34,54 @@ async function finish(h: Harness, result: unknown = h.output, workspace = "ok"):
   await h.blobs.put(BLOB.done(h.token), Buffer.from(JSON.stringify({ workspace })));
 }
 
-async function putWorkspaceTar(h: Harness, files: Record<string, string>): Promise<void> {
+/** Posts these files as the tool actor's workspace tar for the run with this token. */
+async function putWorkspaceTarFor(h: Harness, token: string, files: Record<string, string>): Promise<void> {
   const source = await mkdtemp(join(tmpdir(), "wardby-substrate-ws-"));
   for (const [name, content] of Object.entries(files)) {
     await mkdir(join(source, name, ".."), { recursive: true });
     await writeFile(join(source, name), content);
   }
   const archive = hostTarArchive(source);
-  await h.blobs.putStream(BLOB.workspace(h.token), archive.stream);
+  await h.blobs.putStream(BLOB.workspace(token), archive.stream);
   expect(await archive.done).toBe(0);
 }
 
-jobLauncherContract("substrate", async () => {
-  const h = await makeHarness();
-  return {
-    launcher: h.launcher,
-    spec: h.spec,
-    finish: async (handle, result) => {
-      const t = handle.id.split("/")[1];
-      await h.blobs.put(
-        BLOB.result(t),
-        Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
-      );
-      await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
-    },
-    lose: async (handle) => {
-      await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
-    },
-  };
-});
+async function putWorkspaceTar(h: Harness, files: Record<string, string>): Promise<void> {
+  await putWorkspaceTarFor(h, h.token, files);
+}
+
+jobLauncherContract(
+  "substrate",
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
+      // The tool actor's posted workspace: what the bridge tars from /workspace (a root .git included).
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
 
 describe("SubstrateJobLauncher", () => {
   it("plans the handle from the run id", async () => {
@@ -578,6 +597,37 @@ describe("SubstrateJobLauncher", () => {
     await h.launcher.materializeWorkspace(handle, destination);
     expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# changed\n");
     expect(await readFile(join(destination, "src", "a.ts"), "utf8")).toBe("export {};\n");
+  });
+
+  it("refuses a nested .git with history on, and leaves no bundle behind", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await putWorkspaceTar(h, {
+      "README.md": "# changed\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "# v2 git bundle\n",
+      "vendor/lib/.git/HEAD": "ref: refs/heads/main\n",
+    });
+    await finish(h);
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    await expect(
+      h.launcher.materializeWorkspace(handle, destination, undefined, {
+        gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("docker_workspace_nested_repository");
+    await expect(lstat(bundleDestination)).rejects.toThrow(/ENOENT/);
+    // The trusted workspace is untouched.
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
+  });
+
+  it("seeds a history run's root .git with the workspace", async () => {
+    const h = await makeHarness();
+    await mkdir(join(h.workspaceRoot, h.spec.runId, "workspace", ".git"));
+    await writeFile(join(h.workspaceRoot, h.spec.runId, "workspace", ".git", "HEAD"), "ref: refs/heads/main\n");
+    await h.launcher.launch(h.spec);
+    expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("./.git/HEAD");
   });
 
   it("reads the transcript within its bound", async () => {

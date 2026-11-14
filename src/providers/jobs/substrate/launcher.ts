@@ -16,7 +16,7 @@
  *   Outcomes the launcher observes itself (timeout, a lost or crashed actor, a failed provisioning)
  *   are written to the row's phase, so a terminal state never changes afterwards.
  */
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
@@ -40,10 +40,12 @@ import {
   type JobResult,
   type JobSpec,
   type JobStatus,
+  type MaterializedWorkspace,
+  type MaterializeWorkspaceOptions,
   type WorkspaceJobLauncher,
 } from "../types.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../worker-diagnostic.js";
-import { replaceDirectoryFromStaging } from "../workspace-swap.js";
+import { replaceDirectoryFromStaging, takeResultBundle } from "../workspace-swap.js";
 import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
@@ -284,7 +286,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     return structuredClone(observed.result);
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string, name?: string): Promise<void> {
+  /**
+   * Extracts the tool actor's posted workspace tar into the run's own folder. With `gitHistory`
+   * (#536), as on Docker: the root `.git`'s result bundle is taken to `bundleDestination` and the
+   * root `.git` dropped before validation, so a nested `.git` elsewhere is still refused; without
+   * it, a `.git` anywhere is refused.
+   */
+  async materializeWorkspace(
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options: MaterializeWorkspaceOptions = {},
+  ): Promise<MaterializedWorkspace> {
     // Phase A has no extra repositories, so there is never a named one to collect.
     if (name !== undefined) throw new Error("substrate_workspace_destination_invalid");
     const record = await this.requireRecord(handle);
@@ -298,16 +311,34 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!info) throw new Error("substrate_workspace_missing");
     // The archive holds every extracted byte plus headers, so its size bounds the tree.
     const maxBytes = info.sizeBytes;
-    await replaceDirectoryFromStaging(
-      expected,
-      maxBytes,
-      "substrate_workspace_destination_invalid",
-      async (staging) => {
-        const body = await this.blobs.getStream(key);
-        const source = body instanceof Readable ? body : Readable.from(body as AsyncIterable<Buffer>);
-        await safeExtract(source, staging, { maxBytes, maxEntries: MAX_WORKSPACE_ENTRIES });
-      },
-    );
+    const gitHistory = options.gitHistory && {
+      ...options.gitHistory,
+      // A bundle never exceeds the collected workspace that carries it, whatever the configured limit.
+      maxBundleBytes: Math.min(options.gitHistory.maxBundleBytes, maxBytes),
+    };
+    if (gitHistory && (!Number.isSafeInteger(gitHistory.maxBundleBytes) || gitHistory.maxBundleBytes <= 0)) {
+      throw new Error("job_result_bundle_limit_invalid");
+    }
+    let bundle = false;
+    try {
+      await replaceDirectoryFromStaging(
+        expected,
+        maxBytes,
+        "substrate_workspace_destination_invalid",
+        async (staging) => {
+          const body = await this.blobs.getStream(key);
+          const source = body instanceof Readable ? body : Readable.from(body as AsyncIterable<Buffer>);
+          await safeExtract(source, staging, { maxBytes, maxEntries: MAX_WORKSPACE_ENTRIES });
+          // A history run's root .git leaves the copy here, its bundle kept; validation then never sees it.
+          if (gitHistory) bundle = await takeResultBundle(staging, gitHistory);
+        },
+      );
+    } catch (error) {
+      // A workspace that was not collected leaves no bundle behind either.
+      if (bundle && gitHistory) await rm(gitHistory.bundleDestination, { force: true });
+      throw error;
+    }
+    return { bundle };
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
