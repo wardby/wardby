@@ -283,6 +283,34 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted"]);
   });
 
+  it("force rights follow the current owner, read inside the transaction", async () => {
+    // A cipher that hands the document to Ben while the note is being redacted (after the early check).
+    const transferringCipher = (documentId: string) => {
+      let done = false;
+      return {
+        ...cipher,
+        decrypt: async (v: string) => {
+          if (!done) {
+            done = true;
+            await db.document.update({ where: { id: documentId }, data: { ownerId: ben.id } });
+          }
+          return v;
+        },
+      };
+    };
+    const id = await doc(true);
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await expect(
+      forceApprove(db, transferringCipher(id), { documentId: id, viewer: as(owner), note: "Deadline" }),
+    ).rejects.toThrow("document_not_found");
+    expect(await stateOf(id)).toBe("in_review");
+    // The new owner can force; the old one cannot.
+    const { view } = await forceApprove(db, cipher, { documentId: id, viewer: as(ben), note: "Ship it" });
+    expect(view.state).toBe("approved");
+    expect((await eventsOf(id)).at(-1)).toMatchObject({ kind: "force_approved", actorPrincipalId: ben.id });
+    await db.document.delete({ where: { id } });
+  });
+
   it("two concurrent approvals move the document to approved exactly once", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
