@@ -205,10 +205,13 @@ export function linksServer(
 }
 
 /** The engine calls the pane makes. */
-export function engine(on: On) {
+export function engine(on: On, toasts: string[] = []) {
   on("command.register", () => ({ value: { command: "wardby-runs" } }));
   on("ui.open", () => ({ value: { isPlaced: true } }));
-  on("ui.toast", () => ({ value: {} }));
+  on("ui.toast", (_, e) => {
+    toasts.push(String(e.text));
+    return { value: {} };
+  });
   on("ui.status", () => ({ value: {} }));
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("session.version", () => ({ value: { version: "2.1.322", base: "2.1.322" } }));
@@ -1153,5 +1156,90 @@ test("an agent name with markup is escaped in the desktop map", async ($, on) =>
   expect(source).toContain("a&lt;b&amp;c");
   expect(source).not.toContain("<b");
   expect(source).not.toContain("b&c");
+  await ui.unmount();
+});
+
+/** Fakes the engine's file write and commands for Open larger; `uname` answers `system`. */
+function browserHost(on: On, opts: { system?: string; openExit?: number } = {}) {
+  const writes: { path: string; text: string }[] = [];
+  const runs: (readonly string[])[] = [];
+  on("env.get", (_, e) => ({ value: e.name === "TMPDIR" ? "/var/tmp/me/" : undefined }));
+  on("fs.write", (_, e) => {
+    writes.push({ path: e.path, text: e.text });
+    return { value: undefined };
+  });
+  on("process.run", (_, e) => {
+    runs.push(e.argv);
+    if (e.argv[0] === "uname") return { value: { exitCode: 0, stdout: `${opts.system ?? "Darwin"}\n`, stderr: "" } };
+    return { value: { exitCode: opts.openExit ?? 0, stdout: "", stderr: "" } };
+  });
+  return { writes, runs };
+}
+
+for (const surface of SURFACES)
+  test(`${surface}: Open larger writes the flow as a page and opens it in the browser`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW });
+    const toasts: string[] = [];
+    engine(on, toasts);
+    linksServer(on, { runs: [run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000)] });
+    const host = browserHost(on);
+    await openPane($, clock);
+    const ui = await openFlow($, clock, surface, "agent-v");
+    const button = await ui.find({ key: "flow-open-larger" });
+    expect(button?.props.hotkey).toBe(surface === "terminal" ? "w" : undefined);
+    await ui.press({ key: "flow-open-larger" });
+    await clock.settle();
+    expect(host.writes).toHaveLength(1);
+    const { path, text } = host.writes[0];
+    expect(path).toBe("/var/tmp/me/wardby-flows/flow-d.html");
+    expect(host.runs).toContainEqual(["open", path]);
+    expect(text.startsWith("<!doctype html>")).toBe(true);
+    expect(text).toContain("<title>your-org/mobile · wardby flow</title>");
+    expect(text).toContain("<svg");
+    expect(text).toContain("fix ≤2");
+    // Every agent at full strength, the open one still ringed.
+    expect(text).not.toContain('opacity=".55"');
+    expect(text).toMatch(/stroke="#15b982" stroke-width="2"/);
+    for (const name of ["delivery", "builder", "reviewer"]) expect(text).toContain(name);
+    expect(text).toContain("Review one pull request.");
+    expect(text).toContain("$0.25");
+    expect(text).not.toMatch(/workflow/i);
+    expect(toasts).toContain("Opened the flow map in your browser");
+    await ui.unmount();
+  });
+
+test("Open larger uses xdg-open off macOS and says where the page is when no browser starts", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  const toasts: string[] = [];
+  engine(on, toasts);
+  linksServer(on);
+  const host = browserHost(on, { system: "Linux", openExit: 3 });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "terminal", "agent-d");
+  await ui.press({ key: "flow-open-larger" });
+  await clock.settle();
+  const path = host.writes[0]?.path;
+  expect(host.runs).toContainEqual(["xdg-open", path]);
+  expect(toasts).toContain(`Couldn't open a browser. The page is at ${path}`);
+  await ui.unmount();
+});
+
+test("the larger flow page escapes agent names and prompt lines", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents[1].name = "a<b&c";
+  data.agents[1].promptFirstLine = '<script>alert("x")</script>';
+  linksServer(on, { data });
+  const host = browserHost(on);
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "desktop", "agent-d");
+  await ui.press({ key: "flow-open-larger" });
+  await clock.settle();
+  const text = host.writes[0]?.text ?? "";
+  expect(text).toContain("a&lt;b&amp;c");
+  expect(text).toContain("&lt;script&gt;");
+  expect(text).not.toContain("<script>");
+  expect(text).not.toContain("<b&");
   await ui.unmount();
 });

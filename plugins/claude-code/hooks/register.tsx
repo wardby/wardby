@@ -611,6 +611,8 @@ function flowMapSvg(
     colour: (id: string) => string;
     stats: (id: string) => string;
     failed: (id: string) => boolean;
+    /** Dim every agent but the selected one; the larger browser page keeps them all at full strength. */
+    dimOthers?: boolean;
   },
 ): string {
   const at = new Map(map.nodes.map((node) => [node.id, node]));
@@ -679,9 +681,120 @@ function flowMapSvg(
       `<text x="${cx}" y="${node.y + 19}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
       `<text x="${cx}" y="${node.y + 35}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
     );
-    parts.push(isSelected ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
+    parts.push(isSelected || opts.dimOthers === false ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${map.width}" height="${map.height}" viewBox="0 0 ${map.width} ${map.height}">${parts.join("")}</svg>`;
+}
+
+/** One agent's row under the larger map. */
+type FlowPageAgent = { name: string; colour: string; kind: string; stats: string; budget: string; prompt: string };
+/** One run under the larger map; `depth` > 0 for a sub-agent's run under its lead's. */
+type FlowPageRun = { name: string; status: string; when: string; cost: string; depth: number; isFailed: boolean };
+
+/**
+ * The Flow map as a page of its own, for a browser: the map at the window's width, a legend, the flow's
+ * agents and its recent runs. Only what the pane already shows (names, models, budgets, a prompt's
+ * first line, run stats) goes in, every piece escaped; list_agent_links carries no secret values.
+ */
+function flowPageHtml(page: {
+  title: string;
+  svg: string;
+  mapWidth: number;
+  strip: string;
+  agents: FlowPageAgent[];
+  runs: FlowPageRun[];
+  generated: string;
+}): string {
+  const esc = svgText;
+  const agents = page.agents
+    .map(
+      (a) =>
+        `<tr><td><span class="bar" style="background:${esc(a.colour.slice(0, 7))}"></span>${esc(a.name)}</td>` +
+        `<td>${esc(a.kind)}</td><td>${esc(a.stats)}</td><td>${esc(a.budget)}</td><td class="dim">${esc(a.prompt)}</td></tr>`,
+    )
+    .join("");
+  const runs =
+    page.runs.length === 0
+      ? `<p class="dim">No runs in the pane's window.</p>`
+      : `<ul class="runs">${page.runs
+          .map(
+            (r) =>
+              `<li style="margin-left:${r.depth * 20}px"><span class="dot${r.isFailed ? " failed" : ""}"></span>` +
+              `${esc(r.name)} <span class="dim">· ${esc(r.status)} · ${esc(r.when)} · ${esc(r.cost)}</span></li>`,
+          )
+          .join("")}</ul>`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(page.title)} · wardby flow</title>
+<style>
+:root{--bg:#fafaf9;--fg:#1c1917;--dim:#78716c;--line:#e7e5e4;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--dim:#a8a29e;--line:#44403c;--card:#292524}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
+main{max-width:1600px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:28px 0 8px}
+.dim{color:var(--dim)}.strip{font-family:ui-monospace,monospace;font-size:13px;overflow-wrap:anywhere}
+.map{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow:auto;margin-top:16px}
+.map svg{display:block;width:100%;height:auto;max-width:${Math.round(page.mapWidth * 2)}px;margin:0 auto}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;margin-top:8px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+table{border-collapse:collapse;width:100%}td{padding:6px 10px 6px 0;border-top:1px solid var(--line);vertical-align:top}
+.bar{display:inline-block;width:4px;height:14px;border-radius:2px;margin-right:8px;vertical-align:-2px}
+.runs{list-style:none;padding:0;margin:0}.runs li{padding:3px 0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#15b982;margin-right:8px}.dot.failed{background:${SVG_FAILED}}
+@media (max-width:700px){td:nth-child(5){display:none}}
+</style></head><body><main>
+<h1>${esc(page.title)}</h1>
+<div class="strip dim">${esc(page.strip)}</div>
+<div class="map">${page.svg}</div>
+<div class="legend dim">
+<span><i class="sw" style="background:${ROLE_COLOR.lead}"></i>lead</span>
+<span><i class="sw" style="background:${ROLE_COLOR.reviewer}"></i>reviewer</span>
+<span><i class="sw" style="background:${ROLE_COLOR.manual}"></i>manual</span>
+<span><i class="sw" style="background:${ROLE_COLOR.sub}"></i>sub-agent</span>
+<span>solid arrow: trigger or hand-off</span><span>dashed: delegation or fix round</span>
+<span>red border: last run failed</span>
+</div>
+<h2>Agents</h2><table>${agents}</table>
+<h2>Recent runs</h2>${runs}
+<p class="dim" style="margin-top:32px">A snapshot from the wardby runs pane, ${esc(page.generated)}. Open it again from the pane for fresh numbers.</p>
+</main></body></html>
+`;
+}
+
+/** What openInBrowser needs of the engine. */
+type BrowserHost = {
+  env: { get: (name: string) => Promise<string | undefined> };
+  fs: { write: (path: string, text: string) => Promise<void> };
+  process: {
+    run: (argv: readonly string[]) => Promise<{ exitCode: number | null; stdout: string }>;
+  };
+};
+
+/**
+ * Writes a page to the temporary folder and opens it in the person's browser: `open` on macOS,
+ * `xdg-open` elsewhere, `start` on Windows (where `uname` does not run). Resolves with the file's path
+ * and whether a browser started; rejects only when the file could not be written.
+ */
+async function openInBrowser($: BrowserHost, name: string, html: string): Promise<{ path: string; isOpened: boolean }> {
+  const tmp = ((await $.env.get("TMPDIR")) || (await $.env.get("TEMP")) || "/tmp").replace(/[\\/]+$/, "");
+  const path = `${tmp}/wardby-flows/${name.replace(/[^A-Za-z0-9_-]/g, "_")}.html`;
+  await $.fs.write(path, html);
+  let system = "";
+  try {
+    system = (await $.process.run(["uname"])).stdout.trim();
+  } catch {
+    system = "Windows";
+  }
+  const argv =
+    system === "Darwin" ? ["open", path] : system === "Windows" ? ["cmd", "/c", "start", "", path] : ["xdg-open", path];
+  let isOpened = false;
+  try {
+    isOpened = (await $.process.run(argv)).exitCode === 0;
+  } catch {
+    isOpened = false;
+  }
+  return { path, isOpened };
 }
 
 /** An agent's kind for its pill: the coding agent's provider, else native. */
@@ -3144,8 +3257,73 @@ export const register: Register = (on, options) => {
           </Box>
         );
 
+        // The same map, larger, as a page in the browser: the pane's dock stops at under half the window.
+        const openLarger = () => {
+          const map = flowMap(flow, all);
+          const failed = (id: string) => {
+            const last = agentStats(rows, id).last[0];
+            return !!last && !ACTIVE.has(last) && last !== "succeeded";
+          };
+          const html = flowPageHtml({
+            title: flow.name,
+            svg: flowMapSvg(map, {
+              selected: agent.id,
+              colour: (id) => ROLE_COLOR[roleOf(id)],
+              stats: statsOf,
+              failed,
+              dimOthers: false,
+            }),
+            mapWidth: map.width,
+            strip: flowStrip(flow, all),
+            agents: flow.agentIds
+              .map((id) => byId.get(id))
+              .filter((a): a is LinkAgent => !!a)
+              .map((a) => ({
+                name: a.name,
+                colour: ROLE_COLOR[roleOf(a.id)],
+                kind: agentKind(a),
+                stats: statsOf(a.id),
+                budget: `${usd(a.budgetUsd)} budget`,
+                prompt: a.promptFirstLine,
+              })),
+            runs: recent.flat().flatMap((entry) =>
+              entry.kind === "run"
+                ? [
+                    {
+                      name: entry.event ? `${entry.row.agentName} · ${entry.event}` : entry.row.agentName,
+                      status: entry.row.status.replaceAll("_", " "),
+                      when: `${ago(entry.row.startedAt, now)} ago`,
+                      cost: usd(entry.row.costUsd),
+                      depth: entry.depth,
+                      isFailed: !ACTIVE.has(entry.row.status) && entry.row.status !== "succeeded",
+                    },
+                  ]
+                : [],
+            ),
+            generated: new Date(now).toLocaleString(),
+          });
+          void openInBrowser($, `flow-${flow.key}`, html).then(
+            ({ path, isOpened }) =>
+              $.ui.toast(
+                isOpened ? "Opened the flow map in your browser" : `Couldn't open a browser. The page is at ${path}`,
+              ),
+            () => $.ui.toast("Couldn't write the flow page to the temporary folder"),
+          );
+        };
+        const larger = (
+          <Box key="flow-larger">
+            <Button
+              key="flow-open-larger"
+              label={isDesktop ? "Open larger ↗" : "Open in browser (w)"}
+              {...(isDesktop ? {} : { hotkey: "w" })}
+              onPress={openLarger}
+            />
+          </Box>
+        );
+
         return (
           <Box key="agent-flow" flexDirection="column" gap={1}>
+            {larger}
             {drawing as never}
             {recentRuns}
             {relatedList}
