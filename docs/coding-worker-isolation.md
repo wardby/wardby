@@ -463,11 +463,19 @@ The worker sees only these volume subpaths:
 - `/repos/<name>`: one folder for each extra repository of a run that has
   several (see [A coding agent's repositories](coding-agent-setup.md#several-repositories-in-one-run)).
   A writable extra is read-write like `/workspace`; a read link's folder is
-  mounted read-only and holds one commit's files with no git metadata. The
+  mounted read-only and holds one commit's files with no git metadata (a remote link has no folder: it
+  is fetched into `/workspace`'s history). The
   Codex worker and Claude Code's tool runner mount them; the Claude agent
   container never does, as it never mounts `/workspace`. Only `/workspace` and
   the writable `/repos/<name>` folders are collected after the run.
-- Git metadata remains in the trusted keeper volume and is not mounted into the worker.
+- Git metadata remains in the trusted keeper volume and is not mounted into the
+  worker. The one exception is a run with `codingProfile.gitHistory`: Wardby
+  builds a fresh `.git` in `/workspace` and in each writable `/repos/<name>`,
+  with its own config and no remotes, hooks or credentials, and the worker can
+  read and write it like any file. Nothing in it is trusted: Wardby never runs
+  git against it directly. The worker's commits come back as a bundle, which
+  Wardby validates fully in its own repository before anything is pushed (see
+  [Git history in a run](coding-agent-setup.md#git-history-in-a-run)).
 - `/run/wardby/input`: read-only, validated input artifact.
 - `/run/wardby/output`: read-write result artifact.
 
@@ -502,7 +510,8 @@ allocations at the host scheduler as well as per run.
 9. Cancel the proxy session, collect and validate bounded output, and re-read
    authoritative usage before any repository publication.
 10. For `changes_ready` only, copy the worker workspace into a new host staging
-    directory, reject special files, nested `.git`, escaping symlinks, and size
+    directory (a history run's result bundle is moved out first and its root
+    `.git` dropped), reject special files, nested `.git`, escaping symlinks, and size
     or entry-limit violations, then atomically replace the trusted checkout.
 11. Revalidate protected paths, Git configuration, branch ancestry, remotes,
     and budget; create one controlled commit, push one deterministic branch,
@@ -661,8 +670,8 @@ Operating the queue across replicas:
   and never time out.
 - Upgrade all replicas together. A replica running a version from before
   the queue ignores the cap, and its reconciler reaps queued runs as `lost`. Clones are shallow
-  (`--depth 1`); the worker never receives Git history and finalization needs
-  only the base commit.
+  (`--depth 1`); unless the agent sets `codingProfile.gitHistory`, the worker
+  never receives Git history and finalization needs only the base commit.
 
 Every wardby process also polls the model catalog on
 `WARDBY_MODEL_CATALOG_REFRESH_SECONDS` (default `45`), which decides whether
