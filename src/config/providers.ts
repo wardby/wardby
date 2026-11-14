@@ -13,6 +13,7 @@ import {
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import { CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import {
   DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
@@ -23,7 +24,7 @@ import {
 import { loadMobileConfig, type MobileConfig } from "./mobile.js";
 import { testSimulatorBase } from "./test-simulators.js";
 
-export type JobLauncherKind = "local" | "docker" | "kubernetes";
+export type JobLauncherKind = "local" | "docker" | "kubernetes" | "substrate";
 export type EmailProviderKind = "smtp" | "ses";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "delegating" | "self-hosted";
@@ -705,6 +706,81 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
   if (preflightTimeoutMs !== undefined) config.preflightTimeoutMs = preflightTimeoutMs;
   if (readyTimeoutMs !== undefined) config.readyTimeoutMs = readyTimeoutMs;
   if (enforcementExecTimeoutMs !== undefined) config.enforcementExecTimeoutMs = enforcementExecTimeoutMs;
+  return config;
+}
+
+/** JOB_LAUNCHER=substrate (experimental): the Substrate API, where run Secrets go, and how actors reach the coding proxy. */
+export interface SubstrateJobConfig {
+  apiUrl: string;
+  tokenFile: string;
+  caFile?: string;
+  serverName?: string;
+  atespace: string;
+  credentialsNamespace: string;
+  kubeContext?: string;
+  proxyHost: string;
+  proxyPort: number;
+  workerSelector?: Record<string, string>;
+}
+
+/** The Atespace runs live in when SUBSTRATE_ATESPACE is unset on the control plane. */
+export const DEFAULT_SUBSTRATE_ATESPACE = "wardby-runs";
+const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
+
+function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name]?.trim();
+  if (!value) throw new Error(`${name} is required when JOB_LAUNCHER=substrate.`);
+  return value;
+}
+
+/** `k=v,k=v` into a map; errors name the variable, never the value. */
+function parseWorkerSelector(raw: string | undefined): Record<string, string> | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  const selector: Record<string, string> = {};
+  for (const pair of text.split(",")) {
+    const index = pair.indexOf("=");
+    const key = index > 0 ? pair.slice(0, index).trim() : "";
+    const value = index > 0 ? pair.slice(index + 1).trim() : "";
+    if (!key || !value) throw new Error("SUBSTRATE_WORKER_SELECTOR must be comma-separated key=value pairs.");
+    selector[key] = value;
+  }
+  return selector;
+}
+
+export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
+  const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL");
+  try {
+    new URL(apiUrl);
+  } catch {
+    throw new Error("SUBSTRATE_API_URL must be a valid URL.");
+  }
+  const tokenFile = requiredEnv(env, "SUBSTRATE_TOKEN_FILE");
+  const proxyHost = requiredEnv(env, "SUBSTRATE_PROXY_HOST");
+  const portText = env.SUBSTRATE_PROXY_PORT?.trim();
+  const proxyPort = portText ? Number(portText) : CODING_PROXY_PORT;
+  if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) {
+    throw new Error("SUBSTRATE_PROXY_PORT must be an integer from 1 to 65535.");
+  }
+  const atespace = dnsLabel(
+    env.SUBSTRATE_ATESPACE?.trim() || undefined,
+    "SUBSTRATE_ATESPACE",
+    DEFAULT_SUBSTRATE_ATESPACE,
+  );
+  const credentialsNamespace = dnsLabel(
+    env.SUBSTRATE_CREDENTIALS_NAMESPACE?.trim() || undefined,
+    "SUBSTRATE_CREDENTIALS_NAMESPACE",
+    DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE,
+  );
+  const config: SubstrateJobConfig = { apiUrl, tokenFile, atespace, credentialsNamespace, proxyHost, proxyPort };
+  const caFile = env.SUBSTRATE_CA_FILE?.trim();
+  if (caFile) config.caFile = caFile;
+  const serverName = env.SUBSTRATE_SERVER_NAME?.trim();
+  if (serverName) config.serverName = serverName;
+  const kubeContext = env.SUBSTRATE_KUBE_CONTEXT?.trim();
+  if (kubeContext) config.kubeContext = kubeContext;
+  const workerSelector = parseWorkerSelector(env.SUBSTRATE_WORKER_SELECTOR);
+  if (workerSelector) config.workerSelector = workerSelector;
   return config;
 }
 

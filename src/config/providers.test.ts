@@ -13,6 +13,7 @@ import {
   loadCodingRunRepositoryLimit,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
+  loadSubstrateJobConfig,
   loadJiraConfig,
   loadSlackConfig,
 } from "./providers.js";
@@ -469,6 +470,64 @@ describe("loadKubernetesJobConfig", () => {
       );
     },
   );
+});
+
+describe("loadSubstrateJobConfig", () => {
+  const base = {
+    SUBSTRATE_API_URL: "https://api.ate.example:443",
+    SUBSTRATE_TOKEN_FILE: "/var/run/token",
+    SUBSTRATE_PROXY_HOST: "proxy.example",
+  };
+
+  it("applies defaults", () => {
+    expect(loadSubstrateJobConfig(base)).toEqual({
+      apiUrl: "https://api.ate.example:443",
+      tokenFile: "/var/run/token",
+      atespace: "wardby-runs",
+      credentialsNamespace: "wardby-run-secrets",
+      proxyHost: "proxy.example",
+      proxyPort: 8787,
+    });
+  });
+
+  it("reads every optional variable", () => {
+    expect(
+      loadSubstrateJobConfig({
+        ...base,
+        SUBSTRATE_CA_FILE: "/ca.pem",
+        SUBSTRATE_SERVER_NAME: "api.ate",
+        SUBSTRATE_ATESPACE: "runs",
+        SUBSTRATE_CREDENTIALS_NAMESPACE: "secrets",
+        SUBSTRATE_KUBE_CONTEXT: "kind-x",
+        SUBSTRATE_PROXY_PORT: "9000",
+        SUBSTRATE_WORKER_SELECTOR: "pool=a, zone=b",
+      }),
+    ).toMatchObject({
+      caFile: "/ca.pem",
+      serverName: "api.ate",
+      atespace: "runs",
+      credentialsNamespace: "secrets",
+      kubeContext: "kind-x",
+      proxyPort: 9000,
+      workerSelector: { pool: "a", zone: "b" },
+    });
+  });
+
+  it.each(["SUBSTRATE_API_URL", "SUBSTRATE_TOKEN_FILE", "SUBSTRATE_PROXY_HOST"])("requires %s by name", (name) => {
+    expect(() => loadSubstrateJobConfig({ ...base, [name]: "" })).toThrow(`${name} is required`);
+  });
+
+  it("rejects bad values without echoing them", () => {
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_PROXY_PORT: "secretish" })).toThrow(
+      /SUBSTRATE_PROXY_PORT/,
+    );
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_PROXY_PORT: "secretish" })).not.toThrow(/secretish/);
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WORKER_SELECTOR: "novalue" })).toThrow(
+      "SUBSTRATE_WORKER_SELECTOR",
+    );
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_API_URL: "not a url" })).toThrow("SUBSTRATE_API_URL");
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_ATESPACE: "Bad_Name" })).toThrow("SUBSTRATE_ATESPACE");
+  });
 });
 
 describe("loadGitHubEventConfig", () => {

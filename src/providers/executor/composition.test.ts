@@ -2,8 +2,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import type { Power } from "../../core/power.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
-import { buildConfiguredExecutor, reReviewOnCodingRunTerminal } from "./composition.js";
+import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
+import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
+import { buildConfiguredExecutor, buildSubstrateJobLauncher, reReviewOnCodingRunTerminal } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 
@@ -14,6 +19,77 @@ const db = {} as unknown as PrismaClient;
 const REGISTRY_IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const LOCAL_IMAGE = `sha256:${"b".repeat(64)}`;
 const baseEnv = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "test-key" };
+
+describe("JOB_LAUNCHER=substrate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "substrate-composition-"));
+  const tokenFile = join(dir, "token");
+  writeFileSync(tokenFile, "fake-token-value");
+  const env = {
+    ...baseEnv,
+    JOB_LAUNCHER: "substrate",
+    CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+    CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+    SUBSTRATE_API_URL: "https://api.ate.example:443",
+    SUBSTRATE_TOKEN_FILE: tokenFile,
+    SUBSTRATE_PROXY_HOST: "proxy.example",
+    BLOB_STORE: "local",
+    BLOB_STORE_LOCAL_DIR: join(dir, "blobs"),
+  };
+  const build = (over: Record<string, string>, drop: string[] = []) => {
+    const merged: Record<string, string> = { ...env, ...over };
+    for (const name of drop) delete merged[name];
+    return buildConfiguredExecutor({
+      native,
+      db,
+      env: merged,
+      substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+  };
+
+  it("requires SUBSTRATE_PROXY_HOST, naming the variable", () => {
+    expect(() => build({}, ["SUBSTRATE_PROXY_HOST"])).toThrow("SUBSTRATE_PROXY_HOST is required");
+  });
+
+  it("requires a blob store", () => {
+    expect(() => build({}, ["BLOB_STORE", "BLOB_STORE_LOCAL_DIR"])).toThrow(
+      "BLOB_STORE is required when JOB_LAUNCHER=substrate.",
+    );
+  });
+
+  it("uses the kubernetes digest wording, naming substrate", () => {
+    expect(() => build({ CODING_CLAUDE_WORKER_IMAGE: LOCAL_IMAGE })).toThrow(
+      "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=substrate.",
+    );
+    expect(() => build({ CODING_WORKER_IMAGE: LOCAL_IMAGE })).toThrow(
+      "CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
+    );
+  });
+
+  it("does not leak the token file contents or path in errors", () => {
+    try {
+      build({ SUBSTRATE_PROXY_PORT: "x" });
+    } catch (error) {
+      expect(String(error)).not.toContain("fake-token-value");
+    }
+  });
+
+  it("composes a routing executor", () => {
+    expect(build({})).toBeInstanceOf(RoutingExecutor);
+  });
+
+  it("builds a SubstrateJobLauncher", () => {
+    const launcher = buildSubstrateJobLauncher({
+      env,
+      db,
+      workspaceRoot: join(dir, "ws"),
+      resolveCapability: async () => "cap",
+      substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
+  });
+});
 
 describe("buildConfiguredExecutor", () => {
   it("returns the native executor when no container launcher is selected", () => {
