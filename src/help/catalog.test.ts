@@ -292,4 +292,28 @@ describe("buildHelpCatalog", () => {
         .map((r) => r.page.id),
     ).toContain("claude-code-run-pane");
   });
+
+  it.each([
+    "wait_for_review",
+    "submit_for_review",
+    "review_document",
+    "force approve",
+    "review states",
+    "approved document locked",
+  ])("finds the document review article for %s", async (query) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("document-review");
+  });
+
+  it.each(["document_locked", "document_review_forbidden", "document_review_state_invalid"])(
+    "ranks the error article for %s first",
+    async (code) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(searchHelp(catalog, code)[0]?.page.id).toBe(`errors/${code.replaceAll("_", "-")}`);
+    },
+  );
 });

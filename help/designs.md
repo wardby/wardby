@@ -24,7 +24,7 @@ Files that break the format are refused with [`board_format_invalid`](errors/boa
 
 ## Edit
 
-People with `write` access get a visual editor: a Boards list and Layers (left), a canvas with Desktop, Tablet and Phone widths, and Style and Settings tabs (right). Edits save by themselves as a new version that holds only the changed files. A board's CSS as written stays in a base layer that always renders as written; if the page finds styles the editor cannot change, it lists "N styles may not be editable on board X" under Checks. Readers and commenters see the boards, Comments and History.
+People with `write` access get a visual editor: a Boards list and Layers (left), a canvas with Desktop, Tablet and Phone widths, and Style and Settings tabs (right). Edits save by themselves as a new version that holds only the changed files. A board's CSS as written stays in a base layer that always renders as written; if the page finds styles the editor cannot change, it lists "N styles may not be editable on board X" under Checks. Readers and commenters see the boards, Comments and History. An approved or archived design is read-only for everyone (see [Review and approve documents](document-review.md)); Style, Settings and + Board are hidden.
 
 ## Comment with pins
 
@@ -57,5 +57,6 @@ Boards are sanitised on every write and shown only in sandboxed frames that cann
 - [Board format v1](design-boards-format.md)
 - [Exporting designs and documents](document-exports.md)
 - [Documents](documents.md)
+- [Review and approve documents](document-review.md)
 - [Send comment threads to a coding agent](comment-threads-and-agents.md)
 - [Low-power mode](low-power-mode.md) (the export renderer sleeps when idle)

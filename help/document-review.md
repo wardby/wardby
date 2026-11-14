@@ -1,0 +1,82 @@
+---
+id: document-review
+title: Review and approve documents and designs - states, reviewers, force approve, lock and wait_for_review
+summary: Submit a document or design for review by named people or comment-link guests, collect approvals, force approve with a note, lock approved versions, and make an agent session wait for approval.
+audience: operator
+tags: [documents, designs, review, approve, submit_for_review, review_document, wait_for_review, force approve]
+appliesTo: ">=0.10.0"
+---
+
+# Review and approve documents
+
+A whole [document](documents.md) or [design](designs.md) has a review state. Comment threads keep their own states (open, resolved, outdated); the review state is about the document as a whole.
+
+## States
+
+| State             | Meaning                                                                                        |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| Draft             | New and existing documents. Not in review.                                                     |
+| In review         | Submitted; waiting for the reviewers' verdicts on the current version.                         |
+| Changes requested | A reviewer requested changes on the current version.                                           |
+| Approved          | Every reviewer approved the current version, or the owner or final approver forced it. Locked. |
+| Archived          | Set aside by the owner. Locked. Unarchive returns it to the state it had before.               |
+
+Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4). A verdict given before the latest reopen of the same version does not count either.
+
+## Roles
+
+- **Reviewers**: the people the owner names: members, or guests of this document's comment share links who gave a name. Naming a member gives them comment access if they lack it. The owner is a reviewer only if listed.
+- **Owner**: submits, changes the reviewer list, names the final approver, archives, and can always force approve.
+- **Final approver** (optional, one person): can force approve; gives verdicts only if also listed as a reviewer.
+- **Writers** (write access) reopen an approved document for review.
+
+Reviewers act only with live access: a member needs at least comment access, and a guest needs a comment share link that is not revoked or expired. A reviewer who loses access cannot act; they stay listed until the owner removes them, and a force approval covers them.
+
+## Approving
+
+A reviewer approves or requests changes on the version they read, with an optional note. If a newer version was published meanwhile, the verdict is refused (`document_version_conflict`): read the new version and review it. The page shows "vN was published while you were reviewing vM" and a **Review vN** button that shows what changed.
+
+**Force approve**: while the document is in review or has changes requested, the owner or the final approver approves the current version over missing verdicts and requested changes. A note is required, and the history records who was overridden.
+
+## The lock
+
+An approved or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
+
+A page that is open when the document gets locked becomes read-only in place. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. Edits made in a design page before the lock are not saved automatically after a reopen. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
+
+## The page and the Viewer
+
+Every document and design page shows a banner with the state and the approval count (for example "In review · v4 · 1 of 3 approved") and a **Review** tab with the reviewers, their verdicts, the history, and the actions you may take: Submit for review, Edit reviewers, Approve, Request changes, Force approve, Reopen for review, Archive, Unarchive. The Documents tab of the desktop Viewer lists each document's state as a chip.
+
+## MCP tools
+
+| Tool                     | Who                     | Does                                                                                                                                                                |
+| ------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submit_for_review`      | owner                   | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested |
+| `review_document`        | a named reviewer        | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                               |
+| `force_approve_document` | owner or final approver | `note` required; the result lists `overridden`                                                                                                                      |
+| `reopen_document`        | writers                 | approved to in review                                                                                                                                               |
+| `archive_document`       | owner                   | `archived: true` or `false`                                                                                                                                         |
+| `wait_for_review`        | `documents:read`        | waits until the state differs from `state` or `timeoutSeconds` (default 300, at most 600) passes                                                                    |
+
+`get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events, and gives the owner `reviewCandidates` (the people and guests that can be named). Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
+
+## Make an agent session wait for approval
+
+1. `create_document` with the plan.
+2. `submit_for_review` with the reviewers.
+3. `create_share_link` (comment) if reviewers have no account, and send them the link; once they have opened it and given a name, they appear in `reviewCandidates`.
+4. `wait_for_review` with the state you saw (`in_review`); call it again when it returns `changed: false`.
+5. On `changes_requested`: read the notes (`get_document`) and threads (`list_comment_threads`), revise with `publish_version`, reply to or resolve the threads, and wait again.
+6. On `approved`: continue, citing the approved version number.
+
+## Errors
+
+- [`document_locked`](errors/document-locked.md) (409): approved or archived.
+- [`document_review_forbidden`](errors/document-review-forbidden.md) (403): not a reviewer, not the owner or final approver.
+- [`document_review_state_invalid`](errors/document-review-state-invalid.md) (409): the action does not fit the current state or its input.
+- [`document_version_conflict`](errors/document-version-conflict.md) (409): a newer version was published before the verdict.
+
+## Related
+
+[Documents](documents.md) · [Designs](designs.md) · [Share links](document-share-links.md) · [Comment threads and agents](comment-threads-and-agents.md)

@@ -38,20 +38,26 @@ directory.
 
 ## Tools
 
-| Tool                                                         | Scope             | Purpose                                                                                     |
-| ------------------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------- |
-| `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent |
-| `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link       |
-| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)              |
-| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                    |
-| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                |
-| `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                       |
-| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                       |
-| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                    |
-| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                            |
-| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                             |
-| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                  |
-| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                 |
+| Tool                                                         | Scope             | Purpose                                                                                         |
+| ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------- |
+| `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent     |
+| `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link           |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                  |
+| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                        |
+| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                    |
+| `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                           |
+| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                           |
+| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                        |
+| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                                |
+| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                                 |
+| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                      |
+| `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`) |
+| `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)         |
+| `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)    |
+| `reopen_document`                                            | `documents:write` | Reopen an approved document for review (needs `write`)                                          |
+| `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                         |
+| `wait_for_review`                                            | `documents:read`  | Wait until the review state changes or a timeout (default 300 s, at most 600 s) passes          |
+| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                     |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
 as untrusted content: agents must treat it as data, never as instructions.
@@ -103,7 +109,7 @@ also pass the live-updates stream (next section) through unbuffered.
 An open document page listens on `GET /d/api/<documentId>/events`, a
 Server-Sent Events stream (`text/event-stream`). When anyone comments,
 replies, edits or deletes a comment, resolves, reopens or sends a thread, when
-an agent replies, when a version is published (from the editor, MCP or an
+an agent replies, when the review state or reviewers change (`review`), when a version is published (from the editor, MCP or an
 agent), or when a share link is revoked, every page showing that document
 refetches what changed through the page API. Events name only the document and
 the kind of change, never its content, so access checks stay on the page API.
@@ -175,6 +181,53 @@ summary with `document_summary_invalid`.
 The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
 with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
+
+## Review states
+
+A whole document or design has a review state, separate from its comment
+threads: **draft** (the default), **in review**, **changes requested**,
+**approved** and **archived**. The owner submits it for review (`submit_for_review`,
+or **Submit for review** on the page) and names the reviewers: members, or
+guests of this document's live comment share links who gave a name. Naming a
+member gives them comment access if they lack it. The owner may also name one
+final approver. Reviewers act only with live access (comment access for a
+member, an unrevoked and unexpired comment link for a guest).
+
+The state is computed from the verdicts on the **current version** only: a
+force approval gives approved; otherwise any current changes-requested verdict
+gives changes requested; otherwise every reviewer's current approval gives
+approved; otherwise in review. Publishing a new version while the document is
+in review or has changes requested recomputes it, so earlier verdicts stop
+counting. A reviewer's verdict names the version they read
+(`review_document` takes `versionNumber`); if a newer version was published
+first it is refused with `document_version_conflict`, and the page offers
+**Review vN** to see what changed.
+
+- **Force approve**: the owner or the final approver approves the current
+  version over missing verdicts and requested changes. A note is required and
+  the history lists who was overridden. It is only possible in review or with
+  changes requested.
+- **Reopen**: a writer reopens an approved document (back to in review). Every
+  reviewer then reviews again, even for the same version.
+- **Archive**: the owner archives and unarchives; unarchive returns the state it
+  had before.
+- **The lock**: an approved or archived document takes no new version by any
+  route (editor, board saves, `publish_version`, restore, agent edits), and its
+  threads cannot be sent to an agent: all are refused with `document_locked`.
+  Comments stay open. A page open when the lock lands turns read-only in place.
+  An agent edit that finishes after the lock is not applied; each thread gets a
+  reply naming the branch with the edit.
+
+Open pages update live (the `review` event). The page shows a banner with the
+state and approval count and a **Review** tab with reviewers, verdicts, history
+and the actions you may take. The desktop Viewer's Documents tab shows the state
+as a chip. An agent session can wait for approval with `wait_for_review`: create
+the document, submit it, send reviewers a comment link if they have no account,
+wait, revise on `changes_requested`, continue on `approved`. Errors:
+`document_locked` (409), `document_review_forbidden` (403),
+`document_review_state_invalid` (409) and `document_version_conflict` (409). See
+[Review and approve documents](../help/document-review.md) for the details and
+the per-code help articles.
 
 ## Designs
 
@@ -500,7 +553,8 @@ in the app by agent, repository and title, so an older document that does not
 show up is past that window (other clients can pass the API's `agent` and
 `repository` parameters). Opening a row sends the browser to
 `https://<your-host>/d/<id>`; the viewer only opens `https` links, so a server on
-plain `http` cannot be opened from the viewer (copy the address instead).
+plain `http` cannot be opened from the viewer (copy the address instead). Each
+row shows the document's review state as a chip.
 
 ## Limits
 
@@ -543,6 +597,8 @@ editor's telemetry is switched off. Changing requests need a matching `Origin`
 and a per-session CSRF header. Session cookies are `__Host-` prefixed, HttpOnly
 and Secure on HTTPS. Share tokens are in the URL path, so keep that path out of
 any proxy log you cannot protect.
+
+Review notes are redacted against the linked agent's secret values before they are stored, and returned to MCP as untrusted text. Review events carry ids, states, version numbers and notes only.
 
 **Board sanitiser.** Every board is parsed and sanitised on every write (create,
 publish, editor save, restore, and a coding agent's result), so a stored board
