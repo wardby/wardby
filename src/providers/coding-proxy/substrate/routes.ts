@@ -386,10 +386,17 @@ export function createSubstrateRoutes(
         case "exit": {
           // The worker exited without a usable result: record its code and still collect the workspace.
           const code = await readExitCode(request);
-          await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify({ code })), {
-            contentType: "application/json",
-          });
-          await relay.requestCollect(token);
+          if (!(await blobs.head(BLOB.exit(token)))) {
+            try {
+              await relay.requestCollect(token);
+            } catch (error) {
+              // The relay was already dropped: the run was collected, so there is nothing left to queue.
+              if (!(error instanceof RelayUnknownError)) throw error;
+            }
+            await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify({ code })), {
+              contentType: "application/json",
+            });
+          }
           sendJson(response, 200, {});
           return;
         }

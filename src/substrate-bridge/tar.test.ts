@@ -136,4 +136,92 @@ describe("checkTarEntries", () => {
   it("rejects a truncated archive", async () => {
     expect((await checkTarEntries(header("f", "0", 1000))).ok).toBe(false);
   });
+  describe("fix round 2", () => {
+    interface Raw {
+      name?: string;
+      type?: string;
+      link?: string;
+      magic?: Buffer;
+      junk345?: string;
+      checksum?: "good" | "signed" | "bad";
+    }
+    const raw = (o: Raw): Buffer => {
+      const h = Buffer.alloc(512);
+      h.write(o.name ?? "f", 0, 100);
+      h.write("0000644\0", 100);
+      h.write("00000000000\0", 124);
+      h.write(o.type ?? "0", 156);
+      h.write(o.link ?? "", 157, 100);
+      (o.magic ?? Buffer.from("ustar\0" + "00", "latin1")).copy(h, 257);
+      if (o.junk345) h.write(o.junk345, 345, 155);
+      h.write("        ", 148);
+      let sum = 0;
+      let signed = 0;
+      for (const b of h) {
+        sum += b;
+        signed += b > 127 ? b - 256 : b;
+      }
+      const value = o.checksum === "bad" ? sum + 1 : o.checksum === "signed" ? signed : sum;
+      h.write(value.toString(8).padStart(6, "0") + "\0 ", 148);
+      return h;
+    };
+    const oldGnuMagic = Buffer.from("ustar  \0", "latin1");
+
+    it("rejects a lone zero block followed by an unsafe entry", async () => {
+      const tar = Buffer.concat([
+        raw({ name: "safe" }),
+        Buffer.alloc(512),
+        raw({ name: "/etc/passwd" }),
+        Buffer.alloc(1024),
+      ]);
+      expect((await checkTarEntries(tar)).ok).toBe(false);
+    });
+    it("accepts two zero blocks, and a lone zero block at the very end", async () => {
+      expect((await checkTarEntries(Buffer.concat([raw({}), Buffer.alloc(1024)]))).ok).toBe(true);
+      expect((await checkTarEntries(Buffer.concat([raw({}), Buffer.alloc(512)]))).ok).toBe(true);
+    });
+    it("ignores the prefix field of an old GNU header", async () => {
+      const tar = Buffer.concat([
+        raw({ name: "l", type: "2", link: "x" }),
+        raw({ name: "f", magic: oldGnuMagic, junk345: "l" }),
+        Buffer.alloc(1024),
+      ]);
+      // The junk in 345-500 is not a prefix, so the entry is plain "f" and passes...
+      expect((await checkTarEntries(tar)).ok).toBe(true);
+      // ...while the same name "l/f" written in the old GNU header is refused as through a symlink.
+      const through = Buffer.concat([
+        raw({ name: "l", type: "2", link: "x" }),
+        raw({ name: "l/f", magic: oldGnuMagic, junk345: "junk" }),
+        Buffer.alloc(1024),
+      ]);
+      expect(await checkTarEntries(through)).toEqual({ ok: false, reason: "through_symlink" });
+    });
+    it("uses the prefix field of a POSIX ustar header", async () => {
+      const tar = Buffer.concat([
+        raw({ name: "l", type: "2", link: "x" }),
+        raw({ name: "f", junk345: "l" }),
+        Buffer.alloc(1024),
+      ]);
+      expect(await checkTarEntries(tar)).toEqual({ ok: false, reason: "through_symlink" });
+    });
+    it("rejects an unknown magic", async () => {
+      const tar = Buffer.concat([raw({ magic: Buffer.from("nonsense", "latin1") }), Buffer.alloc(1024)]);
+      expect(await checkTarEntries(tar)).toEqual({ ok: false, reason: "magic" });
+    });
+    it("treats a hardlink to an in-archive symlink as a symlink", async () => {
+      const tar = Buffer.concat([
+        raw({ name: "s", type: "2", link: "x" }),
+        raw({ name: "h", type: "1", link: "s" }),
+        raw({ name: "h/f" }),
+        Buffer.alloc(1024),
+      ]);
+      expect(await checkTarEntries(tar)).toEqual({ ok: false, reason: "through_symlink" });
+    });
+    it("verifies header checksums", async () => {
+      const bad = Buffer.concat([raw({ checksum: "bad" }), Buffer.alloc(1024)]);
+      expect(await checkTarEntries(bad)).toEqual({ ok: false, reason: "checksum" });
+      const signed = Buffer.concat([raw({ name: "caf\u00e9", checksum: "signed" }), Buffer.alloc(1024)]);
+      expect((await checkTarEntries(signed)).ok).toBe(true);
+    });
+  });
 });

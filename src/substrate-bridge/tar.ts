@@ -65,6 +65,21 @@ function parseSize(field: Buffer): number | undefined {
   return parseInt(text, 8);
 }
 
+/** True when the stored checksum matches the unsigned or signed byte sum (GNU tar accepts both). */
+function checksumOk(header: Buffer): boolean {
+  const text = cstring(header.subarray(148, 156)).trim();
+  if (!/^[0-7]+$/.test(text)) return false;
+  const stored = parseInt(text, 8);
+  let unsigned = 0;
+  let signed = 0;
+  for (let i = 0; i < BLOCK; i++) {
+    const b = i >= 148 && i < 156 ? 0x20 : header[i];
+    unsigned += b;
+    signed += b > 127 ? b - 256 : b;
+  }
+  return stored === unsigned || stored === signed;
+}
+
 function cleanName(raw: string): string | undefined {
   if (raw.startsWith("/") || raw.includes("\0")) return undefined;
   const parts = raw.split("/").filter((p) => p !== "" && p !== ".");
@@ -127,7 +142,14 @@ async function check(source: Source): Promise<TarCheck> {
     if (offset >= source.size) return { ok: true, entries }; // no end marker: tar tolerates it
     const header = await source.read(offset, BLOCK);
     if (header.length < BLOCK) return bad("truncated");
-    if (header.every((b) => b === 0)) return { ok: true, entries };
+    if (header.every((b) => b === 0)) {
+      // End of archive is two zero blocks; GNU tar only warns about a lone one and keeps reading.
+      if (offset + BLOCK >= source.size) return { ok: true, entries };
+      const second = await source.read(offset + BLOCK, BLOCK);
+      if (second.length === BLOCK && second.every((b) => b === 0)) return { ok: true, entries };
+      return bad("zero_block");
+    }
+    if (!checksumOk(header)) return bad("checksum");
     const size = parseSize(header.subarray(124, 136));
     if (size === undefined) return bad("size");
     const type = String.fromCharCode(header[156] === 0 ? 48 : header[156]);
@@ -157,8 +179,11 @@ async function check(source: Source): Promise<TarCheck> {
       continue;
     }
     if (++entries > MAX_ENTRIES) return bad("too_many_entries");
-    const ustar = header.subarray(257, 262).toString("latin1") === "ustar";
-    const prefix = ustar ? cstring(header.subarray(345, 500)) : "";
+    // The prefix field is only a name prefix in POSIX ustar; old GNU headers reuse those bytes for times.
+    const magic = header.subarray(257, 263).toString("latin1");
+    const oldGnu = header.subarray(257, 265).toString("latin1") === "ustar  \0";
+    if (magic !== "ustar\0" && !oldGnu) return bad("magic");
+    const prefix = magic === "ustar\0" ? cstring(header.subarray(345, 500)) : "";
     const base = cstring(header.subarray(0, 100));
     const rawName = paxPath ?? longName ?? (prefix ? `${prefix}/${base}` : base);
     const rawLink = paxLink ?? longLink ?? cstring(header.subarray(157, 257));
@@ -173,6 +198,8 @@ async function check(source: Source): Promise<TarCheck> {
     } else if (type === "1") {
       const target = cleanName(rawLink);
       if (target === undefined || target === "" || throughSymlink(target, symlinks)) return bad("hardlink");
+      // A hardlink to an in-archive symlink is itself a symlink.
+      if (symlinks.has(target)) symlinks.add(name);
     }
     offset = next;
   }

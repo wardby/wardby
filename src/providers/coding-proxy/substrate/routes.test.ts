@@ -2,13 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BLOB, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
 import { MemoryRelayStore } from "./memory-relay-store.js";
-import { RelayBusyError, type RelayStore } from "./relay-store.js";
+import { RelayBusyError, RelayUnknownError, type RelayStore } from "./relay-store.js";
 import { createSubstrateRoutes, type SubstrateRouteOptions } from "./routes.js";
 
 const ATESPACE = "wardby-runs";
@@ -259,6 +259,27 @@ describe("substrate routes", () => {
       expect((await fetch(`${base}/exit`, agent({ method: "POST", body: bad }))).status).toBe(400);
     const big = await fetch(`${base}/exit`, agent({ method: "POST", body: " ".repeat(2000) }));
     expect(big.status).toBe(413);
+  });
+
+  it("answers exit twice after the workspace was uploaded and the relay dropped", async () => {
+    await start();
+    await fetch(`${base}/channels`, agent({ method: "POST" }));
+    expect((await fetch(`${base}/workspace`, tool({ method: "POST", body: "tar" }))).status).toBe(200);
+    const body = { method: "POST", body: JSON.stringify({ code: 3 }), headers: { "content-type": "application/json" } };
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
+  });
+
+  it("answers exit 200 when the relay is unknown, and does not collect again once the exit blob exists", async () => {
+    await start();
+    const collect = vi.spyOn(relay, "requestCollect").mockRejectedValue(new RelayUnknownError());
+    const body = { method: "POST", body: JSON.stringify({ code: 4 }), headers: { "content-type": "application/json" } };
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 4 });
   });
 
   it("records a failed workspace and drops the relay (tool only)", async () => {
