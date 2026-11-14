@@ -330,13 +330,17 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     );
   };
 
+  /** A save was refused as locked: the edits stay unsaved, with no retry, until the refetch shows the lock. */
+  let refusedLocked = false;
   const save = async (): Promise<void> => {
-    if (saving || conflict || !dirty) return;
+    // Locked: the edits wait (still unsaved) for a reopen and the next edit, never a timer.
+    if (saving || conflict || !dirty || locked) return;
     saving = true;
     dirty = false;
     showSave("Saving…");
     try {
       const r = await api.saveContent(editor.getMarkdown(), baseNumber);
+      refusedLocked = false;
       baseNumber = r.version.number;
       version.textContent = `v${baseNumber}`;
       showSave(dirty ? "Unsaved changes" : "Saved");
@@ -352,8 +356,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         showSave(errorMessage(err), true);
       } else if (err instanceof ApiError && err.code === "document_locked") {
         // Approved or archived since the edit began: not the user's fault, and retrying cannot help.
-        // Refetch so the review lock shows (a live event may not have arrived yet).
-        dirty = false;
+        // The edits stay unsaved; refetch so the review lock shows (a live event may not have arrived yet).
+        refusedLocked = true;
         showSave(errorMessage(err));
         pendingRefresh = true;
       } else {
@@ -366,7 +370,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       pendingRefresh = false;
       void refresh();
     }
-    if (dirty && !conflict) schedule();
+    if (dirty && !conflict && !refusedLocked) schedule();
   };
 
   const schedule = () => {
@@ -441,6 +445,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     if (act === "banner") changedBanner.hidden = false;
     comments.apply(next);
     review.apply(next.review);
+    // A refused save whose refetch finds it open again (reopened since): the edits wait for the next edit.
+    if (refusedLocked) {
+      refusedLocked = false;
+      if (!conflict && !saving) showSave(restingSaveText());
+    }
   });
 
   // ---- the review banner and Review tab ----

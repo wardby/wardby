@@ -162,6 +162,88 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect([row.verdict, row.versionNumber, row.note]).toEqual(["approved", 3, "Keep this note"]);
     }, 90_000);
 
+    it("a Markdown save refused as locked keeps the edits unsaved: no retry on a timer, the next edit saves them", async () => {
+      const d = await server.design({ title: "Lock", kind: "document", markdown: "# L\n\nfirst\n", access: "write" });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      // The first save is refused as locked (approved and reopened inside one save cycle).
+      let refused = 0;
+      await page.route(
+        (url) => url.pathname.startsWith("/d/api/"),
+        async (route) => {
+          if (route.request().method() === "PUT" && refused === 0) {
+            refused += 1;
+            return route.fulfill({
+              status: 409,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "document_locked" }),
+            });
+          }
+          return route.fallback();
+        },
+      );
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.postData() ?? ""));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => editable(page), { timeout: 20_000 }).toBe("true");
+      const save = () => page.locator(".save").textContent();
+      await page.locator(".editor .ProseMirror p").click();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" one");
+      await expect.poll(() => refused, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => save()).toBe("Unsaved changes");
+      await page.waitForTimeout(2500);
+      expect(puts.length).toBe(1);
+      await page.keyboard.type(" two");
+      await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(2);
+      expect(puts[1]).toContain("first one two");
+      await expect.poll(() => save(), { timeout: 10_000 }).toBe("Saved");
+      await context.close();
+    }, 90_000);
+
+    it("a Markdown page approved while typing saves nothing while locked; after a reopen the edits wait for the next edit", async () => {
+      const d = await server.design({ title: "Lock", kind: "document", markdown: "# L\n\nfirst\n", access: "write" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.second],
+      });
+      const context = await browser.newContext();
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      const puts: string[] = [];
+      page.on("request", (r) => r.method() === "PUT" && puts.push(r.postData() ?? ""));
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => editable(page), { timeout: 20_000 }).toBe("true");
+      const save = () => page.locator(".save").textContent();
+      await page.locator(".editor .ProseMirror p").click();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" one");
+      // The approval lands inside the save delay, while the edit is still unsaved.
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.second },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      await expect.poll(() => save()).toBe("Read only: approved");
+      await page.waitForTimeout(2500);
+      expect(puts).toEqual([]);
+
+      await reopenDocument(server.db, { documentId: d.documentId, viewer: owner(d.principalIds) });
+      await expect.poll(() => save()).toBe("Unsaved changes");
+      await page.waitForTimeout(2500);
+      expect(puts).toEqual([]);
+      await page.locator(".editor .ProseMirror p").click();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" two");
+      await expect.poll(() => puts.length, { timeout: 10_000 }).toBe(1);
+      expect(puts[0]).toContain("first one two");
+      await expect.poll(() => save(), { timeout: 10_000 }).toBe("Saved");
+      await context.close();
+    }, 90_000);
+
     it("an approved document offers no Restore; reopening gives each viewer back their own save state", async () => {
       const d = await server.design({ title: "Lock", kind: "document", markdown: "# L\n\nfirst\n", access: "comment" });
       await publishVersion(server.db, TEST_CIPHER, {

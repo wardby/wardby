@@ -42,7 +42,7 @@ A reviewer approves or requests changes on the version they read, with an option
 
 An approved or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
 
-A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. After a reopen, edits made before the lock are kept and saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
+A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it (back to in review, with every reviewer waiting again, even for the same version), publishes the new version, and the reviewers approve again. After a reopen, edits made before the lock show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
 
 ## The page and the Viewer
 
