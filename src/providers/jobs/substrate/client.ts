@@ -20,11 +20,13 @@ import {
   CredentialHeaderSchema,
   DeleteActorEgressPolicyRequestSchema,
   DeleteActorRequestSchema,
+  DeleteActorTemplateRequestSchema,
   DurableDirVolumeSourceSchema,
   EgressPolicySchema,
   EgressRuleSchema,
   EnvVarSchema,
   GetActorRequestSchema,
+  GetActorTemplateRequestSchema,
   HttpGetActionSchema,
   HttpRuleEffectsSchema,
   HttpRuleSchema,
@@ -59,6 +61,7 @@ import {
   type ActorTemplateSpec,
   type EgressRule,
   type SubstrateApi,
+  type TemplateInfo,
   type WorkerInfo,
 } from "./api.js";
 
@@ -249,7 +252,32 @@ class GrpcSubstrateApi implements SubstrateApi {
     );
   }
 
+  async getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined> {
+    return this.call<TemplateInfo | undefined>(
+      async () => {
+        const template = await this.control.getActorTemplate(
+          create(GetActorTemplateRequestSchema, { actorTemplate: ref(atespace, name) }),
+        );
+        // Only whether the build failed: the error message itself is never read out.
+        return { goldenSnapshotFailed: (template.status?.goldenSnapshotStatus?.errorMessage ?? "") !== "" };
+      },
+      { [Code.NotFound]: () => undefined },
+    );
+  }
+
+  async deleteActorTemplate(atespace: string, name: string): Promise<void> {
+    await this.call(
+      async () => {
+        await this.control.deleteActorTemplate(
+          create(DeleteActorTemplateRequestSchema, { actorTemplate: ref(atespace, name) }),
+        );
+      },
+      { [Code.NotFound]: () => undefined },
+    );
+  }
+
   async createActor(atespace: string, name: string, template: string): Promise<void> {
+    // The actor's name is metadata.name (CreateActorRequest carries only the Actor).
     const actor = create(ActorSchema, {
       metadata: create(ResourceMetadataSchema, { atespace, name }),
       actorTemplate: ref(atespace, template),

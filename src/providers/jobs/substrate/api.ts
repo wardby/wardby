@@ -54,6 +54,16 @@ export interface ActorInfo {
   workerPod?: string;
 }
 
+export interface TemplateInfo {
+  /**
+   * The template's golden snapshot build failed for good (Substrate's
+   * status.goldenSnapshotStatus.errorMessage is set, which it documents as terminal): actors
+   * cannot start from it until it is deleted and created again. The message itself is never read
+   * out: it may quote the template.
+   */
+  goldenSnapshotFailed: boolean;
+}
+
 export interface WorkerInfo {
   pool: string;
   /** The WorkerPool's labels, which a template's worker selector matches against. */
@@ -79,6 +89,9 @@ export class SubstrateUnavailableError extends Error {
 export interface SubstrateApi {
   /** AlreadyExists is success. */
   ensureActorTemplate(spec: ActorTemplateSpec): Promise<void>;
+  getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined>;
+  /** A missing template is success. */
+  deleteActorTemplate(atespace: string, name: string): Promise<void>;
   /** Throws SubstrateAlreadyExistsError. */
   createActor(atespace: string, name: string, template: string): Promise<void>;
   getActor(atespace: string, name: string): Promise<ActorInfo | undefined>;
@@ -86,7 +99,10 @@ export interface SubstrateApi {
   resumeActor(atespace: string, name: string): Promise<void>;
   /** A missing actor is success. */
   deleteActor(atespace: string, name: string): Promise<void>;
-  /** Creates the actor's egress policy; AlreadyExists is success. */
+  /**
+   * Creates the actor's egress policy; AlreadyExists is success. The policy belongs to the actor
+   * (a foreign key in Substrate), so the actor must exist first.
+   */
   putEgressPolicy(atespace: string, actor: string, rules: EgressRule[]): Promise<void>;
   /** A missing policy is success. */
   deleteEgressPolicy(atespace: string, actor: string): Promise<void>;

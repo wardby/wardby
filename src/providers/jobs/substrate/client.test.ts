@@ -5,7 +5,10 @@ import {
   ActorSchema,
   ActorState,
   ActorStatusSchema,
+  ActorTemplateSchema,
+  ActorTemplateStatusSchema,
   Control,
+  GoldenSnapshotStatusSchema,
   ListWorkersResponseSchema,
   ObjectRefSchema,
   ResumeActorResponseSchema,
@@ -13,7 +16,10 @@ import {
   WorkerSchema,
   WorkerStatusSchema,
   WorkerAssignmentSchema,
+  type CreateActorRequest,
   type CreateActorTemplateRequest,
+  type DeleteActorTemplateRequest,
+  type GetActorTemplateRequest,
   type CreateActorEgressPolicyRequest,
 } from "../../../generated/substrate/substrate/ateapi/v1/ateapi_pb.js";
 import {
@@ -31,6 +37,62 @@ function control(methods: Record<string, unknown>) {
 const SECRET = "rrp_fake_secret_value_1234567890";
 
 describe("createSubstrateApi (Connect adapter)", () => {
+  it("creates the actor under the given name (actor.metadata.name) from the given template", async () => {
+    let seen: CreateActorRequest | undefined;
+    const api = control({
+      createActor: (request: CreateActorRequest) => {
+        seen = request;
+        return create(ActorSchema, request.actor);
+      },
+    });
+    await api.createActor("wardby-runs", "wr-0123456789abcdef0123-agent", "tmpl");
+    expect(seen?.actor?.metadata?.atespace).toBe("wardby-runs");
+    expect(seen?.actor?.metadata?.name).toBe("wr-0123456789abcdef0123-agent");
+    expect(seen?.actor?.actorTemplate).toMatchObject({ atespace: "wardby-runs", name: "tmpl" });
+  });
+
+  it("reports a template's terminal golden snapshot failure without its message, and a missing template", async () => {
+    let asked: GetActorTemplateRequest | undefined;
+    const status = (errorMessage: string) =>
+      create(ActorTemplateSchema, {
+        status: create(ActorTemplateStatusSchema, {
+          goldenSnapshotStatus: create(GoldenSnapshotStatusSchema, { errorMessage }),
+        }),
+      });
+    let reply = status(`GoldenActorCrashed: ${SECRET}`);
+    const api = control({
+      getActorTemplate: (request: GetActorTemplateRequest) => {
+        asked = request;
+        if (request.actorTemplate?.name === "gone") throw new ConnectError("missing", Code.NotFound);
+        return reply;
+      },
+    });
+    const failed = await api.getActorTemplate("s", "t");
+    expect(failed).toEqual({ goldenSnapshotFailed: true });
+    expect(JSON.stringify(failed)).not.toContain(SECRET);
+    expect(asked?.actorTemplate).toMatchObject({ atespace: "s", name: "t" });
+    reply = status("");
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+    reply = create(ActorTemplateSchema, {});
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+    expect(await api.getActorTemplate("s", "gone")).toBeUndefined();
+  });
+
+  it("deletes a template by name; a missing one is success", async () => {
+    const deleted: DeleteActorTemplateRequest[] = [];
+    const api = control({
+      deleteActorTemplate: (request: DeleteActorTemplateRequest) => {
+        deleted.push(request);
+        if (deleted.length > 1) throw new ConnectError("missing", Code.NotFound);
+        return create(ActorTemplateSchema, {});
+      },
+    });
+    await api.deleteActorTemplate("s", "t");
+    await api.deleteActorTemplate("s", "t");
+    expect(deleted.map((r) => r.actorTemplate?.name)).toEqual(["t", "t"]);
+    expect(deleted[0]?.actorTemplate?.atespace).toBe("s");
+  });
+
   it("maps ALREADY_EXISTS on createActor to SubstrateAlreadyExistsError", async () => {
     const api = control({
       createActor: () => {

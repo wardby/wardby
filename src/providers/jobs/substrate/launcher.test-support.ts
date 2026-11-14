@@ -8,7 +8,7 @@ import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
-import { SubstrateJobLauncher } from "./launcher.js";
+import { SubstrateJobLauncher, type SubstrateCallFailure } from "./launcher.js";
 import { substrateRunToken } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
@@ -91,6 +91,8 @@ export interface Harness {
   workspaceRoot: string;
   output: { schemaVersion: 1; runId: string; outcome: string; summary: string; tests: never[] };
   setNow: (ms: number) => void;
+  /** Every failed Substrate call the launcher reported. */
+  callFailures: SubstrateCallFailure[];
 }
 
 export async function makeHarness(
@@ -118,6 +120,7 @@ export async function makeHarness(
   const runs = options.runs ?? new MemorySubstrateRunStore();
   const secrets = new RecordingSecrets();
   let now = 1_000_000;
+  const callFailures: SubstrateCallFailure[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const launcher = new SubstrateJobLauncher({
     api,
@@ -128,6 +131,7 @@ export async function makeHarness(
     workspaceRoot,
     resolveCapability: async () => FAKE_CAP,
     now: () => now,
+    onSubstrateCallFailed: (failure) => callFailures.push(failure),
   });
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -153,5 +157,6 @@ export async function makeHarness(
     setNow: (ms) => {
       now = ms;
     },
+    callFailures,
   };
 }

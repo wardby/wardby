@@ -291,6 +291,78 @@ describe("SubstrateJobLauncher", () => {
     });
   });
 
+  it("creates each actor before its egress policy (Substrate's foreign key), and both policies before any resume", async () => {
+    const h = await makeHarness();
+    const order: string[] = [];
+    for (const method of ["createActor", "putEgressPolicy", "resumeActor"] as const) {
+      const original = h.api[method].bind(h.api) as (...args: unknown[]) => Promise<void>;
+      (h.api as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+        order.push(`${method} ${String(args[1]).replace(h.token, "T")}`);
+        return original(...args);
+      };
+    }
+    await h.launcher.launch(h.spec);
+    expect(order).toEqual([
+      "createActor T-agent",
+      "createActor T-tool",
+      "putEgressPolicy T-agent",
+      "putEgressPolicy T-tool",
+      "resumeActor T-tool",
+      "resumeActor T-agent",
+    ]);
+    expect(h.callFailures).toEqual([]);
+  });
+
+  it("names the Substrate call that failed, with fixed fields only", async () => {
+    const h = await makeHarness();
+    h.api.putEgressPolicy = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect(h.callFailures).toEqual([
+      { runId: h.spec.runId, substrateCall: "putEgressPolicy", errorCode: "substrate_unavailable" },
+    ]);
+    expect(JSON.stringify(h.callFailures)).not.toContain(FAKE_CAP);
+
+    // An existing actor (a relaunch of the same run) is not a failure.
+    const r = await makeHarness();
+    await r.api.ensureActorTemplate(agentTemplate(r.spec, CONFIG));
+    await r.api.createActor(CONFIG.atespace, agentActorName(r.token), agentTemplate(r.spec, CONFIG).name);
+    await r.launcher.launch(r.spec);
+    expect(r.callFailures).toEqual([]);
+  });
+
+  it("recreates a template whose golden snapshot failed, once per launch", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    const deleted: string[] = [];
+    const deleteTemplate = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async (atespace, name) => {
+      deleted.push(name);
+      return deleteTemplate(atespace, name);
+    };
+    await h.launcher.launch(h.spec);
+    expect(deleted).toEqual([agent.name]);
+    expect(await h.api.getActorTemplate(CONFIG.atespace, agent.name)).toEqual({ goldenSnapshotFailed: false });
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+
+    // Still failed after the recreate (a broken image): no second delete in the same launch.
+    const r = await makeHarness();
+    const getTemplate = r.api.getActorTemplate.bind(r.api);
+    r.api.getActorTemplate = async (atespace, name) => ({
+      ...(await getTemplate(atespace, name))!,
+      goldenSnapshotFailed: true,
+    });
+    let deletes = 0;
+    r.api.deleteActorTemplate = async () => {
+      deletes += 1;
+    };
+    await r.launcher.launch(r.spec);
+    expect(deletes).toBe(2); // one per template (agent and tool), never repeated
+  });
+
   it("rejects what Phase A does not support, before any side effect", async () => {
     const h = await makeHarness();
     const cases: [Partial<JobSpec>, string][] = [

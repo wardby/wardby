@@ -4,6 +4,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
 
@@ -18,6 +19,40 @@ const template = (name: string, cpuMillicores: number, memoryBytes: number): Act
 });
 
 describe("FakeSubstrateApi", () => {
+  it("refuses an actor without a name, so a missing name cannot pass silently", async () => {
+    const api = new FakeSubstrateApi({ workers: 1 });
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    await expect(api.createActor("s", "", "t")).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect(api.actors.size).toBe(0);
+    await api.createActor("s", "wr-00000000000000000000-agent", "t");
+    expect([...api.actors.keys()]).toEqual(["s/wr-00000000000000000000-agent"]);
+  });
+
+  it("refuses an egress policy for an actor that does not exist (Substrate's foreign key)", async () => {
+    const api = new FakeSubstrateApi({ workers: 1 });
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    await expect(api.putEgressPolicy("s", "a", [])).rejects.toBeInstanceOf(SubstrateNotFoundError);
+    await api.createActor("s", "a", "t");
+    await api.putEgressPolicy("s", "a", []);
+    expect(api.egressPolicies.has("s/a")).toBe(true);
+    await api.deleteActor("s", "a");
+    expect(api.egressPolicies.size).toBe(0);
+  });
+
+  it("reports a template's failed golden snapshot until the template is deleted and created again", async () => {
+    const api = new FakeSubstrateApi({ workers: 1 });
+    expect(await api.getActorTemplate("s", "t")).toBeUndefined();
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+    api.failGoldenSnapshot("s", "t");
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: true });
+    await api.deleteActorTemplate("s", "t");
+    await api.deleteActorTemplate("s", "t"); // idempotent
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+  });
+
   it("creates, resumes and deletes actors", async () => {
     const api = new FakeSubstrateApi({ workers: 1 });
     await api.ensureActorTemplate(template("t", 500, 2 ** 20));
@@ -76,6 +111,8 @@ describe("FakeSubstrateApi", () => {
 
   it("records templates and egress policies for assertions", async () => {
     const api = new FakeSubstrateApi({ workers: 2 });
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    await api.createActor("s", "a", "t");
     await api.putEgressPolicy("s", "a", [{ kind: "http", hostnames: ["p"], ports: [8080] }]);
     expect(api.egressPolicies.get("s/a")).toHaveLength(1);
   });

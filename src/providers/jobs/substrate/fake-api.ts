@@ -2,11 +2,13 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateUnavailableError,
   type ActorInfo,
   type ActorState,
   type ActorTemplateSpec,
   type EgressRule,
   type SubstrateApi,
+  type TemplateInfo,
   type WorkerInfo,
 } from "./api.js";
 import { pickWorker, type Room } from "./placement.js";
@@ -39,13 +41,27 @@ export class FakeSubstrateApi implements SubstrateApi {
   readonly templates = new Map<string, ActorTemplateSpec>();
   readonly actors = new Map<string, FakeActor>();
   readonly egressPolicies = new Map<string, EgressRule[]>();
+  /** Templates whose golden snapshot build failed (see failGoldenSnapshot). */
+  readonly goldenFailed = new Set<string>();
   constructor(readonly options: FakeSubstrateOptions) {}
 
+  /** Like Substrate: an existing template is left as it is (AlreadyExists is success). */
   async ensureActorTemplate(spec: ActorTemplateSpec): Promise<void> {
-    this.templates.set(`${spec.atespace}/${spec.name}`, structuredClone(spec));
+    const key = `${spec.atespace}/${spec.name}`;
+    if (!this.templates.has(key)) this.templates.set(key, structuredClone(spec));
+  }
+  async getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined> {
+    const key = `${atespace}/${name}`;
+    return this.templates.has(key) ? { goldenSnapshotFailed: this.goldenFailed.has(key) } : undefined;
+  }
+  async deleteActorTemplate(atespace: string, name: string): Promise<void> {
+    this.templates.delete(`${atespace}/${name}`);
+    this.goldenFailed.delete(`${atespace}/${name}`);
   }
   async createActor(atespace: string, name: string, template: string): Promise<void> {
     const key = `${atespace}/${name}`;
+    // Substrate refuses an actor without a name (InvalidArgument, which the client reports as unavailable).
+    if (!name) throw new SubstrateUnavailableError("substrate_unavailable");
     if (!this.templates.has(`${atespace}/${template}`)) throw new SubstrateNotFoundError("substrate_not_found");
     if (this.actors.has(key)) throw new SubstrateAlreadyExistsError(key);
     this.actors.set(key, { state: "SUSPENDED", templateName: template });
@@ -65,8 +81,12 @@ export class FakeSubstrateApi implements SubstrateApi {
   }
   async deleteActor(atespace: string, name: string): Promise<void> {
     this.actors.delete(`${atespace}/${name}`);
+    // The policy belongs to the actor and goes with it.
+    this.egressPolicies.delete(`${atespace}/${name}`);
   }
+  /** Like Substrate's foreign key from a policy to its actor: the actor must exist. */
   async putEgressPolicy(atespace: string, actor: string, rules: EgressRule[]): Promise<void> {
+    if (!this.actors.has(`${atespace}/${actor}`)) throw new SubstrateNotFoundError("substrate_not_found");
     this.egressPolicies.set(`${atespace}/${actor}`, structuredClone(rules));
   }
   async deleteEgressPolicy(atespace: string, actor: string): Promise<void> {
@@ -79,6 +99,10 @@ export class FakeSubstrateApi implements SubstrateApi {
       freeCpuMillicores: room.cpuMillicores,
       freeMemoryBytes: room.memoryBytes,
     }));
+  }
+  /** Test hook: the template's golden snapshot build failed for good. */
+  failGoldenSnapshot(atespace: string, name: string): void {
+    this.goldenFailed.add(`${atespace}/${name}`);
   }
   /** Test hook: put an actor in a state (e.g. CRASHED); only a RUNNING actor holds room. */
   setState(atespace: string, name: string, state: ActorState): void {
