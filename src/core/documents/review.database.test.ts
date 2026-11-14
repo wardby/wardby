@@ -229,6 +229,59 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     ).rejects.toThrow("document_not_found");
   });
 
+  it("a guest on a revoked or expired comment link is neither a candidate nor a reviewer", async () => {
+    const id = await doc();
+    const revoked = await createShareLink(db, { documentId: id, viewer: as(owner), permission: "comment" });
+    const gone = await registerGuest(db, { shareLinkId: revoked.id, name: "Gone" });
+    const expired = await createShareLink(db, { documentId: id, viewer: as(owner), permission: "comment" });
+    const late = await registerGuest(db, { shareLinkId: expired.id, name: "Late" });
+    await db.documentShareLink.update({ where: { id: revoked.id }, data: { revokedAt: new Date() } });
+    await db.documentShareLink.update({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect((await reviewCandidates(db, id, as(owner))).guests).toEqual([]);
+    for (const guestId of [gone.guestId, late.guestId]) {
+      await expect(
+        submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [`guest:${guestId}`] }),
+      ).rejects.toThrow("document_review_state_invalid");
+    }
+    expect(await stateOf(id)).toBe("draft");
+  });
+
+  it("access revoked after the early check but before the transaction stops the verdict and the force", async () => {
+    // A cipher that revokes a grant while the note is being redacted (between the early check and the transaction).
+    const revokingCipher = (principalId: string, documentId: string) => {
+      let done = false;
+      return {
+        ...cipher,
+        decrypt: async (v: string) => {
+          if (!done) {
+            done = true;
+            await db.resourceGrant.deleteMany({ where: { resourceId: documentId, granteePrincipalId: principalId } });
+          }
+          return v;
+        },
+      };
+    };
+    const id = await doc(true);
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id], finalApproverId: cat.id });
+    await expect(
+      reviewDocument(db, revokingCipher(ann.id, id), {
+        documentId: id,
+        viewer: as(ann),
+        verdict: "approve",
+        versionNumber: 1,
+        note: "looks fine",
+      }),
+    ).rejects.toThrow("document_not_found");
+    // Refused, not committed: the read-back view after a commit would also fail with document_not_found.
+    expect(await stateOf(id)).toBe("in_review");
+    expect((await db.documentReviewer.findFirstOrThrow({ where: { documentId: id } })).verdict).toBe("none");
+    await expect(
+      forceApprove(db, revokingCipher(cat.id, id), { documentId: id, viewer: as(cat), note: "Deadline" }),
+    ).rejects.toThrow("document_not_found");
+    expect(await stateOf(id)).toBe("in_review");
+    expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted"]);
+  });
+
   it("two concurrent approvals move the document to approved exactly once", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });

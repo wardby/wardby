@@ -10,6 +10,9 @@
  * transaction after its reads, and always later than the document's newest review event. An action
  * that saw an earlier one in its snapshot is therefore always stamped after it.
  *
+ * Access: each action checks access once early (to fail fast and to find the agent for redaction) and again
+ * inside its transaction, so a grant or share link revoked in between is seen.
+ *
  * Secrets: notes are redacted by exact value against the document agent's secret values before the
  * transaction, as comment bodies are; events carry ids, states, version numbers and notes only.
  * Errors are codes; nothing here logs.
@@ -217,6 +220,14 @@ async function storedNote(
   return redactForDocumentAgent(db, cipher, agentId, note);
 }
 
+/** A comment share link on this document that is still live (not revoked, not expired). */
+const liveCommentLink = (documentId: string) => ({
+  documentId,
+  permission: "comment",
+  revokedAt: null,
+  expiresAt: { gt: new Date() },
+});
+
 type Ref = { principalId: string } | { guestId: string };
 const parseRef = (ref: string): Ref => (ref.startsWith("guest:") ? { guestId: ref.slice(6) } : { principalId: ref });
 
@@ -254,6 +265,7 @@ export async function submitForReview(
   const guestIds = parsed.flatMap((r) => ("guestId" in r ? [r.guestId] : []));
   const approver = input.finalApproverId;
   await inReviewTx(db, async (tx) => {
+    await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
     if (!SUBMITTABLE.has(doc.reviewState)) invalid();
     const known = await tx.principal.findMany({
@@ -263,7 +275,7 @@ export async function submitForReview(
     const knownIds = new Set(known.map((p) => p.id));
     if (principalIds.some((id) => !knownIds.has(id)) || (approver && !knownIds.has(approver))) invalid();
     const guests = await tx.documentGuest.findMany({
-      where: { id: { in: guestIds }, shareLink: { documentId: doc.id, permission: "comment" } },
+      where: { id: { in: guestIds }, shareLink: liveCommentLink(doc.id) },
       select: { id: true },
     });
     if (guests.length !== guestIds.length) invalid();
@@ -316,6 +328,8 @@ export async function reviewDocument(
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
   await inReviewTx(db, async (tx) => {
+    // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
+    await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
     const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
     const viewer = input.viewer;
     const mine = reviewers.find((r) =>
@@ -365,10 +379,12 @@ export async function forceApprove(
   if (input.note.trim() === "") invalid();
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
   const overridden = await inReviewTx(db, async (tx) => {
+    // Force rights follow live access, the current owner and the current final approver, read in the transaction.
+    const accessNow = await documentAccess(tx, input.documentId, viewer);
+    if (accessNow === "none") throw new Error("document_not_found");
     const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
-    // Force rights follow the current owner and the current final approver (re-read in the transaction).
-    const ownsNow = access === "owner" && (viewer.operator === true || doc.ownerId === principalId);
-    if (!ownsNow && doc.finalApproverId !== principalId) throw new Error("document_review_forbidden");
+    const approverNow = doc.finalApproverId === principalId && atLeast("document", accessNow, "comment");
+    if (accessNow !== "owner" && !approverNow) throw new Error("document_review_forbidden");
     if (!FORCEABLE.has(doc.reviewState)) invalid();
     const ids = overriddenReviewerIds(rule);
     await record(tx, {
@@ -395,6 +411,7 @@ export async function reopenDocument(
   await requireDocumentAccess(db, input.documentId, input.viewer, "write");
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
   await inReviewTx(db, async (tx) => {
+    await requireDocumentAccess(tx, input.documentId, input.viewer, "write");
     const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
     if (doc.reviewState !== "approved") invalid();
     await record(tx, {
@@ -417,6 +434,7 @@ export async function setArchived(
 ): Promise<ReviewView> {
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
   await inReviewTx(db, async (tx) => {
+    await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
     const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
     if (input.archived === (doc.reviewState === "archived")) invalid();
     const back = doc.reviewStateBeforeArchive;
@@ -452,12 +470,18 @@ export async function documentReviewState(
 export async function getReviewView(db: PrismaClient, documentId: string, viewer: Viewer): Promise<ReviewView> {
   await requireDocumentAccess(db, documentId, viewer, "read");
   const access = await documentAccess(db, documentId, viewer);
-  const { doc, reviewers, rule } = await db.$transaction((tx) => readReview(tx, documentId));
-  const events = await db.documentReviewEvent.findMany({
-    where: { documentId },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: MAX_REVIEW_EVENTS,
-  });
+  // One snapshot: state, reviewers, the force banner and the events agree with each other.
+  const { doc, reviewers, rule, events } = await db.$transaction(
+    async (tx) => ({
+      ...(await readReview(tx, documentId)),
+      events: await tx.documentReviewEvent.findMany({
+        where: { documentId },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: MAX_REVIEW_EVENTS,
+      }),
+    }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   const guestIds = [
     ...new Set([
       ...reviewers.flatMap((r) => (r.guestId ? [r.guestId] : [])),
@@ -570,7 +594,7 @@ export async function reviewCandidates(
   await requireDocumentAccess(db, documentId, viewer, "owner");
   const members = await mentionCandidates(db, documentId);
   const guests = await db.documentGuest.findMany({
-    where: { shareLink: { documentId, permission: "comment" } },
+    where: { shareLink: liveCommentLink(documentId) },
     orderBy: { createdAt: "asc" },
     select: { id: true, name: true },
   });
