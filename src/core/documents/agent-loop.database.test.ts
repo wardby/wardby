@@ -33,11 +33,13 @@ import {
   sweepUnansweredDocumentRuns,
   versionConflictReply,
   reconcileTooLargeReply,
+  lockedEditReply,
 } from "./agent-loop.js";
 import { createThread, listThreads, setThreadStatus } from "./comments.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
 import { BOARD_FORMAT_RULES } from "./boards/rules.js";
 import { anchorForElement, type ElementLike } from "./element-anchors.js";
+import { reviewDocument, setArchived, submitForReview } from "./review.js";
 import { createDocument, getDocument, publishVersion } from "./service.js";
 
 const SECRET = "s3cret-agentloop-789";
@@ -1222,6 +1224,89 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       ).rejects.toThrow("document_repo_link_invalid");
     }
     expect(await db.run.count({ where: { agentId: codingAgentId } })).toBe(runsBefore);
+  });
+
+  const approve = async (docId: string) => {
+    await submitForReview(db, {
+      documentId: docId,
+      viewer: { kind: "principal", principalId: owner.id },
+      reviewers: [writer.id],
+    });
+    const n = (await getDocument(db, docId)).version.number;
+    await reviewDocument(db, cipher, { documentId: docId, viewer: asWriter(), verdict: "approve", versionNumber: n });
+  };
+
+  it("refuses a send on an approved or archived document: document_locked, no run", async () => {
+    const docId = await linkedDoc();
+    const t = await thread(docId, "hello", "Warmer");
+    await approve(docId);
+    const runs = await runsOf();
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t.threadId] }),
+    ).rejects.toThrow("document_locked");
+    expect(await runsOf()).toBe(runs);
+  });
+
+  it("an edit that finishes after approval is not applied: the locked reply names the branch; no merge, no reconcile", async () => {
+    const docId = await linkedDoc();
+    const t = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t.threadId],
+    });
+    await approve(docId);
+    const replies = [{ thread: t.number, reply: "Done", resolved: true }];
+    const sha = await finish(
+      runId,
+      "succeeded",
+      `ok\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``,
+    );
+    files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+    const runs = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
+    expect(await runsOf()).toBe(runs);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
+    expect(lockedEditReply("approved", "b")).toBe(
+      "The document was approved while the agent worked, so its edit was not applied. It is on branch b.",
+    );
+  });
+
+  it("an edit that finishes after archiving gets the archived reply", async () => {
+    const docId = await linkedDoc();
+    const t = await thread(docId, "hello", "Warmer");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t.threadId],
+    });
+    await setArchived(db, { documentId: docId, viewer: { kind: "principal", principalId: owner.id }, archived: true });
+    const sha = await finish(runId, "succeeded", "ok");
+    files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+    await onDocumentRunFinished(db, deps, runId);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.comments.at(-1)!.body).toBe(
+      `The document was archived while the agent worked, so its edit was not applied. It is on branch wardby/run-${runId}.`,
+    );
+  });
+
+  it("an unchanged edit on an approved document gets the agent's normal replies", async () => {
+    const docId = await linkedDoc();
+    const t = await thread(docId, "hello", "Is this right?");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t.threadId],
+    });
+    await approve(docId);
+    const replies = [{ thread: t.number, reply: "Yes, as written.", resolved: false }];
+    await finish(runId, "succeeded", `\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``, false);
+    await onDocumentRunFinished(db, deps, runId);
+    const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(v.comments.at(-1)!.body).toBe("Yes, as written.");
   });
 });
 

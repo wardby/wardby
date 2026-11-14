@@ -12,6 +12,7 @@ import type { Viewer } from "./access.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
 import { createDocument, publishVersion } from "./service.js";
 import { createShareLink, registerGuest } from "./share-links.js";
+import { restoreVersion } from "./versions.js";
 import {
   forceApprove,
   getReviewView,
@@ -472,5 +473,89 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       off();
       await bus.close();
     }
+  });
+
+  it("an approved or archived document takes no new version: publish and restore are refused", async () => {
+    const id = await doc();
+    await publishVersion(db, cipher, { documentId: id, markdown: "v2", via: "mcp" });
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 2 });
+    for (const attempt of [
+      () => publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "editor", expectedNumber: 2 }),
+      () => publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "mcp" }),
+      () => publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "agent", runId: "r", expectedNumber: 2 }),
+      () => restoreVersion(db, cipher, { documentId: id, viewer: as(owner), number: 1, baseNumber: 2, via: "editor" }),
+    ]) {
+      await expect(attempt()).rejects.toThrow("document_locked");
+    }
+    await setArchived(db, { documentId: id, viewer: as(owner), archived: true });
+    await expect(publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "mcp" })).rejects.toThrow(
+      "document_locked",
+    );
+    expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(2);
+    // Comments stay open in every state.
+    const { createThread } = await import("./comments.js");
+    await expect(
+      createThread(db, cipher, {
+        documentId: id,
+        viewer: as(owner),
+        anchor: { type: "text", quote: "v2", prefix: "", suffix: "" },
+        body: "still commentable",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("a design's board save is refused on an approved design before any file text is stored", async () => {
+    const { readFileSync } = await import("node:fs");
+    const coffee = (p: string) => readFileSync(new URL(`./boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
+    const all = () => ({
+      "manifest.json": coffee("manifest.json"),
+      ...Object.fromEntries(
+        ["home", "menu", "about", "visit"].map((b) => [`boards/${b}.html`, coffee(`boards/${b}.html`)]),
+      ),
+    });
+    const design = await createDocument(db, cipher, {
+      kind: "design",
+      ownerId: owner.id,
+      title: "Coffee",
+      files: all(),
+    });
+    await submitForReview(db, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: design.id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    const before = await db.documentContent.count({ where: { documentId: design.id } });
+    await expect(
+      publishVersion(db, cipher, {
+        documentId: design.id,
+        files: { ...all(), "boards/home.html": coffee("boards/home.html").replace("</body>", "<p>new</p></body>") },
+        via: "editor",
+        expectedNumber: 1,
+      }),
+    ).rejects.toThrow("document_locked");
+    expect(await db.documentContent.count({ where: { documentId: design.id } })).toBe(before);
+  });
+
+  it("a publish while in review recomputes: changes requested on v1 becomes in_review on v2", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
+    expect(await stateOf(id)).toBe("changes_requested");
+    await publishVersion(db, cipher, { documentId: id, markdown: "fixed", via: "mcp" });
+    expect(await stateOf(id)).toBe("in_review");
+    const v = await getReviewView(db, id, as(owner));
+    expect(v.reviewers[0]).toMatchObject({ verdict: "changes_requested", versionNumber: 1, current: false });
+  });
+
+  it("an approval racing a publish: exactly one wins", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    const results = await Promise.allSettled([
+      reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
+      publishVersion(db, cipher, { documentId: id, markdown: "racing", via: "mcp", expectedNumber: 1 }),
+    ]);
+    const versions = await db.documentVersion.count({ where: { documentId: id } });
+    const state = await stateOf(id);
+    // Either the approval landed first (approved, publish refused) or the publish did (v2, approval stale).
+    expect([state, versions]).toEqual(results[0].status === "fulfilled" ? ["approved", 1] : ["in_review", 2]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
   });
 });

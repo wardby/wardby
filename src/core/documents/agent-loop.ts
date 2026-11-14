@@ -23,6 +23,9 @@
  * line inside a file both changed) and the merge published; else one reconcile run as the original sender on the latest
  * version, every send check made again (at most one per send:
  * CommentThread.reconcileOfRunId); else the fixed conflict reply.
+ *
+ * An approved or archived document takes no edit: each thread gets the locked reply (lockedEditReply)
+ * and no merge or reconcile is tried.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -52,6 +55,8 @@ import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
 import { loadContent } from "./files.js";
 import { mergeContent } from "./merge.js";
+import { documentReviewState } from "./review.js";
+import { isLocked, type LockedState } from "./review-state.js";
 import { getDocument, publishVersion } from "./service.js";
 import { withHtmlEscapedForms } from "./formats/boards.js";
 import { formatFor, type DocumentFormat } from "./formats/index.js";
@@ -78,6 +83,10 @@ export const EDIT_NOT_APPLIED_NOTE = "(The edit could not be applied.)";
 /** The reply when the document got a newer version after the send and neither a merge nor a reconcile run applied the edit. */
 export function versionConflictReply(branch: string): string {
   return `The document changed after this was sent, so the agent's edit was not applied. It is on branch ${branch}.`;
+}
+/** The reply when the document was approved or archived while the agent worked: no merge or reconcile is tried. */
+export function lockedEditReply(state: LockedState, branch: string): string {
+  return `The document was ${state} while the agent worked, so its edit was not applied. It is on branch ${branch}.`;
 }
 /** The reply when the edit conflicted and is too large, even as a diff, to send back to the agent to re-apply. */
 export function reconcileTooLargeReply(branch: string): string {
@@ -220,6 +229,7 @@ type SendableLink = {
  */
 async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer): Promise<SendableLink> {
   const doc = await requireDocumentAccess(db, documentId, viewer, "write");
+  if (isLocked(doc.reviewState)) throw new Error("document_locked");
   if (viewer.kind !== "principal") throw new Error("document_access_denied");
   if (!doc.agentId || !doc.repository || !doc.path) throw new Error("document_not_agent_linked");
   const agent = await db.agent.findUnique({
@@ -615,13 +625,24 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
     }
 
     const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
+    if (edit.kind === "locked") {
+      for (const t of threads) await reply(t, lockedEditReply(edit.state, edit.branch));
+      return;
+    }
     if (edit.kind === "conflict") {
       const start =
         edit.reconcile === null
           ? "refused"
           : await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues });
       if (start !== "started") {
-        const text = start === "too_large" ? reconcileTooLargeReply(edit.branch) : versionConflictReply(edit.branch);
+        // A reconcile refused because the document was locked meanwhile gets the locked reply.
+        const lockedNow = await documentReviewState(db, threads[0].documentId);
+        const text =
+          lockedNow && isLocked(lockedNow)
+            ? lockedEditReply(lockedNow, edit.branch)
+            : start === "too_large"
+              ? reconcileTooLargeReply(edit.branch)
+              : versionConflictReply(edit.branch);
         for (const t of threads) await reply(t, text);
       }
       return;
@@ -700,6 +721,7 @@ async function conflictedBranches(db: PrismaClient, threads: ClaimedThread[]): P
  */
 type RunEdit =
   | { kind: "published" | "unchanged" | "failed" }
+  | { kind: "locked"; state: LockedState; branch: string }
   | {
       kind: "conflict";
       branch: string;
@@ -755,7 +777,11 @@ async function publishRunEdit(
     const prepared = fmt.prepare(edited, secretValues).content;
     const branch = result?.headRef ?? ref;
     const numbers = threads.map((t) => `#${t.number}`).join(", ");
-    const publish = async (content: VersionContent, expectedNumber: number, summary: string) => {
+    const publish = async (
+      content: VersionContent,
+      expectedNumber: number,
+      summary: string,
+    ): Promise<"published" | "conflict" | "locked"> => {
       try {
         await publishVersion(db, deps.cipher, {
           documentId,
@@ -765,19 +791,30 @@ async function publishRunEdit(
           summary,
           expectedNumber,
         });
-        return true;
+        return "published";
       } catch (err) {
-        if (err instanceof Error && err.message === "document_version_conflict") return false;
+        if (err instanceof Error && err.message === "document_version_conflict") return "conflict";
+        if (err instanceof Error && err.message === "document_locked") return "locked";
         throw err;
       }
     };
+    // Locked between the read above and a publish: the state at that moment names the reply.
+    const locked = async (): Promise<RunEdit> => ({
+      kind: "locked",
+      state: (await documentReviewState(db, documentId)) === "archived" ? "archived" : "approved",
+      branch,
+    });
 
+    // Approved or archived while the agent worked: nothing is published, merged or reconciled.
+    if (isLocked(doc.reviewState) && contentHash(prepared) !== doc.currentVersion.contentHash) {
+      return { kind: "locked", state: doc.reviewState, branch };
+    }
     let current = doc.currentVersion;
     if (current.number === sentVersion) {
       if (contentHash(prepared) === current.contentHash) return { kind: "unchanged" };
-      if (await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`)) {
-        return { kind: "published" };
-      }
+      const out = await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`);
+      if (out === "published") return { kind: "published" };
+      if (out === "locked") return locked();
       // Someone published first: merge with what they published.
       const latest = await getDocument(db, documentId);
       current = latest.version;
@@ -812,7 +849,9 @@ async function publishRunEdit(
     if (contentHash(mergedContent) === contentHash(theirs)) return { kind: "unchanged" };
     try {
       const summary = `Agent edit for comment threads ${numbers} (merged with v${current.number})`;
-      if (await publish(mergedContent, current.number, summary)) return { kind: "published" };
+      const out = await publish(mergedContent, current.number, summary);
+      if (out === "published") return { kind: "published" };
+      if (out === "locked") return locked();
     } catch (err) {
       // A merge the store refuses (a manifest and boards that no longer agree) is a conflict too.
       log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit could not be stored");

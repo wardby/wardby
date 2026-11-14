@@ -10,6 +10,8 @@ import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
 import { loadContent, storeDocumentContent, storeVersionFileRows, storeVersionFiles } from "./files.js";
 import { formatFor, type DocumentKind, type PreparedContent } from "./formats/index.js";
 import { documentSecretValues } from "./redact.js";
+import { isLocked } from "./review-state.js";
+import { assertNotLocked, recomputeAfterPublish } from "./review.js";
 import type { VersionWarning } from "./warnings.js";
 
 type Cipher = Parameters<typeof loadAgentSecretValues>[1];
@@ -92,6 +94,7 @@ export async function createDocument(
   });
 }
 
+/** Refused with document_locked while the document is approved or archived (every route publishes here). */
 export async function publishVersion(
   db: DocumentServiceDb,
   cipher: Cipher,
@@ -119,9 +122,11 @@ export async function publishVersion(
   }
   const doc = await db.document.findUnique({
     where: { id: input.documentId },
-    select: { agentId: true, kind: true },
+    select: { agentId: true, kind: true, reviewState: true },
   });
   if (!doc) throw new Error("document_not_found");
+  // Early refusal (the transaction below decides): a locked design must not store orphan file text.
+  if (isLocked(doc.reviewState)) throw new Error("document_locked");
   const fmt = formatFor(doc.kind);
   const content = contentInput(fmt.kind, input);
   const secrets = await documentSecretValues(db, cipher, doc.agentId);
@@ -155,6 +160,7 @@ export async function publishVersion(
       db.$transaction(
         async (tx) => {
           await preferIndexScans(tx);
+          await assertNotLocked(tx, input.documentId);
           const last = await tx.documentVersion.aggregate({
             where: { documentId: input.documentId },
             _max: { number: true },
@@ -179,6 +185,7 @@ export async function publishVersion(
             where: { id: input.documentId },
             data: { currentVersionId: version.id },
           });
+          await recomputeAfterPublish(tx, input.documentId);
           const threads = await tx.commentThread.findMany({
             where: { documentId: input.documentId, status: "open" },
             select: { id: true, anchor: true },

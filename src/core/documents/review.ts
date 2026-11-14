@@ -30,6 +30,7 @@ import {
   approvedCount,
   computeReviewState,
   countsNow,
+  isLocked,
   isReviewState,
   overriddenReviewerIds,
   overrideSentence,
@@ -456,6 +457,24 @@ export async function setArchived(
   });
   await notifyDocumentChange(db, input.documentId, "review");
   return getReviewView(db, input.documentId, input.viewer);
+}
+
+/** In publishVersion's transaction, before the version is written: refuses an approved or archived document. */
+export async function assertNotLocked(tx: Tx, documentId: string): Promise<void> {
+  const row = await tx.document.findUnique({ where: { id: documentId }, select: { reviewState: true } });
+  if (!row) throw new Error("document_not_found");
+  if (isLocked(row.reviewState)) throw new Error("document_locked");
+}
+
+/**
+ * In publishVersion's transaction, after the new version is current: while in review, the state is
+ * recomputed (older verdicts stop counting). No event row: a publish is not a review action.
+ */
+export async function recomputeAfterPublish(tx: Tx, documentId: string): Promise<void> {
+  const { doc, rule } = await readReview(tx, documentId);
+  if (doc.reviewState !== "in_review" && doc.reviewState !== "changes_requested") return;
+  const to = computeReviewState(rule);
+  if (to !== doc.reviewState) await tx.document.update({ where: { id: documentId }, data: { reviewState: to } });
 }
 
 /** The stored state, or null when the document does not exist. */
