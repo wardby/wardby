@@ -799,6 +799,8 @@ async function publishRunEdit(
       }
     };
     // Locked between the read above and a publish: the state at that moment names the reply.
+    // Anything but archived reads as approved, a document deleted meanwhile (null) included: the
+    // reply must still say the edit was not applied, and approved is the only other locked state.
     const locked = async (): Promise<RunEdit> => ({
       kind: "locked",
       state: (await documentReviewState(db, documentId)) === "archived" ? "archived" : "approved",

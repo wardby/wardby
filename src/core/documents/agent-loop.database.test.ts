@@ -1245,6 +1245,18 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [t.threadId] }),
     ).rejects.toThrow("document_locked");
     expect(await runsOf()).toBe(runs);
+
+    const archivedId = await linkedDoc();
+    const ta = await thread(archivedId, "hello", "Warmer");
+    await setArchived(db, {
+      documentId: archivedId,
+      viewer: { kind: "principal", principalId: owner.id },
+      archived: true,
+    });
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: archivedId, viewer: asWriter(), threadIds: [ta.threadId] }),
+    ).rejects.toThrow("document_locked");
+    expect(await runsOf()).toBe(runs);
   });
 
   it("an edit that finishes after approval is not applied: the locked reply names the branch; no merge, no reconcile", async () => {
@@ -1273,6 +1285,43 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(lockedEditReply("approved", "b")).toBe(
       "The document was approved while the agent worked, so its edit was not applied. It is on branch b.",
     );
+  });
+
+  it("an edit that finishes after the document moved on and was approved: no merge, every thread gets the locked reply", async () => {
+    const docId = await linkedDoc(PARAS);
+    const t1 = await thread(docId, "First", "Warmer");
+    const t2 = await thread(docId, "Second", "Shorter");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [t1.threadId, t2.threadId],
+    });
+    // v2 edits another paragraph: unlocked, the agent's edit would merge with it into v3.
+    await publishVersion(db, cipher, {
+      documentId: docId,
+      markdown: PARAS.replace("Third paragraph.", "Third, edited by a person."),
+      via: "editor",
+    });
+    await approve(docId);
+    const sha = await finish(
+      runId,
+      "succeeded",
+      repliesBlock([
+        { thread: t1.number, reply: "Warmer.", resolved: true },
+        { thread: t2.number, reply: "Shorter.", resolved: true },
+      ]),
+    );
+    files.set(`${sha}:${path}`, PARAS.replace("First paragraph.", "First, warmer."));
+    const runs = await runsOf();
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(2);
+    expect(await runsOf()).toBe(runs);
+    const threads = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
+    expect(threads).toHaveLength(2);
+    for (const v of threads) {
+      expect(v.status).toBe("open");
+      expect(v.comments.at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
+    }
   });
 
   it("an edit that finishes after archiving gets the archived reply", async () => {

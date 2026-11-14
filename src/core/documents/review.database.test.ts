@@ -545,6 +545,30 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(v.reviewers[0]).toMatchObject({ verdict: "changes_requested", versionNumber: 1, current: false });
   });
 
+  it("a document approved after publish's early check is refused inside the transaction", async () => {
+    // A cipher that approves while the agent's secret values are read (after the early check, before
+    // the transaction), so only the check inside the transaction can refuse the publish.
+    const id = await doc(true);
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    let approved = false;
+    const approvingCipher = {
+      ...cipher,
+      decrypt: async (v: string) => {
+        if (!approved) {
+          approved = true;
+          await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+        }
+        return v;
+      },
+    };
+    await expect(
+      publishVersion(db, approvingCipher, { documentId: id, markdown: "late", via: "mcp", expectedNumber: 1 }),
+    ).rejects.toThrow("document_locked");
+    expect(approved).toBe(true);
+    expect(await stateOf(id)).toBe("approved");
+    expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(1);
+  });
+
   it("an approval racing a publish: exactly one wins", async () => {
     const id = await doc();
     await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
