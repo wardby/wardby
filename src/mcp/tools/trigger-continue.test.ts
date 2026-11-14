@@ -5,6 +5,7 @@ import { buildMcpServer } from "../server.js";
 import { registerTriggerTool } from "./trigger.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants } from "../../core/grants.test-support.js";
+import { ContinuationRefusedError } from "../../core/dispatch.js";
 
 const dispatchRun = vi.hoisted(() => vi.fn());
 vi.mock("../../core/dispatch.js", async (importOriginal) => ({
@@ -96,5 +97,15 @@ describe("trigger_agent continuePriorRun", () => {
       expect(text(result)).toContain("prior run of agent");
     }
     expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("reports a refused continuation with its fixed reason code", async () => {
+    dispatchRun.mockRejectedValue(new ContinuationRefusedError("no_pushed_branch"));
+    const trigger = setup([coding()], [{ id: "prior", agentId: "a1" }]);
+    const result = await trigger({ agentId: "a1", continuePriorRun: "prior" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain(
+      "no_pushed_branch: Cannot continue a local-repository coding run that never pushed a branch.",
+    );
   });
 });

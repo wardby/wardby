@@ -28,7 +28,7 @@
  * task manager — a caller who guesses or is handed someone else's taskId
  * gets 404, not another principal's final text/cost.
  */
-import { dispatchRun } from "../../core/dispatch.js";
+import { ContinuationRefusedError, dispatchRun } from "../../core/dispatch.js";
 import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
 import {
@@ -294,6 +294,8 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       // requested value.
       const refused = (err: unknown): never => {
         if (err instanceof RepositoryChoiceRefusedError) throw new McpError(400, `${err.code}: ${err.message}`);
+        // Fixed text with its fixed reason code (see ContinuationRefusedError).
+        if (err instanceof ContinuationRefusedError) throw new McpError(400, `${err.reason}: ${err.message}`);
         // Both messages carry their code and never a caller-written value or a ref file's content.
         if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
           throw new McpError(400, err.message);

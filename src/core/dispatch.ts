@@ -6,6 +6,7 @@ import {
   CodingTaskInputSchema,
   normalizeGitRef,
   composeCodingTask,
+  publicCodingRunResult,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
@@ -409,12 +410,14 @@ interface CodingBranch {
   mergeOrder?: number | null;
 }
 
-export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
+export type ContinuationRefusal =
+  "unknown_run" | "other_repository" | "no_pull_request" | "no_pushed_branch" | "other_owner";
 
 const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   unknown_run: "Cannot continue an unknown coding run.",
   other_repository: "Cannot continue a coding run from a different repository.",
   no_pull_request: "Cannot continue a coding run that never opened a pull request.",
+  no_pushed_branch: "Cannot continue a local-repository coding run that never pushed a branch.",
   other_owner: "Cannot continue a coding run opened by a different owner's agent.",
 };
 
@@ -553,17 +556,39 @@ async function continuationRoot(
   const root = rootId
     ? await reader.codingRun.findUnique({
         where: { runId: rootId },
-        select: { runId: true, repository: true, baseRef: true, headRef: true },
+        select: { runId: true, repository: true, baseRef: true, headRef: true, result: true },
       })
     : null;
-  if (
-    !root ||
-    !sameRepository(root.repository, repository) ||
-    (await rootPullRequests(reader, root.runId)).length === 0
-  ) {
+  if (!root || !sameRepository(root.repository, repository)) throw new ContinuationRefusedError("no_pull_request");
+  // A local repository has no pull requests: its runs push their branch (wardby/run-<root id>) into
+  // the repository instead, and a follow-up continues on that branch exactly as a pull request
+  // continuation does on the pull request's head branch.
+  if (codeProviderOf(root.repository) === "local") {
+    if (!(await pushedRootBranch(reader, root))) throw new ContinuationRefusedError("no_pushed_branch");
+  } else if ((await rootPullRequests(reader, root.runId)).length === 0) {
     throw new ContinuationRefusedError("no_pull_request");
   }
   return { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
+}
+
+/**
+ * Whether the root's branch was pushed: the root's own result, or any continuation's, is
+ * branch_pushed on the root's head branch (a continuation pushes to the same branch).
+ */
+async function pushedRootBranch(
+  reader: Pick<DispatchTx, "codingRun">,
+  root: { runId: string; headRef: string; result: unknown },
+): Promise<boolean> {
+  const pushed = (value: unknown) => {
+    const result = publicCodingRunResult(value);
+    return result?.outcome === "branch_pushed" && result.headRef === root.headRef;
+  };
+  if (pushed(root.result)) return true;
+  const continuations = await reader.codingRun.findMany({
+    where: { rootCodingRunId: root.runId },
+    select: { result: true },
+  });
+  return continuations.some((continuation) => pushed(continuation.result));
 }
 
 /**

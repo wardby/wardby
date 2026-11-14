@@ -17,6 +17,7 @@ import {
 import type { AttributionIntent } from "./attribution.js";
 import {
   checkContinuation,
+  ContinuationRefusedError,
   dispatchRun,
   isSerializationConflict,
   isTransactionUnavailable,
@@ -1792,6 +1793,119 @@ describe("dispatchRun", () => {
           continuesCodingRunId: "root_run",
         }),
       ).rejects.toThrow(/never opened a pull request/);
+    });
+
+    describe("a local repository (no pull requests)", () => {
+      const LOCAL = "local:/srv/repos/app";
+      function localCodingRun(
+        runId: string,
+        outcome: "branch_pushed" | "no_changes",
+        overrides: Record<string, any> = {},
+      ) {
+        const headRef = overrides.headRef ?? `wardby/run-${runId}`;
+        return {
+          runId,
+          repository: LOCAL,
+          baseRef: "main",
+          headRef,
+          rootCodingRunId: null,
+          run: { agent: { ownerId: "owner_1" } },
+          result: {
+            schemaVersion: 1,
+            outcome,
+            repository: LOCAL,
+            baseRef: "main",
+            ...(outcome === "branch_pushed" ? { headRef, commitSha: "b".repeat(40) } : {}),
+            summary: "Done",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+          ...overrides,
+        };
+      }
+      const localAgent = () =>
+        codingAgent({
+          ownerId: "owner_1",
+          codingProfile: { ...codingAgent().codingProfile, repository: LOCAL },
+        });
+
+      it("continues a run that pushed its branch, on that same branch", async () => {
+        const agent = localAgent();
+        const state = fakeDb(agent, [localCodingRun("root_run", "branch_pushed")]);
+
+        const result = await dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        });
+
+        expect(state.codingRuns).toContainEqual(
+          expect.objectContaining({
+            runId: result?.run.id,
+            repository: LOCAL,
+            baseRef: "main",
+            headRef: "wardby/run-root_run",
+            rootCodingRunId: "root_run",
+          }),
+        );
+      });
+
+      it("continues through a continuation that pushed the root's branch to the root", async () => {
+        const agent = localAgent();
+        const state = fakeDb(agent, [
+          localCodingRun("root_run", "no_changes"),
+          localCodingRun("cont_1", "branch_pushed", { rootCodingRunId: "root_run", headRef: "wardby/run-root_run" }),
+        ]);
+
+        const result = await dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "cont_1",
+        });
+
+        expect(state.codingRuns).toContainEqual(
+          expect.objectContaining({
+            runId: result?.run.id,
+            headRef: "wardby/run-root_run",
+            rootCodingRunId: "root_run",
+          }),
+        );
+      });
+
+      it("refuses a run that never pushed a branch with no_pushed_branch", async () => {
+        const agent = localAgent();
+        const state = fakeDb(agent, [localCodingRun("root_run", "no_changes")]);
+
+        const refusal = dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        });
+        await expect(refusal).rejects.toBeInstanceOf(ContinuationRefusedError);
+        await expect(refusal).rejects.toMatchObject({
+          reason: "no_pushed_branch",
+          message: "Cannot continue a local-repository coding run that never pushed a branch.",
+        });
+      });
+
+      it("still refuses another owner's local run", async () => {
+        const agent = localAgent();
+        const state = fakeDb(agent, [
+          localCodingRun("root_run", "branch_pushed", { run: { agent: { ownerId: "owner_2" } } }),
+        ]);
+
+        await expect(
+          dispatchRun({
+            db: state.db,
+            executor: { async start() {}, async stop() {} },
+            agentId: agent.id,
+            continuesCodingRunId: "root_run",
+          }),
+        ).rejects.toMatchObject({ reason: "other_owner" });
+      });
     });
 
     it("continues a root run opened by the same owner's agent", async () => {
