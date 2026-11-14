@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -48,7 +48,7 @@ describe("substrate routes", () => {
           ? { ok: true, subject }
           : { ok: false, code: "invalid" },
       tokenForRun: substrateRunToken,
-      limits: { inputBytes: 1024, resultBytes: 1024, transcriptBytes: 1024, workspaceBytes: 64 },
+      limits: { resultBytes: 1024, transcriptBytes: 1024, workspaceBytes: 64 },
       pollWaitMs: 100,
       log: { info: (...args) => void logCalls.push(args) },
       ...overrides,
@@ -142,6 +142,35 @@ describe("substrate routes", () => {
     };
     await start();
     expect((await fetch(`${base}/channels`, agent({ method: "POST" }))).status).toBe(401);
+  });
+
+  it("refuses a stopped session with a future deadline", async () => {
+    overrides = {
+      ledger: { findSessionByCapabilityHash: async () => ({ ...sessionFor("run-1"), status: "cancelled" }) },
+    };
+    await start();
+    expect((await fetch(`${base}/channels`, agent({ method: "POST" }))).status).toBe(401);
+  });
+
+  it("requires Content-Length on uploads", async () => {
+    await start();
+    for (const [name, headers] of [
+      ["result", { "x-api-key": CAPABILITY }],
+      ["transcript", { "x-api-key": CAPABILITY }],
+      ["workspace", AUTH],
+    ] as const) {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(`${base}/${name}`, { method: "POST", headers }, (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        req.on("error", reject);
+        req.write("abc");
+        req.end();
+      });
+      expect(status).toBe(411);
+    }
+    expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
   });
 
   it("answers unknown paths and unknown runs with fixed codes", async () => {
@@ -261,6 +290,17 @@ describe("substrate routes", () => {
     const denied = await fetch(`${base}/channels`, { method: "POST", headers: { "x-api-key": CAPABILITY + "x" } });
     const deniedBody = await denied.text();
     await fetch(`${base}/workspace`, tool({ method: "POST", body: "w".repeat(200) }));
+    // A store error whose message holds a secret: only its kind is logged, nothing is echoed.
+    const failing = new Error(`boom ${CAPABILITY}`);
+    (failing as { code?: string }).code = "P2002";
+    overrides = { relay: { openChannel: async () => Promise.reject(failing) } as unknown as RelayStore };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await start();
+    const failed = await fetch(`${base}/channels`, agent({ method: "POST" }));
+    expect(failed.status).toBe(500);
+    expect(await failed.text()).not.toContain(CAPABILITY);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(JSON.stringify(logCalls)).toContain("P2002");
     const serialized = JSON.stringify(logCalls);
     expect(logCalls.length).toBeGreaterThan(0);
     for (const secret of [CAPABILITY, REGISTRY_TOKEN, "Bearer good", "good"]) {

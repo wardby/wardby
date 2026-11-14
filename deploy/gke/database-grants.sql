@@ -154,7 +154,7 @@ DO $$ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'SubstrateRelayChannel');
   END IF;
   IF to_regclass('public."SubstrateRelayEvent"') IS NOT NULL THEN
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'SubstrateRelayEvent');
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON public.%I TO wardby_proxy', 'SubstrateRelayEvent');
   END IF;
   IF to_regclass('public."SubstrateRun"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, UPDATE (%I, %I, %I, %I) ON public.%I TO wardby_proxy',

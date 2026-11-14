@@ -8,7 +8,7 @@
  * egress gateway); the tool actor with its Substrate actor JWT.
  *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
- * the route name, the status, byte counts and a duration; an error answer carries one fixed code.
+ * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -37,7 +37,7 @@ export interface SubstrateRouteOptions {
   verifyActor: (authorization: string | undefined, expectedSubject: string) => Promise<IdentityResult>;
   /** substrateRunToken */
   tokenForRun: (runId: string) => string;
-  limits: { inputBytes: number; resultBytes: number; transcriptBytes: number; workspaceBytes: number };
+  limits: { resultBytes: number; transcriptBytes: number; workspaceBytes: number };
   /** Long-poll wait (default 20 s). */
   pollWaitMs?: number;
   /** Time an authenticated upload has to arrive (default 10 min). */
@@ -142,6 +142,14 @@ function classify(error: unknown): RouteError {
   return new RouteError(500, "internal_error");
 }
 
+/** What kind of failure a 500 was: the Prisma error code when present, else the constructor name. Never the message. */
+function errorKindOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code)) return code;
+  const name = (error as { constructor?: { name?: unknown } } | null)?.constructor?.name;
+  return typeof name === "string" && /^[A-Za-z0-9_]{1,60}$/.test(name) ? name : "unknown";
+}
+
 function afterParam(url: URL): number {
   const raw = url.searchParams.get("after");
   if (raw === null) return 0;
@@ -186,6 +194,7 @@ export function createSubstrateRoutes(
   const uploadMs = options.uploadMs ?? SUBSTRATE_UPLOAD_MS;
   /** Runs whose tool setup this replica already deleted (saves a blob call on every later poll). */
   const setupDeleted = new Set<string>();
+  const SETUP_DELETED_MAX = 10_000;
 
   async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
     const key = request.headers["x-api-key"];
@@ -230,8 +239,8 @@ export function createSubstrateRoutes(
     clearBodyTimer: (() => void) | undefined,
   ): Promise<number> {
     const length = request.headers["content-length"];
-    if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > maxBytes))
-      throw new RouteError(413, "too_large");
+    if (length === undefined) throw new RouteError(411, "length_required");
+    if (!/^\d+$/.test(length) || Number(length) > maxBytes) throw new RouteError(413, "too_large");
     clearBodyTimer?.();
     const timer = setTimeout(() => request.destroy(), uploadMs);
     timer.unref();
@@ -255,6 +264,7 @@ export function createSubstrateRoutes(
     const token = found?.[1] ?? "unknown";
     const route = matched?.name ?? "unmatched";
     const counters = { bytes: 0 };
+    let errorKind: string | undefined;
     response.once("close", () => {
       log.info(
         {
@@ -264,6 +274,7 @@ export function createSubstrateRoutes(
           status: response.statusCode,
           bytes: counters.bytes,
           durationMs: Math.round(performance.now() - startedAt),
+          ...(errorKind ? { errorKind } : {}),
         },
         "coding proxy substrate route",
       );
@@ -315,6 +326,10 @@ export function createSubstrateRoutes(
           if (!setupDeleted.has(token)) {
             await blobs.delete(BLOB.toolSetup(token));
             setupDeleted.add(token);
+            if (setupDeleted.size > SETUP_DELETED_MAX) {
+              const oldest = setupDeleted.values().next().value;
+              if (oldest !== undefined) setupDeleted.delete(oldest);
+            }
           }
           const controller = new AbortController();
           response.once("close", () => controller.abort());
@@ -338,6 +353,7 @@ export function createSubstrateRoutes(
             contentType: "application/json",
           });
           await relay.dropRelay(token);
+          setupDeleted.delete(token);
           sendJson(response, 200, {});
           return;
         }
@@ -347,7 +363,9 @@ export function createSubstrateRoutes(
         if (!response.destroyed) response.destroy();
         return;
       }
-      sendError(request, response, classify(error));
+      const answer = classify(error);
+      if (answer.status === 500) errorKind = errorKindOf(error);
+      sendError(request, response, answer);
     }
   };
 }

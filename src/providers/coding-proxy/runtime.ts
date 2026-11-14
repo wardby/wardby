@@ -132,14 +132,14 @@ export interface SubstrateProxyConfig {
   issuer: string;
   jwksUrl: URL;
   blobStore: BlobStoreConfig;
-  limits: { inputBytes: number; resultBytes: number; transcriptBytes: number; workspaceBytes: number };
+  limits: { resultBytes: number; transcriptBytes: number; workspaceBytes: number };
 }
 
 /**
  * The experimental Substrate job launcher's proxy routes (`/substrate/...`). Off unless SUBSTRATE_ATESPACE is
  * set; then SUBSTRATE_ACTOR_JWT_ISSUER and a blob store (BLOB_STORE) are required, and the error names the
  * missing variable (never a value). SUBSTRATE_ACTOR_JWKS_URL overrides the default `<issuer>/openid/v1/jwks`.
- * SUBSTRATE_{INPUT,RESULT,TRANSCRIPT,WORKSPACE}_MAX_MB bound what a run may transfer.
+ * SUBSTRATE_{RESULT,TRANSCRIPT,WORKSPACE}_MAX_MB bound what a run may transfer.
  */
 export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxyConfig | undefined {
   const atespace = env.SUBSTRATE_ATESPACE?.trim();
@@ -160,7 +160,6 @@ export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxy
     jwksUrl,
     blobStore,
     limits: {
-      inputBytes: positiveInt(env.SUBSTRATE_INPUT_MAX_MB, 64) * MIB,
       resultBytes: positiveInt(env.SUBSTRATE_RESULT_MAX_MB, 16) * MIB,
       transcriptBytes: positiveInt(env.SUBSTRATE_TRANSCRIPT_MAX_MB, 64) * MIB,
       workspaceBytes: positiveInt(env.SUBSTRATE_WORKSPACE_MAX_MB, 1024) * MIB,
