@@ -16,12 +16,16 @@ export type IdentityResult =
 export function createActorIdentityVerifier(options: { issuer: string; jwks: Parameters<typeof jwtVerify>[1] }) {
   return async (authorization: string | undefined, expectedSubject: string): Promise<IdentityResult> => {
     if (authorization === undefined) return { ok: false, code: "missing" };
-    const match = /^Bearer ([\w-]+\.[\w-]+\.[\w-]+)$/.exec(authorization);
+    const match = /^bearer ([\w-]+\.[\w-]+\.[\w-]+)$/i.exec(authorization);
     if (!match) return { ok: false, code: "malformed" };
     try {
       const { payload } = await jwtVerify(match[1], options.jwks, {
         issuer: options.issuer,
         audience: ACTOR_JWT_AUDIENCE,
+        // Substrate's idp signs ES256 only; a token without exp is never accepted.
+        algorithms: ["ES256"],
+        requiredClaims: ["exp", "sub"],
+        clockTolerance: 5,
       });
       if (payload.sub !== expectedSubject) return { ok: false, code: "wrong_subject" };
       return { ok: true, subject: payload.sub };
