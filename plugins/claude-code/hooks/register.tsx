@@ -196,6 +196,10 @@ const flowCursor = atom(
 const FLOW_RECENT = 5;
 // The agents and their links change rarely: the Agents tab reads them again after this long, or on r.
 const LINKS_REFRESH_MS = 5 * 60_000;
+// A failed read of the Agents tab's data (a server still starting, a network blip) is tried again after
+// 2 s, then twice as long each time, up to LINKS_REFRESH_MS. The first LINKS_QUIET_FAILURES read as waiting.
+const LINKS_RETRY_MS = 2000;
+const LINKS_QUIET_FAILURES = 3;
 // An older server without list_agent_links costs two calls an agent to draw flows: only up to this many.
 const FALLBACK_MAX_AGENTS = 30;
 const FLOWS_NOTICE = "Drawing flows needs wardby 0.9.14 or later.";
@@ -2393,7 +2397,7 @@ export const register: Register = (on, options) => {
       try {
         const now = await $.clock.now();
         const held = await read($, links);
-        if (!force && held.at !== 0 && now - held.at < LINKS_REFRESH_MS) return;
+        if (!force && held.at !== 0 && now < (held.retryAt ?? held.at + LINKS_REFRESH_MS)) return;
         try {
           let fresh: LinksState;
           try {
@@ -2413,10 +2417,33 @@ export const register: Register = (on, options) => {
             : ["list_agent_links", "get_agent"];
           const named = tools.map((t) => `mcp__${server}__${t}`);
           // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools the tab uses.
-          const error = /auto mode/i.test(raw)
-            ? `auto mode refused the call. Allow ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]} in /permissions, then press r.`
-            : raw;
-          await update($, links, (old): LinksState => ({ ...old, at: now, error }));
+          if (/auto mode/i.test(raw)) {
+            // Asking again changes nothing until the person allows the tools.
+            const error = `auto mode refused the call. Allow ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]} in /permissions, then press r.`;
+            await update($, links, (old): LinksState => ({
+              ...old,
+              at: now,
+              error,
+              failures: undefined,
+              retryAt: undefined,
+            }));
+            return;
+          }
+          // A server that is still starting (a local one can take seconds) fails the first call: try again
+          // soon, backing off, rather than waiting LINKS_REFRESH_MS.
+          const failures = ((await read($, links)).failures ?? 0) + 1;
+          const delay = Math.min(LINKS_REFRESH_MS, LINKS_RETRY_MS * 2 ** (failures - 1));
+          await update($, links, (old): LinksState => ({
+            ...old,
+            at: now,
+            error: raw,
+            failures,
+            retryAt: now + delay,
+          }));
+          // Only while the pane is open (its poll timer runs): a closed pane reads nothing.
+          $.clock.after(delay, () => {
+            if (timer) void refreshLinks(false);
+          });
         }
       } finally {
         isLinking = false;
@@ -2813,11 +2840,16 @@ export const register: Register = (on, options) => {
       const text = f.text.trim().toLowerCase();
       const notices = (
         <>
-          {linksState.error && (
-            <Text color={FAILED_COLOR} wrap="wrap">
-              wardby: {linksState.error}
-            </Text>
-          )}
+          {linksState.error &&
+            ((linksState.failures ?? 0) > 0 && (linksState.failures ?? 0) <= LINKS_QUIET_FAILURES ? (
+              <Text dimColor wrap="wrap">
+                Waiting for the wardby server; trying again shortly ({linksState.error})
+              </Text>
+            ) : (
+              <Text color={FAILED_COLOR} wrap="wrap">
+                wardby: {linksState.error}
+              </Text>
+            ))}
           {linksState.notice && (
             <Box key="links-notice">
               <Text color={WARN_COLOR} wrap="wrap">

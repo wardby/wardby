@@ -185,7 +185,15 @@ export type AgentLinks = {
   hidden: { agents: number; edges: number };
 };
 /** The Agents tab's data: when it was read, what came back, an error, and a notice about an older server. */
-export type LinksState = { at: number; data: AgentLinks | null; error: string | null; notice: string | null };
+export type LinksState = {
+  at: number;
+  data: AgentLinks | null;
+  error: string | null;
+  notice: string | null;
+  /** Reads failed in a row (not an auto-mode refusal); the next is tried at retryAt. */
+  failures?: number;
+  retryAt?: number;
+};
 
 declare module "claude-code" {
   interface PluginState {

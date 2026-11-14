@@ -145,8 +145,11 @@ export function linksServer(
     agentError?: string;
     fail?: { tool: string; agentId: string; text: string };
     seen?: { tool: string; args: Record<string, unknown> }[];
+    /** Fail this many list_agent_links calls first, as a server still starting does. */
+    failLinks?: number;
   } = {},
 ) {
+  let linksFailures = opts.failLinks ?? 0;
   const data = opts.data ?? structuredClone(LINKS);
   const calls: string[] = [];
   on("mcp.call", (_, e) => {
@@ -158,6 +161,10 @@ export function linksServer(
     if (opts.fail && e.tool === opts.fail.tool && e.args.agentId === opts.fail.agentId)
       return { value: { content: [{ type: "text", text: opts.fail.text }], isError: true } };
     if (e.tool === "list_agent_links") {
+      if (linksFailures > 0) {
+        linksFailures--;
+        return { value: { content: [{ type: "text", text: "Connection closed" }], isError: true } };
+      }
       if (opts.hasTool === false)
         return { value: { content: [{ type: "text", text: "Tool list_agent_links not found" }], isError: true } };
       return reply(data);
@@ -1241,5 +1248,50 @@ test("the larger flow page escapes agent names and prompt lines", async ($, on) 
   expect(text).toContain("&lt;script&gt;");
   expect(text).not.toContain("<script>");
   expect(text).not.toContain("<b&");
+  await ui.unmount();
+});
+
+test("a server still starting: the Agents tab waits, tries again soon, then lists flows", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const calls = linksServer(on, { failLinks: 2 });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  let text = await texts(ui);
+  expect(text).toContain("Waiting for the wardby server");
+  expect(text).not.toContain("wardby: list_agent_links");
+  // Tried again after 2 s, then 4 s.
+  await clock.advance(2_000);
+  await clock.settle();
+  expect(calls.filter((t) => t === "list_agent_links")).toHaveLength(2);
+  await clock.advance(4_000);
+  await clock.settle();
+  expect(calls.filter((t) => t === "list_agent_links")).toHaveLength(3);
+  text = await texts(ui);
+  expect(text).toContain("your-org/mobile");
+  expect(text).not.toContain("Waiting for the wardby server");
+  await ui.unmount();
+});
+
+test("a server that keeps failing shows the error after a few tries, and backs off", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const calls = linksServer(on, { failLinks: 100 });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  for (const wait of [2_000, 4_000, 8_000]) {
+    await clock.advance(wait);
+    await clock.settle();
+  }
+  expect(calls.filter((t) => t === "list_agent_links")).toHaveLength(4);
+  expect(await texts(ui)).toContain("wardby: list_agent_links: Connection closed");
+  // The next try waits 16 s, not less.
+  await clock.advance(15_000);
+  await clock.settle();
+  expect(calls.filter((t) => t === "list_agent_links")).toHaveLength(4);
   await ui.unmount();
 });
