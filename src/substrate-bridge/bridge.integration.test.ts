@@ -397,6 +397,65 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
   });
 
+  it("uploads the transcript before the result or exit report that ends the run", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    const posts: string[] = [];
+    proxyDelay = (request) => {
+      const match = /^POST \/substrate\/runs\/[^/]+\/(transcript|result|exit|diagnostics)$/.exec(request);
+      if (match) posts.push(match[1]);
+      return 0;
+    };
+    const worker = (withResult: boolean) => () => ({
+      exited: (async () => {
+        await mkdir(join(dir, "out"), { recursive: true });
+        await writeFile(join(dir, "out", "session.jsonl"), '{"type":"user"}\n');
+        if (withResult) await writeFile(join(dir, "out", "result.json"), "{}");
+        return withResult ? 0 : 2;
+      })(),
+    });
+    agent = await runAgent(await workerOptions({ launchWorker: worker(false) }));
+    await agent.uploaded;
+    // No result file: the exit report ends the run, and nothing is sent after it.
+    expect(posts.filter((p) => p !== "diagnostics")).toEqual(["transcript", "exit"]);
+    expect(posts.at(-1)).toBe("exit");
+    expect(await tool.collected).toBe("ok");
+    await agent.close();
+    await tool.close();
+    agent = tool = undefined;
+
+    // With a result: transcript, then result.
+    await rm(join(dir, "out"), { recursive: true, force: true });
+    const staged = await stage();
+    tool = await startTool(staged.workspace, staged.toolSetup);
+    posts.length = 0;
+    agent = await runAgent(await workerOptions({ launchWorker: worker(true) }));
+    await agent.uploaded;
+    expect(posts).toEqual(["transcript", "result"]);
+  });
+
+  it("does not let a stuck transcript upload hold back the exit report", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    proxyDelay = (request) => (/^POST \/substrate\/runs\/[^/]+\/transcript$/.test(request) ? 60_000 : 0);
+    agent = await runAgent(
+      await workerOptions({
+        transcriptDeadlineMs: 200,
+        launchWorker: () => ({
+          exited: (async () => {
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "session.jsonl"), '{"type":"user"}\n');
+            return 2;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 2 });
+    expect(logs.join("\n")).toContain('"what":"transcript"');
+    expect(await tool.collected).toBe("ok");
+  });
+
   it("reports the worker's own diagnostic line with its exit code, and nothing else of its output", async () => {
     const { workspace, toolSetup } = await stage();
     tool = await startTool(workspace, toolSetup);

@@ -3,7 +3,7 @@
  * claude-coding-worker, which expects the tool runner's socket at /run/wardby/tool/runner.sock; the
  * tool actor is another actor it cannot reach. This bridge listens on that socket and relays the
  * worker's newline-delimited JSON-RPC lines through the coding proxy's /substrate/ routes, fetches
- * the run's input, and uploads the result and the session transcript when the worker exits.
+ * the run's input, and uploads the session transcript and then the result when the worker exits.
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * Nothing secret is logged (see Logger in common.ts).
@@ -70,6 +70,8 @@ export interface AgentOptions {
   policy?: RetryPolicy;
   /** How long a line (either direction) may keep failing before its connection is dropped. */
   giveUpMs?: number;
+  /** How long the transcript upload may take before the bridge gives up on it and reports the result (default 2 min). */
+  transcriptDeadlineMs?: number;
 }
 
 export interface AgentHandle {
@@ -77,7 +79,7 @@ export interface AgentHandle {
   readyPort: number;
   /** Resolves with the worker's exit code. */
   workerExited: Promise<number>;
-  /** Resolves once the result and transcript uploads have finished (or been given up on). */
+  /** Resolves once the transcript and result uploads have finished (or been given up on). */
   uploaded: Promise<void>;
   close(): Promise<void>;
 }
@@ -102,6 +104,8 @@ const spawnWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
 
 /** How long, after the worker exits, the bridge waits for its output streams to end. */
 const OUTPUT_DRAIN_MS = 2_000;
+/** The transcript is best effort: it never holds the result back for longer than this. */
+export const TRANSCRIPT_DEADLINE_MS = 2 * 60_000;
 
 export async function run(options: AgentOptions): Promise<AgentHandle> {
   // The operator-diagnostics tail: the worker's stderr and this bridge's events. The worker holds no
@@ -318,20 +322,32 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     ...(worker.stderr ? [diagnostics.tail.follow(worker.stderr)] : []),
   ]);
 
-  // 4. Result and transcript, once the worker has exited.
+  // 4. Transcript, then result, once the worker has exited. The result (or the exit report) ends the
+  // run: the control plane may read the transcript and remove the run's blobs as soon as it lands,
+  // so nothing is uploaded after it. The transcript is best effort and bounded, and never blocks it.
+  const transcriptDeadlineMs = options.transcriptDeadlineMs ?? TRANSCRIPT_DEADLINE_MS;
   const uploaded = worker.exited.then(async (code) => {
     log("substrate_bridge_worker_exited", { runToken: token, code });
+    await uploadFile(
+      `${base}/transcript`,
+      headers,
+      transcriptPath,
+      policy,
+      log,
+      "transcript",
+      AbortSignal.any([shutdown.signal, AbortSignal.timeout(transcriptDeadlineMs)]),
+    );
     const outcome = await uploadFile(`${base}/result`, headers, resultPath, policy, log, "result", shutdown.signal);
     // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
     // with the worker's own diagnostic code when it printed one.
     if (outcome !== "ok") {
       await waitAtMost(drained, OUTPUT_DRAIN_MS);
       const diagnostic = findWorkerDiagnostic(output.lines());
-      await postCapped(`${base}/exit`, headers, { code, ...diagnostic }, policy, log, "exit", shutdown.signal);
-      // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log.
+      // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log, before the
+      // exit report that ends the run.
       await diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
+      await postCapped(`${base}/exit`, headers, { code, ...diagnostic }, policy, log, "exit", shutdown.signal);
     }
-    await uploadFile(`${base}/transcript`, headers, transcriptPath, policy, log, "transcript", shutdown.signal);
   });
 
   return {
