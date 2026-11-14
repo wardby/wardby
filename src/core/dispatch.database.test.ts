@@ -475,6 +475,138 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await runsOf(agentId)).toEqual([]);
   });
 
+  describe("remote links and git history (#536)", () => {
+    afterEach(async () => {
+      await db.agent.updateMany({ where: { id: { startsWith: PREFIX } }, data: { scheduleEnabled: false } });
+    });
+    const NOW = new Date("2026-09-05T12:16:00.000Z");
+
+    async function remoteAgent(history: { gitHistoryDepth: number | null; gitHistoryFull: boolean }) {
+      const made = await codingAgent();
+      await db.codingAgentProfile.update({ where: { agentId: made.agentId }, data: history });
+      await db.agentRepository.update({ where: { id: made.upstream.id }, data: { asRemote: true } });
+      return made;
+    }
+
+    it("refuses a remote link while history is off, before any run exists", async () => {
+      const { agentId } = await remoteAgent({ gitHistoryDepth: null, gitHistoryFull: false });
+      const { executor, spies } = fakeExecutor();
+      await expect(dispatchRun({ db, executor, agentId, codingTask: "sync" })).rejects.toThrow(
+        /^repository_remote_needs_history:/,
+      );
+      expect(await runsOf(agentId)).toEqual([]);
+      expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+    });
+
+    it("records one refused run for a scheduled dispatch, and advances the schedule", async () => {
+      const { agentId } = await remoteAgent({ gitHistoryDepth: null, gitHistoryFull: false });
+      await db.agent.update({
+        where: { id: agentId },
+        data: { schedule: "*/15 * * * *", timezone: "UTC", scheduleEnabled: true },
+      });
+      const { executor } = fakeExecutor();
+      const runId = await claimDueRun(db, executor, agentId, NOW);
+      const run = await db.run.findUnique({ where: { id: runId! } });
+      expect(run).toMatchObject({ status: "refused", trigger: "scheduled" });
+      expect(run?.error).toMatch(/^repository_remote_needs_history: /);
+      expect(await runsOf(agentId)).toHaveLength(1);
+      expect(executor.start).not.toHaveBeenCalled();
+    });
+
+    it("refuses a remote link on another host than the default repository (repository_remote_invalid)", async () => {
+      const { agentId } = await remoteAgent({ gitHistoryDepth: 10, gitHistoryFull: false });
+      await db.agentRepository.create({
+        data: {
+          agentId,
+          name: "localup",
+          provider: "local",
+          repository: "local:/srv/up",
+          access: "read",
+          ref: "main",
+          asRemote: true,
+          inDefaultSet: true,
+          authorizedVia: "local_root",
+          createdAt: new Date(3_000),
+        },
+      });
+      await expect(dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "sync" })).rejects.toThrow(
+        /^repository_remote_invalid:/,
+      );
+      expect(await runsOf(agentId)).toEqual([]);
+    });
+
+    it.each([[{ gitHistoryDepth: 50, gitHistoryFull: false }], [{ gitHistoryDepth: null, gitHistoryFull: true }]])(
+      "copies the history setting %j to the run and asRemote to the repository row",
+      async (history) => {
+        const { agentId } = await remoteAgent(history);
+        const result = await dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "sync" });
+        const run = await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+        expect({ gitHistoryDepth: run.gitHistoryDepth, gitHistoryFull: run.gitHistoryFull }).toEqual(history);
+        expect((await rowsOf(result!.run.id)).map((r) => [r.name, r.asRemote])).toEqual([
+          ["base", false],
+          ["upstream", true],
+        ]);
+      },
+    );
+
+    it("leaves history off on the run and rows as before when the setting is off and no link is remote", async () => {
+      const { agentId } = await codingAgent();
+      const result = await dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "sync" });
+      const run = await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+      expect(run).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: false });
+      expect((await rowsOf(result!.run.id)).every((r) => r.asRemote === false)).toBe(true);
+    });
+
+    it("keeps asRemote on a continuation's copied rows", async () => {
+      const { agentId } = await remoteAgent({ gitHistoryDepth: 50, gitHistoryFull: false });
+      const { runId } = await rootWithTools(agentId, "opened");
+      await db.codingRunRepository.updateMany({ where: { runId, name: "upstream" }, data: { asRemote: true } });
+      const continuation = await dispatchRun({
+        db,
+        executor: fakeExecutor().executor,
+        agentId,
+        codingTask: "again",
+        continuesCodingRunId: runId,
+      });
+      expect((await rowsOf(continuation!.run.id)).map((r) => [r.name, r.asRemote])).toEqual([
+        ["base", false],
+        ["upstream", true],
+        ["tools", false],
+      ]);
+    });
+  });
+
+  describe("a continuation's git history comes from its root run (#536, #537)", () => {
+    it.each([
+      ["history switched off", { gitHistoryDepth: null, gitHistoryFull: false }],
+      ["history switched to full", { gitHistoryDepth: null, gitHistoryFull: true }],
+    ])("keeps the root's depth when the profile has %s", async (_label, switched) => {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({
+        where: { agentId },
+        data: { gitHistoryDepth: 50, gitHistoryFull: false },
+      });
+      const { runId } = await rootWithTools(agentId, "opened");
+      await db.codingRun.update({ where: { runId }, data: { gitHistoryDepth: 50, gitHistoryFull: false } });
+      await db.codingRunRepository.updateMany({ where: { runId, name: "upstream" }, data: { asRemote: true } });
+      await db.codingAgentProfile.update({ where: { agentId }, data: switched });
+      const continuation = await dispatchRun({
+        db,
+        executor: fakeExecutor().executor,
+        agentId,
+        codingTask: "again",
+        continuesCodingRunId: runId,
+      });
+      const run = await db.codingRun.findUniqueOrThrow({ where: { runId: continuation!.run.id } });
+      expect(run).toMatchObject({ gitHistoryDepth: 50, gitHistoryFull: false });
+      expect((await rowsOf(continuation!.run.id)).map((r) => [r.name, r.asRemote])).toEqual([
+        ["base", false],
+        ["upstream", true],
+        ["tools", false],
+      ]);
+    });
+  });
+
   describe("a scheduled dispatch (no caller waiting for the error)", () => {
     const NOW = new Date("2026-09-05T12:16:00.000Z");
     const WINDOW = new Date("2026-09-05T12:15:00.000Z");

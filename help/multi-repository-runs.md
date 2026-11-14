@@ -16,7 +16,10 @@ own folder, `/repos/<name>`:
 - a **writable** extra: a write link without triggers. Changes are collected,
   pushed to their own branch and published as their own pull request.
 - a **read-only** extra: a read link. The run gets one commit's files and no
-  git history, and nothing in the folder is collected or pushed.
+  git history, and nothing in the folder is collected or pushed. With
+  `as: "remote"` the link is not a folder at all: its commit is fetched into
+  the default repository's git history as a remote of that name (needs
+  `codingProfile.gitHistory`); see [Git history in coding runs](git-history.md).
 
 ## Set it up
 
@@ -66,6 +69,13 @@ own folder, `/repos/<name>`:
   `driver-v30` or later before its runs get extras; an older driver rejects the
   run input (`worker_input_failed`). Runs with only the default repository are
   not affected.
+- With `codingProfile.gitHistory` on, every writable repository (`/workspace`
+  and writable `/repos/<name>`) gets its own `.git`, and the task line for a
+  writable extra reads `writable, with git history`. Remote links need history
+  and the same host as the default repository:
+  [`repository_remote_invalid`](errors/repository-remote-invalid.md),
+  [`repository_remote_needs_history`](errors/repository-remote-needs-history.md).
+  History needs `driver-v31` or later on a Codex `workerImageRef`.
 - Being in a set starts no review, mention follow-up, fix round or mark-ready
   in a repository; link the lead and reviewer there with the triggers you want.
 
@@ -123,7 +133,7 @@ copies) and `vcs_workspace_entry_limit` (all the run's repositories together
 hold more than 100,000 files and folders; drop a repository from the run or
 shrink it).
 
-Related: [Fork sync with a read-only upstream](fork-sync.md), [Agent
+Related: [Git history in coding runs](git-history.md), [Fork sync](fork-sync.md), [Agent
 recipes](agent-recipes.md), [Local repositories](local-repositories.md) and
 [Related pull requests](related-pull-requests.md). Operator guide:
 [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md#several-repositories-in-one-run).

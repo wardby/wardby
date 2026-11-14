@@ -12,6 +12,7 @@ import { publicCodingRunResult } from "./protocol.js";
 export const RUN_REPOSITORY_SELECT = {
   name: true,
   access: true,
+  asRemote: true,
   repository: true,
   requestedRef: true,
   resolvedSha: true,
@@ -25,6 +26,8 @@ export type RunRepositoryRow = Prisma.CodingRunRepositoryGetPayload<{ select: ty
 export interface PublicRunRepository {
   name: string;
   access: "read" | "write";
+  /** Fetched as a git remote in the run's history instead of mounted as a folder (#536). */
+  asRemote: boolean;
   repository: string;
   requestedRef: string | null;
   resolvedSha: string | null;
@@ -38,6 +41,7 @@ export function publicRunRepository(r: RunRepositoryRow): PublicRunRepository {
   return {
     name: r.name,
     access: r.access === "write" ? "write" : "read",
+    asRemote: r.asRemote,
     repository: r.repository,
     requestedRef: r.requestedRef ?? null,
     resolvedSha: r.resolvedSha ?? null,

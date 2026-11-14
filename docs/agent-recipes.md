@@ -593,11 +593,54 @@ fails with category `continuation_closed` and pushes nothing — see
   the same time can briefly both see the same remaining run-tree budget and
   both be admitted against it.
 
-### Fork sync: one coding agent, three repositories
+### Fork sync: one coding agent, git history and a remote
 
-A scheduled agent can keep a fork up to date with its upstream by merging in
-what changed upstream since the last sync, with no git history in the run. It
-needs Wardby 0.9.13 or later. The run holds three copies of code:
+A scheduled agent can keep a fork up to date with its upstream. It needs Wardby
+0.9.13 or later. The recommended setup uses
+[git history](coding-agent-setup.md#git-history-in-a-run), so the sync is a real
+`git merge` and its merge commit moves the merge base forward: the next run only
+merges what is new.
+
+1. **The agent.** A coding agent with `codingProfile.repository` set to
+   `your-org/your-fork`, a `defaultTask` (needed to schedule it) and
+   `gitHistory: { "depth": "full" }`. Codex and Claude Code both have git in
+   their standard images; a custom `workerImageRef` image needs `git` and, for
+   Codex, `driver-v31` or later.
+2. **The upstream as a remote**, read-only and in the default set:
+
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "upstream",
+     "ref": "main",
+     "inDefaultSet": true,
+     "as": "remote"
+   }
+   ```
+
+   The commit appears as the remote ref `upstream/main`.
+
+3. **The task** (`defaultTask`), in your own words, says: run
+   `git merge upstream/main`, resolve every conflict by reading both sides
+   (never leaving conflict markers), run the fork's tests, and commit. No marker
+   file is needed.
+4. **Schedule it** with `set_schedule`, for example `0 6 * * 1` with your
+   `timezone`. A scheduled run is top-level, and its pull request appears in
+   `run_completed.pullRequests`, so a run hook can post it to a channel.
+
+The run opens one pull request in the fork whose commits are the agent's merge
+commit and fix-ups, with upstream's commits as parents of the merge. Commit
+authors become `Wardby`. Review the first runs by hand. See also the
+[fork-sync help article](../help/fork-sync.md).
+
+#### Without git history: three folders
+
+If git is not available in your agent's image, or you prefer not to turn history
+on, use two read-only folders and a marker file instead.
+
+The run holds three copies of code, with no git history:
 
 | Folder            | What it is                                         | Access    |
 | ----------------- | -------------------------------------------------- | --------- |
@@ -659,21 +702,20 @@ the last-synced version and the new upstream version, then moves the marker.
      `upstream`, see no changes, and the fork would silently stop syncing;
    - run the fork's tests.
 
-4. **The merge command depends on the coding provider.** On Codex, use
+4. **The merge command.** Use
    `git merge-file <fork file> <base file> <upstream file>`, which writes the
    merged result into the fork file and exits non-zero while conflicts remain.
-   Claude Code's tool runner has no git, so use `diff3 -m -E <fork file>
-   <base file> <upstream file>` and redirect its output into the fork file;
-   it exits 1 when conflict markers were written. State the one for your
-   provider in the task.
+   Both Codex and Claude Code's tool runner have git. Alternatively,
+   `diff3 -m -E <fork file> <base file> <upstream file>` prints the merge
+   (redirect it into the fork file) and exits 1 when conflict markers were
+   written. State the one you want in the task.
 5. **Schedule it** with `set_schedule`, for example `0 6 * * 1` with your
    `timezone`. A scheduled run is top-level, and its pull request appears in
    `run_completed.pullRequests`, so a run hook can post it to a channel.
 
 The run opens one pull request in the fork. The read-only folders are not
 collected or pushed. Keep the budget generous enough for a large upstream
-change, and review the first runs by hand. See also the
-[fork-sync help article](../help/fork-sync.md) and
+change, and review the first runs by hand. See also
 [Several repositories in one run](coding-agent-setup.md#several-repositories-in-one-run).
 
 ### Together with Recipe A

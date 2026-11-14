@@ -156,6 +156,12 @@ function fakeDb(
         return data;
       },
       findUnique: async ({ where }: any) => codingRuns.find((row) => row.runId === where.runId) ?? null,
+      // resolveCodingBranch: a continuation root's git history (column defaults for rows seeded without it).
+      findUniqueOrThrow: async ({ where }: any) => {
+        const row = codingRuns.find((r) => r.runId === where.runId);
+        if (!row) throw new Error(`fakeDb: no coding run "${where.runId}"`);
+        return { gitHistoryDepth: null, gitHistoryFull: false, ...row };
+      },
       // newestDefaultPullRequest: a root's continuations (newest first; insertion order here).
       findMany: async ({ where }: any) =>
         codingRuns.filter((row) => row.rootCodingRunId === where.rootCodingRunId).reverse(),

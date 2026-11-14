@@ -124,6 +124,11 @@ If a run fails with `worker_tool_runner_unreachable`, the image was usually not
 built `FROM` this release's tool runner, or its `USER` or `ENTRYPOINT` was
 changed. Rebuild the image whenever Wardby is upgraded.
 
+If the agent will use git history (`codingProfile.gitHistory`, Wardby 0.9.13 or later; see
+the `git-history` article), the tool runner must have `git`: the release's
+tool runner image already does, so keep it. Without git the run fails with
+`worker_git_unavailable`.
+
 To undo it, call `update_agent` with `codingProfile: {workerImageRef: null}`.
 
 Related: [Build a custom worker image](build-worker-image.md),

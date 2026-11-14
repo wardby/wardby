@@ -6,8 +6,12 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 # The tool runner every Claude Code run uses; the two targets below add only their toolchain.
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS base
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
+# git: a run with git history (#536) commits with it, and the worker's result bundle uses it
+# (result-bundle.mjs, below). Without recommends, so no ssh client comes with it. The Claude agent
+# container itself stays git-free (claude-coding-worker/Dockerfile).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade perl-base \
+    && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
@@ -33,6 +37,11 @@ RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
 # npm and environment its commands use. main.mjs imports it as ../coding-worker/dependency-cache.mjs.
 COPY src/coding-worker/dependency-cache.mjs /opt/wardby/coding-worker/dependency-cache.mjs
 RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function" || typeof m.sealUploadWindow !== "function") process.exit(1)'
+# The result bundle (src/coding-worker/result-bundle.mjs, the same file the Codex driver ships): the
+# git check and result bundle tools of a run with git history. main.mjs imports it as
+# ../coding-worker/result-bundle.mjs.
+COPY src/coding-worker/result-bundle.mjs /opt/wardby/coding-worker/result-bundle.mjs
+RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/result-bundle.mjs"); if (typeof m.createResultBundle !== "function" || !(await m.gitAvailable())) process.exit(1)'
 # `wardby-packages` (src/coding-worker/wardby-packages.mjs): lists the package registry's refusals for
 # the run, which pip and uv don't print. command.mjs imports registry-refusals.mjs as
 # ../coding-worker/registry-refusals.mjs to add them to a failed command's output.
@@ -57,7 +66,7 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/sudo \
     && test ! -e /usr/bin/gcc \
     && test ! -e /usr/bin/make \
-    && test ! -e /usr/bin/git
+    && git --version
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby
 ENTRYPOINT ["node", "/opt/wardby/claude-tool-runner/main.mjs"]
@@ -84,7 +93,7 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/sudo \
     && test ! -e /usr/bin/gcc \
     && test ! -e /usr/bin/make \
-    && test ! -e /usr/bin/git \
+    && git --version \
     && test ! -e /usr/bin/pip \
     && test ! -e /usr/bin/pip3 \
     && python --version \

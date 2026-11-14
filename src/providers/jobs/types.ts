@@ -173,13 +173,35 @@ export interface JobLauncher {
   remove: (handle: JobHandle) => Promise<void>;
 }
 
+/** Options for collecting a history run's workspace (#536). */
+export interface MaterializeWorkspaceOptions {
+  /**
+   * Set for a history run: the collector takes `<workspace>/.git/wardby-result.bundle` (a regular file,
+   * never a symlink, of at most `maxBundleBytes`, itself capped at the run's disk) to `bundleDestination`,
+   * a trusted path outside the workspace, and drops the root `.git` before validating. A nested `.git`
+   * elsewhere is still refused. Unset: a `.git` anywhere is refused, as before.
+   */
+  gitHistory?: { bundleDestination: string; maxBundleBytes: number };
+}
+
+/** What a collection produced besides the workspace itself. */
+export interface MaterializedWorkspace {
+  /** Whether a result bundle was written to `gitHistory.bundleDestination`; always false without history. */
+  bundle: boolean;
+}
+
 /** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
 export interface WorkspaceJobLauncher extends JobLauncher {
   /**
    * Copies the job's /workspace to `destination` (the run's default workspace), or with `name` that
    * writable extra repository's /repos/<name> to its own workspace. A read repository is never collected.
    */
-  materializeWorkspace: (handle: JobHandle, destination: string, name?: string) => Promise<void>;
+  materializeWorkspace: (
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options?: MaterializeWorkspaceOptions,
+  ) => Promise<MaterializedWorkspace>;
   /**
    * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes and Docker, for
    * Codex and Claude Code. Absent means no services at all.

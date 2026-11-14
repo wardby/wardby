@@ -73,6 +73,7 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
       refFromFile: r.refFromFile,
       linkId: r.linkId,
       baseRef: r.baseRef,
+      asRemote: r.asRemote,
     }));
     // A set or ref refusal (an executor without extra-repository support included) refuses the run,
     // as dispatch does; its message never carries a ref file's content.

@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ import {
   type JobResult,
   type JobSpec,
   type JobStatus,
+  type MaterializeWorkspaceOptions,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
 import type {
@@ -53,6 +54,7 @@ import {
   CAPACITY_RETRY_BACKOFF_MS,
   CATEGORY_BY_PREFIX,
   ContainerExecutor,
+  failureCategory,
   type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
@@ -427,10 +429,36 @@ class FakeJobs implements WorkspaceJobLauncher {
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
   materializedNames: Array<string | undefined> = [];
-  async materializeWorkspace(_handle: JobHandle, _destination: string, name?: string): Promise<void> {
+  /** Every materializeWorkspace call's arguments after the handle, as passed (#536). */
+  materializeCalls: unknown[][] = [];
+  /** Repository names (undefined: the default) whose collection writes a result bundle (#536). */
+  bundlesFor = new Set<string | undefined>();
+  /** Whether each history collection found its bundleDestination already gone, by name. */
+  destinationFreeAtCollect = new Map<string | undefined, boolean>();
+  async materializeWorkspace(
+    _handle: JobHandle,
+    ...args: [destination: string, name?: string, options?: MaterializeWorkspaceOptions]
+  ): Promise<{ bundle: boolean }> {
+    const [, name, options] = args;
     this.materializations += 1;
     this.materializedNames.push(name);
+    this.materializeCalls.push(args);
     this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
+    const destination = options?.gitHistory?.bundleDestination;
+    if (destination === undefined) return { bundle: false };
+    // "wx" fails if the destination exists: the check and the write are one operation.
+    if (!this.bundlesFor.has(name)) {
+      this.destinationFreeAtCollect.set(name, !existsSync(destination));
+      return { bundle: false };
+    }
+    try {
+      await writeFile(destination, "a bundle", { flag: "wx" });
+      this.destinationFreeAtCollect.set(name, true);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      this.destinationFreeAtCollect.set(name, false);
+    }
+    return { bundle: true };
   }
 }
 
@@ -516,6 +544,7 @@ class FakeVcs implements VcsProvider {
         baseCommit: "b".repeat(40),
         workspacePath: join(this.root, input.runId, "repos", input.slot.name, "workspace"),
         gitMetadataPath: join(this.root, input.runId, "repos", input.slot.name, "git"),
+        ...(input.gitHistory ? { historyBase: "b".repeat(40), remoteTips: [] } : {}),
       };
       await mkdir(slot.workspacePath, { recursive: true });
       this.slots.set(input.slot.name, slot);
@@ -670,6 +699,9 @@ class FakeVcs implements VcsProvider {
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
       ...(input.continuation && this.targetMerge ? { targetMerge: structuredClone(this.targetMerge) } : {}),
+      ...(input.gitHistory
+        ? { historyBase: "a".repeat(40), remoteTips: (input.remotes ?? []).map((remote) => remote.resolvedSha) }
+        : {}),
     };
   }
 }
@@ -3151,6 +3183,7 @@ describe("ContainerExecutor", () => {
       const created = await harness();
       created.jobs.materializeWorkspace = async () => {
         created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 
@@ -3660,6 +3693,7 @@ describe("ContainerExecutor", () => {
       created.jobs.result.resultArtifact = stoppedArtifact;
       created.jobs.materializeWorkspace = async () => {
         created.store.run.status = "cancelled";
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 
@@ -5173,6 +5207,7 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       id: `row-${overrides.name}`,
       position: 1,
       access: "read",
+      asRemote: false,
       accessKnown: true,
       provider: "github",
       repository: `openai/${overrides.name}`,
@@ -5717,6 +5752,272 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       expect(taskOf(text)).toBe(
         `${created.store.run.task}\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
       );
+    });
+  });
+
+  describe("git history at prepare (#536)", () => {
+    const SHA_C = "c".repeat(40);
+    async function launchedWith(overrides: Partial<ContainerRunSnapshot>) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, input: input! };
+    }
+
+    it("fetches remote rows as remotes: no folder, no copy, no mount, and their tips are the excluded commits", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryDepth: 20,
+        repositories: [
+          readRow("upstream", { position: 1, asRemote: true, repository: "openai/upstream", resolvedSha: SHA_C }),
+          writeRow("tools", { position: 2 }),
+        ],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.copyInputs).toEqual([]);
+      expect(created.events.some((event) => event === "copy:upstream")).toBe(false);
+      const [main, tools] = created.vcs.prepareInputs;
+      expect(main.gitHistory).toEqual({ depth: 20 });
+      expect(main.remotes).toEqual([
+        { name: "upstream", repository: "openai/upstream", resolvedSha: SHA_C, label: "main" },
+      ]);
+      // A writable extra gets history but never remotes.
+      expect(tools.slot).toEqual({ name: "tools" });
+      expect(tools.gitHistory).toEqual({ depth: 20 });
+      expect(tools).not.toHaveProperty("remotes");
+      expect(created.jobs.lastSpec!.repositories).toEqual([
+        { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      ]);
+      expect(input.gitHistory).toEqual({
+        repositories: [
+          { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] },
+          { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: [] },
+        ],
+      });
+      expect((input.repositories as { name: string }[]).map((r) => r.name)).toEqual(["tools"]);
+      expect(input.task).toContain(`remotes: upstream/main at ${SHA_C}`);
+      expect(input.task).not.toContain("/repos/upstream");
+    });
+
+    it("gives a run with only remote rows no repositories at all, and full history as depth full", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryFull: true,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: SHA_C })],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.prepareInputs[0].gitHistory).toEqual({ depth: "full" });
+      expect(created.jobs.lastSpec).not.toHaveProperty("repositories");
+      expect(input).not.toHaveProperty("repositories");
+      expect(input.gitHistory).toEqual({
+        repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] }],
+      });
+    });
+
+    it("labels a remote pinned for a SHA or a fromFile ref, else by its requested ref", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [
+          readRow("bysha", { position: 1, asRemote: true, requestedRef: SHA_C, resolvedSha: SHA_C }),
+          readRow("byfile", { position: 2, asRemote: true, requestedRef: "v2.0", refFromFile: ".upstream-ref" }),
+          readRow("bytag", { position: 3, asRemote: true, requestedRef: "v2.0" }),
+        ],
+      });
+      expect(created.vcs.prepareInputs[0].remotes?.map((remote) => [remote.name, remote.label])).toEqual([
+        ["bysha", "pinned"],
+        ["byfile", "pinned"],
+        ["bytag", "v2.0"],
+      ]);
+    });
+
+    it("refuses a remote row dispatch never resolved, before anything is cloned", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: null })],
+      });
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.prepareInputs).toEqual([]);
+    });
+
+    it("passes no history fields without history", async () => {
+      const { created, input } = await launchedWith({ repositories: [writeRow("tools")] });
+      expect(
+        created.vcs.prepareInputs.every((prepared) => !("gitHistory" in prepared) && !("remotes" in prepared)),
+      ).toBe(true);
+      expect(input).not.toHaveProperty("gitHistory");
+    });
+  });
+
+  describe("git history at collect (#536)", () => {
+    async function finishedWith(overrides: Partial<ContainerRunSnapshot>, bundlesFor: (string | undefined)[] = []) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      for (const name of bundlesFor) created.jobs.bundlesFor.add(name);
+      const seenAtFinalize = new Map<string | undefined, boolean>();
+      const launched = { workspacePath: "" };
+      created.jobs.onLaunch = () => {
+        launched.workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      created.vcs.onFinalize = (slot) => {
+        const call = created.vcs.finalizeCalls.at(-1);
+        if (call?.details?.resultBundle) seenAtFinalize.set(slot, existsSync(call.details.resultBundle));
+      };
+      await created.executor.start("run-1");
+      return { created, seenAtFinalize, workspacePath: launched.workspacePath };
+    }
+    const bundlesDir = (workspacePath: string) => join(workspacePath, "..", "result-bundles");
+
+    it("collects the default repository's bundle outside the workspace and passes it to finalize, then removes it", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith({ gitHistoryDepth: 20 }, [undefined]);
+      expect(created.store.run.status).toBe("succeeded");
+      const destination = join(bundlesDir(workspacePath), "workspace.bundle");
+      expect(created.jobs.materializeCalls).toEqual([
+        [
+          workspacePath,
+          undefined,
+          { gitHistory: { bundleDestination: destination, maxBundleBytes: 256 * 1024 * 1024 } },
+        ],
+      ]);
+      expect(destination.startsWith(`${workspacePath}/`)).toBe(false);
+      expect(created.vcs.finalizeCalls[0].details?.resultBundle).toBe(destination);
+      expect(seenAtFinalize.get(undefined)).toBe(true);
+      expect(existsSync(destination)).toBe(false);
+      expect((await stat(bundlesDir(workspacePath))).mode & 0o777).toBe(0o700);
+    });
+
+    it("removes a stale file at the destination before collecting, and passes no bundle the collector did not write", async () => {
+      const created = await harness({ gitHistoryDepth: 20 }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.onLaunch = () => {
+        // A file left from an earlier attempt: never taken for this collection's bundle.
+        const dir = join(created.vcs.workspace!.workspacePath, "..", "result-bundles");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "workspace.bundle"), "stale");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.destinationFreeAtCollect.get(undefined)).toBe(true);
+      expect(created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+    });
+
+    it("collects each writable extra's bundle to its own path, and removes every bundle after publishing", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 }), writeRow("docs", { position: 2 })] },
+        [undefined, "tools"],
+      );
+      expect(created.store.run.status).toBe("succeeded");
+      const dir = bundlesDir(workspacePath);
+      const byName = new Map(created.jobs.materializeCalls.map((call) => [call[1], call[2]]));
+      expect(byName.get(undefined)).toEqual({
+        gitHistory: { bundleDestination: join(dir, "workspace.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("tools")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "tools.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("docs")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "docs.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      const details = new Map(created.vcs.finalizeCalls.map((call) => [call.slot, call.details]));
+      expect(details.get(undefined)?.resultBundle).toBe(join(dir, "workspace.bundle"));
+      expect(details.get("tools")?.resultBundle).toBe(join(dir, "tools.bundle"));
+      expect(details.get("docs")).not.toHaveProperty("resultBundle");
+      expect(seenAtFinalize.get("tools")).toBe(true);
+      for (const name of ["workspace", "tools", "docs"]) expect(existsSync(join(dir, `${name}.bundle`))).toBe(false);
+    });
+
+    it("removes the bundles when publishing fails", async () => {
+      const created = await harness(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      created.jobs.bundlesFor.add(undefined);
+      created.jobs.bundlesFor.add("tools");
+      created.vcs.slotErrors.set("tools", new Error("vcs_result_history_invalid"));
+      let workspacePath = "";
+      created.jobs.onLaunch = () => {
+        workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.find((call) => call.slot === "tools")?.details?.resultBundle).toBeDefined();
+      const dir = bundlesDir(workspacePath);
+      expect(existsSync(join(dir, "workspace.bundle"))).toBe(false);
+      expect(existsSync(join(dir, "tools.bundle"))).toBe(false);
+    });
+
+    it("without history, collects exactly as before: no options, no bundle, no bundle folder", async () => {
+      const single = await finishedWith({});
+      expect(single.created.jobs.materializeCalls).toEqual([[single.workspacePath]]);
+      expect(single.created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+      expect(existsSync(bundlesDir(single.workspacePath))).toBe(false);
+      const several = await finishedWith({ repositories: [writeRow("tools", { position: 1 })] });
+      expect(several.created.jobs.materializeCalls).toEqual([
+        [several.workspacePath],
+        [several.created.vcs.slotPaths.get("tools"), "tools"],
+      ]);
+      expect(several.created.vcs.finalizeCalls.every((call) => !("resultBundle" in (call.details ?? {})))).toBe(true);
+      expect(existsSync(bundlesDir(several.workspacePath))).toBe(false);
+    });
+  });
+
+  describe("git history in input.json (#536)", () => {
+    const history = {
+      repositories: [
+        { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] as string[] },
+        { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: ["c".repeat(40)] },
+      ],
+    };
+    const wording = { depth: 20, remotes: [{ ref: "upstream/pinned", commit: "c".repeat(40) }] };
+    type WriteInput = (
+      run: ContainerRunSnapshot,
+      deadlineAt: Date,
+      workspaces: unknown,
+      history?: unknown,
+    ) => Promise<string>;
+    async function written(withHistory: boolean) {
+      const created = await harness(
+        { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      const workspaces = {
+        main: { workspacePath: join(created.root, "ws"), baseCommit: "a".repeat(40) },
+        writable: new Map([["tools", { baseCommit: "b".repeat(40) }]]),
+        readOnly: [],
+      };
+      const write = (created.executor as unknown as { writeInput: WriteInput }).writeInput.bind(created.executor);
+      const path = await write(
+        created.store.run,
+        new Date("2026-11-13T00:00:00Z"),
+        workspaces,
+        withHistory ? { input: history, wording } : undefined,
+      );
+      return JSON.parse(readFileSync(path, "utf8")) as { task: string; gitHistory?: unknown };
+    }
+
+    it("writes the key and the history wording when given history", async () => {
+      const parsed = await written(true);
+      expect(parsed.gitHistory).toEqual(history);
+      expect(parsed.task).toContain(
+        `Base commit: ${"a".repeat(40)} (the workspace has git history to depth 20; remotes: upstream/pinned at ${"c".repeat(40)}; fetching and pushing are not possible \u2014 commit your work).`,
+      );
+      expect(parsed.task).toContain(
+        `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable, with git history.`,
+      );
+      expect(parsed.task).toContain(`Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`);
+      expect(parsed.task).not.toContain("no git metadata");
+    });
+
+    it("writes no key and today's wording without history", async () => {
+      const parsed = await written(false);
+      expect("gitHistory" in parsed).toBe(false);
+      expect(parsed.task).toContain("the workspace has no git metadata");
+      expect(parsed.task).toContain(`openai/tools at ${"b".repeat(40)}, writable.`);
     });
   });
 
@@ -6300,6 +6601,28 @@ describe("CATEGORY_BY_PREFIX", () => {
   it("files every category under a coding_failure_<category> code a parent run can be told", () => {
     for (const [, category] of CATEGORY_BY_PREFIX) {
       expect(CHILD_RUN_FAILURE_CODES.has(`coding_failure_${category}`), category).toBe(true);
+    }
+  });
+
+  it("files git history's codes (#536): the vcs_ ones as workspace, a git-less image as preflight", () => {
+    const expected: Record<string, string> = {
+      vcs_result_bundle_invalid: "workspace",
+      vcs_result_bundle_too_large: "workspace",
+      vcs_result_history_invalid: "workspace",
+      vcs_result_commit_limit: "workspace",
+      vcs_result_commit_unsafe: "workspace",
+      vcs_result_path_excluded: "workspace",
+      "vcs_remote_fetch_failed:upstream": "workspace",
+      vcs_history_shortened: "workspace",
+      vcs_git_history_invalid: "workspace",
+      vcs_worker_git_invalid: "workspace",
+      kubernetes_result_bundle_read_failed: "workspace",
+      job_worker_git_unavailable: "preflight",
+      worker_git_unavailable: "preflight",
+      job_result_bundle_limit_invalid: "preflight",
+    };
+    for (const [code, category] of Object.entries(expected)) {
+      expect(failureCategory(new Error(code)), code).toBe(category);
     }
   });
 });

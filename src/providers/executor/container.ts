@@ -8,10 +8,10 @@ import {
   type PackageAuditReport,
 } from "../../coding/registry/audit-mode.js";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
-import { withBaseCommit, withExtraRepositories } from "../../coding/base-commit.js";
+import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
@@ -84,6 +84,8 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
+  COMMIT_SHA,
+  GitHistoryInputSchema,
   MAX_CODING_INPUT_BYTES,
   RESERVED_REPOSITORY_NAME,
   isLocalRepository,
@@ -96,6 +98,7 @@ import {
   type CodingRunResult,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  type GitHistoryInput,
   type PullRequestNote,
 } from "../../coding/protocol.js";
 import { parseStoredEntry } from "../llm/catalog-types.js";
@@ -126,9 +129,11 @@ import type {
   ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
+  GitHistorySetting,
   PreparedReadOnlyCopy,
   PreparedWorkspace,
   ReadOnlyCopyInput,
+  RemoteLinkInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
@@ -269,6 +274,10 @@ interface RepositorySlot {
   extra?: RunRepositorySnapshot;
   workspace?: PreparedWorkspace;
   error?: unknown;
+  /** A history run's result bundle (#536): where collectWritable had it collected, removed after publishing. */
+  bundleDestination?: string;
+  /** Set when the collector wrote a bundle there; passed to finalizeChanges. */
+  resultBundle?: string;
 }
 
 /** What finalizeChanges did for one repository of a run with several. */
@@ -460,11 +469,15 @@ export interface RunRepositorySnapshot {
   position: number;
   name: string;
   access: "read" | "write";
+  /** Fetched as a git remote in the run's history instead of mounted as a folder (CodingRunRepository.asRemote, #536). */
+  asRemote: boolean;
   /** False when the stored access is neither "read" nor "write": such a row is refused, never treated as read. */
   accessKnown: boolean;
   provider: string;
   repository: string;
   requestedRef: string | null;
+  /** The link's refFromFile when the ref came from a file (a remote row is then filed as "pinned"); absent = none. */
+  refFromFile?: string | null;
   resolvedSha: string | null;
   baseRef: string | null;
   headRef: string | null;
@@ -477,6 +490,17 @@ export interface RunRepositorySnapshot {
   pullRequestNumber: number | null;
   mergeOrder: number | null;
   result: unknown;
+}
+
+/**
+ * What writeInput needs to put git history into a run's input (#536): the `gitHistory` input key as it
+ * is written, and the facts the task text states (depth or full, the remote refs and their commits).
+ * Both come from the prepared workspaces. Left out, the input and task are exactly what a run without
+ * history gets.
+ */
+export interface GitHistoryForInput {
+  input: GitHistoryInput;
+  wording: GitHistoryWording;
 }
 
 /** Every workspace a run prepared: the default repository's, each writable extra's by name, and the read-only copies. */
@@ -500,7 +524,7 @@ function jobRepositories(
   rows: readonly RunRepositorySnapshot[],
   workspaces: RunWorkspaces | null,
 ): JobRepositoryMount[] {
-  return rows.map((row) => {
+  return folderRows(rows).map((row) => {
     const prepared =
       row.access === "read"
         ? workspaces?.readOnly.find((copy) => copy.name === row.name)
@@ -508,6 +532,97 @@ function jobRepositories(
     if (!prepared) throw new Error("coding_workspace_lost");
     return { name: row.name, access: row.access, hostPath: prepared.workspacePath };
   });
+}
+
+/** The rows that are folders under /repos/: every row but the remote ones (#536), which are never mounted or prepared. */
+function folderRows(rows: readonly RunRepositorySnapshot[]): RunRepositorySnapshot[] {
+  return rows.filter((row) => !row.asRemote);
+}
+
+/** A run's git history setting (#536), fixed at dispatch: full overrides depth; neither = off. */
+function gitHistoryOf(
+  run: Pick<ContainerRunSnapshot, "gitHistoryDepth" | "gitHistoryFull">,
+): GitHistorySetting | undefined {
+  if (run.gitHistoryFull) return { depth: "full" };
+  return typeof run.gitHistoryDepth === "number" ? { depth: run.gitHistoryDepth } : undefined;
+}
+
+/**
+ * The label a remote row's commit is filed under (refs/remotes/<name>/<label>): the requested
+ * branch or tag name, or "pinned" for a commit SHA or a ref read from a file. The VCS files a label
+ * that is not a valid ref component under "pinned" too.
+ */
+function remoteLinkLabel(row: RunRepositorySnapshot): string {
+  if (row.refFromFile || !row.requestedRef || COMMIT_SHA.test(row.requestedRef)) return "pinned";
+  return row.requestedRef;
+}
+
+/**
+ * The default repository's remote links (#536), from the run's remote rows. `strict` (a run being
+ * prepared): a row dispatch never resolved, or that is not a read row, refuses the run. Otherwise
+ * (cleanup) such a row is left out.
+ */
+function remoteLinksOf(run: ContainerRunSnapshot, strict: boolean): RemoteLinkInput[] {
+  const links: RemoteLinkInput[] = [];
+  for (const row of run.repositories) {
+    if (!row.asRemote) continue;
+    if (!row.accessKnown || row.access !== "read" || !row.resolvedSha) {
+      if (strict) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+      continue;
+    }
+    links.push({
+      name: row.name,
+      repository: row.repository,
+      resolvedSha: row.resolvedSha,
+      label: remoteLinkLabel(row),
+    });
+  }
+  return links;
+}
+
+/** The history keys of a VcsPrepareInput, written only when set (a run without history gets neither). */
+function historyPrepareFields(
+  run: ContainerRunSnapshot,
+  options: { remotes: boolean; strict: boolean },
+): Pick<VcsPrepareInput, "gitHistory" | "remotes"> {
+  const gitHistory = gitHistoryOf(run);
+  const remotes = options.remotes ? remoteLinksOf(run, options.strict) : [];
+  return { ...(gitHistory ? { gitHistory } : {}), ...(remotes.length > 0 ? { remotes } : {}) };
+}
+
+/** The commit a workspace's worker starts at: a history run's history base (M0 after a committed merge), else its base. */
+function startCommit(workspace: PreparedWorkspace): string {
+  return workspace.historyBase ?? workspace.baseCommit;
+}
+
+/**
+ * What a history run's input says about git (#536), from the prepared workspaces only: for the
+ * default repository and each writable extra with history (in the run's order), its start commit and
+ * the commits its result must not include (the default repository's remote tips). Undefined without
+ * history, so the input and task stay what they were.
+ */
+function gitHistoryForInput(run: ContainerRunSnapshot, workspaces: RunWorkspaces): GitHistoryForInput | undefined {
+  const main = workspaces.main;
+  if (!main.gitHistory) return undefined;
+  const repositories: GitHistoryInput["repositories"] = [
+    { path: "/workspace", baseCommit: startCommit(main), excludeCommits: [...(main.remoteTips ?? [])] },
+  ];
+  for (const row of folderRows(run.repositories)) {
+    const extra = row.access === "write" ? workspaces.writable.get(row.name) : undefined;
+    if (extra?.gitHistory) {
+      repositories.push({ path: `/repos/${row.name}`, baseCommit: startCommit(extra), excludeCommits: [] });
+    }
+  }
+  return {
+    input: GitHistoryInputSchema.parse({ repositories }),
+    wording: {
+      depth: main.gitHistory.depth,
+      remotes: (main.remotes ?? []).map((remote) => ({
+        ref: `${remote.name}/${remote.label}`,
+        commit: remote.resolvedSha,
+      })),
+    },
+  };
 }
 
 /** How many extra repositories are prepared at once. */
@@ -610,6 +725,10 @@ export interface ContainerRunSnapshot {
   dependencyCache?: boolean;
   /** Session resume, fixed at dispatch (CodingRun.sessionResume); absent on older snapshots = false. */
   sessionResume?: boolean;
+  /** Git history depth, fixed at dispatch (CodingRun.gitHistoryDepth); null with gitHistoryFull false = history off. */
+  gitHistoryDepth?: number | null;
+  /** Full git history, fixed at dispatch (CodingRun.gitHistoryFull); absent on older snapshots = false. */
+  gitHistoryFull?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -856,6 +975,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       claudeBareMode: row.codingRun.claudeBareMode,
       dependencyCache: row.codingRun.dependencyCache,
       sessionResume: row.codingRun.sessionResume,
+      gitHistoryDepth: row.codingRun.gitHistoryDepth,
+      gitHistoryFull: row.codingRun.gitHistoryFull,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -908,9 +1029,11 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         name: r.name,
         access: r.access === "write" ? "write" : "read",
         accessKnown: r.access === "read" || r.access === "write",
+        asRemote: r.asRemote,
         provider: r.provider,
         repository: r.repository,
         requestedRef: r.requestedRef,
+        refFromFile: r.refFromFile,
         resolvedSha: r.resolvedSha,
         baseRef: r.baseRef,
         headRef: r.headRef,
@@ -1509,6 +1632,11 @@ export interface ContainerExecutorOptions {
    * vcs_workspace_entry_limit). Test hook; defaults to countWorkspaceEntries.
    */
   countEntries?: (paths: string[]) => Promise<void>;
+  /**
+   * CODING_MAX_RESULT_BUNDLE_MB in bytes (loadCodingResultBundleMaxBytes): the largest result bundle a
+   * history run's collector takes (#536); each launcher caps it again at the run's disk. Default 256 MiB.
+   */
+  resultBundleMaxBytes?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
@@ -1766,7 +1894,8 @@ export class ContainerExecutor implements Executor {
       // A slow clone (large repository, cold host) outlives HEARTBEAT_TIMEOUT_MS just as a launch can.
       const toPrepare = run;
       // A launched run's job already has its read-only copies; only its writable extras are recovered.
-      const pending = run.repositories.filter((extra) => !(handle && extra.access === "read"));
+      // Remote rows (#536) are never folders: preflight passes them to the default repository instead.
+      const pending = folderRows(run.repositories).filter((extra) => !(handle && extra.access === "read"));
       workspace = await this.whileHeartbeating(runId, async () => {
         // Every repository is authorized, and every extra row checked, before anything is cloned.
         await this.authorizeRepository(toPrepare, { inFlight: Boolean(handle) });
@@ -1834,7 +1963,7 @@ export class ContainerExecutor implements Executor {
         if (mcpToken) this.options.capabilities.setMcpToken(runId, mcpToken);
         const [inputRun, inputWorkspaces] = [run, workspaces ?? { main: workspace, writable: new Map(), readOnly: [] }];
         const inputArtifact = await this.whileHeartbeating(runId, () =>
-          this.writeInput(inputRun, deadlineAt, inputWorkspaces),
+          this.writeInput(inputRun, deadlineAt, inputWorkspaces, gitHistoryForInput(inputRun, inputWorkspaces)),
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
@@ -2048,6 +2177,8 @@ export class ContainerExecutor implements Executor {
   ): { kind: "read"; input: ReadOnlyCopyInput } | { kind: "write"; input: VcsPrepareInput } {
     assertRowWellFormed(run, extra);
     if (!extra.resolvedSha) throw new PreflightError(CODING_REPOSITORY_UNRESOLVED_ERROR);
+    // A remote row (#536) is fetched into the default repository, never prepared as a folder.
+    if (extra.asRemote) throw new PreflightError("repository_remote_invalid");
     if (extra.access === "read") {
       return {
         kind: "read",
@@ -2070,6 +2201,8 @@ export class ContainerExecutor implements Executor {
         slot: { name: extra.name },
         continuation: extra.continuesBranch && root ? { rootRunId: root } : undefined,
         ...(root && !extra.continuesBranch ? { branchRunId: root } : {}),
+        // A writable extra gets the run's history too, but never remotes (#536).
+        ...historyPrepareFields(run, { remotes: false, strict: true }),
       },
     };
   }
@@ -2286,6 +2419,8 @@ export class ContainerExecutor implements Executor {
         protectedPaths: profile.protectedPaths,
         collectExclude: [...normalizeCollectExclusions(run.collectExclude).paths],
         continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+        // Git history (#536), with the run's remote rows fetched into the default repository.
+        ...historyPrepareFields(run, { remotes: true, strict: true }),
       };
     } catch (error) {
       throw new PreflightError(safeError(error), { cause: error });
@@ -2562,7 +2697,62 @@ export class ContainerExecutor implements Executor {
     const preparedInput = this.preflight(collectedFor, { launched: true });
     const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
     if (!workspace) throw new Error("coding_workspace_lost");
-    await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+    const collected = await this.materialize(handle, workspace);
+    try {
+      return await this.finalizeCollected(run, collectedFor, output, summary, workspace, collected, options);
+    } finally {
+      await removeResultBundle(collected.bundleDestination);
+    }
+  }
+
+  /**
+   * Copies one writable repository out of the finished job into its workspace. A history run's result
+   * bundle (#536) is collected too, to a fresh path outside every workspace (resultBundlePath), with any
+   * stale file there removed first; without history the call is exactly as before. The caller removes
+   * the bundle once it is finalized, whatever happened.
+   */
+  private async materialize(
+    handle: JobHandle,
+    workspace: PreparedWorkspace,
+  ): Promise<{ bundleDestination?: string; resultBundle?: string }> {
+    const name = workspace.slot?.name;
+    if (!workspace.gitHistory) {
+      if (name === undefined) await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+      else await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath, name);
+      return {};
+    }
+    const bundleDestination = resultBundlePath(workspace);
+    await mkdir(dirname(bundleDestination), { recursive: true, mode: 0o700 });
+    await removeResultBundle(bundleDestination);
+    try {
+      const collected = await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath, name, {
+        gitHistory: {
+          bundleDestination,
+          maxBundleBytes: this.options.resultBundleMaxBytes ?? DEFAULT_RESULT_BUNDLE_MAX_BYTES,
+        },
+      });
+      return { bundleDestination, ...(collected?.bundle ? { resultBundle: bundleDestination } : {}) };
+    } catch (error) {
+      await removeResultBundle(bundleDestination);
+      throw error;
+    }
+  }
+
+  /** pushChanges once the job's workspace (and a history run's bundle) is collected. */
+  private async finalizeCollected(
+    run: ContainerRunSnapshot,
+    collectedFor: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    summary: string,
+    workspace: PreparedWorkspace,
+    collected: { resultBundle?: string },
+    options: { keepDescription?: boolean },
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    workspace: PreparedWorkspace;
+    finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
+    descriptionState: DescriptionState;
+  }> {
     await normalizeCollectedLockfiles(collectedFor.provider, workspace.workspacePath);
     const current = await this.requireCurrent(run.runId);
     // One more (usually cached) check right before anything is pushed: access
@@ -2584,6 +2774,7 @@ export class ContainerExecutor implements Executor {
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
         : {}),
+      ...(collected.resultBundle ? { resultBundle: collected.resultBundle } : {}),
     });
     return { current, workspace, finalized, descriptionState };
   }
@@ -2695,21 +2886,25 @@ export class ContainerExecutor implements Executor {
     sessionId: string | null | undefined,
   ): Promise<{ outcome: "succeeded" | "failed"; current: ContainerRunSnapshot; main?: FinalizeResult }> {
     const slots = await this.repositorySlots(current, held);
-    await this.collectWritable(handle, current, slots);
     const done: RepositoryPublish[] = [];
     let latest = current;
-    for (const slot of slots) {
-      if (slot.error !== undefined || !slot.workspace) continue;
-      try {
-        const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, done, {
-          summary: (text) => text,
-        });
-        latest = publish.current;
-        done.push(publish);
-      } catch (error) {
-        if (isNoLongerActive(error)) throw error;
-        slot.error = error;
+    try {
+      await this.collectWritable(handle, current, slots);
+      for (const slot of slots) {
+        if (slot.error !== undefined || !slot.workspace) continue;
+        try {
+          const publish = await this.publishRepository(current, output, { ...slot, workspace: slot.workspace }, done, {
+            summary: (text) => text,
+          });
+          latest = publish.current;
+          done.push(publish);
+        } catch (error) {
+          if (isNoLongerActive(error)) throw error;
+          slot.error = error;
+        }
       }
+    } finally {
+      await removeResultBundles(slots);
     }
     const failed = slots.filter((slot) => slot.error !== undefined);
     const pushed = done.flatMap((publish) => (publish.finalized.outcome === "no_changes" ? [] : [publish.finalized]));
@@ -2772,11 +2967,12 @@ export class ContainerExecutor implements Executor {
     extras: ExtraPublishRecord[];
     pushed: Exclude<FinalizeResult, { outcome: "no_changes" }>[];
   }> {
-    let slots: RepositorySlot[];
+    let slots: RepositorySlot[] = [];
     try {
       slots = await this.repositorySlots(current, held);
       await this.collectWritable(handle, current, slots);
     } catch (error) {
+      await removeResultBundles(slots);
       if (isNoLongerActive(error)) throw error;
       containerLog.warn(
         { runId: current.runId, reason: describeFailure(error) },
@@ -2784,6 +2980,28 @@ export class ContainerExecutor implements Executor {
       );
       return { current, extras: [], pushed: [] };
     }
+    try {
+      return await this.keepCollected(current, output, slots);
+    } finally {
+      await removeResultBundles(slots);
+    }
+  }
+
+  /** keepStoppedChangesAll once every writable repository (and each history run's bundle) is collected. */
+  private async keepCollected(
+    current: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    slots: RepositorySlot[],
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    main?: {
+      finalized: Exclude<FinalizeResult, { outcome: "no_changes" }>;
+      result: CodingRunResult;
+      record: CodingRunRecord;
+    };
+    extras: ExtraPublishRecord[];
+    pushed: Exclude<FinalizeResult, { outcome: "no_changes" }>[];
+  }> {
     const kept: RepositoryPublish[] = [];
     for (const slot of slots) {
       const reason = (error: unknown) => ({
@@ -2874,7 +3092,9 @@ export class ContainerExecutor implements Executor {
     for (const slot of slots) {
       if (slot.error !== undefined || !slot.workspace) continue;
       try {
-        await this.options.jobs.materializeWorkspace(handle, slot.workspace.workspacePath, slot.extra?.name);
+        const bundle = await this.materialize(handle, slot.workspace);
+        slot.bundleDestination = bundle.bundleDestination;
+        slot.resultBundle = bundle.resultBundle;
         await normalizeCollectedLockfiles(run.provider, slot.workspace.workspacePath);
         collected.push(slot.workspace.workspacePath);
       } catch (error) {
@@ -2947,6 +3167,7 @@ export class ContainerExecutor implements Executor {
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
         : {}),
+      ...(slot.resultBundle ? { resultBundle: slot.resultBundle } : {}),
     });
     return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
   }
@@ -3784,7 +4005,7 @@ export class ContainerExecutor implements Executor {
       labels: {},
       collectExclude: normalizeCollectExclusions(run.collectExclude),
       ...(services.length > 0 ? { services } : {}),
-      ...(run.repositories.length > 0 && !options.capacityProbe
+      ...(folderRows(run.repositories).length > 0 && !options.capacityProbe
         ? { repositories: jobRepositories(run.repositories, workspaces) }
         : {}),
     };
@@ -3796,7 +4017,12 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspaces: RunWorkspaces): Promise<string> {
+  private async writeInput(
+    run: ContainerRunSnapshot,
+    deadlineAt: Date,
+    workspaces: RunWorkspaces,
+    history?: GitHistoryForInput,
+  ): Promise<string> {
     const workspace = workspaces.main;
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
@@ -3809,13 +4035,16 @@ export class ContainerExecutor implements Executor {
     const services = parseStoredServices(run.services);
     // Each extra at the commit it was prepared at: the same values go into input.json's repositories
     // and, in full, into the task text (the worker's own note shortens them).
-    const extras = run.repositories.map((r) => ({
+    // Remote rows (#536) are not folders: the history wording names them instead.
+    const folders = folderRows(run.repositories);
+    const extras = folders.map((r) => ({
       name: r.name,
       repository: r.repository,
       access: r.access,
-      commit: r.access === "read" ? r.resolvedSha! : workspaces.writable.get(r.name)!.baseCommit,
+      commit: r.access === "read" ? r.resolvedSha! : startCommit(workspaces.writable.get(r.name)!),
+      ...(history?.input.repositories.some((h) => h.path === `/repos/${r.name}`) ? { history: true } : {}),
     }));
-    const withBase = withBaseCommit(run.task, workspace.baseCommit);
+    const withBase = withBaseCommit(run.task, startCommit(workspace), history?.wording);
     const withCommit = withExtraRepositories(withBase, extras);
     if (extras.length > 0 && withCommit === withBase) {
       containerLog.warn(
@@ -3889,8 +4118,10 @@ export class ContainerExecutor implements Executor {
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
         ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
+        // Only on a run with git history: every other run's input stays exactly what older workers expect.
+        ...(history ? { gitHistory: history.input } : {}),
         // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.
-        ...(run.repositories.length > 0
+        ...(folders.length > 0
           ? {
               repositories: extras.map((r) => ({
                 name: r.name,
@@ -4016,6 +4247,8 @@ export class ContainerExecutor implements Executor {
       protectedPaths: run.protectedPaths,
       collectExclude,
       continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+      // A history workspace is recovered only as one (its root .git is allowed then).
+      ...historyPrepareFields(run, { remotes: true, strict: false }),
     };
   }
 
@@ -4259,6 +4492,39 @@ export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
 /** Low-power mode: the native gateway serving a run's MCP tools did not wake; nothing launched. */
 export const MCP_GATEWAY_UNAVAILABLE_CATEGORY = "mcp_gateway_unavailable";
 
+/** CODING_MAX_RESULT_BUNDLE_MB's default, in bytes, when the executor is given no limit. */
+const DEFAULT_RESULT_BUNDLE_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Where a history run's result bundle (#536) for one repository is collected:
+ * `<run root>/result-bundles/<name>.bundle`, beside the workspaces and outside every one of them (the
+ * default repository is RESERVED_REPOSITORY_NAME, which no extra can be named). The run root is the
+ * workspace's base: `<run root>/workspace`, or `<run root>/repos/<name>/workspace` for a slot.
+ */
+function resultBundlePath(workspace: PreparedWorkspace): string {
+  const base = dirname(workspace.workspacePath);
+  const runRoot = workspace.slot ? dirname(dirname(base)) : base;
+  if (
+    basename(workspace.workspacePath) !== "workspace" ||
+    (workspace.slot && (basename(base) !== workspace.slot.name || basename(dirname(base)) !== "repos"))
+  ) {
+    throw new Error("coding_workspace_path_invalid");
+  }
+  return join(runRoot, "result-bundles", `${workspace.slot?.name ?? RESERVED_REPOSITORY_NAME}.bundle`);
+}
+
+/** Removes a collected result bundle; never throws (the run root's cleanup removes what is left). */
+async function removeResultBundle(path: string | undefined): Promise<void> {
+  if (path === undefined) return;
+  await rm(path, { force: true }).catch((error: unknown) => {
+    containerLog.warn({ reason: describeFailure(error) }, "could not remove a collected result bundle");
+  });
+}
+
+async function removeResultBundles(slots: readonly RepositorySlot[]): Promise<void> {
+  for (const slot of slots) await removeResultBundle(slot.bundleDestination);
+}
+
 /**
  * Error-code prefixes that name their category outright, checked before the
  * substring heuristics below. Those heuristics filed every `github_*` error
@@ -4277,6 +4543,14 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   // Claude Code's tool runner failed to start or never became ready: the same category on both launchers.
   ["docker_tool_runner_", "job"],
   ["kubernetes_tool_runner_", "job"],
+  // Git history (#536): a worker image (or Claude tool runner) without git is the image's
+  // configuration, like a missing worker image; the worker's code arrives as job_<code>.
+  ["job_worker_git_unavailable", "preflight"],
+  ["worker_git_unavailable", "preflight"],
+  // An invalid result-bundle limit (CODING_MAX_RESULT_BUNDLE_MB, refused at start-up first): configuration.
+  ["job_result_bundle_limit_invalid", "preflight"],
+  // The Kubernetes collector could not read a history run's result bundle: collecting the workspace failed.
+  ["kubernetes_result_bundle_read_failed", "workspace"],
   // Checked first: the host could not be asked (after one retry), not a lost permission.
   ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],
@@ -4296,6 +4570,9 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   ["vcs_github_not_configured", "preflight"],
   // The same for any other host: a repository whose provider this server has not registered.
   ["vcs_host_provider_not_configured", "preflight"],
+  // Every other vcs_ code is the workspace's: #536's vcs_result_* (vcs_result_path_excluded among
+  // them), vcs_remote_fetch_failed, vcs_history_shortened, vcs_git_history_invalid and
+  // vcs_worker_git_invalid included.
   ["vcs_", "workspace"],
   // The agent's MCP tool pins could not be read at launch: nothing was launched.
   [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
@@ -4321,7 +4598,7 @@ function causeChainStartsWith(error: unknown, prefix: string): boolean {
   return false;
 }
 
-function failureCategory(error: unknown): string {
+export function failureCategory(error: unknown): string {
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   for (const [prefix, category] of CATEGORY_BY_PREFIX) {
     if (raw.startsWith(prefix)) return category;

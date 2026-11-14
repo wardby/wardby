@@ -29,6 +29,10 @@ describe("coding worker image policy", () => {
     // the build fails, not the run, when it is missing.
     expect(dockerfile).toContain("COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs");
     expect(dockerfile).toContain("/opt/wardby/coding-worker/dependency-cache.mjs");
+    // The result bundle module (#536), next to driver.js, which imports it on a run with git history;
+    // the image keeps git for it.
+    expect(dockerfile).toContain("COPY src/coding-worker/result-bundle.mjs ./coding-worker/result-bundle.mjs");
+    expect(dockerfile).toContain("/opt/wardby/coding-worker/result-bundle.mjs");
   });
 
   it("Dockerfile pins its FROM to the driver by digest and excludes privileged or general-purpose host tooling", async () => {

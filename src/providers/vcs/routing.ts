@@ -70,12 +70,25 @@ export class RoutingVcsProvider implements VcsProvider {
     return (provider === "github" ? this.options.github : this.options.hosted?.get(provider)) ?? null;
   }
 
+  /**
+   * The provider of a workspace, which must also serve every remote link it fetches (#536): a remote
+   * is fetched with the default repository's own remote, so it must be on the same host. Dispatch
+   * refuses a cross-host remote first (repository_remote_invalid); this is the backstop.
+   */
+  private workspaceTarget(input: VcsPrepareInput): VcsProvider {
+    const target = this.target(input.repository);
+    for (const remote of input.remotes ?? []) {
+      if (this.optionalTarget(remote.repository) !== target) throw new Error("repository_remote_invalid");
+    }
+    return target;
+  }
+
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
-    return this.target(input.repository).prepareWorkspace(input);
+    return this.workspaceTarget(input).prepareWorkspace(input);
   }
 
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
-    return this.target(input.repository).recoverWorkspace(input);
+    return this.workspaceTarget(input).recoverWorkspace(input);
   }
 
   async finalizeChanges(

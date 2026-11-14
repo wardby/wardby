@@ -62,8 +62,17 @@ import {
   type ServiceStateUpdate,
 } from "./service-state.js";
 import { expectedRepositoryHostPath, repositoryStorageDirectories, storageInitScript } from "./storage-init.js";
-import type { JobHandle, JobRepositoryMount, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
-import { replaceDirectoryFromStaging } from "./workspace-swap.js";
+import type {
+  JobHandle,
+  JobRepositoryMount,
+  JobResult,
+  JobSpec,
+  JobStatus,
+  MaterializedWorkspace,
+  MaterializeWorkspaceOptions,
+  WorkspaceJobLauncher,
+} from "./types.js";
+import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
 
 const BACKEND = "docker";
 const STATE_SCHEMA_VERSION = 1;
@@ -258,13 +267,18 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
 export interface DockerArtifactTransfer {
   seedDirectory(sourceDirectory: string, container: string, destination: string): Promise<void>;
   seedInput(sourceFile: string, container: string): Promise<void>;
+  /**
+   * Copies `source` from the keeper into `destination`. With `gitHistory` (#536), the root `.git`'s
+   * result bundle is taken to `gitHistory.bundleDestination` and the root `.git` dropped before validation.
+   */
   materializeDirectory(
     container: string,
     source: string,
     destination: string,
     maxBytes: number,
     exclusions: CollectExclusions,
-  ): Promise<void>;
+    gitHistory?: MaterializeWorkspaceOptions["gitHistory"],
+  ): Promise<MaterializedWorkspace>;
 }
 
 export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
@@ -388,22 +402,33 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
     destination: string,
     maxBytes: number,
     exclusions: CollectExclusions,
-  ): Promise<void> {
-    await replaceDirectoryFromStaging(
-      destination,
-      maxBytes,
-      "docker_workspace_destination_invalid",
-      async (staging) => {
-        await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
-          "container",
-          "cp",
-          `${container}:${source}/.`,
-          staging,
-        ]);
-        // Before replaceDirectoryFromStaging validates: excluded folders never count.
-        await pruneCollectExcluded(staging, exclusions);
-      },
-    );
+    gitHistory?: MaterializeWorkspaceOptions["gitHistory"],
+  ): Promise<MaterializedWorkspace> {
+    let bundle = false;
+    try {
+      await replaceDirectoryFromStaging(
+        destination,
+        maxBytes,
+        "docker_workspace_destination_invalid",
+        async (staging) => {
+          await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
+            "container",
+            "cp",
+            `${container}:${source}/.`,
+            staging,
+          ]);
+          // A history run's root .git leaves the copy here, its bundle kept; validation then never sees it.
+          if (gitHistory) bundle = await takeResultBundle(staging, gitHistory);
+          // Before replaceDirectoryFromStaging validates: excluded folders never count.
+          await pruneCollectExcluded(staging, exclusions);
+        },
+      );
+    } catch (error) {
+      // A workspace that was not collected leaves no bundle behind either.
+      if (bundle && gitHistory) await rm(gitHistory.bundleDestination, { force: true });
+      throw error;
+    }
+    return { bundle };
   }
 }
 
@@ -733,11 +758,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     });
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string, name?: string): Promise<void> {
+  async materializeWorkspace(
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options: MaterializeWorkspaceOptions = {},
+  ): Promise<MaterializedWorkspace> {
     await this.ready;
     const record = await this.findRecord(handle);
     if (!record) throw new Error("job_not_found");
-    await this.withRun(record.runId, async () => {
+    return this.withRun(record.runId, async () => {
       const current = await this.requireRecord(record.runId);
       await this.refresh(current);
       if (current.phase !== "succeeded") throw new Error("job_not_succeeded");
@@ -756,13 +786,19 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
         throw new Error("docker_workspace_destination_invalid");
       }
-      await this.transfer.materializeDirectory(
+      const diskBytes = current.spec.limits.diskMb * 1024 * 1024;
+      return this.transfer.materializeDirectory(
         this.keeperName(current),
         source,
         expected,
-        current.spec.limits.diskMb * 1024 * 1024,
+        diskBytes,
         // Names are always the current built-in list; only the paths come from the spec.
         normalizeCollectExclusions(current.spec.collectExclude?.paths),
+        options.gitHistory && {
+          ...options.gitHistory,
+          // A bundle never exceeds the run's disk, whatever the configured limit.
+          maxBundleBytes: Math.min(options.gitHistory.maxBundleBytes, diskBytes),
+        },
       );
     });
   }
@@ -1319,7 +1355,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       hostPath: this.repositoryHostPath(record.runId, r),
     }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
-    await this.transfer.seedDirectory(resolve(runRoot, "git"), keeper, "/run/wardby/storage/git");
+    // The control plane's own git folder (<runRoot>/git) is never seeded: no worker or tool-runner
+    // mount reads the keeper's storage/git, and Kubernetes never seeded it either. A history run's
+    // worker gets its repository as <workspace>/.git, prepared by the control plane (#536).
     if (repositories.length > 0) {
       // The keeper creates only its fixed folders; the extras' mount sources are made here, owned by the run uid.
       await this.run([

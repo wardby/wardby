@@ -355,7 +355,9 @@ class FinishedJobs implements WorkspaceJobLauncher {
   }
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async materializeWorkspace(): Promise<void> {}
+  async materializeWorkspace(): Promise<{ bundle: boolean }> {
+    return { bundle: false };
+  }
 }
 
 const sessions: CodingSessionController = {

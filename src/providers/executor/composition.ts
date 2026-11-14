@@ -4,6 +4,7 @@ import type { PrismaClient } from "#prisma";
 import {
   loadBlobStoreConfig,
   loadCodingConcurrencyConfig,
+  loadCodingResultBundleMaxBytes,
   loadContainerExecutorConfig,
   loadGitHubVcsConfig,
   loadKubernetesJobConfig,
@@ -272,6 +273,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
+    resultBundleMaxBytes: loadCodingResultBundleMaxBytes(env),
     claudeCommandTimeouts: config.claudeCommandTimeouts,
     repoAccess,
     readLinkedIssue: linkedIssueReader({ hosts: reviewHosts, issueTrackers }),

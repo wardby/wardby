@@ -6,6 +6,7 @@ import type {
   prepareDependencies,
   sealUploadWindow,
 } from "./dependency-cache.mjs";
+import type { createResultBundle, gitAvailable, resolveHistoryPath } from "./result-bundle.mjs";
 
 /** What the driver uses from the dependency cache module (dependency-cache.mjs); injectable for tests. */
 export interface DependencyCacheModule {
@@ -14,6 +15,13 @@ export interface DependencyCacheModule {
   dependencyCacheBudget: typeof dependencyCacheBudget;
   dependencyCacheTimeLimit: typeof dependencyCacheTimeLimit;
   BUDGET_MEASURE_TIMEOUT_MS: number;
+}
+
+/** What the driver uses from the result bundle module (result-bundle.mjs); injectable for tests. */
+export interface ResultBundleModule {
+  createResultBundle: typeof createResultBundle;
+  gitAvailable: typeof gitAvailable;
+  resolveHistoryPath: typeof resolveHistoryPath;
 }
 
 export type WorkerProgressEvent =
@@ -74,4 +82,12 @@ export interface WorkerRunOptions {
   loadDependencyCache?: () => Promise<DependencyCacheModule>;
   /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
   mcpToken?: string;
+  /** Tests only: replaces loading the result bundle module, which happens only on a run with git history. */
+  loadResultBundle?: () => Promise<ResultBundleModule>;
+  /** The git the history check and the result bundle run; "git" (on PATH) by default. */
+  gitBinary?: string;
+  /** Where the extra repositories are (/repos/<name>); "/repos" by default. */
+  reposRoot?: string;
+  /** One operator log line (a fixed-code JSON object); stderr by default. */
+  operatorLog?: (event: Record<string, string>) => void;
 }

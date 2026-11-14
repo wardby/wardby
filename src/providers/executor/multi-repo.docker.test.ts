@@ -11,13 +11,19 @@ import type { JobSpec } from "../jobs/types.js";
 import { GitVcsProvider } from "../vcs/git.js";
 import { LocalRemote } from "../vcs/local-remote.js";
 import {
+  addUpstreamCommit,
   createForkSyncAgent,
+  createHistoryForkSyncAgent,
   FORK_SYNC_CAPABILITY,
   forkSyncExecutor,
   forkSyncProxyEnv,
   forkSyncProxyProgram,
   forkSyncRepositories,
+  historyProxyEnv,
+  historyProxyProgram,
+  mergeRunBranch,
   runAndAssertForkSync,
+  runAndAssertHistorySync,
 } from "./fork-sync.test-support.js";
 
 /**
@@ -37,6 +43,14 @@ import {
  * The Codex parity case also needs WARDBY_CODEX_WORKER_IMAGE (src/coding-worker/Dockerfile; the
  * driver base is linux/amd64 only, so build with --platform linux/amd64 on an arm64 host). It runs at
  * the launcher level: the Codex scripted path (mock-upstream.integration.test.ts) has no shell step.
+ * The git-history cases (#536) run the same fork sync with `gitHistory: { depth: "full" }` and
+ * upstream linked `as: "remote"`: the agent merges `upstream/main` with git, and the run pushes its
+ * real merge commit. They run for Claude Code and, with WARDBY_CODEX_WORKER_IMAGE, for Codex through
+ * the ContainerExecutor (the scripted model gives Codex a gpt-4.1 slug, whose classic tool set has an
+ * exec_command function). The worker images must be built from this checkout: the driver and tool
+ * runner carry the result bundle. For Codex, build the driver base locally
+ * (src/coding-worker/Dockerfile.driver) and the worker on top of it (src/coding-worker/Dockerfile with
+ * its FROM pointed at that local tag).
  * Skipped without DATABASE_URL.
  */
 const execute = promisify(execFile);
@@ -168,6 +182,121 @@ describe.skipIf(!enabled || !agentImageRef || !toolImageRef || !process.env.DATA
         proxyLog: () => docker(["container", "logs", proxy]),
       });
     }, 300_000);
+
+    describe("with git history (#536)", () => {
+      const historyProxy = `wardby-git-history-proxy-${token}`;
+
+      beforeAll(async () => {
+        const env = Object.entries(historyProxyEnv()).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+        await docker([
+          "container",
+          "create",
+          "--name",
+          historyProxy,
+          "--network",
+          "bridge",
+          ...env,
+          "--entrypoint",
+          "node",
+          agentImage,
+          "-e",
+          historyProxyProgram(),
+        ]);
+        await docker(["container", "start", historyProxy]);
+      }, 60_000);
+
+      afterAll(async () => {
+        for (const id of runIds)
+          await cleanup(["network", "disconnect", "--force", isolationNames(id).network, historyProxy]);
+        await cleanup(["container", "rm", "--force", historyProxy]);
+      }, 60_000);
+
+      /**
+       * Two syncs: the first merges upstream's U1 through a real conflict; the PR is merged; upstream
+       * adds U2; the second sync's merge-base is U1 (the first merge moved it), so it merges only U2,
+       * cleanly. Each pushes one Wardby merge commit whose second parent is upstream's tip.
+       */
+      async function twoSyncs(input: { provider: "claude-code" | "codex"; model: string; codexImage?: string }) {
+        const repos = await forkSyncRepositories(`wardby-git-history-${input.provider}-`);
+        roots.push(repos.root);
+        const agentId = `${PREFIX}history-${input.provider}-${suffix}`;
+        await createHistoryForkSyncAgent(db, {
+          agentId,
+          ownerId: owner,
+          repos,
+          provider: input.provider,
+          model: input.model,
+        });
+        const workspaceRoot = join(repos.root, "workspaces");
+        const executor = forkSyncExecutor({
+          db,
+          repos,
+          workspaceRoot,
+          agentImage,
+          toolImage,
+          ...(input.codexImage ? { codexImage: input.codexImage } : {}),
+          onSession: (runId) => runIds.push(runId),
+          jobs: new DockerJobLauncher({
+            stateRoot: join(repos.root, "state"),
+            workspaceRoot,
+            proxyContainer: historyProxy,
+            resolveCapability: async () => FORK_SYNC_CAPABILITY,
+            isRunActive: async () => false,
+          }),
+        });
+        const proxyLog = () => docker(["container", "logs", historyProxy]);
+        const { u0, u1, upstream } = repos;
+        const first = await runAndAssertHistorySync({
+          db,
+          executor,
+          agentId,
+          repos,
+          proxyLog,
+          upstreamTip: u1,
+          expectedMergeBase: u0,
+          conflict: true,
+          expectedFiles: {
+            "app.txt": "a\nB-fork\nB-upstream\nc\n",
+            "new.txt": "new upstream file\n",
+            "upstream-sync": `${u1}\n`,
+          },
+        });
+        await mergeRunBranch(repos, first);
+        const u2 = await addUpstreamCommit(repos);
+        await runAndAssertHistorySync({
+          db,
+          executor,
+          agentId,
+          repos,
+          proxyLog,
+          upstreamTip: u2,
+          expectedMergeBase: u1,
+          conflict: false,
+          expectedFiles: {
+            "app.txt": "a\nB-fork\nB-upstream\nc\n",
+            "new.txt": "new upstream file, v2\n",
+            "later.txt": "a later upstream file\n",
+            "upstream-sync": `${u2}\n`,
+          },
+        });
+        // The fork now has both merges in its history, and upstream's commits under their own authors.
+        expect(await repos.git(repos.fork, "log", "-1", "--format=%an", u2)).toBe("Upstream Dev");
+        expect(await repos.git(upstream, "rev-parse", "main")).toBe(u2);
+      }
+
+      it("Claude Code: merges upstream with git through a real conflict, then a second sync merges only what is new", async () => {
+        await twoSyncs({ provider: "claude-code", model: "claude-sonnet-5" });
+      }, 600_000);
+
+      it.skipIf(!codexImageRef)(
+        "Codex: merges upstream with git through a real conflict, then a second sync merges only what is new",
+        async () => {
+          const codexImage = await docker(["image", "inspect", "--format", "{{.Id}}", codexImageRef]);
+          await twoSyncs({ provider: "codex", model: "gpt-4.1", codexImage });
+        },
+        600_000,
+      );
+    });
 
     it.skipIf(!codexImageRef)(
       "Codex parity (launcher level): the worker sees /repos/base and /repos/upstream read-only, and git merge-file reports the conflict",

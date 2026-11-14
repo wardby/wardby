@@ -146,8 +146,9 @@ and [Repository not on the agent's list](../help/errors/repository-not-listed.md
 
 A run always has its default repository at `/workspace`. Each extra repository
 is a link on the agent and appears in the run at `/repos/<name>`. Extras are
-**writable** (a write link) or **read-only** (a read link). No folder has git
-metadata, so the run's task text carries one line per extra with its folder,
+**writable** (a write link) or **read-only** (a read link). Unless
+[git history](#git-history-in-a-run) is on, no folder has git metadata, so the
+run's task text carries one line per extra with its folder,
 repository, full commit and access, for example
 `Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`
 A run with only its default repository gets no such lines.
@@ -169,7 +170,9 @@ run can look at but never change:
 - A read link needs a `ref`: a branch, a tag or a full 40-hex commit SHA. It
   takes no triggers, `checkName` or `baseRef`. The repository can be on GitHub
   or a `local:` path.
-- The run gets one commit's files and no git history. The commit is resolved
+- The run gets one commit's files and no git history (a link with
+  `as: "remote"` is the exception; see [Git history in a
+  run](#git-history-in-a-run)). The commit is resolved
   when the run is dispatched and recorded on the run, so a branch that moves
   later does not change a run already started. Nothing in a read-only folder is
   collected, committed or pushed.
@@ -249,6 +252,10 @@ the default set for that run (`[]` means the default repository only):
   the protected paths apply to each repository's own changes.
 - Only the default repository supplies `CLAUDE.md`, skills, the dependency
   cache, `services.yaml` and the knowledge index.
+- `CODING_MAX_RESULT_BUNDLE_MB` (default `256`, a positive whole number, capped
+  at the run's disk) caps the result bundle a git-history run returns for each
+  repository; see [Git history in a run](#git-history-in-a-run). A bad value
+  stops start-up.
 
 **Publishing.** Each writable repository with changes gets its own branch
 (`wardby/run-<id of the root run>`) and pull request, the default repository first and
@@ -291,7 +298,144 @@ recreated on the developer's machine. The pane lists each extra repository
 with its branch or commit and a clone command instead.
 
 For a worked example, see the fork-sync recipe in
-[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-three-repositories).
+[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-git-history-and-a-remote).
+
+### Git history in a run
+
+By default a run's folders hold files only and Wardby commits the agent's
+changes as one commit. With `codingProfile.gitHistory` the default repository
+and every writable extra get a real `.git`, so the agent can use `log`,
+`blame`, `bisect`, `merge` and `commit`, and the pull request carries its real
+commits, merge commits included. The motivating case is a fork sync: merge
+`upstream/main`, fix the conflicts, commit; the merge commit moves the merge
+base forward so the next sync only merges what is new. It needs Wardby 0.9.13
+or later.
+
+**Setting.** `codingProfile.gitHistory` is `{ "depth": <1..100000> }` or
+`{ "depth": "full" }`, and `null` (the default) is off. `create_agent` and
+`update_agent` take it, and `update_agent` clears it with `null`. It is stored as
+`gitHistoryDepth` and `gitHistoryFull`, and `get_agent` shows those two fields
+rather than `gitHistory` (full overrides depth). It is fixed at dispatch and
+copied to the run, so a change applies to later runs. A numeric depth can give
+somewhat more history than asked; it normally gives at least the depth, but
+that is not guaranteed, so use `"full"` for fork sync.
+
+**Remote links.** A read link with `as: "remote"` is fetched into the default
+repository's `.git` instead of mounted at `/repos/<name>`. Its `name` is the git
+remote name (`origin` is reserved), and its resolved commit is stored as
+`refs/remotes/<name>/<label>`, where the label is the branch or tag you gave as
+`ref`, or `pinned` for a 40-hex SHA or a `fromFile` ref.
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "upstream",
+  "ref": "main",
+  "inDefaultSet": true,
+  "as": "remote"
+}
+```
+
+- `as` is `"folder"` (default) or `"remote"`. A remote must be a read link on a
+  coding agent, on the same host as the default repository (GitHub with GitHub,
+  `local:` with `local:`); otherwise it is refused with
+  `repository_remote_invalid`, at link time or at dispatch.
+- A run whose set includes a remote link while `gitHistory` is off is refused
+  with `repository_remote_needs_history`; a scheduled run records it as
+  `refused`.
+- Remote links count toward `CODING_MAX_RUN_REPOSITORIES`; allowlist, access
+  checks and the other read-link rules are unchanged.
+- The commit is fetched by Wardby before the run, with the same access as a
+  read-only folder. A failure is `vcs_remote_fetch_failed`.
+
+**Operator notes on remotes.**
+
+- Merging a remote pushes that remote's history into the default repository's
+  branch. If the upstream is private, its history becomes part of the fork,
+  which may be public.
+- Prefer a branch or tag `ref` for remote links. A remote fetched by a raw SHA
+  or a `fromFile` SHA is trusted as upstream content, and its changes are not
+  checked against `protectedPaths`. Only use SHAs you trust.
+
+**What the agent gets.** The task text says the workspace has history to the
+configured depth (or full), lists each remote as `<name>/<label> at <commit>`,
+and says fetching and pushing are not possible, so the agent commits its work;
+uncommitted changes are collected as well. Wardby builds the worker's `.git`
+itself: its own config, no hooks, no remotes, no URLs and no credentials. A
+worker that replaces or corrupts `.git` cannot affect Wardby's repository,
+because only a validated bundle is imported.
+
+**What is pushed.** When the run ends (also when it stops with
+`budget_exhausted`), the worker returns its new commits as a bundle. Wardby
+fetches it with object checks, then:
+
+- requires at most 500 new commits per repository (`vcs_result_commit_limit`);
+- requires each commit message to be at most 64 KiB and free of token-shaped
+  text, as are the author and committer names and emails
+  (`vcs_result_commit_unsafe`);
+- requires the base to be an ancestor of the result, and every new commit's
+  parents to be other new commits, the base, or a remote's fetched tip
+  (`vcs_result_history_invalid`);
+- refuses a bundle that is not a valid single-head bundle
+  (`vcs_result_bundle_invalid`) or is larger than `CODING_MAX_RESULT_BUNDLE_MB`
+  (`vcs_result_bundle_too_large`);
+- refuses any commit touching a path no run collects (`node_modules`, `.venv`,
+  `venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`,
+  `.vite`, `.cache`, and the agent's `collectExclude`)
+  (`vcs_result_path_excluded`);
+- rewrites each commit with the author and committer
+  `Wardby <wardby@users.noreply.github.com>`, keeping the tree, the parents, the
+  message and the original author and committer dates. Signatures are dropped
+  and non-UTF-8 messages are re-encoded;
+- runs the usual checks on the agent's own changes: the changed-file and
+  diff-byte limits, `protectedPaths` for every path the agent's commits and
+  merge resolutions touch, and conflict markers in the final tree of every
+  merge. Upstream's own commits, reaching the pull request as parents of a
+  merge or by a fast-forward to a remote's tip, are upstream's: they are not
+  checked against `protectedPaths`, and a fast-forward pushes upstream's tip
+  unchanged;
+- commits any uncommitted files on top as `Wardby run <id>`.
+
+If there is no new commit, the result is the usual files-only result.
+
+**Continuations.** A follow-up, fix round or mark-ready clones the pull request
+branch with the same depth. When it merges the target branch first, Wardby
+commits that merge before the run starts. If it conflicts, the merge is
+committed with the conflict markers in place and the agent must resolve them;
+the final tree is checked for markers.
+
+**Images.** The standard images include git. A Codex `workerImageRef` image
+needs `driver-v31` or later and `git`; a Claude Code `workerImageRef` tool runner
+needs `git`. Otherwise the run fails with `worker_git_unavailable`. See
+[Build your own worker image](coding-worker-byo-images.md#git-history-needs-a-current-driver-and-git).
+
+**Same everywhere.** Codex and Claude Code, Docker and Kubernetes, GitHub and
+`local:` behave the same.
+
+**Rare failures.** `vcs_history_shortened` is reported as
+`vcs_remote_fetch_failed:origin` (a continuation's deepening made a shallow,
+merge-heavy history shorter; use `"full"`). `vcs_git_history_invalid` and
+`vcs_worker_git_invalid` are internal consistency checks.
+`kubernetes_result_bundle_read_failed` is a failure to read the bundle on
+Kubernetes. `job_result_bundle_limit_invalid` is a bad
+`CODING_MAX_RESULT_BUNDLE_MB`. The first four fail the run in the `workspace`
+category; the last in `preflight`.
+
+Help articles: [Git history in coding runs](../help/git-history.md),
+[`repository_remote_invalid`](../help/errors/repository-remote-invalid.md),
+[`repository_remote_needs_history`](../help/errors/repository-remote-needs-history.md),
+[`vcs_remote_fetch_failed`](../help/errors/vcs-remote-fetch-failed.md),
+[`vcs_result_bundle_invalid`](../help/errors/vcs-result-bundle-invalid.md),
+[`vcs_result_bundle_too_large`](../help/errors/vcs-result-bundle-too-large.md),
+[`vcs_result_history_invalid`](../help/errors/vcs-result-history-invalid.md),
+[`vcs_result_commit_limit`](../help/errors/vcs-result-commit-limit.md),
+[`vcs_result_commit_unsafe`](../help/errors/vcs-result-commit-unsafe.md),
+[`vcs_result_path_excluded`](../help/errors/vcs-result-path-excluded.md) and
+[`worker_git_unavailable`](../help/errors/worker-git-unavailable.md). For a
+worked example, see the fork-sync recipe in
+[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-git-history-and-a-remote).
 
 ## See what a run was asked to do
 
@@ -351,8 +495,9 @@ JOB_LAUNCHER=docker
 
 ### What a coding run does
 
-1. Wardby clones the repository's **committed** history at the base ref
-   (`baseRef`, default the profile's). Untracked and uncommitted files, such as
+1. Wardby clones the repository's **committed** state at the base ref
+   (`baseRef`, default the profile's), one commit deep unless
+   [`gitHistory`](#git-history-in-a-run) is on. Untracked and uncommitted files, such as
    `.env.local`, never leave the host. `trigger_agent` returns `warnings` when
    the working tree is dirty or the repository uses submodules or Git LFS;
    uncommitted changes are not included, and submodules and LFS are not
@@ -360,7 +505,8 @@ JOB_LAUNCHER=docker
 2. The worker runs in the usual sandbox. `.wardby/services.yaml` works: it is
    read from the committed file at the base ref (never the working tree) and
    fails with the same errors as on GitHub (see [coding-services.md](coding-services.md)).
-3. Wardby validates the result and pushes one commit to the branch
+3. Wardby validates the result and pushes one commit (with `gitHistory` on, the
+   agent's own commits, rewritten to Wardby's identity) to the branch
    `wardby/run-<run id>` in the source repository. Your working tree, index
    and checked-out branch are never modified. `get_run` reports `resultBranch`
    and `baseSha`.

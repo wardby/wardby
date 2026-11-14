@@ -20,6 +20,10 @@ describe("safeWorkerErrorCode", () => {
     expect(safeWorkerErrorCode(new Error("provider_secret_value"))).toBe("worker_failed");
   });
 
+  it("keeps worker_git_unavailable (a history run on an image without git, #536)", () => {
+    expect(safeWorkerErrorCode(new Error("worker_git_unavailable"))).toBe("worker_git_unavailable");
+  });
+
   it("removes an attacker-controlled duplicate-key suffix", () => {
     expect(safeWorkerErrorCode(new Error("coding_artifact_duplicate_key:DO_NOT_LEAK"))).toBe(
       "coding_artifact_duplicate_key",

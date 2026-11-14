@@ -403,6 +403,8 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
+  /** A continuation's git history setting, copied from its root run like its repository rows (#536). */
+  gitHistory?: { depth: number | null; full: boolean };
   /** The pull request's effective mergeOrder (effectiveMergeOrder), inherited unless this dispatch sets its own. Undefined for a fresh branch. */
   mergeOrder?: number | null;
 }
@@ -509,11 +511,16 @@ async function resolveCodingBranch(
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
   const root = await continuationRoot(reader, options.continuesCodingRunId, profile.repository, ownerId);
+  const rootHistory = await reader.codingRun.findUniqueOrThrow({
+    where: { runId: root.runId },
+    select: { gitHistoryDepth: true, gitHistoryFull: true },
+  });
   return {
     baseRef: root.baseRef,
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
+    gitHistory: { depth: rootHistory.gitHistoryDepth, full: rootHistory.gitHistoryFull },
     mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
 }
@@ -754,7 +761,7 @@ async function planExtras(
   reader: Pick<DispatchTx, "agentRepository">,
   options: DispatchRunOptions,
   target: CodingRepositoryTarget,
-  profileBaseRef: string,
+  profile: { baseRef: string; gitHistoryDepth: number | null; gitHistoryFull: boolean },
 ): Promise<PlannedRunRepository[]> {
   const links = await reader.agentRepository.findMany({
     where: { agentId: options.agentId, ...CODING_SET_LINK_FILTER },
@@ -768,6 +775,7 @@ async function planExtras(
       ref: true,
       refFromFile: true,
       inDefaultSet: true,
+      asRemote: true,
       createdAt: true,
     },
   });
@@ -776,13 +784,14 @@ async function planExtras(
     workspace: { provider: codeProviderOf(target.repository), repository: target.repository },
     requested: options.codingRepositories,
     limit: loadCodingRunRepositoryLimit(),
-    profileBaseRef,
+    profileBaseRef: profile.baseRef,
+    historyOn: profile.gitHistoryFull || profile.gitHistoryDepth !== null,
   });
 }
 
 /** What a plan is compared by: a link changed between the preview and the transaction refuses the dispatch. */
 function planKey(plan: readonly PlannedRunRepository[]): string {
-  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile]));
+  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile, r.asRemote]));
 }
 
 /**
@@ -868,6 +877,7 @@ export async function copyRootRepositoryRows(
       refFromFile: r.refFromFile,
       resolvedSha: r.resolvedSha,
       viaRepositoryLink: r.viaRepositoryLink,
+      asRemote: r.asRemote,
       linkId: r.linkId,
       baseRef: r.baseRef,
       headRef: r.headRef,
@@ -901,7 +911,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       kind: true,
       ownerId: true,
       budgetGroupId: true,
-      codingProfile: { select: { repository: true, baseRef: true, services: true } },
+      codingProfile: {
+        select: { repository: true, baseRef: true, services: true, gitHistoryDepth: true, gitHistoryFull: true },
+      },
     },
   });
   const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
@@ -931,7 +943,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   let extrasRefusal: string | undefined;
   if (!deferCoding && preview?.codingProfile && previewTarget && options.continuesCodingRunId === undefined) {
     try {
-      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile.baseRef);
+      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile);
       extrasRefusal = await authorizeRunRepositories(
         options.db,
         options.executor,
@@ -1016,7 +1028,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             // Planned again inside the transaction: a link changed since the preview refuses the dispatch.
             // A scheduled run's set refusal commits as a refused run (see the preview above).
             try {
-              inTxPlan = await planExtras(tx, options, target, agent.codingProfile.baseRef);
+              inTxPlan = await planExtras(tx, options, target, agent.codingProfile);
             } catch (err) {
               inTxSetRefusal = setRefusalOf(err);
               if (inTxSetRefusal === undefined) throw err;
@@ -1136,7 +1148,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
 
           // Resolved once: before the transaction when the declaration was read from it.
           const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, target, agent.ownerId));
-          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
+          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder, gitHistory } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
           const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
@@ -1201,6 +1213,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               claudeBareMode: agent.codingProfile.claudeBareMode,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
+              // A continuation keeps its root's setting, matching the rows copied from it.
+              gitHistoryDepth: gitHistory ? gitHistory.depth : agent.codingProfile.gitHistoryDepth,
+              gitHistoryFull: gitHistory ? gitHistory.full : agent.codingProfile.gitHistoryFull,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
@@ -1231,6 +1246,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                   requestedRef: r.requestedRef,
                   refFromFile: r.refFromFile,
                   resolvedSha: r.resolvedSha,
+                  asRemote: r.asRemote,
                   linkId: r.linkId,
                   baseRef: r.access === "write" ? r.baseRef : null,
                   headRef: r.access === "write" ? headRef : null,

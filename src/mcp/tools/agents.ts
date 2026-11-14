@@ -14,7 +14,12 @@ import {
   type RunStepsLevel,
 } from "../../core/run-steps/config.js";
 import { codeProviderOf } from "../../coding/code-host.js";
-import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
+import {
+  CodingProfilePatchSchema,
+  CodingProfileSchema,
+  MAX_GIT_HISTORY_DEPTH,
+  type CodingProfile,
+} from "../../coding/profile.js";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
@@ -430,6 +435,22 @@ const profileJsonSchema = {
       description:
         "Workspace disk size in MiB. Null uses the deployment default (CODING_DISK_MB), capped by the operator's CODING_MAX_DISK_MB.",
     },
+    gitHistory: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      properties: {
+        depth: {
+          oneOf: [
+            { type: "integer", minimum: 1, maximum: MAX_GIT_HISTORY_DEPTH },
+            { type: "string", enum: ["full"] },
+          ],
+        },
+      },
+      required: ["depth"],
+      description:
+        'Give runs real git history in /workspace instead of a single snapshot commit: { depth: <1..100000> } commits, or { depth: "full" }. ' +
+        'Applies to every writable repository of a run. Null (default) turns it off. Remote repository links (link_repository as: "remote") need it on.',
+    },
     maxTurns: {
       type: ["integer", "null"],
       minimum: 1,
@@ -584,6 +605,16 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
   }
 }
 
+/** The stored columns for a validated profile: gitHistory is kept as gitHistoryDepth + gitHistoryFull (full overrides depth). */
+function profileColumns(profile: CodingProfile) {
+  const { gitHistory, ...rest } = profile;
+  return {
+    ...rest,
+    gitHistoryDepth: gitHistory && gitHistory.depth !== "full" ? gitHistory.depth : null,
+    gitHistoryFull: gitHistory?.depth === "full",
+  };
+}
+
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -598,6 +629,11 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
     workspaceDiskMb: profile.workspaceDiskMb,
+    gitHistory: profile.gitHistoryFull
+      ? { depth: "full" }
+      : profile.gitHistoryDepth != null
+        ? { depth: profile.gitHistoryDepth }
+        : null,
     maxTurns: profile.maxTurns,
     maxOutputTokens: profile.maxOutputTokens,
     packageAllowlist: profile.packageAllowlist,
@@ -731,7 +767,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           })),
           ownerId: ctx.principal.id,
           ...(codingProfile && authorization
-            ? { codingProfile: { create: { ...codingProfile, ...profileStamp(authorization) } } }
+            ? { codingProfile: { create: { ...profileColumns(codingProfile), ...profileStamp(authorization) } } }
             : {}),
         },
         include: { codingProfile: true },
@@ -1091,8 +1127,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: { ...nextProfile!, ...stamp, ...trace } }
-                : { create: { ...nextProfile!, ...stamp, ...trace } };
+                ? { update: { ...profileColumns(nextProfile!), ...stamp, ...trace } }
+                : { create: { ...profileColumns(nextProfile!), ...stamp, ...trace } };
           const scheduleStart = await scheduleStartFields(tx, existing, {
             schedule: nextSchedule,
             timezone: nextTimezone,

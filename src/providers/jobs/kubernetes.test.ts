@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { MAX_DEBUG_TRACE_LINE_BYTES, createDebugTracer } from "../../coding-worker/debug-trace.js";
 import type { V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
@@ -177,10 +178,31 @@ async function harness(
   };
 }
 
-jobLauncherContract("Kubernetes", async () => {
-  const h = await harness();
-  return { launcher: h.launcher, spec: h.spec, finish: h.finish, lose: h.lose };
-});
+jobLauncherContract(
+  "Kubernetes",
+  async () => {
+    const h = await harness();
+    return { launcher: h.launcher, spec: h.spec, finish: h.finish, lose: h.lose };
+  },
+  async () => {
+    const h = await harness("run-k8s-contract-collect");
+    const keeper = await mkdtemp(join(tmpdir(), "wardby-k8s-keeper-"));
+    roots.push(keeper);
+    serveKeeperFolders(h, { "/run/wardby/storage/workspace": keeper });
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => h.finish(handle),
+      fillJobWorkspace: async (_handle, files) => {
+        for (const [path, content] of Object.entries(files)) {
+          await mkdir(dirname(join(keeper, path)), { recursive: true });
+          await writeFile(join(keeper, path), content);
+        }
+      },
+    };
+  },
+);
 
 describe("KubernetesJobLauncher", () => {
   it("creates the attested pod, policy, and secret, seeds the keeper, then opens the gate", async () => {
@@ -2521,5 +2543,217 @@ describe("Kubernetes extra repositories (#537)", () => {
       "kubernetes_workspace_destination_invalid",
     );
     expect(archiveCommand).toEqual([]);
+  });
+});
+
+/**
+ * Serves the keeper's execs from local folders standing in for its storage: the archive exec tars the
+ * folder (honouring an anchored `./.git` exclude), and the bundle exec runs the launcher's own read
+ * script with the host's node against the local `.git`, so its symlink and size rules are exercised.
+ */
+async function packFolder(folder: string, excludeRootGit: boolean, stdout: PassThrough) {
+  const pack = tar.pack();
+  const walk = async (relative: string): Promise<void> => {
+    for (const entry of await readdir(join(folder, relative), { withFileTypes: true })) {
+      if (excludeRootGit && relative === "" && entry.name === ".git") continue;
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      const full = join(folder, path);
+      if (entry.isSymbolicLink()) pack.entry({ name: `./${path}`, type: "symlink", linkname: await readlink(full) });
+      else if (entry.isDirectory()) {
+        pack.entry({ name: `./${path}`, type: "directory" });
+        await walk(path);
+      } else pack.entry({ name: `./${path}` }, await readFile(full));
+    }
+  };
+  await walk("");
+  pack.finalize();
+  (pack as unknown as Readable).pipe(stdout);
+  await new Promise((r) => stdout.once("finish", r));
+}
+
+function serveKeeperFolders(
+  h: Awaited<ReturnType<typeof harness>>,
+  folders: Record<string, string>,
+  seen: string[][] = [],
+) {
+  const previous = h.api.onExec;
+  h.api.onExec = async (call) => {
+    const { command, stdout } = call;
+    if (command[0] === "tar" && command.includes("-cf")) {
+      seen.push(command);
+      const folder = folders[command[2]];
+      if (!folder) return 2;
+      await packFolder(folder, command.includes("--exclude=./.git"), stdout as PassThrough);
+      return 0;
+    }
+    if (command[0] === "node" && command[1] === "-e" && command[3]?.endsWith("/.git")) {
+      seen.push(command);
+      const folder = folders[command[3].slice(0, -"/.git".length)];
+      if (!folder) return 2;
+      const child = spawn(process.execPath, ["-e", command[2], join(folder, ".git"), command[4]], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      child.stdout.pipe(stdout as PassThrough);
+      return await new Promise<number>((r) => child.once("close", (code) => r(code ?? -1)));
+    }
+    return previous(call);
+  };
+}
+
+describe("Kubernetes workspace collection for history runs (#536)", () => {
+  async function collector() {
+    const h = await harness("run-k8s-history");
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    const keeper = await mkdtemp(join(tmpdir(), "wardby-k8s-keeper-"));
+    roots.push(keeper);
+    await mkdir(join(keeper, ".git", "objects", "pack"), { recursive: true });
+    await writeFile(join(keeper, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(keeper, "README.md"), "changed\n");
+    const seen: string[][] = [];
+    serveKeeperFolders(h, { "/run/wardby/storage/workspace": keeper }, seen);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const bundleDestination = join(h.workspaceRoot, "..", "result.bundle");
+    return { h, handle, keeper, seen, target, bundleDestination };
+  }
+
+  it("excludes the root .git (anchored) from the archive only when history is on", async () => {
+    const c = await collector();
+    await expect(c.h.launcher.materializeWorkspace(c.handle, c.target)).rejects.toThrow(
+      "docker_workspace_nested_repository",
+    );
+    expect(c.seen[0]).not.toContain("--exclude=./.git");
+    c.seen.length = 0;
+    await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+      gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 1024 },
+    });
+    const archive = c.seen.find((command) => command[0] === "tar")!;
+    const anchored = archive.lastIndexOf("--anchored");
+    expect(anchored).toBeGreaterThan(archive.lastIndexOf("--no-anchored"));
+    expect(archive.indexOf("--exclude=./.git")).toBeGreaterThan(anchored);
+    expect(archive.slice(-3)).toEqual(["-cf", "-", "."]);
+    expect(await readdir(c.target)).toEqual(["README.md"]);
+  });
+
+  it("reads the bundle with one bounded exec and writes its bytes to the trusted path", async () => {
+    const c = await collector();
+    const bytes = Buffer.from([0x23, 0x20, 0x76, 0x32, 0x00, 0xff, 0xfe, 0x80, 0x0a]);
+    await writeFile(join(c.keeper, ".git", "wardby-result.bundle"), bytes);
+    expect(
+      await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+        gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).toEqual({ bundle: true });
+    expect(await readFile(c.bundleDestination)).toEqual(bytes);
+    const read = c.seen.find((command) => command[0] === "node")!;
+    expect(read).toEqual(["node", "-e", expect.any(String), "/run/wardby/storage/workspace/.git", "1024"]);
+    expect(c.h.api.execCalls.find((call) => call.command === read)?.container).toBe("keeper");
+  });
+
+  it("caps the bundle read at the run's disk", async () => {
+    const c = await collector();
+    await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+      gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: Number.MAX_SAFE_INTEGER },
+    });
+    const read = c.seen.find((command) => command[0] === "node")!;
+    expect(read[4]).toBe(String(c.h.spec.limits.diskMb * 1024 * 1024));
+  });
+
+  it("reports no bundle when there is none, or it is a symlink, or .git itself is a symlink", async () => {
+    const c = await collector();
+    const history = { gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 1024 } };
+    expect(await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, history)).toEqual({
+      bundle: false,
+    });
+    const secret = join(c.keeper, "..", `${c.h.spec.runId}-secret.txt`);
+    await writeFile(secret, "fake-secret-value");
+    roots.push(secret);
+    await symlink(secret, join(c.keeper, ".git", "wardby-result.bundle"));
+    expect(await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, history)).toEqual({
+      bundle: false,
+    });
+    await expect(lstat(c.bundleDestination)).rejects.toThrow(/ENOENT/);
+    const elsewhere = await mkdtemp(join(tmpdir(), "wardby-k8s-elsewhere-"));
+    roots.push(elsewhere);
+    await writeFile(join(elsewhere, "wardby-result.bundle"), "not ours");
+    await rm(join(c.keeper, ".git"), { recursive: true });
+    await symlink(elsewhere, join(c.keeper, ".git"));
+    expect(await c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, history)).toEqual({
+      bundle: false,
+    });
+    await expect(lstat(c.bundleDestination)).rejects.toThrow(/ENOENT/);
+    expect(await readdir(c.target)).toEqual(["README.md"]);
+  });
+
+  it("raises vcs_result_bundle_too_large past the limit, leaving no bundle and the old workspace", async () => {
+    const c = await collector();
+    await writeFile(join(c.keeper, ".git", "wardby-result.bundle"), "x".repeat(65));
+    await expect(
+      c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+        gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 64 },
+      }),
+    ).rejects.toThrow("vcs_result_bundle_too_large");
+    await expect(lstat(c.bundleDestination)).rejects.toThrow(/ENOENT/);
+    expect(await readdir(c.target)).toEqual(["README.md"]);
+    expect(await readFile(join(c.target, "README.md"), "utf8")).toBe("hello\n");
+  });
+
+  it("fails, leaving no bundle, when the bundle read exec fails", async () => {
+    const c = await collector();
+    const served = c.h.api.onExec;
+    c.h.api.onExec = async (call) =>
+      call.command[0] === "node" && call.command[3]?.endsWith("/.git") ? 1 : served(call);
+    await expect(
+      c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+        gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 64 },
+      }),
+    ).rejects.toThrow("kubernetes_result_bundle_read_failed");
+    await expect(lstat(c.bundleDestination)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("still refuses a nested .git elsewhere with history on", async () => {
+    const c = await collector();
+    await mkdir(join(c.keeper, "vendor", ".git"), { recursive: true });
+    await writeFile(join(c.keeper, ".git", "wardby-result.bundle"), "bundle");
+    await expect(
+      c.h.launcher.materializeWorkspace(c.handle, c.target, undefined, {
+        gitHistory: { bundleDestination: c.bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("docker_workspace_nested_repository");
+    await expect(lstat(c.bundleDestination)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("reads a writable extra's bundle from its own storage folder", async () => {
+    const h = await harness("run-k8s-history-repos");
+    await mkdir(join(h.workspaceRoot, h.spec.runId, "repos", "tools", "workspace"), { recursive: true });
+    const spec: JobSpec = {
+      ...h.spec,
+      repositories: [
+        {
+          name: "tools",
+          access: "write",
+          hostPath: join(h.workspaceRoot, h.spec.runId, "repos", "tools", "workspace"),
+        },
+      ],
+    };
+    const handle = await h.launcher.launch(spec);
+    await h.finish(handle);
+    const keeper = await mkdtemp(join(tmpdir(), "wardby-k8s-keeper-"));
+    roots.push(keeper);
+    await mkdir(join(keeper, ".git"));
+    await writeFile(join(keeper, ".git", "wardby-result.bundle"), "tools bundle");
+    const seen: string[][] = [];
+    serveKeeperFolders(h, { "/run/wardby/storage/repos/tools": keeper }, seen);
+    const bundleDestination = join(h.workspaceRoot, "..", "tools.bundle");
+    expect(
+      await h.launcher.materializeWorkspace(
+        handle,
+        join(h.workspaceRoot, h.spec.runId, "repos", "tools", "workspace"),
+        "tools",
+        { gitHistory: { bundleDestination, maxBundleBytes: 1024 } },
+      ),
+    ).toEqual({ bundle: true });
+    expect(await readFile(bundleDestination, "utf8")).toBe("tools bundle");
+    expect(seen.find((command) => command[0] === "node")?.[3]).toBe("/run/wardby/storage/repos/tools/.git");
   });
 });

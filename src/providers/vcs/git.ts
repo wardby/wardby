@@ -15,7 +15,7 @@ import {
 import type { Dirent } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
+import { gitExcludePathspecs, isCollectExcluded, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import {
   WARDBY_PROTECTED_PATHS,
   isProtectedPathException,
@@ -27,7 +27,7 @@ import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { simulatorGitEnvironment } from "../../config/test-simulators.js";
 import { globRegex } from "../../core/glob.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
-import type { Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import {
   COMMIT_SHA,
   MAX_REDACTED_SPAN,
@@ -37,6 +37,8 @@ import {
 } from "../../coding/protocol.js";
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
+import { buildWorkerGitDir } from "./worker-git.js";
+import { RESULT_REF, importResultBundle, validateChangedPath } from "./result-history.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -44,9 +46,11 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  GitHistorySetting,
   PreparedReadOnlyCopy,
   PreparedWorkspace,
   ReadOnlyCopyInput,
+  RemoteLinkInput,
   TargetMerge,
   VcsPrepareInput,
   VcsProvider,
@@ -103,11 +107,28 @@ const MERGE_HEAD_REF = "refs/wardby/merge-head";
  */
 const MERGE_STATE_REF = "refs/wardby/merge-state";
 const MERGE_STATE_SUBJECT = "wardby merge state";
+/**
+ * History runs (#536): the commit the worker's HEAD starts at, recorded at prepare time so recovery
+ * reads it back -- baseCommit, or M0, the merge commit of a continuation's target-branch merge.
+ */
+const HISTORY_BASE_REF = "refs/wardby/history-base";
+/** The most history a run may ask for (codingProfile.gitHistory.depth). */
+const MAX_GIT_HISTORY_DEPTH = 100_000;
+/** The label a remote's commit is filed under when its requested ref is not a branch or tag name. */
+const PINNED_REMOTE_LABEL = "pinned";
 /** How far `fetch --deepen` goes, step by step, looking for a merge base in a depth-1 clone. */
 const MERGE_BASE_DEEPEN_STEPS = [64, 256, 1024, 4096] as const;
+/** How many `--deepen` rounds restoreHeadDepth makes at most before it settles for what it has. */
+const HEAD_DEPTH_RESTORE_ATTEMPTS = 4;
 /** A conflict marker pair at the start of a line: git writes 7 characters (any longer run counts too), then a space or the line end. */
 const CONFLICT_MARKER_START = /^<{7,}(?: |\r?$)/m;
 const CONFLICT_MARKER_END = /^>{7,}(?: |\r?$)/m;
+/**
+ * A history run's finalize steps that read or write a tree the result bundle brought in (read-tree,
+ * add, diff, write-tree, commit-tree): bounded, since that tree is the agent's.
+ */
+const TREE_STEP_TIMEOUT_MS = 300_000;
+
 const HARDENED_GIT_CONFIG = [
   "-c",
   "core.hooksPath=/dev/null",
@@ -131,7 +152,31 @@ export interface GitCommandOptions {
   maxOutputBytes?: number;
   /** Non-zero exit codes that still resolve with the output (`merge-tree` exits 1 on conflicts). */
   acceptExitCodes?: readonly number[];
+  /**
+   * Kills the command, and every process it started, after this many milliseconds, raising
+   * GitCommandError `timed_out`. Unset: no limit.
+   */
+  timeoutMs?: number;
+  /**
+   * Written to the command's stdin: a string (`commit-tree -F -`), or a stream piped in (a result
+   * bundle's pack, to `index-pack --stdin`); unset, stdin is closed. A stream that fails kills the command.
+   */
+  input?: string | Readable;
+  /** Only the commit identity and date variables (GIT_COMMIT_ENV_NAMES); anything else is refused. */
+  env?: Readonly<Partial<Record<GitCommitEnvName, string>>>;
 }
+
+/** The environment variables a caller may set for one git command: who made a commit, and when. */
+export const GIT_COMMIT_ENV_NAMES = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+] as const;
+export type GitCommitEnvName = (typeof GIT_COMMIT_ENV_NAMES)[number];
+const GIT_COMMIT_ENV = new Set<string>(GIT_COMMIT_ENV_NAMES);
 
 export interface GitCommandResult {
   stdout: string;
@@ -192,6 +237,15 @@ export class NodeGitCommandRunner implements GitCommandRunner {
     if (options.authUsername !== undefined && !SAFE_GIT_USERNAME.test(options.authUsername)) {
       throw new Error("git_auth_username_invalid");
     }
+    const commitEnv = Object.entries(options.env ?? {});
+    if (
+      commitEnv.some(([name, value]) => !GIT_COMMIT_ENV.has(name) || typeof value !== "string" || value.includes("\0"))
+    ) {
+      throw new Error("git_env_invalid");
+    }
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0)) {
+      throw new Error("git_timeout_invalid");
+    }
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
       HOME: this.options.homeDir,
@@ -209,16 +263,21 @@ export class NodeGitCommandRunner implements GitCommandRunner {
       GIT_LFS_SKIP_SMUDGE: "1",
       // WARDBY_TEST_SIMULATORS (test only): the simulator's throwaway CA; empty otherwise.
       ...simulatorGitEnvironment(),
+      ...Object.fromEntries(commitEnv),
     };
     const maxBytes = options.maxOutputBytes ?? MAX_GIT_OUTPUT_BYTES;
     const secrets = options.authToken ? [options.authToken] : [];
 
     return new Promise((resolvePromise, rejectPromise) => {
+      const timed = options.timeoutMs !== undefined;
       const child = spawn(this.gitBinary, [...args], {
         cwd: options.cwd,
         env,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe", options.authToken ? "pipe" : "ignore"],
+        // A timed command leads its own process group, so a timeout kills what it started too
+        // (fetch's index-pack, a shell's children), not just git.
+        detached: timed,
+        stdio: [options.input !== undefined ? "pipe" : "ignore", "pipe", "pipe", options.authToken ? "pipe" : "ignore"],
       });
       const childStdout = child.stdout;
       const childStderr = child.stderr;
@@ -227,6 +286,37 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         rejectPromise(new GitCommandError(null, "git_stdio_unavailable"));
         return;
       }
+      let timedOut = false;
+      const killAll = () => {
+        try {
+          if (timed && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      };
+      const source = options.input;
+      if (source !== undefined && child.stdin) {
+        child.stdin.on("error", () => undefined);
+        if (typeof source === "string") {
+          child.stdin.end(source);
+        } else {
+          // A source that cannot be read must not look like a short, valid input.
+          source.on("error", killAll);
+          source.pipe(child.stdin);
+          child.once("close", () => source.destroy());
+        }
+      }
+      const timer = timed
+        ? setTimeout(() => {
+            timedOut = true;
+            killAll();
+            // Whatever still holds the pipes open is not waited for.
+            childStdout.destroy();
+            childStderr.destroy();
+            rejectPromise(new GitCommandError(null, "timed_out"));
+          }, options.timeoutMs)
+        : undefined;
       if (options.authToken) {
         const authPipe = child.stdio[3] as Writable;
         authPipe.on("error", () => undefined);
@@ -242,7 +332,7 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         outputBytes += chunk.length;
         if (outputBytes > maxBytes) {
           outputExceeded = true;
-          child.kill("SIGKILL");
+          killAll();
           return;
         }
         chunks.push(chunk);
@@ -253,6 +343,8 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         spawnError = true;
       });
       child.once("close", (code) => {
+        if (timer) clearTimeout(timer);
+        if (timedOut) return;
         if (outputExceeded) {
           rejectPromise(new GitCommandError(code, "git_output_limit"));
           return;
@@ -322,17 +414,7 @@ export function protectedPathMatcher(patterns: readonly string[]): (path: string
   };
 }
 
-export function validateChangedPath(path: string): string {
-  if (
-    !path ||
-    isAbsolute(path) ||
-    path.includes("\\") ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  ) {
-    throw new Error("vcs_changed_path_invalid");
-  }
-  return path;
-}
+export { validateChangedPath };
 
 function nullSeparated(value: string): string[] {
   const values = value.split("\0");
@@ -346,6 +428,61 @@ function safeGitRef(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
+
+/** A repository config with no credential, transport, filter or token-shaped content (see assertSafeLocalConfig). */
+function isSafeLocalConfig(config: string): boolean {
+  return !(
+    Buffer.byteLength(config, "utf8") > MAX_LOCAL_CONFIG_BYTES ||
+    /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config) ||
+    /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config) ||
+    redactTokenShapedValues(config) !== config
+  );
+}
+
+/** A value that is exactly one valid git ref component sequence, untouched by normalization. */
+function isExactGitRef(value: string): boolean {
+  return safeGitRef(value) === value;
+}
+
+/**
+ * A remote's name (#536): a repository link name that is also one valid ref component, and never
+ * `origin` (the default repository's own). Link creation checks this too; this is the backstop.
+ */
+function isRemoteName(name: string): boolean {
+  return isCodingRepositoryName(name) && name !== "origin" && isExactGitRef(name) && !name.endsWith(".lock");
+}
+
+/** A remote's label as filed: the given branch or tag name when it is a valid ref below the remote's name, else "pinned". */
+function remoteLabel(label: string): string {
+  if (label === "HEAD" || label.startsWith("refs/") || !isExactGitRef(label)) return PINNED_REMOTE_LABEL;
+  return label;
+}
+
+/** The clone (and fetch) depth arguments: depth 1 without history, the setting's depth, or none for full history. */
+function depthArgs(gitHistory: GitHistorySetting | undefined): string[] {
+  if (!gitHistory) return ["--depth", "1"];
+  return gitHistory.depth === "full" ? [] : ["--depth", String(gitHistory.depth)];
+}
+
+function sameGitHistory(left: GitHistorySetting | undefined, right: GitHistorySetting | undefined): boolean {
+  return left?.depth === right?.depth;
+}
+
+function sameRemotes(left: readonly RemoteLinkInput[] | undefined, right: readonly RemoteLinkInput[] | undefined) {
+  const [a, b] = [left ?? [], right ?? []];
+  return (
+    a.length === b.length &&
+    a.every(
+      (remote, index) =>
+        remote.name === b[index].name &&
+        remote.repository === b[index].repository &&
+        remote.resolvedSha === b[index].resolvedSha &&
+        remote.label === b[index].label,
+    )
+  );
 }
 
 /** The merge state's message: a fixed subject, then the target ref and conflicted paths as JSON. */
@@ -455,12 +592,12 @@ export class GitVcsProvider implements VcsProvider {
             "--no-checkout",
             "--single-branch",
             "--no-tags",
-            // History is never needed: the worker gets no Git metadata, the
-            // finalizer compares only against baseCommit and the new commit's
-            // parent, and pushOnce compares SHAs. Depth 1 keeps large
-            // repositories' history off the control plane's disk.
-            "--depth",
-            "1",
+            // Without git history (#536) history is never needed: the worker
+            // gets no Git metadata, the finalizer compares only against
+            // baseCommit and the new commit's parent, and pushOnce compares
+            // SHAs. Depth 1 keeps large repositories' history off the control
+            // plane's disk. A history run clones to its depth, or in full.
+            ...depthArgs(normalized.gitHistory),
             "--branch",
             cloneBranch,
             "--separate-git-dir",
@@ -471,9 +608,26 @@ export class GitVcsProvider implements VcsProvider {
           { cwd: base, ...auth },
         );
         if (mergeRef && mergeRef !== normalized.headRef) {
-          mergeFetched = await this.fetchMergeTarget(gitMetadataPath, workspacePath, cloneBranch, mergeRef, auth);
+          mergeFetched = await this.fetchMergeTarget(
+            gitMetadataPath,
+            workspacePath,
+            cloneBranch,
+            mergeRef,
+            auth,
+            normalized.gitHistory,
+          );
         }
       });
+      for (const remote of normalized.remotes ?? []) {
+        await this.fetchRemoteLink(gitMetadataPath, workspacePath, remote, normalized.gitHistory);
+      }
+      if (
+        normalized.gitHistory &&
+        normalized.gitHistory.depth !== "full" &&
+        (normalized.remotes?.length || mergeFetched)
+      ) {
+        await this.restoreHeadDepth(gitMetadataPath, workspacePath, cloneBranch, normalized, mergeFetched);
+      }
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
         gitMetadataPath,
@@ -508,13 +662,39 @@ export class GitVcsProvider implements VcsProvider {
         mergeFetched && mergeRef
           ? await this.mergeTargetBranch(gitMetadataPath, workspacePath, baseCommit, mergeRef)
           : null;
+      // A history run's merge is committed now, as M0 (parents baseCommit and the target): the
+      // worker starts at it, and its own commits are measured against it.
+      const historyBase =
+        normalized.gitHistory && merged
+          ? await this.commitTwoParentMerge(
+              { gitMetadataPath, workspacePath, baseCommit, headRef: normalized.headRef, runId: normalized.runId },
+              merged.tree,
+              merged.targetMerge,
+            )
+          : baseCommit;
       await this.gitForPaths(gitMetadataPath, workspacePath, [
         "read-tree",
         "--reset",
         "-u",
         merged?.tree ?? baseCommit,
       ]);
-      await this.inspectWorkspace(workspacePath);
+      if (normalized.gitHistory) {
+        await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", HISTORY_BASE_REF, historyBase]);
+        await buildWorkerGitDir({
+          git: this.git,
+          gitMetadataPath,
+          workspacePath,
+          headRef: normalized.headRef,
+          head: historyBase,
+          collectExclude: normalized.collectExclude,
+          remotes: (normalized.remotes ?? []).map((remote) => ({
+            name: remote.name,
+            label: remote.label,
+            commit: remote.resolvedSha,
+          })),
+        });
+      }
+      await this.inspectWorkspace(workspacePath, { allowRootGit: Boolean(normalized.gitHistory) });
 
       return {
         id: workspaceId(normalized),
@@ -523,6 +703,9 @@ export class GitVcsProvider implements VcsProvider {
         workspacePath,
         gitMetadataPath,
         ...(merged ? { targetMerge: merged.targetMerge } : {}),
+        ...(normalized.gitHistory
+          ? { historyBase, remoteTips: (normalized.remotes ?? []).map((remote) => remote.resolvedSha) }
+          : {}),
       };
     } catch (error) {
       // Never the run root for a slot: the default workspace (and any other slot) lives there.
@@ -555,18 +738,38 @@ export class GitVcsProvider implements VcsProvider {
       workspacePath: expected.workspacePath,
       gitMetadataPath: expected.gitMetadataPath,
     };
-    const prepared = await this.validatePrepared(recovered);
-    await this.inspectWorkspace(prepared.workspacePath);
+    const history = normalized.gitHistory ? await this.readHistoryFields(normalized, expected) : undefined;
+    const prepared = await this.validatePrepared({ ...recovered, ...history });
+    await this.inspectWorkspace(prepared.workspacePath, { allowRootGit: Boolean(prepared.gitHistory) });
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
     const merge = await this.readMergeState(prepared);
     const currentHead = await this.revParse(prepared, "HEAD");
-    if (currentHead !== prepared.baseCommit) {
+    // A history run's finalize records the tip it pushed (any number of commits on historyBase).
+    const finalizedHistory = prepared.gitHistory !== undefined && currentHead === (await this.resultRef(prepared));
+    if (currentHead !== prepared.baseCommit && !finalizedHistory) {
       const parent = await this.revParse(prepared, "HEAD^");
       if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
       if (merge && (await this.revParse(prepared, "HEAD^2")) !== merge.targetCommit) {
+        throw new Error("vcs_commit_history_invalid");
+      }
+    }
+    if (prepared.historyBase !== undefined && prepared.historyBase !== prepared.baseCommit) {
+      // M0: the recorded merge state's tree, on baseCommit and the target, and nothing else.
+      if (!merge) throw new Error("vcs_commit_history_invalid");
+      const parents = await this.commitParents(prepared, prepared.historyBase);
+      const [mergeTree, stateTree] = await Promise.all([
+        this.revParse(prepared, `${prepared.historyBase}^{tree}`),
+        this.revParse(prepared, `${merge.stateCommit}^{tree}`),
+      ]);
+      if (
+        parents.length !== 2 ||
+        parents[0] !== prepared.baseCommit ||
+        parents[1] !== merge.targetCommit ||
+        mergeTree !== stateTree
+      ) {
         throw new Error("vcs_commit_history_invalid");
       }
     }
@@ -575,17 +778,60 @@ export class GitVcsProvider implements VcsProvider {
     return { ...prepared, targetMerge };
   }
 
+  /**
+   * A history run's recorded fields, read back from the control plane's own git dir (never the
+   * worker's): the history base, and each remote's tip, which must still be the commit dispatch
+   * resolved.
+   */
+  private async readHistoryFields(
+    normalized: Pick<PreparedWorkspace, "remotes">,
+    paths: { gitMetadataPath: string; workspacePath: string },
+  ): Promise<Pick<PreparedWorkspace, "historyBase" | "remoteTips">> {
+    const historyBase = await this.revParseRaw(
+      paths.gitMetadataPath,
+      paths.workspacePath,
+      `${HISTORY_BASE_REF}^{commit}`,
+    ).catch((error: unknown) => {
+      throw new Error("vcs_commit_history_invalid", { cause: error });
+    });
+    const remoteTips: string[] = [];
+    for (const remote of normalized.remotes ?? []) {
+      const tip = await this.revParseRaw(
+        paths.gitMetadataPath,
+        paths.workspacePath,
+        `refs/remotes/${remote.name}/${remote.label}^{commit}`,
+      );
+      if (tip !== remote.resolvedSha) throw new Error("vcs_workspace_handle_invalid");
+      remoteTips.push(tip);
+    }
+    return { historyBase, remoteTips };
+  }
+
+  /** A commit's parents, in order, from its raw object. */
+  private async commitParents(workspace: PreparedWorkspace, commit: string): Promise<string[]> {
+    const raw = (await this.gitFor(workspace, ["cat-file", "commit", commit])).stdout;
+    const split = raw.indexOf("\n\n");
+    const header = split < 0 ? raw : raw.slice(0, split);
+    return header
+      .split("\n")
+      .filter((line) => line.startsWith("parent "))
+      .map((line) => line.slice("parent ".length));
+  }
+
   async finalizeChanges(
     workspace: PreparedWorkspace,
     details?: FinalizeChangesDetails,
   ): Promise<FinalizeChangesResult> {
     const prepared = await this.validatePrepared(workspace);
-    await this.inspectWorkspace(prepared.workspacePath);
+    await this.inspectWorkspace(prepared.workspacePath, { allowRootGit: Boolean(prepared.gitHistory) });
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     // The merge state on disk is the trusted record; the handle must agree with it.
     const merge = await this.readMergeState(prepared);
     if (!sameTargetMerge(merge, prepared.targetMerge)) throw new Error("vcs_workspace_handle_invalid");
+    if (prepared.gitHistory) return this.finalizeHistory(prepared, merge, details);
+    // Only a history run's collector makes a result bundle.
+    if (details?.resultBundle !== undefined) throw new Error("vcs_workspace_handle_invalid");
     // Excluded paths (src/coding/collect-exclude.ts) are never collected from the worker, so
     // they are also neither added nor deleted here: tracked files under them stay untouched.
     await this.gitFor(prepared, [
@@ -656,7 +902,17 @@ export class GitVcsProvider implements VcsProvider {
       if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
       commitSha = currentHead;
     }
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
 
+  /** The end of every finalize that has something to push: push it once, then open or update the pull request (or report the branch). */
+  private async pushAndPublish(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+    changed: string[],
+    commitSha: string,
+  ): Promise<FinalizeChangesResult> {
     await this.remote.assertContinuationOpen(prepared);
     // Before the push: a description comment must already exist when the push starts a review.
     await this.remote
@@ -697,24 +953,206 @@ export class GitVcsProvider implements VcsProvider {
     };
   }
 
+  /**
+   * A history run's finalize (#536). With a result bundle, the agent's commits are imported and
+   * rewritten (result-history.ts) and become the start; without one, the start is historyBase
+   * (baseCommit, or M0, a continuation's committed target merge, which is then pushed even with no
+   * other change). The uncommitted files are staged on the start and committed on top as
+   * "Wardby run <id>" when they differ from it. Every check runs over the agent's own changes: each
+   * new commit's paths (against all its parents) and the uncommitted ones, together; the diff limit
+   * over all their diffs together; the conflict-marker check over the target merge's conflicted paths
+   * and every path a merge commit of the agent's resolved. refs/wardby/result records the tip pushed.
+   */
+  private async finalizeHistory(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+  ): Promise<FinalizeChangesResult> {
+    const historyBase = prepared.historyBase;
+    if (historyBase === undefined) throw new Error("vcs_workspace_handle_invalid");
+    const previousHead = await this.revParse(prepared, "HEAD");
+    const finalized = await this.resultRef(prepared);
+    if (details?.resultBundle === undefined && finalized !== null && finalized === previousHead) {
+      return this.repushFinalized(prepared, merge, details, finalized);
+    }
+    const imported =
+      details?.resultBundle !== undefined
+        ? await importResultBundle({
+            git: (args, options) => this.gitFor(prepared, args, options),
+            bundlePath: details.resultBundle,
+            historyBase,
+            remoteTips: prepared.remoteTips ?? [],
+            runId: prepared.runId,
+            maxDiffBytes: this.maxDiffBytes,
+            maxChangedFiles: this.maxChangedFiles,
+          })
+        : undefined;
+    const exclusions = normalizeCollectExclusions(prepared.collectExclude);
+    // A path no run ever collects (dependency and cache folders, the agent's collectExclude) is
+    // never published from a commit either: the sandbox writes files there that are not the
+    // agent's work, its package manager config with the run's registry token among them.
+    // Every commit's own paths count, so one a later commit deletes is refused too: the intermediate
+    // commit would still carry its blob. The worker's info/exclude keeps `git add -A` off these paths.
+    if (imported?.agentPaths.some((path) => isCollectExcluded(path, exclusions))) {
+      throw new Error("vcs_result_path_excluded");
+    }
+    const start = imported?.tip ?? historyBase;
+    // The index starts at the start's tree, so excluded paths (never collected) keep the start's
+    // version, and the staged diff is only what the agent left uncommitted.
+    await this.gitFor(prepared, ["read-tree", start], { timeoutMs: TREE_STEP_TIMEOUT_MS });
+    await this.gitFor(prepared, ["add", "--all", "--", ":/", ...gitExcludePathspecs(exclusions)], {
+      timeoutMs: TREE_STEP_TIMEOUT_MS,
+    });
+    const staged = nullSeparated(
+      (
+        await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", start, "--"], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout,
+    );
+    const changed = [...new Set([...(imported?.agentPaths ?? []).map(validateChangedPath), ...staged])];
+    if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
+    const protectedChange = changed.find(protectedPathMatcher(prepared.protectedPaths));
+    if (protectedChange) throw new Error(`vcs_protected_path:${protectedChange}`);
+    const remaining = this.maxDiffBytes - (imported?.agentDiffBytes ?? 0);
+    if (remaining < 0) throw new Error("vcs_diff_size_limit");
+    let diff: string;
+    try {
+      diff = (
+        await this.gitFor(prepared, ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", start, "--"], {
+          maxOutputBytes: remaining,
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout;
+    } catch (error) {
+      if (error instanceof GitCommandError && error.message.includes("git_output_limit")) {
+        throw new Error("vcs_diff_size_limit", { cause: error });
+      }
+      throw error;
+    }
+    if (Buffer.byteLength(diff, "utf8") > remaining) throw new Error("vcs_diff_size_limit");
+    // After the size limits, as for a run without history. The workspace holds the final tree.
+    const conflicted = [...new Set([...(merge?.conflictedPaths ?? []), ...(imported?.mergePaths ?? [])])];
+    if (conflicted.length > 0) await this.assertConflictsResolved(prepared.workspacePath, conflicted);
+
+    const tree = (await this.gitFor(prepared, ["write-tree"], { timeoutMs: TREE_STEP_TIMEOUT_MS })).stdout.trim();
+    if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    let commitSha: string;
+    if (tree === (await this.revParse(prepared, `${start}^{tree}`))) {
+      commitSha = start;
+    } else if (
+      previousHead !== start &&
+      (await this.commitParents(prepared, previousHead)).join(" ") === start &&
+      (await this.revParse(prepared, `${previousHead}^{tree}`)) === tree
+    ) {
+      // Finalized before with these same files: the commit already made is pushed again.
+      commitSha = previousHead;
+    } else {
+      commitSha = (
+        await this.gitFor(prepared, ["commit-tree", tree, "-p", start, "-m", `Wardby run ${prepared.runId}`], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout.trim();
+      if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
+    }
+    if (commitSha === prepared.baseCommit) {
+      return {
+        outcome: "no_changes",
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        baseCommit: prepared.baseCommit,
+      };
+    }
+    const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
+    if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha]);
+    await this.gitFor(prepared, ["symbolic-ref", "HEAD", `refs/heads/${prepared.headRef}`]);
+    await this.gitFor(prepared, ["update-ref", RESULT_REF, commitSha]);
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
+
+  /**
+   * A history run finalized before (refs/wardby/result is HEAD: every check passed then) and finalized
+   * again without a bundle: the same tip is pushed again, provided the collected files still match it.
+   */
+  private async repushFinalized(
+    prepared: PreparedWorkspace,
+    merge: (TargetMerge & { stateCommit: string }) | undefined,
+    details: FinalizeChangesDetails | undefined,
+    commitSha: string,
+  ): Promise<FinalizeChangesResult> {
+    await this.gitFor(prepared, ["read-tree", commitSha], { timeoutMs: TREE_STEP_TIMEOUT_MS });
+    await this.gitFor(
+      prepared,
+      ["add", "--all", "--", ":/", ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude))],
+      { timeoutMs: TREE_STEP_TIMEOUT_MS },
+    );
+    const afterCommitChanges = nullSeparated(
+      (
+        await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", commitSha, "--"], {
+          timeoutMs: TREE_STEP_TIMEOUT_MS,
+        })
+      ).stdout,
+    );
+    if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
+    // Only for the pull request's notes (lockfiles): what the branch changes against where it started.
+    const changed = await this.gitFor(
+      prepared,
+      ["diff", "--name-only", "-z", "--no-renames", prepared.baseCommit, commitSha, "--"],
+      { timeoutMs: TREE_STEP_TIMEOUT_MS },
+    ).then(
+      (result) => nullSeparated(result.stdout).slice(0, this.maxChangedFiles),
+      () => [],
+    );
+    const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
+    if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    return this.pushAndPublish(prepared, merge, details, changed, commitSha);
+  }
+
+  /** refs/wardby/result in the control plane's git dir, or null when no finalize recorded one. */
+  private async resultRef(workspace: PreparedWorkspace): Promise<string | null> {
+    const value = (await this.gitFor(workspace, ["for-each-ref", "--format=%(objectname)", RESULT_REF])).stdout.trim();
+    if (!value) return null;
+    if (!COMMIT_SHA.test(value)) throw new Error("vcs_commit_sha_invalid");
+    return value;
+  }
+
   /** The two-parent merge commit (baseCommit, the target) of the staged tree, as the Wardby identity. */
   private async commitMerge(prepared: PreparedWorkspace, merge: TargetMerge): Promise<string> {
     const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
     if (!COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    return this.commitTwoParentMerge(prepared, tree, merge);
+  }
+
+  /**
+   * Commits `tree` with the parents baseCommit and the target's commit, as the Wardby identity, and
+   * moves headRef from baseCommit to it: the merge a finalize commits, and a history run's M0 (#536).
+   */
+  private async commitTwoParentMerge(
+    workspace: Pick<PreparedWorkspace, "gitMetadataPath" | "workspacePath" | "baseCommit" | "headRef" | "runId">,
+    tree: string,
+    merge: Pick<TargetMerge, "ref" | "targetCommit">,
+  ): Promise<string> {
+    const { gitMetadataPath, workspacePath } = workspace;
     const commitSha = (
-      await this.gitFor(prepared, [
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
         "commit-tree",
         tree,
         "-p",
-        prepared.baseCommit,
+        workspace.baseCommit,
         "-p",
         merge.targetCommit,
         "-m",
-        `Merge ${merge.ref} into ${prepared.headRef} (Wardby run ${prepared.runId})`,
+        `Merge ${merge.ref} into ${workspace.headRef} (Wardby run ${workspace.runId})`,
       ])
     ).stdout.trim();
     if (!COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
-    await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha, prepared.baseCommit]);
+    await this.gitForPaths(gitMetadataPath, workspacePath, [
+      "update-ref",
+      `refs/heads/${workspace.headRef}`,
+      commitSha,
+      workspace.baseCommit,
+    ]);
     return commitSha;
   }
 
@@ -918,6 +1356,33 @@ export class GitVcsProvider implements VcsProvider {
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
     if (!protectsSomePath(protectedPaths)) throw new Error("vcs_protected_paths_invalid");
     const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
+    let gitHistory: GitHistorySetting | undefined;
+    if (input.gitHistory !== undefined) {
+      const { depth } = input.gitHistory;
+      if (depth !== "full" && !(Number.isSafeInteger(depth) && depth >= 1 && depth <= MAX_GIT_HISTORY_DEPTH)) {
+        throw new Error("vcs_git_history_invalid");
+      }
+      gitHistory = { depth };
+    }
+    let remotes: RemoteLinkInput[] | undefined;
+    if (input.remotes !== undefined && input.remotes.length > 0) {
+      // Dispatch refuses these first (repository_remote_needs_history / _invalid); this is the backstop.
+      if (!gitHistory) throw new Error("repository_remote_needs_history");
+      if (input.slot !== undefined) throw new Error("repository_remote_invalid");
+      const names = new Set<string>();
+      remotes = input.remotes.map((remote) => {
+        if (!isRemoteName(remote.name) || names.has(remote.name) || !COMMIT_SHA.test(remote.resolvedSha)) {
+          throw new Error("repository_remote_invalid");
+        }
+        names.add(remote.name);
+        return {
+          name: remote.name,
+          repository: this.remote.normalizeRepository(remote.repository),
+          resolvedSha: remote.resolvedSha,
+          label: remoteLabel(remote.label),
+        };
+      });
+    }
     return {
       runId: input.runId,
       repository,
@@ -928,6 +1393,8 @@ export class GitVcsProvider implements VcsProvider {
       continuation,
       ...(input.slot ? { slot: { name: input.slot.name } } : {}),
       ...(input.branchRunId !== undefined ? { branchRunId: input.branchRunId } : {}),
+      ...(gitHistory ? { gitHistory } : {}),
+      ...(remotes ? { remotes } : {}),
     };
   }
 
@@ -964,7 +1431,10 @@ export class GitVcsProvider implements VcsProvider {
       workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index]) ||
       workspace.collectExclude.length !== normalized.collectExclude.length ||
       workspace.collectExclude.some((path, index) => path !== normalized.collectExclude[index]) ||
-      workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId
+      workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId ||
+      !sameGitHistory(workspace.gitHistory, normalized.gitHistory) ||
+      !sameRemotes(workspace.remotes, normalized.remotes) ||
+      !this.validHistoryFields(workspace, normalized)
     ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
@@ -987,6 +1457,162 @@ export class GitVcsProvider implements VcsProvider {
     return { ...workspace, ...normalized };
   }
 
+  /** A history run's historyBase and remoteTips are set and well formed; no other run has either. */
+  private validHistoryFields(
+    workspace: PreparedWorkspace,
+    normalized: Pick<PreparedWorkspace, "gitHistory" | "remotes">,
+  ): boolean {
+    if (!normalized.gitHistory) return workspace.historyBase === undefined && workspace.remoteTips === undefined;
+    const tips = (normalized.remotes ?? []).map((remote) => remote.resolvedSha);
+    return (
+      workspace.historyBase !== undefined &&
+      COMMIT_SHA.test(workspace.historyBase) &&
+      workspace.remoteTips !== undefined &&
+      workspace.remoteTips.length === tips.length &&
+      workspace.remoteTips.every((tip, index) => tip === tips[index])
+    );
+  }
+
+  /**
+   * Fetches one remote link's resolved commit (#536) into the control plane's git dir at
+   * `refs/remotes/<name>/<label>`, to the run's history depth (or in full), under the remote's read
+   * access. Any failure is vcs_remote_fetch_failed:<name>, its git output redacted by the token.
+   */
+  private async fetchRemoteLink(
+    gitMetadataPath: string,
+    workspacePath: string,
+    remote: RemoteLinkInput,
+    gitHistory: GitHistorySetting | undefined,
+  ): Promise<void> {
+    const ref = `refs/remotes/${remote.name}/${remote.label}`;
+    const url = this.remote.cloneUrl(remote.repository);
+    const fetch = async (token: string | undefined) => {
+      try {
+        await this.gitForPaths(
+          gitMetadataPath,
+          workspacePath,
+          [
+            ...this.remote.gitConfig,
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            ...depthArgs(gitHistory),
+            url,
+            `${remote.resolvedSha}:${ref}`,
+          ],
+          this.gitAuth(token),
+        );
+        if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${ref}^{commit}`)) !== remote.resolvedSha) {
+          throw new Error("vcs_remote_commit_mismatch");
+        }
+      } catch (error) {
+        // Only the redacted text goes on: the raw error (and its chain) never leaves here, so a
+        // runner that did not redact its own output cannot carry the token out either.
+        const detail = redactGitOutput(error instanceof Error ? error.message : "unknown", token ? [token] : []);
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error(`vcs_remote_fetch_failed:${remote.name}`, { cause: new Error(detail) });
+      }
+    };
+    if (this.remote.withReadAccess) await this.remote.withReadAccess(remote.repository, fetch);
+    else await this.remote.withAccess(remote.repository, fetch);
+  }
+
+  /**
+   * Git's shallow boundary is shared by the whole repository: a depth-n fetch of a remote (or of a
+   * continuation's target) whose tip is nearer the shared merge base than n can mark the head's own
+   * commits shallow, leaving the head with less history than configured.
+   *
+   * This only ever adds history. When the head already has at least n commits (for instance after
+   * fetchMergeTarget deepened it to reach a merge base) nothing is fetched. Otherwise it deepens by
+   * the missing count (`--deepen`, which moves the boundary back and never forward), a few bounded
+   * times while the head still stops at a shallow commit. It then checks that every remote link and
+   * the merge target kept at least the history they had, and that a merge base found before is
+   * still there. (A `--depth n` fetch would instead reset the boundary and could shorten all of them.)
+   *
+   * It fetches the recorded baseCommit SHA (never the branch name), into a scratch ref under
+   * refs/wardby, so a branch that moved on the host meanwhile cannot move refs/remotes/origin/<branch>
+   * or baseCommit. (Fetching a SHA is what the remote links already do.)
+   */
+  private async restoreHeadDepth(
+    gitMetadataPath: string,
+    workspacePath: string,
+    cloneBranch: string,
+    input: { repository: string; gitHistory?: GitHistorySetting; remotes?: readonly RemoteLinkInput[] },
+    mergeFetched: boolean,
+  ): Promise<void> {
+    const depth = input.gitHistory?.depth;
+    if (typeof depth !== "number") return;
+    const git = (args: readonly string[], options: { acceptExitCodes?: number[] } = {}) =>
+      this.gitForPaths(gitMetadataPath, workspacePath, [...args], options);
+    const count = async (revision: string) => Number((await git(["rev-list", "--count", revision])).stdout.trim());
+    const mergeBase = async (a: string, b: string) =>
+      (await git(["merge-base", a, b], { acceptExitCodes: [1] })).stdout.trim();
+    const sha = await this.revParseRaw(gitMetadataPath, workspacePath, `refs/remotes/origin/${cloneBranch}^{commit}`);
+    let have = await count(sha);
+    if (have >= depth) return;
+    const others = [
+      ...(input.remotes ?? []).map((remote) => `refs/remotes/${remote.name}/${remote.label}`),
+      ...(mergeFetched ? [MERGE_TARGET_REF] : []),
+    ];
+    const before = await Promise.all(others.map(count));
+    const baseBefore = mergeFetched ? await mergeBase(sha, MERGE_TARGET_REF) : "";
+    await this.remote.withAccess(input.repository, async (token) => {
+      try {
+        for (let attempt = 0; attempt < HEAD_DEPTH_RESTORE_ATTEMPTS && have < depth; attempt += 1) {
+          if (!(await this.stopsAtShallowBoundary(gitMetadataPath, workspacePath, sha))) break;
+          await this.gitForPaths(
+            gitMetadataPath,
+            workspacePath,
+            [
+              ...this.remote.gitConfig,
+              "fetch",
+              "--no-tags",
+              "--no-write-fetch-head",
+              `--deepen=${depth - have}`,
+              "origin",
+              `+${sha}:${MERGE_HEAD_REF}`,
+            ],
+            this.gitAuth(token),
+          );
+          if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${MERGE_HEAD_REF}^{commit}`)) !== sha) {
+            throw new Error("vcs_head_commit_mismatch");
+          }
+          have = await count(sha);
+        }
+        const after = await Promise.all(others.map(count));
+        if (after.some((value, index) => value < before[index])) throw new Error("vcs_history_shortened");
+        if (baseBefore && !(await mergeBase(sha, MERGE_TARGET_REF))) throw new Error("vcs_history_shortened");
+      } catch (error) {
+        // Redacted text only; the raw error chain never leaves here.
+        const detail = redactGitOutput(error instanceof Error ? error.message : "unknown", token ? [token] : []);
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error("vcs_remote_fetch_failed:origin", { cause: new Error(detail) });
+      }
+    });
+  }
+
+  /** Whether `commit`'s history ends at a shallow commit (rather than at a real root). */
+  private async stopsAtShallowBoundary(
+    gitMetadataPath: string,
+    workspacePath: string,
+    commit: string,
+  ): Promise<boolean> {
+    let shallow: string;
+    try {
+      shallow = await readFile(resolve(gitMetadataPath, "shallow"), "utf8");
+    } catch {
+      return false;
+    }
+    const boundary = new Set(shallow.split("\n").filter(Boolean));
+    if (boundary.size === 0) return false;
+    const roots = (
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-list", "--max-parents=0", commit])
+    ).stdout
+      .split("\n")
+      .filter(Boolean);
+    return roots.some((root) => boundary.has(root));
+  }
+
   /**
    * Fetches a continuation's target branch from the same `origin` the clone
    * came from (never another URL, so never a fork) and deepens the depth-1
@@ -1000,6 +1626,7 @@ export class GitVcsProvider implements VcsProvider {
     cloneBranch: string,
     ref: string,
     auth: { authToken?: string; authUsername?: string },
+    gitHistory?: GitHistorySetting,
   ): Promise<boolean> {
     const fetch = (depth: readonly string[], refspec: string) =>
       this.gitForPaths(
@@ -1013,8 +1640,11 @@ export class GitVcsProvider implements VcsProvider {
     // refs/remotes/origin/<head> (baseCommit) never moves.
     const head = `+refs/heads/${cloneBranch}:${MERGE_HEAD_REF}`;
     try {
-      await fetch(["--depth", "1"], target);
-      for (const step of [0, ...MERGE_BASE_DEEPEN_STEPS]) {
+      // The target comes at the clone's own depth: 1, a history run's depth, or in full (#536).
+      await fetch(depthArgs(gitHistory), target);
+      // A full clone has nothing to deepen: a merge base is there at once, or not at all.
+      const steps = gitHistory?.depth === "full" ? [] : MERGE_BASE_DEEPEN_STEPS;
+      for (const step of [0, ...steps]) {
         if (step > 0) {
           // One fetch per side: newer git deepens only the refs a fetch names
           // (older git deepened every shallow boundary), and a fetch naming
@@ -1187,14 +1817,25 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
-  private async inspectWorkspace(workspacePath: string): Promise<void> {
+  /**
+   * `allowRootGit` (history runs, #536): the workspace root's own `.git` directory is allowed. It is
+   * never walked and never run git against (the worker can write it); only its config is read, as
+   * text, and must pass the local-config checks. Any other `.git` is a nested repository.
+   */
+  private async inspectWorkspace(workspacePath: string, options: { allowRootGit?: boolean } = {}): Promise<void> {
     const rootStat = await lstat(workspacePath);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     let entries = 0;
     await walkEntries(workspacePath, async (entry, fullPath, directory) => {
       entries += 1;
       if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("vcs_workspace_entry_limit");
-      if (entry.name.toLowerCase() === ".git") throw new Error("vcs_nested_repository");
+      if (entry.name.toLowerCase() === ".git") {
+        if (!options.allowRootGit || entry.name !== ".git" || directory !== workspacePath) {
+          throw new Error("vcs_nested_repository");
+        }
+        await this.assertSafeWorkerGit(fullPath);
+        return false;
+      }
       const stat = await lstat(fullPath);
       if (stat.isSymbolicLink()) {
         const target = await readlink(fullPath);
@@ -1250,14 +1891,35 @@ export class GitVcsProvider implements VcsProvider {
    */
   private async assertSafeLocalConfig(gitMetadataPath: string): Promise<void> {
     const config = await readFile(resolve(gitMetadataPath, "config"), "utf8");
-    if (
-      Buffer.byteLength(config, "utf8") > 64 * 1024 ||
-      /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config) ||
-      /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config) ||
-      redactTokenShapedValues(config) !== config
-    ) {
-      throw new Error("vcs_git_config_unsafe");
+    if (!isSafeLocalConfig(config)) throw new Error("vcs_git_config_unsafe");
+  }
+
+  /**
+   * The worker's `.git` (#536), which the worker can write: a real directory (not a symlink, not a
+   * gitdir file), whose config is a regular file read without following a symlink, at most 64 KiB,
+   * passing the same checks as the control plane's own. Anything else is vcs_git_config_unsafe.
+   */
+  private async assertSafeWorkerGit(gitDir: string): Promise<void> {
+    const stat = await lstat(gitDir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("vcs_nested_repository");
+    let handle: FileHandle;
+    try {
+      handle = await open(resolve(gitDir, "config"), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    } catch (error) {
+      throw new Error("vcs_git_config_unsafe", { cause: error });
     }
+    let config: string;
+    try {
+      const configStat = await handle.stat();
+      if (!configStat.isFile() || configStat.size > MAX_LOCAL_CONFIG_BYTES) throw new Error("vcs_git_config_unsafe");
+      const buffer = Buffer.alloc(MAX_LOCAL_CONFIG_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead > MAX_LOCAL_CONFIG_BYTES) throw new Error("vcs_git_config_unsafe");
+      config = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+    if (!isSafeLocalConfig(config)) throw new Error("vcs_git_config_unsafe");
   }
 
   /** The git credentials for a remote's access token; none when the remote needs no token. */

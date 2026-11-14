@@ -71,6 +71,23 @@ describe("RoutingVcsProvider", () => {
     ]);
   });
 
+  it("passes history and remotes through, and refuses a remote on another host than the default repository", async () => {
+    const github = fake("github");
+    const local = fake("local");
+    const routing = new RoutingVcsProvider({ github, local });
+    const remote = { name: "upstream", repository: "owner/upstream", resolvedSha: "a".repeat(40), label: "main" };
+    const input = { ...prepare("owner/repo"), gitHistory: { depth: 5 }, remotes: [remote] };
+    await routing.prepareWorkspace(input);
+    await routing.recoverWorkspace(input);
+    expect(github.prepareWorkspace).toHaveBeenCalledWith(input);
+    expect(github.recoverWorkspace).toHaveBeenCalledWith(input);
+    const crossHost = { ...input, remotes: [{ ...remote, repository: "local:/srv/repos/up" }] };
+    await expect(routing.prepareWorkspace(crossHost)).rejects.toThrow("repository_remote_invalid");
+    await expect(routing.recoverWorkspace(crossHost)).rejects.toThrow("repository_remote_invalid");
+    expect(github.calls).toEqual(["prepare:owner/repo", "recover:owner/repo"]);
+    expect(local.calls).toEqual([]);
+  });
+
   it("routes read-only copies by repository and refuses a provider without them", async () => {
     const github = fake("github");
     const local = {

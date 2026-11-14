@@ -18,6 +18,8 @@ import {
 
 const SOCKET_PATH = "/run/wardby/tool/runner.sock";
 const WORKSPACE_PATH = "/workspace";
+/** Where the extra repositories are mounted (docker-isolation.ts, kubernetes-isolation.ts). */
+const REPOS_ROOT = "/repos";
 export const TOOL_RUNNER_READY_MESSAGE = "wardby_tool_runner_ready";
 /**
  * The worker's one call on a dependency-cache run (claude-coding-worker/driver.ts), before the
@@ -25,6 +27,22 @@ export const TOOL_RUNNER_READY_MESSAGE = "wardby_tool_runner_ready";
  * command has run it only answers `already_started`.
  */
 export const PREPARE_DEPENDENCIES_TOOL = "wardby_prepare_dependencies";
+
+/**
+ * The worker's calls on a run with git history (#536, claude-coding-worker/driver.ts): a git check
+ * before the agent starts, and a result bundle per history repository after it has finished. Never
+ * the agent's: the worker's SDK options disallow both (sdk.ts). The agent's own commands have git
+ * here anyway, so neither tool gives a command anything it lacks. Each answers small JSON; the
+ * bundle is written into the repository's .git and never crosses the socket.
+ */
+export const GIT_CHECK_TOOL = "wardby_git_check";
+export const RESULT_BUNDLE_TOOL = "wardby_result_bundle";
+const COMMIT = /^[0-9a-f]{40}$/;
+const RESULT_BUNDLE_CODE = /^result_bundle_[a-z_]+$/;
+
+/** The result bundle module (src/coding-worker/result-bundle.mjs), the same file the Codex driver
+ *  ships: the image copies it to /opt/wardby/coding-worker/, as the dependency cache. */
+const loadDefaultResultBundle = () => import("../coding-worker/result-bundle.mjs");
 
 /** The dependency cache module (src/coding-worker/dependency-cache.mjs): the image copies it to
  *  /opt/wardby/coding-worker/, the same path relative to this file as in the repository. */
@@ -112,7 +130,40 @@ export function runCommandDescription(limits) {
   return `${base} A command is stopped after ${seconds(limits.defaultMs)} unless timeout_ms asks for more, up to ${seconds(limits.maxMs)}.`;
 }
 
-function toolServer(setup, gate, workspacePath) {
+/** The git tools' handlers; any failure is a fixed code, never git's output or an error's text. */
+function gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle }) {
+  return {
+    async check() {
+      try {
+        const module = await loadResultBundle();
+        return (await module.gitAvailable(gitBinary)) ? { ok: true } : { ok: false, reason: "git_unavailable" };
+      } catch {
+        return { ok: false, reason: "git_unavailable" };
+      }
+    },
+    async bundle({ path, baseCommit, excludeCommits, timeoutMs }) {
+      try {
+        const module = await loadResultBundle();
+        const repoPath = module.resolveHistoryPath(path, { workspace: workspacePath, reposRoot });
+        if (repoPath === null) return { ok: false, reason: "result_bundle_path_invalid" };
+        const result = await module.createResultBundle({
+          repoPath,
+          baseCommit,
+          excludeCommits,
+          gitBinary,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        });
+        return result.bundled ? { ok: true, bundled: true } : { ok: true, bundled: false, reason: result.reason };
+      } catch (error) {
+        const code =
+          error instanceof Error && RESULT_BUNDLE_CODE.test(error.message) ? error.message : "result_bundle_failed";
+        return { ok: false, reason: code };
+      }
+    },
+  };
+}
+
+function toolServer(setup, gate, workspacePath, git) {
   const server = new McpServer({ name: "wardby_tools", version: "1.0.0" });
   const limits = commandTimeoutLimits(setup);
   server.registerTool(
@@ -147,20 +198,59 @@ function toolServer(setup, gate, workspacePath) {
       }),
     );
   }
+  server.registerTool(
+    GIT_CHECK_TOOL,
+    { description: "Wardby internal: check that git is available for the run's history.", inputSchema: {} },
+    async () => ({ content: [{ type: "text", text: JSON.stringify(await git.check()) }] }),
+  );
+  server.registerTool(
+    RESULT_BUNDLE_TOOL,
+    {
+      description: "Wardby internal: bundle a history repository's new commits after the agent has finished.",
+      inputSchema: {
+        path: z.string().min(1).max(256),
+        base_commit: z.string().regex(COMMIT),
+        exclude_commits: z.array(z.string().regex(COMMIT)).max(17),
+        timeout_ms: z.number().int().min(1).max(600_000).optional(),
+      },
+    },
+    async ({ path, base_commit, exclude_commits, timeout_ms }) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            await git.bundle({
+              path,
+              baseCommit: base_commit,
+              excludeCommits: exclude_commits,
+              timeoutMs: timeout_ms,
+            }),
+          ),
+        },
+      ],
+    }),
+  );
   return server;
 }
 
 export async function startToolRunner(
   socketPath = SOCKET_PATH,
   setup = parseToolSetup(undefined),
-  { workspacePath = WORKSPACE_PATH, loadDependencyCache = loadDefaultDependencyCache } = {},
+  {
+    workspacePath = WORKSPACE_PATH,
+    reposRoot = REPOS_ROOT,
+    gitBinary = "git",
+    loadDependencyCache = loadDefaultDependencyCache,
+    loadResultBundle = loadDefaultResultBundle,
+  } = {},
 ) {
   if (!isAbsolute(socketPath)) throw new Error("tool_socket_path_invalid");
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   await rm(socketPath, { force: true });
   const gate = dependencyGate(setup, workspacePath, loadDependencyCache);
+  const git = gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle });
   const server = createServer((socket) => {
-    const mcp = toolServer(setup, gate, workspacePath);
+    const mcp = toolServer(setup, gate, workspacePath, git);
     // A closed connection ends the server, which aborts its in-flight calls' signals (a prepare stops).
     socket.once("close", () => void mcp.close().catch(() => undefined));
     void mcp.connect(new StdioServerTransport(socket, socket)).catch(() => socket.destroy());

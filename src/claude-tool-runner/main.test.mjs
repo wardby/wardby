@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -12,7 +13,13 @@ import {
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
 } from "../coding-worker/dependency-cache.mjs";
-import { PREPARE_DEPENDENCIES_TOOL, startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
+import {
+  GIT_CHECK_TOOL,
+  PREPARE_DEPENDENCIES_TOOL,
+  RESULT_BUNDLE_TOOL,
+  startToolRunner,
+  TOOL_RUNNER_READY_MESSAGE,
+} from "./main.mjs";
 
 test("exposes a fixed lifecycle readiness marker", () => {
   assert.equal(TOOL_RUNNER_READY_MESSAGE, "wardby_tool_runner_ready");
@@ -43,7 +50,7 @@ function waitForResponse(socket, id) {
   });
 }
 
-test("serves only the bounded run_command MCP tool over its private socket", async () => {
+test("serves the bounded run_command MCP tool and the worker's internal git tools over its private socket", async () => {
   const directory = await mkdtemp(join(tmpdir(), "wardby-claude-mcp-"));
   const socketPath = join(directory, "runner.sock");
   const server = await startToolRunner(socketPath);
@@ -66,9 +73,10 @@ test("serves only the bounded run_command MCP tool over its private socket", asy
     const listed = waitForResponse(socket, 2);
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
     const tools = await listed;
+    // The git tools are the worker's own (#536); the agent's SDK options disallow them (sdk.ts).
     assert.deepEqual(
       tools.result.tools.map((tool) => tool.name),
-      ["run_command"],
+      ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL],
     );
   } finally {
     socket.destroy();
@@ -213,7 +221,9 @@ test("offers the prepare tool only on a dependency-cache run", async () => {
       const listed = await client.request("tools/list");
       assert.deepEqual(
         listed.result.tools.map((tool) => tool.name),
-        dependencyCache ? ["run_command", PREPARE_DEPENDENCIES_TOOL] : ["run_command"],
+        dependencyCache
+          ? ["run_command", PREPARE_DEPENDENCIES_TOOL, GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL]
+          : ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL],
       );
     });
   }
@@ -439,5 +449,183 @@ test("a worker that hangs up stops the prepare (its signal aborts)", async () =>
     const other = await connect();
     const ran = await callTool(other, "run_command", { command: "true" });
     assert.equal(ran.result.isError, false);
+  });
+});
+
+// ---------------------------------------------------------------- git history (#536)
+
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: cwd,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "T",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "T",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    },
+  });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+/** A tool runner over a workspace (and /repos root) holding real shallow clones with one agent commit. */
+async function withGitRunner(options, body) {
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-git-"));
+  const upstream = join(directory, "upstream");
+  const workspace = join(directory, "workspace");
+  const reposRoot = join(directory, "repos");
+  const socketPath = join(directory, "runner.sock");
+  await mkdir(upstream);
+  git(upstream, "init", "-q", "-b", "main");
+  await writeFile(join(upstream, "a.txt"), "a\n");
+  git(upstream, "add", "a.txt");
+  git(upstream, "commit", "-q", "-m", "base");
+  const base = git(upstream, "rev-parse", "HEAD");
+  await mkdir(reposRoot);
+  for (const repo of [workspace, join(reposRoot, "api")]) {
+    git(directory, "clone", "-q", "--depth", "1", "--no-local", `file://${upstream}`, repo);
+    await writeFile(join(repo, "b.txt"), "b\n");
+    git(repo, "add", "b.txt");
+    git(repo, "commit", "-q", "-m", "agent");
+  }
+  const server = await startToolRunner(socketPath, parseToolSetup(undefined), {
+    workspacePath: workspace,
+    reposRoot,
+    ...options,
+  });
+  const clients = [];
+  try {
+    await body({
+      base,
+      workspace,
+      reposRoot,
+      connect: async () => {
+        const client = await connect(socketPath);
+        clients.push(client);
+        return client;
+      },
+    });
+  } finally {
+    for (const client of clients) client.socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("the git check answers ok with git, and git_unavailable without it", async () => {
+  await withGitRunner({}, async ({ connect }) => {
+    assert.deepEqual(toolJson(await callTool(await connect(), GIT_CHECK_TOOL)), { ok: true });
+  });
+  await withGitRunner({ gitBinary: join(tmpdir(), "wardby-no-such-git") }, async ({ connect }) => {
+    assert.deepEqual(toolJson(await callTool(await connect(), GIT_CHECK_TOOL)), {
+      ok: false,
+      reason: "git_unavailable",
+    });
+  });
+  await withGitRunner(
+    {
+      loadResultBundle: async () => {
+        throw new Error("missing");
+      },
+    },
+    async ({ connect }) => {
+      assert.deepEqual(toolJson(await callTool(await connect(), GIT_CHECK_TOOL)), {
+        ok: false,
+        reason: "git_unavailable",
+      });
+    },
+  );
+});
+
+test("the result bundle tool writes the bundle into the repository's .git and answers small JSON", async () => {
+  await withGitRunner({}, async ({ connect, base, workspace, reposRoot }) => {
+    const client = await connect();
+    for (const [path, folder] of [
+      ["/workspace", workspace],
+      ["/repos/api", join(reposRoot, "api")],
+    ]) {
+      const response = await callTool(client, RESULT_BUNDLE_TOOL, {
+        path,
+        base_commit: base,
+        exclude_commits: [],
+      });
+      assert.deepEqual(toolJson(response), { ok: true, bundled: true });
+      // The bundle itself never crosses the socket.
+      assert.ok(response.result.content[0].text.length < 128);
+      const head = git(folder, "rev-parse", "HEAD");
+      assert.equal(
+        git(folder, "bundle", "list-heads", join(folder, ".git", "wardby-result.bundle")),
+        `${head} refs/wardby/bundle-head`,
+      );
+    }
+    // HEAD at the base: nothing to bundle.
+    git(workspace, "reset", "-q", "--hard", base);
+    assert.deepEqual(
+      toolJson(
+        await callTool(client, RESULT_BUNDLE_TOOL, { path: "/workspace", base_commit: base, exclude_commits: [] }),
+      ),
+      { ok: true, bundled: false, reason: "no_new_commits" },
+    );
+    await assert.rejects(stat(join(workspace, ".git", "wardby-result.bundle")));
+  });
+});
+
+test("the result bundle tool passes the caller's timeout to the module, and none when it is not given", async () => {
+  const seen = [];
+  const loadResultBundle = async () => ({
+    resolveHistoryPath: () => "/somewhere",
+    createResultBundle: async (options) => {
+      seen.push(options.timeoutMs);
+      return { bundled: false, reason: "no_new_commits" };
+    },
+  });
+  await withGitRunner({ loadResultBundle }, async ({ connect, base }) => {
+    const client = await connect();
+    const args = { path: "/workspace", base_commit: base, exclude_commits: [] };
+    await callTool(client, RESULT_BUNDLE_TOOL, { ...args, timeout_ms: 85_000 });
+    await callTool(client, RESULT_BUNDLE_TOOL, args);
+    // A timeout the schema does not allow never reaches the module.
+    const refused = await callTool(client, RESULT_BUNDLE_TOOL, { ...args, timeout_ms: 0 });
+    assert.equal(refused.result.isError, true);
+  });
+  assert.deepEqual(seen, [85_000, undefined]);
+});
+
+test("the result bundle tool answers a fixed code on failure, never git's output", async () => {
+  await withGitRunner({}, async ({ connect, base, workspace }) => {
+    const client = await connect();
+    assert.deepEqual(
+      toolJson(await callTool(client, RESULT_BUNDLE_TOOL, { path: "/etc", base_commit: base, exclude_commits: [] })),
+      { ok: false, reason: "result_bundle_path_invalid" },
+    );
+    await writeFile(join(workspace, ".git", "shallow"), "ghp_FAKESECRET0123456789abcdefABCDEF012345\n");
+    const response = await callTool(client, RESULT_BUNDLE_TOOL, {
+      path: "/workspace",
+      base_commit: base,
+      exclude_commits: [],
+    });
+    assert.deepEqual(toolJson(response), { ok: false, reason: "result_bundle_shallow_invalid" });
+    assert.ok(!JSON.stringify(response).includes("FAKESECRET"));
+    // A malformed commit never reaches git: the tool's schema refuses it.
+    const refused = await callTool(client, RESULT_BUNDLE_TOOL, {
+      path: "/workspace",
+      base_commit: "--all",
+      exclude_commits: [],
+    });
+    assert.equal(refused.result.isError, true);
+  });
+});
+
+test("the git tools are not commands: a bundle before any command leaves the dependency gate alone", async () => {
+  await withGitRunner({}, async ({ connect, base }) => {
+    const client = await connect();
+    await callTool(client, RESULT_BUNDLE_TOOL, { path: "/workspace", base_commit: base, exclude_commits: [] });
+    const ran = await callTool(client, "run_command", { command: "git --version" });
+    assert.match(ran.result.content[0].text, /^exit_code=0\ngit version /);
   });
 });
