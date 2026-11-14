@@ -147,12 +147,14 @@ commit) and a `git clone` line to copy.
 
 The **Agents** tab shows how your agents work together. The list is grouped by
 flow (agents that hand work to each other through sub-agents, pull request
-review, fix rounds or after-merge runs), with agents that share a repository
+review, fix rounds, after-merge runs or Jira ticket statuses), with agents that share a repository
 or budget group but no trigger shown separately as related. Pick an agent for
 its **Detail** tab (settings, entry points, notes) and its **Flow** tab (the
 map of what it receives from and hands to). In the terminal the Flow tab is a
 tree: j and k move between its agents and o opens one. On the desktop, the
-buttons under the map open an agent. Under either come the flow's recent run
+buttons under the map open an agent. A Jira status that starts an agent is a
+pill on the map ("status: Plan review"); a status only a person sets, such as
+an approval column, is drawn in gold as "<status> · person". Under either come the flow's recent run
 chains and the agents that look related but have no link.
 
 **Open larger** on the desktop (w in the terminal) opens the flow's map in your

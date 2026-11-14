@@ -139,6 +139,19 @@ describe("list_agent_links", () => {
         jqlFilter: "FAKE-JQL-FILTER",
         trustedAccountIds: ["FAKE-ACCOUNT-ID"],
         writableFields: ["FAKE-FIELD"],
+        allowedTransitions: ["Plan review"],
+        authorizedById: me.id,
+      },
+    });
+    // The builder starts when a ticket reaches the status the lead moves it to.
+    await db.agentIssueProject.create({
+      data: {
+        agentId: builder.id,
+        provider: "jira",
+        projectKey: "FLW",
+        access: "write",
+        triggers: ["transitioned"],
+        triggerStatuses: ["Plan review"],
         authorizedById: me.id,
       },
     });
@@ -235,8 +248,10 @@ describe("list_agent_links", () => {
         { from: lead.id, to: builder.id, kind: "delegates", repository: null, label: "build" },
         { from: builder.id, to: reviewer.id, kind: "reviews", repository: `github:${REPO}`, label: "PR opened" },
         { from: reviewer.id, to: lead.id, kind: "fixes", repository: `github:${REPO}`, label: "fix ≤2" },
+        { from: lead.id, to: builder.id, kind: "status", repository: "jira:FLW", label: "Plan review" },
       ]),
     );
+    expect(flow.issueProjects).toEqual(["jira:FLW"]);
   });
 
   it("strips terminal control sequences from the prompt's first line", async () => {

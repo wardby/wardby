@@ -33,6 +33,52 @@ const link = (triggers: string[], access: "read" | "write" = "read", extra = {})
   ...extra,
 });
 
+const jira = (
+  triggers: string[],
+  extra: Partial<{
+    triggerStatuses: string[];
+    allowedTransitions: string[];
+    onPullRequestOpened: string | null;
+    onPullRequestMerged: string | null;
+  }> = {},
+) => ({
+  provider: "jira",
+  projectKey: "ABC",
+  triggers,
+  triggerStatuses: [],
+  allowedTransitions: [],
+  onPullRequestOpened: null,
+  onPullRequestMerged: null,
+  ...extra,
+});
+
+// A board: a person moves a ticket to "Ready for agent" (planner), the planner moves it to "Plan review",
+// a person approves by moving it to "Approved" (builder), the builder's pull request moves it to
+// "In Review", where a triage agent also starts, and the merge moves it to "Done".
+export const BOARD: AgentLinkFacts[] = [
+  agent({
+    id: "planner",
+    issueProjects: [
+      jira(["transitioned"], { triggerStatuses: ["Ready for agent"], allowedTransitions: ["Plan review"] }),
+    ],
+  }),
+  agent({
+    id: "builder",
+    kind: "coding",
+    codingRepository: R,
+    issueProjects: [
+      jira(["transitioned"], {
+        triggerStatuses: ["approved"],
+        allowedTransitions: ["In Progress"],
+        onPullRequestOpened: "In Review",
+        onPullRequestMerged: "Done",
+      }),
+    ],
+  }),
+  agent({ id: "triage", issueProjects: [jira(["transitioned"], { triggerStatuses: ["in review"] })] }),
+  agent({ id: "reader", issueProjects: [jira([])] }),
+];
+
 // The mobile-shaped setup: a lead with mention + review_fix delegating to planner and builder,
 // a reviewer on pull_request, a device lead sharing the builder.
 export const MOBILE: AgentLinkFacts[] = [
@@ -98,7 +144,7 @@ describe("entryPoints", () => {
       scheduled: true,
       webhook: true,
       repositories: [link(["mention"])],
-      issueProjects: [{ provider: "jira", projectKey: "ABC", triggers: ["status"] }],
+      issueProjects: [jira(["created"])],
     });
     expect(entryPoints(a, [])).toEqual([`mention:github:${R}`, "jira:ABC", "schedule", "webhook"]);
   });
@@ -165,5 +211,46 @@ describe("buildAgentFlows", () => {
     const result = buildAgentFlows([agent({ id: "solo", name: "solo" })], []);
     expect(result.flows).toEqual([]);
     expect(result.unlinked).toEqual(["solo"]);
+  });
+});
+
+describe("ticket status hand-offs", () => {
+  it("links an agent that moves a ticket to the agents that start on that status, case-insensitively", () => {
+    expect(flowEdges(BOARD, []).filter((e) => e.kind === "status")).toEqual([
+      { from: "builder", to: "triage", kind: "status", repository: "jira:ABC", label: "in review" },
+    ]);
+  });
+
+  it("makes a status only a person can set an entry point, and none for one an agent sets", () => {
+    const { entries } = buildAgentFlows(BOARD, []);
+    expect(entries.planner).toEqual(["status:jira:ABC:Ready for agent"]);
+    expect(entries.builder).toEqual(["status:jira:ABC:approved"]);
+    expect(entries.triage).toEqual([]);
+    expect(entries.reader).toEqual(["manual"]);
+  });
+
+  it("keeps a board's agents in one flow across a person-only approval, named after the project", () => {
+    const result = buildAgentFlows(BOARD, []);
+    expect(result.flows).toHaveLength(1);
+    const flow = result.flows[0];
+    expect(flow.agentIds.sort()).toEqual(["builder", "planner", "triage"]);
+    expect(flow.issueProjects).toEqual(["jira:ABC"]);
+    // A coding agent's profile repository is not a link into the flow's name.
+    expect(flow.name).toBe("Jira ABC");
+    // The key agent is a person-started agent with no incoming link: "builder" sorts first.
+    expect(flow.key).toBe("builder");
+    // An agent with a read-only link and no trigger stays out of the flow.
+    expect(result.unlinked).toEqual(["reader"]);
+  });
+
+  it("names the issue project and the pull request moves, not other Jira settings", () => {
+    const edges = flowEdges(
+      [
+        agent({ id: "a", issueProjects: [jira([], { onPullRequestMerged: "Done" })] }),
+        agent({ id: "b", issueProjects: [jira(["transitioned"], { triggerStatuses: ["Done"] })] }),
+      ],
+      [],
+    );
+    expect(edges).toEqual([{ from: "a", to: "b", kind: "status", repository: "jira:ABC", label: "Done" }]);
   });
 });

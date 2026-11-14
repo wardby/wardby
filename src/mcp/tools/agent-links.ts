@@ -1,7 +1,8 @@
 /**
  * list_agent_links: the caller's readable agents with their links, as flows (src/core/agent-flows.ts),
  * in one call, for the Claude Code pane's Agents tab and the admin viewer. Link facts only: no secret
- * values or names, webhook secrets, Jira account ids, JQL, writable fields, hook config or tool code.
+ * values or names, webhook secrets, Jira account ids, JQL, writable fields, hook config or tool code. Status
+ * names (trigger statuses, allowed transitions, pull request moves) are link facts and are included.
  * A sub-agent link to an agent the caller cannot read is counted in `hidden`, never named.
  */
 import { buildAgentFlows, type AgentLinkFacts, type SubAgentFact } from "../../core/agent-flows.js";
@@ -29,7 +30,9 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "The agents you can read and how they link, grouped into flows: sub-agent delegation, pull request review, " +
-      "review fix rounds and after-merge triggers, plus each agent's entry points (mention, Jira, schedule, webhook, manual). " +
+      "review fix rounds, after-merge triggers and ticket status hand-offs (an agent that moves a Jira ticket to a status " +
+      "starts the agents that trigger on it), plus each agent's entry points (mention, Jira, a status only a person sets, " +
+      "schedule, webhook, manual). " +
       "Link facts only, never secrets. A link to an agent you cannot read is counted in `hidden`. " +
       "all: true covers every agent in the deployment (admins only, admin:view).",
     inputSchema: { type: "object", properties: { all: { type: "boolean" } }, additionalProperties: false },
@@ -66,7 +69,17 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
             },
             orderBy: { createdAt: "asc" },
           },
-          issueProjects: { select: { provider: true, projectKey: true, triggers: true } },
+          issueProjects: {
+            select: {
+              provider: true,
+              projectKey: true,
+              triggers: true,
+              triggerStatuses: true,
+              allowedTransitions: true,
+              onPullRequestOpened: true,
+              onPullRequestMerged: true,
+            },
+          },
           webhooks: { where: { status: "enabled" }, select: { id: true } },
           mcpServers: { select: { server: { select: { name: true } } } },
           runHooks: { where: { enabled: true }, select: { events: true } },
