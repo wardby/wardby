@@ -107,13 +107,16 @@ The pane reads only, with the caller's own access:
 | Recent steps, Steps  | `get_run_steps`      | `agents:read` | Same as `get_run`                                                              |
 | Show full text, Copy | `get_run_text`       | `agents:read` | Same as `get_run`                                                              |
 | Continue locally     | `get_run_transcript` | `agents:read` | Same as `get_run`                                                              |
+| Agents tab, flows    | `list_agent_links`   | `agents:read` | Agents you can read, how they link and start (0.9.14 or later)                 |
+| Agents tab, Detail   | `get_agent`          | `agents:read` | An agent you can read                                                          |
 
 Under Claude Code's auto mode, a plugin's MCP calls go through the same safety
 check as any other, and calls the pane makes on its own timer are refused
 unless allowed. Allow these in `/permissions` (or let `wardby claude-plugin
 install` add them): `mcp__wardby__list_runs`, `mcp__wardby__list_agents`,
 `mcp__wardby__get_run`, `mcp__wardby__get_run_transcript`,
-`mcp__wardby__get_run_steps` and `mcp__wardby__get_run_text`. The pane never
+`mcp__wardby__get_run_steps`, `mcp__wardby__get_run_text`,
+`mcp__wardby__list_agent_links` and `mcp__wardby__get_agent`. The pane never
 calls `stop_run` or any other tool that changes something. When a call is
 refused, the pane says which rules to add.
 
@@ -136,6 +139,21 @@ A coding run over several repositories continues in your clone of its default
 repository only: a resumed session maps just `/workspace`. The pane lists each
 other repository of the run with its branch (or, for a read-only one, its
 commit) and a `git clone` line to copy.
+
+## Agents tab
+
+The **Agents** tab shows how your agents work together. The list is grouped by
+flow (agents that hand work to each other through sub-agents, pull request
+review, fix rounds or after-merge runs), with agents that share a repository
+or budget group but no trigger shown separately as related. Pick an agent for
+its **Detail** tab (settings, entry points, notes) and its **Flow** tab (the
+map of what it receives from and hands to). In the terminal the Flow tab is a
+tree.
+
+The tab needs wardby 0.9.14 or later, which adds `list_agent_links`. On an older
+server it reads each agent with `get_agent`, for up to 30 agents; with more it
+shows "Drawing flows needs wardby 0.9.14 or later." See the `agent-flows` help
+article for how links are worked out.
 
 ## Using the pane
 

@@ -100,6 +100,10 @@ mode: no pull-request grouping, outcomes or run steps." It still lists each
 agent's latest runs. Upgrade the server to 0.8.0 or later; the notice goes away
 at the pane's next check.
 
+The **Agents** tab draws how your agents work together: a list grouped by flow,
+and a Detail and Flow tab for each agent. It needs wardby 0.9.14 or later. See
+`agent-flows`.
+
 See also [Several repositories in one coding run](multi-repository-runs.md).
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).
