@@ -10,6 +10,9 @@
  *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
  * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
+ * The one exception is `POST diagnostics` (CLAUDE.md's operator-diagnostics exception): a bridge's
+ * bounded stderr tail, redacted by the bridge by exact value, logged at warn to the operator log
+ * only, and refused unlogged if a token shape is still in it.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -32,6 +35,14 @@ const MAX_EXIT_BYTES = 8 * 1024;
 /** The longest operator-diagnostics tail (the bridges' DIAGNOSTICS_TAIL.bytes; constants.test.ts keeps them equal). */
 export const MAX_DIAGNOSTICS_BYTES = 8 * 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
+/**
+ * A run capability (`rrp_…`) or registry-only token (`rrg_…`) shape. The proxy cannot redact a
+ * diagnostics tail by exact value (it holds only the capability's hash), so a tail with either shape
+ * left in it after the bridge's own redaction is refused, not logged.
+ */
+const TOKEN_SHAPE = /rr[pg]_[A-Za-z0-9_-]/;
+/** Runs (per side) whose diagnostics this replica already logged; oldest forgotten first past the cap. */
+const DIAGNOSTICS_SEEN_MAX = 10_000;
 /** The time an upload has to arrive once it is authenticated. */
 export const SUBSTRATE_UPLOAD_MS = 10 * 60_000;
 
@@ -49,10 +60,15 @@ export interface SubstrateRouteOptions {
   pollWaitMs?: number;
   /** Time an authenticated upload has to arrive (default 10 min). */
   uploadMs?: number;
-  log?: { info(fields: Record<string, unknown>, message: string): void };
+  /** Route lines at info; operator diagnostics (and their refusals) at warn. */
+  log?: {
+    info(fields: Record<string, unknown>, message: string): void;
+    warn(fields: Record<string, unknown>, message: string): void;
+  };
 }
 
-type Caller = "agent" | "tool";
+/** `either`: the agent (capability) or the tool (actor JWT), told apart by which credential header is sent. */
+type Caller = "agent" | "tool" | "either";
 type RouteName =
   | "input"
   | "channels.open"
@@ -66,7 +82,8 @@ type RouteName =
   | "channels.from-tool"
   | "workspace"
   | "exit"
-  | "workspace-failed";
+  | "workspace-failed"
+  | "diagnostics";
 
 interface Matched {
   name: RouteName;
@@ -110,6 +127,8 @@ function match(method: string, rest: string): Matched | undefined {
       return { name: "exit", caller: "agent" };
     case "POST workspace-failed":
       return { name: "workspace-failed", caller: "tool" };
+    case "POST diagnostics":
+      return { name: "diagnostics", caller: "either" };
     default:
       return undefined;
   }
@@ -208,6 +227,8 @@ export function createSubstrateRoutes(
   /** Runs whose tool setup this replica already deleted (saves a blob call on every later poll). */
   const setupDeleted = new Set<string>();
   const SETUP_DELETED_MAX = 10_000;
+  /** `<run token>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
+  const diagnosticsSeen = new Set<string>();
 
   async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
     const key = request.headers["x-api-key"];
@@ -307,6 +328,14 @@ export function createSubstrateRoutes(
     return { code, ...diagnostic };
   }
 
+  /** A diagnostics tail: Content-Length required, at most MAX_DIAGNOSTICS_BYTES, read as UTF-8 text. */
+  async function readDiagnostics(request: IncomingMessage): Promise<string> {
+    const length = request.headers["content-length"];
+    if (length === undefined) throw new RouteError(411, "length_required");
+    if (!/^\d+$/.test(length) || Number(length) > MAX_DIAGNOSTICS_BYTES) throw new RouteError(413, "too_large");
+    return readBody(request, MAX_DIAGNOSTICS_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+  }
+
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
@@ -332,7 +361,14 @@ export function createSubstrateRoutes(
     });
     try {
       if (!found || !matched) throw new RouteError(404, "not_found");
-      const allowed = matched.caller === "agent" ? await agentAuth(request, token) : await toolAuth(request, token);
+      // A diagnostics post comes from either side: the tool's credential header says which.
+      const side: "agent" | "tool" =
+        matched.caller === "either"
+          ? request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined
+            ? "tool"
+            : "agent"
+          : matched.caller;
+      const allowed = side === "agent" ? await agentAuth(request, token) : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
       const { relay, blobs, limits } = options;
       const channel = matched.channel ?? "";
@@ -422,6 +458,31 @@ export function createSubstrateRoutes(
             await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify(report)), {
               contentType: "application/json",
             });
+          }
+          sendJson(response, 200, {});
+          return;
+        }
+        case "diagnostics": {
+          // Operator diagnostics (CLAUDE.md's exception): a bridge's bounded, already redacted stderr
+          // tail after a failure. It goes to the operator log only: never a blob, the database, an
+          // answer, MCP, the viewer or a run record.
+          const tail = await readDiagnostics(request);
+          counters.bytes = Buffer.byteLength(tail);
+          if (TOKEN_SHAPE.test(tail)) {
+            log.warn(
+              { event: "substrate.diagnostics_rejected", runToken: token, side },
+              "substrate actor diagnostics rejected",
+            );
+            throw new RouteError(400, "bad_request");
+          }
+          const seenKey = `${token}/${side}`;
+          if (!diagnosticsSeen.has(seenKey)) {
+            diagnosticsSeen.add(seenKey);
+            if (diagnosticsSeen.size > DIAGNOSTICS_SEEN_MAX) {
+              const oldest = diagnosticsSeen.values().next().value;
+              if (oldest !== undefined) diagnosticsSeen.delete(oldest);
+            }
+            log.warn({ event: "substrate.diagnostics", runToken: token, side, tail }, "substrate actor diagnostics");
           }
           sendJson(response, 200, {});
           return;

@@ -14,6 +14,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  DiagnosticsTail,
   postBestEffort,
   postCapped,
   requireProxyUrl,
@@ -103,7 +104,10 @@ const spawnWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
 const OUTPUT_DRAIN_MS = 2_000;
 
 export async function run(options: AgentOptions): Promise<AgentHandle> {
-  const log = options.log ?? stderrLogger;
+  // The operator-diagnostics tail: the worker's stderr and this bridge's events. The worker holds no
+  // real secret (the gateway injects the capability on the wire), only the placeholder.
+  const diagnostics = new DiagnosticsTail(() => [PLACEHOLDER_CAPABILITY]);
+  const log = diagnostics.logger(options.log ?? stderrLogger);
   const policy = options.policy ?? DEFAULT_POLICY;
   const giveUpMs = options.giveUpMs ?? 60_000;
   const env = options.env ?? process.env;
@@ -309,9 +313,10 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   // The worker's last lines, in memory only: nothing of them leaves the actor except the one fixed
   // diagnostic findWorkerDiagnostic accepts.
   const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
-  const drained = Promise.all(
-    [worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
-  );
+  const drained = Promise.all([
+    ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
+    ...(worker.stderr ? [diagnostics.tail.follow(worker.stderr)] : []),
+  ]);
 
   // 4. Result and transcript, once the worker has exited.
   const uploaded = worker.exited.then(async (code) => {
@@ -323,6 +328,8 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       await waitAtMost(drained, OUTPUT_DRAIN_MS);
       const diagnostic = findWorkerDiagnostic(output.lines());
       await postCapped(`${base}/exit`, headers, { code, ...diagnostic }, policy, log, "exit", shutdown.signal);
+      // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log.
+      await diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
     }
     await uploadFile(`${base}/transcript`, headers, transcriptPath, policy, log, "transcript", shutdown.signal);
   });

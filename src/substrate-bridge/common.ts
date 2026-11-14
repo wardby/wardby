@@ -1,7 +1,8 @@
 /** Pieces both bridges share: identity, logging, the readiness server, uploads. */
 import { access, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { AGENT_SUFFIX, RUN_TOKEN_PATTERN, TOOL_SUFFIX } from "./constants.js";
+import { AGENT_SUFFIX, DIAGNOSTICS_TAIL, RUN_TOKEN_PATTERN, TOOL_SUFFIX } from "./constants.js";
+import { LineTail, redactExact, type LineFeed } from "./diagnostics.js";
 import { BridgeError, send, withRetry, type RetryPolicy } from "./http.js";
 
 /**
@@ -177,5 +178,64 @@ export async function postCapped(
   } catch {
     log("substrate_bridge_post_failed", { what });
     return false;
+  }
+}
+
+/** How many times a diagnostics tail is tried: it is a courtesy to the operator, never worth a long wait. */
+export const DIAGNOSTICS_ATTEMPTS = 3;
+
+/**
+ * A bridge's operator-diagnostics tail (CLAUDE.md's operator-diagnostics exception): its child
+ * processes' stderr plus its own log events, the last DIAGNOSTICS_TAIL lines, each line redacted by
+ * exact value against `secrets()` (every secret value delivered to those processes) once complete.
+ * Posted at most once, and only after a failure.
+ */
+export class DiagnosticsTail {
+  readonly tail: LineTail;
+  private readonly own: LineFeed;
+  private sent = false;
+
+  constructor(secrets: () => readonly string[]) {
+    this.tail = new LineTail(DIAGNOSTICS_TAIL.lines, DIAGNOSTICS_TAIL.bytes, (line) => redactExact(line, secrets()));
+    this.own = this.tail.feed();
+  }
+
+  /** Wraps a logger so the bridge's own events (fixed codes and numbers) are part of the tail. */
+  logger(log: Logger): Logger {
+    return (event, fields = {}) => {
+      log(event, fields);
+      this.own.push(`${JSON.stringify({ event, ...fields })}\n`);
+    };
+  }
+
+  /** Posts the tail once (text/plain, Content-Length), with a few quick retries; failures are only logged. */
+  async post(
+    url: string,
+    headers: Record<string, string>,
+    policy: RetryPolicy,
+    log: Logger,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.sent) return;
+    this.sent = true;
+    const body = this.tail.text();
+    if (body === "") return;
+    try {
+      const result = await withRetry(
+        () =>
+          send(url, {
+            method: "POST",
+            headers: { ...headers, "content-type": "text/plain; charset=utf-8" },
+            body,
+            timeoutMs: 10_000,
+            signal,
+          }),
+        { policy, maxAttempts: DIAGNOSTICS_ATTEMPTS, signal },
+      );
+      if (result.status === 200) log("substrate_bridge_posted", { what: "diagnostics" });
+      else log("substrate_bridge_post_rejected", { what: "diagnostics", status: result.status });
+    } catch {
+      log("substrate_bridge_post_failed", { what: "diagnostics" });
+    }
   }
 }

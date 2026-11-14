@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseToolSetup } from "../claude-tool-runner/command.mjs";
 import { claudeToolSetup } from "../providers/jobs/claude-tool-setup.js";
+import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 import { BLOB, substrateRunToken, toolActorSubject } from "../providers/jobs/substrate/names.js";
 import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
@@ -84,6 +85,7 @@ describe("substrate bridges, end to end without Substrate", () => {
   let logs: string[];
   let sockets: string[];
   let routeLogs: unknown[];
+  let routeWarns: unknown[][];
   let proxyOverride: ((url: string) => number | undefined) | undefined;
   let proxyDelay: ((url: string) => number) | undefined;
 
@@ -95,6 +97,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     logs = [];
     sockets = [];
     routeLogs = [];
+    routeWarns = [];
     proxyOverride = undefined;
     proxyDelay = undefined;
     const routes = createSubstrateRoutes({
@@ -114,7 +117,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       tokenForRun: substrateRunToken,
       limits: { resultBytes: 1 << 20, transcriptBytes: 1 << 20, workspaceBytes: 1 << 24 },
       pollWaitMs: 200,
-      log: { info: (...args) => void routeLogs.push(args) },
+      log: { info: (...args) => void routeLogs.push(args), warn: (...args) => void routeWarns.push(args) },
     });
     proxy = createHttpServer((req, res) => {
       const forced = proxyOverride?.(`${req.method} ${req.url}`);
@@ -447,6 +450,137 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
   });
 
+  /** The tail the proxy logged at warn for one side (CLAUDE.md operator diagnostics), or undefined. */
+  const diagnosticsTail = (side: "agent" | "tool"): string | undefined => {
+    const found = routeWarns.find(
+      ([fields]) =>
+        (fields as { event?: string; side?: string }).event === "substrate.diagnostics" &&
+        (fields as { side?: string }).side === side,
+    );
+    return found ? (found[0] as { tail: string }).tail : undefined;
+  };
+
+  /** Every blob's bytes, as text: the tail must never be stored. */
+  async function everyBlobText(): Promise<string> {
+    const root = join(dir, "blobs");
+    const entries = await readdir(root, { recursive: true, withFileTypes: true }).catch(() => []);
+    const texts: string[] = [];
+    for (const entry of entries) {
+      if (entry.isFile()) texts.push(await readFile(join(entry.parentPath, entry.name), "latin1"));
+    }
+    return texts.join("\n");
+  }
+
+  it("sends the worker's redacted stderr tail to the operator log on a failure, and stores none of it", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => {
+          const stderr = new PassThrough();
+          return {
+            stderr,
+            exited: (async () => {
+              stderr.end(`worker says boom\nusing key ${PLACEHOLDER_CAPABILITY}\n{"error":"coding_turn_limit"}\n`);
+              return 1;
+            })(),
+          };
+        },
+      }),
+    );
+    await agent.uploaded;
+    const tail = await waitFor(() => diagnosticsTail("agent"));
+    expect(tail).toContain("worker says boom");
+    expect(tail).toContain("using key [redacted]");
+    expect(tail).not.toContain(PLACEHOLDER_CAPABILITY);
+    expect(await everyBlobText()).not.toContain("worker says boom");
+    expect(JSON.stringify(routeLogs)).not.toContain("worker says boom");
+    expect(diagnosticsTail("tool")).toBeUndefined();
+    expect(await tool.collected).toBe("ok");
+  });
+
+  it("sends no diagnostics when the worker succeeded", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => {
+          const stderr = new PassThrough();
+          return {
+            stderr,
+            exited: (async () => {
+              stderr.end("all fine\n");
+              await mkdir(join(dir, "out"), { recursive: true });
+              await writeFile(join(dir, "out", "result.json"), "{}");
+              return 0;
+            })(),
+          };
+        },
+      }),
+    );
+    await agent.uploaded;
+    await tool.collected;
+    expect(routeWarns).toEqual([]);
+  });
+
+  it("sends the tool runner's stderr tail, redacted against the registry tokens it was given, when it fails to start", async () => {
+    const { workspace } = await stage();
+    const derived = deriveRegistryToken(CAPABILITY);
+    await expect(
+      runTool({
+        proxyUrl,
+        metadataDir: await names("tool"),
+        workspace,
+        socketPath: join(dir, "tool", "runner.sock"),
+        readyPort: 0,
+        tempRoot: dir,
+        tarCommand: await tarForTests(dir),
+        policy: FAST,
+        log,
+        launchRunner: () => {
+          const stderr = new PassThrough();
+          stderr.end(
+            `npm notice auth ${REGISTRY_TOKEN}\nregistry url http://wardby:${derived}@proxy/\nrunner: EADDRINUSE\n`,
+          );
+          return { stderr, ready: Promise.reject(new Error("exited")), exited: Promise.resolve(1) };
+        },
+      }),
+    ).rejects.toMatchObject({ code: "substrate_bridge_runner_failed" });
+    const tail = await waitFor(() => diagnosticsTail("tool"));
+    expect(tail).toContain("npm notice auth [redacted]");
+    expect(tail).toContain("registry url http://wardby:[redacted]@proxy/");
+    expect(tail).toContain("runner: EADDRINUSE");
+    // (The staged tool-setup blob holds the token by design; no log does.)
+    const logged = JSON.stringify([routeWarns, routeLogs, logs]);
+    for (const secret of [REGISTRY_TOKEN, derived, CAPABILITY]) expect(logged).not.toContain(secret);
+    expect(await everyBlobText()).not.toContain("EADDRINUSE");
+  });
+
+  it("sends the tool runner's stderr tail when it exits mid-run, before reporting the exit", async () => {
+    const { workspace } = await stage();
+    let exit!: (code: number) => void;
+    const stderr = new PassThrough();
+    tool = await runTool({
+      proxyUrl,
+      metadataDir: await names("tool"),
+      workspace,
+      socketPath: join(dir, "tool", "runner.sock"),
+      readyPort: 0,
+      tempRoot: dir,
+      tarCommand: await tarForTests(dir),
+      policy: FAST,
+      log,
+      launchRunner: () => ({ stderr, ready: Promise.resolve(), exited: new Promise<number>((r) => (exit = r)) }),
+    });
+    expect(diagnosticsTail("tool")).toBeUndefined();
+    stderr.end(`runner crashed: out of memory ${REGISTRY_TOKEN}\n`);
+    exit(137);
+    expect(await tool.runnerExited).toBe(137);
+    const tail = diagnosticsTail("tool");
+    expect(tail).toContain("runner crashed: out of memory [redacted]");
+    expect(tail).not.toContain(REGISTRY_TOKEN);
+  });
+
   it("reports a rejected result upload as an exit", async () => {
     const { workspace, toolSetup } = await stage();
     tool = await startTool(workspace, toolSetup);
@@ -715,6 +849,7 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
       `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+process.stderr.write("tar: cannot extract ./src (token ${REGISTRY_TOKEN})\\n");
 process.exit(2);
 `,
       { mode: 0o755 },
@@ -738,6 +873,11 @@ process.exit(2);
     expect(argv).toContain("--strip-components=1");
     expect(argv).toContain("--no-same-owner");
     expect(logs.filter((l) => l.includes("substrate_bridge_posted") && l.includes("workspace-failed"))).toHaveLength(1);
+    // The operator gets tar's stderr, with the registry-only token redacted.
+    const tail = diagnosticsTail("tool");
+    expect(tail).toContain("tar: cannot extract ./src (token [redacted])");
+    expect(tail).toContain("substrate_bridge_seed_failed");
+    expect(tail).not.toContain(REGISTRY_TOKEN);
   });
 
   it("answers the readiness probe", async () => {

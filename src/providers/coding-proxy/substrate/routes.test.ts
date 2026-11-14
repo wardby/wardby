@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ describe("substrate routes", () => {
   let server: Server;
   let base: string;
   let logCalls: unknown[][];
+  let warnCalls: unknown[][];
   let overrides: Partial<SubstrateRouteOptions>;
 
   const start = async (): Promise<void> => {
@@ -50,7 +51,7 @@ describe("substrate routes", () => {
       tokenForRun: substrateRunToken,
       limits: { resultBytes: 1024, transcriptBytes: 1024, workspaceBytes: 64 },
       pollWaitMs: 100,
-      log: { info: (...args) => void logCalls.push(args) },
+      log: { info: (...args) => void logCalls.push(args), warn: (...args) => void warnCalls.push(args) },
       ...overrides,
     });
     server = createServer((req, res) => void handler(req, res));
@@ -64,6 +65,7 @@ describe("substrate routes", () => {
     relay = new MemoryRelayStore();
     relay.register(TOKEN, 1 << 20);
     logCalls = [];
+    warnCalls = [];
     overrides = {};
   });
   afterEach(async () => {
@@ -314,6 +316,79 @@ describe("substrate routes", () => {
     expect((await fetch(`${base}/exit`, agent(body))).status).toBe(200);
     expect(collect).toHaveBeenCalledTimes(1);
     expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 4 });
+  });
+
+  describe("operator diagnostics", () => {
+    const text = (body: string) => ({ method: "POST", body, headers: { "content-type": "text/plain" } });
+    const allFiles = async (): Promise<string[]> =>
+      (await readdir(dir, { recursive: true, withFileTypes: true })).filter((e) => e.isFile()).map((e) => e.name);
+
+    it("logs a bounded tail at warn for the operator, once per run and side, and stores or returns nothing", async () => {
+      await start();
+      const tail = "npm ERR! could not resolve\nexit 1";
+      const answer = await fetch(`${base}/diagnostics`, agent(text(tail)));
+      expect(answer.status).toBe(200);
+      expect(await answer.text()).toBe("{}");
+      // A repeat from the same side is ignored.
+      expect((await fetch(`${base}/diagnostics`, agent(text("again")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics`, tool(text("tool side")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics`, tool(text("tool again")))).status).toBe(200);
+      expect(warnCalls).toEqual([
+        [{ event: "substrate.diagnostics", runToken: TOKEN, side: "agent", tail }, "substrate actor diagnostics"],
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "tool", tail: "tool side" },
+          "substrate actor diagnostics",
+        ],
+      ]);
+      // Never stored: no blob was written by any of it.
+      expect(await allFiles()).toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(JSON.stringify(logCalls)).not.toContain("npm ERR");
+    });
+
+    it("refuses a tail that still holds a capability or registry token shape, and logs only a fixed event", async () => {
+      await start();
+      for (const [side, init, secret] of [
+        ["agent", agent, CAPABILITY],
+        ["tool", tool, REGISTRY_TOKEN],
+      ] as const) {
+        const answer = await fetch(`${base}/diagnostics`, init(text(`line one\nkey=${secret}\n`)));
+        expect(answer.status).toBe(400);
+        expect(await answer.json()).toEqual({ error: { type: "bad_request" } });
+        expect(warnCalls.at(-1)).toEqual([
+          { event: "substrate.diagnostics_rejected", runToken: TOKEN, side },
+          "substrate actor diagnostics rejected",
+        ]);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const serialized = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [CAPABILITY, REGISTRY_TOKEN, "line one"]) expect(serialized).not.toContain(secret);
+      expect(await allFiles()).toEqual([]);
+    });
+
+    it("requires auth and a Content-Length within 8 KiB", async () => {
+      await start();
+      expect((await fetch(`${base}/diagnostics`, text("x"))).status).toBe(401);
+      expect(
+        (await fetch(`${base}/diagnostics`, { ...text("x"), headers: { "x-wardby-actor-jwt": "Bearer bad" } })).status,
+      ).toBe(401);
+      expect((await fetch(`${base}/diagnostics`, agent(text("y".repeat(8 * 1024 + 1))))).status).toBe(413);
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          `${base}/diagnostics`,
+          { method: "POST", headers: { "x-api-key": CAPABILITY } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.write("abc");
+        req.end();
+      });
+      expect(status).toBe(411);
+      expect(warnCalls).toEqual([]);
+    });
   });
 
   it("records a failed workspace and drops the relay (tool only)", async () => {
