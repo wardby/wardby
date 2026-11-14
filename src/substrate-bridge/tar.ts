@@ -129,7 +129,7 @@ function paxKeysUnderstood(records: Map<string, string>): boolean {
   return true;
 }
 
-async function check(source: Source): Promise<TarCheck> {
+async function check(source: Source, dotRelative = false): Promise<TarCheck> {
   const symlinks = new Set<string>();
   let offset = 0;
   let entries = 0;
@@ -190,6 +190,9 @@ async function check(source: Source): Promise<TarCheck> {
     paxPath = paxLink = longName = longLink = undefined;
     const name = cleanName(rawName);
     if (name === undefined) return bad("name");
+    // The extraction drops the first path component (the seed's "." entry cannot be applied to the
+    // workspace mount point), so every entry must sit under "./" or the archive would lose a directory level.
+    if (dotRelative && rawName !== "." && rawName !== "./" && !rawName.startsWith("./")) return bad("not_dot_relative");
     if (!["0", "5", "1", "2", "7"].includes(type)) return bad("type");
     if (throughSymlink(name, symlinks)) return bad("through_symlink");
     if (type === "2") {
@@ -205,22 +208,26 @@ async function check(source: Source): Promise<TarCheck> {
   }
 }
 
-export function checkTarEntries(archive: Buffer): Promise<TarCheck> {
-  return check({ size: archive.length, read: async (o, l) => archive.subarray(o, o + l) });
+export function checkTarEntries(archive: Buffer, dotRelative = false): Promise<TarCheck> {
+  return check({ size: archive.length, read: async (o, l) => archive.subarray(o, o + l) }, dotRelative);
 }
 
-export async function checkTarFile(path: string): Promise<TarCheck> {
+/** `dotRelative`: also refuse an archive with an entry outside "./" (the caller extracts with --strip-components=1). */
+export async function checkTarFile(path: string, dotRelative = false): Promise<TarCheck> {
   const handle = await open(path, "r");
   try {
     const { size } = await handle.stat();
-    return await check({
-      size,
-      read: async (offset, length) => {
-        const buf = Buffer.alloc(length);
-        const { bytesRead } = await handle.read(buf, 0, length, offset);
-        return buf.subarray(0, bytesRead);
+    return await check(
+      {
+        size,
+        read: async (offset, length) => {
+          const buf = Buffer.alloc(length);
+          const { bytesRead } = await handle.read(buf, 0, length, offset);
+          return buf.subarray(0, bytesRead);
+        },
       },
-    });
+      dotRelative,
+    );
   } finally {
     await handle.close();
   }

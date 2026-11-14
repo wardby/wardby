@@ -35,7 +35,7 @@ async function tarForTests(dir: string): Promise<string> {
     shim,
     `#!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore");
+const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore" && a !== "--no-overwrite-dir");
 process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
 `,
     { mode: 0o755 },
@@ -151,7 +151,10 @@ describe("substrate bridges, end to end without Substrate", () => {
     await writeFile(join(seedDir, "src", "skipped", "big.bin"), "excluded by path\n");
     await mkdir(join(seedDir, "node_modules"), { recursive: true });
     await writeFile(join(seedDir, "node_modules", "dep.js"), "skip me\n");
-    await exec("tar", ["-c", "-C", seedDir, "-f", join(dir, "seed.tar"), "."]);
+    // COPYFILE_DISABLE as in hostTarArchive: macOS tar would add `._*` entries that are not under "./".
+    await exec("tar", ["-c", "-C", seedDir, "-f", join(dir, "seed.tar"), "."], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
     const setup = JSON.parse(claudeToolSetup(spec, CAPABILITY)) as { env: Record<string, string> };
     setup.env.FAKE_REGISTRY_TOKEN = REGISTRY_TOKEN;
     const toolSetup = JSON.stringify(setup);
@@ -436,7 +439,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       shim,
       `#!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore");
+const args = process.argv.slice(2).filter((a) => a !== "--anchored" && a !== "--no-anchored" && a !== "--delay-directory-restore" && a !== "--no-overwrite-dir");
 if (args.includes("-c")) process.exit(2);
 process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
 `,
@@ -646,6 +649,41 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
         launchRunner: () => ({ ready: Promise.resolve(), exited: new Promise<number>(() => undefined) }),
       }),
     ).rejects.toMatchObject({ code: "substrate_bridge_seed_unsafe" });
+    expect(logs.some((l) => l.includes("substrate_bridge_posted") && l.includes("workspace-failed"))).toBe(true);
+  });
+
+  it("extracts with --no-overwrite-dir and tells the run when the extraction fails", async () => {
+    const { workspace } = await stage();
+    const argvFile = join(dir, "extract-argv.json");
+    const shim = join(dir, "recording-tar.mjs");
+    await writeFile(
+      shim,
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+process.exit(2);
+`,
+      { mode: 0o755 },
+    );
+    await expect(
+      runTool({
+        proxyUrl,
+        metadataDir: await names("tool"),
+        workspace,
+        socketPath: join(dir, "tool", "runner.sock"),
+        readyPort: 0,
+        tempRoot: dir,
+        tarCommand: shim,
+        policy: FAST,
+        log,
+        launchRunner: () => ({ ready: Promise.resolve(), exited: new Promise<number>(() => undefined) }),
+      }),
+    ).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
+    const argv = JSON.parse(await readFile(argvFile, "utf8")) as string[];
+    expect(argv).toContain("--no-overwrite-dir");
+    expect(argv).toContain("--strip-components=1");
+    expect(argv).toContain("--no-same-owner");
+    expect(logs.filter((l) => l.includes("substrate_bridge_posted") && l.includes("workspace-failed"))).toHaveLength(1);
   });
 
   it("answers the readiness probe", async () => {

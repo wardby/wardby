@@ -23,6 +23,14 @@ const body = (text: string): Buffer => {
 const archive = (...parts: Buffer[]): Buffer => Buffer.concat([...parts, Buffer.alloc(1024)]);
 
 describe("checkTarEntries", () => {
+  it("with dotRelative refuses entries outside ./ (they would lose a level when the first component is stripped)", async () => {
+    const ok = archive(header("./", "5"), header("./a/f.txt", "0", 1), body("x"));
+    expect(await checkTarEntries(ok, true)).toEqual({ ok: true, entries: 2 });
+    const bare = archive(header("a/f.txt", "0", 1), body("x"));
+    expect(await checkTarEntries(bare, true)).toEqual({ ok: false, reason: "not_dot_relative" });
+    expect(await checkTarEntries(bare)).toEqual({ ok: true, entries: 1 });
+  });
+
   it("accepts a normal tree", async () => {
     const tar = archive(
       header("./", "5"),

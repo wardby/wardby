@@ -158,6 +158,17 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     await rm(stage, { recursive: true, force: true }).catch(() => undefined);
   };
   const abortStart = async (code: string): Promise<never> => {
+    // Tell the run once so the launcher fails it now instead of the agent timing out on a tool runner
+    // that never starts (best effort: postCapped gives up quietly when the proxy cannot be reached).
+    await postCapped(
+      `${base}/workspace-failed`,
+      headers,
+      undefined,
+      policy,
+      log,
+      "workspace-failed",
+      shutdown.signal,
+    ).catch(() => undefined);
     ready.server.close();
     await cleanup();
     throw new BridgeError(code);
@@ -192,7 +203,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       { policy, deadlineMs: SETUP_DEADLINE_MS, signal: shutdown.signal },
     );
     if (seed.status !== 200) return await abortStart("substrate_bridge_seed_failed");
-    const checked = await checkTarFile(seedPath);
+    const checked = await checkTarFile(seedPath, true);
     if (!checked.ok) {
       log("substrate_bridge_seed_unsafe", { reason: checked.reason });
       return await abortStart("substrate_bridge_seed_unsafe");
@@ -206,6 +217,11 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       seedPath,
       "--no-same-owner",
       "--delay-directory-restore",
+      // /workspace is a root-owned mount point the bridge (uid 10001) cannot chmod or utime, so the
+      // seed's "." entry must not be applied to it: drop the leading "./" (tar.ts refuses any seed whose
+      // entries are not under "./"). Existing directories keep their metadata.
+      "--strip-components=1",
+      "--no-overwrite-dir",
     ]);
     if (code !== 0) return await abortStart("substrate_bridge_seed_failed");
     log("substrate_bridge_seed_extracted", { entries: checked.entries });
