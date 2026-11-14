@@ -37,6 +37,11 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
   type AttributionIntent,
 } from "../../core/attribution.js";
+import {
+  CONTINUATION_REQUIRES_CODING_ERROR,
+  CONTINUATION_REQUIRES_CODING_MESSAGE,
+  CONTINUATION_SAME_OWNER_MESSAGE,
+} from "../../coding/continuation-wording.js";
 import { CodingBaseRefSchema, CodingTaskOverrideSchema, isLocalRepository } from "../../coding/protocol.js";
 import { loadLocalRepoRoots, resolveLocalRepository, LocalRepoError } from "../../coding/local-repo.js";
 import { localRepoWarnings } from "../../coding/local-repo-status.js";
@@ -60,6 +65,7 @@ const TriggerAgentSchema = z
     baseRef: CodingBaseRefSchema.optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
+    continuePriorRun: z.string().trim().min(1).max(128).optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -206,6 +212,11 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           description:
             "Coding agents only: link names (list_repositories) of the extra repositories for this run, replacing the agent's default set. [] = the default repository only.",
         },
+        continuePriorRun: {
+          type: "string",
+          description:
+            "Coding agents only, owner only: continue this prior run of the same agent (same branch and repository), like a delegation's continuePriorRun.",
+        },
         review: {
           type: "object",
           additionalProperties: false,
@@ -250,6 +261,18 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         }
         review = await resolveLocalReview(ctx, agent.id, args.review);
       }
+      if (args.continuePriorRun !== undefined) {
+        if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+          throw new McpError(403, `Agent "${agent.id}": ${CONTINUATION_SAME_OWNER_MESSAGE}`);
+        }
+        if (agent.kind !== "coding") {
+          throw new McpError(400, `${CONTINUATION_REQUIRES_CODING_ERROR}: ${CONTINUATION_REQUIRES_CODING_MESSAGE}`);
+        }
+        const prior = await ctx.db.run.findUnique({ where: { id: args.continuePriorRun }, select: { agentId: true } });
+        if (!prior || prior.agentId !== agent.id) {
+          throw new McpError(400, `continuePriorRun must name a prior run of agent "${agent.id}".`);
+        }
+      }
       if (
         agent.kind !== "coding" &&
         (args.task !== undefined ||
@@ -284,6 +307,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
                 agentId: agent.id,
                 profile: agent.codingProfile,
                 requested: args.repository,
+                continuesCodingRunId: args.continuePriorRun,
               }).catch(refused)
             ).repository
           : undefined;
@@ -335,6 +359,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           codingBaseRef: args.baseRef,
           codingRepository: args.repository,
           codingRepositories: args.repositories,
+          continuesCodingRunId: args.continuePriorRun,
           attribution,
           task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
           triggeredById: ctx.principal.id,

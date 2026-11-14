@@ -97,3 +97,14 @@ export function budgetStoppedTaskSection(request: string): string {
 export function budgetStoppedChangesSentence(ref: string, draft: boolean, fromIssue = false): string {
   return `The changes so far are in ${draft ? "draft PR " : ""}${ref}; mention the agent on it${fromIssue ? " or on the issue it came from" : ""} to continue.`;
 }
+
+/**
+ * The refusals shared by every way of asking for a continuation of a prior coding run: a
+ * delegation's `continuePriorRun` and trigger_agent's. `ownerOnlyMessage` is the part that differs
+ * ("same owner" for a delegation, "its owner" for a human caller).
+ */
+export const CONTINUATION_REQUIRES_CODING_ERROR = "continuation_requires_coding_agent";
+export const CONTINUATION_REQUIRES_CODING_MESSAGE =
+  "continuePriorRun is only supported when the sub-agent is coding-kind.";
+export const CONTINUATION_SAME_OWNER_MESSAGE =
+  "continuePriorRun is only allowed when the sub-agent has the same owner.";
