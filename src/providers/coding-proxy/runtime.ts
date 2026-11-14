@@ -137,6 +137,8 @@ export interface SubstrateProxyConfig {
   jwksUrl: URL;
   blobStore: BlobStoreConfig;
   limits: { resultBytes: number; transcriptBytes: number; workspaceBytes: number };
+  /** SUBSTRATE_WARM_ROUNDS=true (experimental): per-round files, and run tokens read from SubstrateRun rows. */
+  warmRounds?: true;
 }
 
 /**
@@ -173,6 +175,9 @@ export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxy
   if (!/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(proxyHost))
     throw new Error("SUBSTRATE_PROXY_HOST must be a bare hostname (no scheme, port, or path)");
   const proxyPort = substrateProxyPort(env);
+  const warm = env.SUBSTRATE_WARM_ROUNDS?.trim().toLowerCase();
+  if (warm !== undefined && warm !== "" && warm !== "true" && warm !== "false")
+    throw new Error("SUBSTRATE_WARM_ROUNDS must be true or false");
   return {
     atespace,
     proxyHost,
@@ -180,6 +185,7 @@ export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxy
     issuer,
     jwksUrl,
     blobStore,
+    ...(warm === "true" ? { warmRounds: true as const } : {}),
     limits: {
       resultBytes: positiveInt(env.SUBSTRATE_RESULT_MAX_MB, 16) * MIB,
       transcriptBytes: positiveInt(env.SUBSTRATE_TRANSCRIPT_MAX_MB, 64) * MIB,
@@ -322,7 +328,13 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
           issuer: substrateConfig.issuer,
           jwks: createRemoteJWKSet(substrateConfig.jwksUrl),
         }),
-        tokenForRun: substrateRunToken,
+        // Warm rounds: an adopting run holds the parked run's token, so it is read from the run's row.
+        tokenForRun: substrateConfig.warmRounds
+          ? async (runId: string) =>
+              (await options.db.substrateRun.findUnique({ where: { runId }, select: { token: true } }))?.token ??
+              substrateRunToken(runId)
+          : substrateRunToken,
+        ...(substrateConfig.warmRounds ? { warmRounds: true } : {}),
         limits: substrateConfig.limits,
       })
     : undefined;

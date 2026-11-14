@@ -189,6 +189,20 @@ describe("configured coding proxy runtime", () => {
     ).toBe("https://keys.example.invalid/jwks");
   });
 
+  it("reads SUBSTRATE_WARM_ROUNDS for the substrate routes (off unless true)", () => {
+    const on = {
+      SUBSTRATE_ATESPACE: "wardby-runs",
+      SUBSTRATE_ACTOR_JWT_ISSUER: "https://idp.example.invalid",
+      SUBSTRATE_PROXY_HOST: "coding-proxy.example.svc.cluster.local",
+      BLOB_STORE: "local",
+      BLOB_STORE_LOCAL_DIR: "/tmp/wardby-substrate-test",
+    };
+    expect(loadSubstrateProxyConfig(on)).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "true" })?.warmRounds).toBe(true);
+    expect(() => loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "on" })).toThrow("SUBSTRATE_WARM_ROUNDS");
+  });
+
   it("closes the proxy server when the deny port cannot bind", async () => {
     const closed: string[] = [];
     const handle: CodingProxyServerHandle = {
