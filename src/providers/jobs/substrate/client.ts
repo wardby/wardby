@@ -354,6 +354,7 @@ class GrpcSubstrateApi implements SubstrateApi {
           };
           out.push({
             pool: w.workerPool,
+            labels: { ...w.labels },
             freeCpuMillicores: free(cap?.cpuMillicores, used?.cpuMillicores),
             freeMemoryBytes: free(cap?.memoryBytes, used?.memoryBytes),
           });

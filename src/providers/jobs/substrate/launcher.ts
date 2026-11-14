@@ -11,7 +11,8 @@
  *   home) and `seed`; the actors post `result`, `transcript`, `workspace`, and the proxy writes
  *   `exit` and `done`.
  * - The `SubstrateRun` row is the launch fence (a second launch of the same run finds it) and the
- *   phase record. Completion is reported, not observed: `done` with a parseable `result` is success.
+ *   phase record. Completion is reported, not observed: `done` with a parseable `result`, written by
+ *   the deadline (plus 5 s of clock skew), is success; a later one is a timeout.
  *   Outcomes the launcher observes itself (timeout, a lost or crashed actor, a failed provisioning)
  *   are written to the row's phase, so a terminal state never changes afterwards.
  */
@@ -30,7 +31,7 @@ import { claudeToolSetup } from "../claude-tool-setup.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
 import { RUN_ID } from "../kubernetes-isolation.js";
-import { CAPABILITY, hostTarArchive, stableSpecHash } from "../kubernetes.js";
+import { CAPABILITY, FINISHED_AT_SKEW_MS, hostTarArchive, stableSpecHash } from "../kubernetes.js";
 import { safeExtract } from "../safe-extract.js";
 import {
   JobCapacityError,
@@ -48,6 +49,7 @@ import {
   type SubstrateApi,
 } from "./api.js";
 import { BLOB, agentActorName, substrateRunToken, toolActorName } from "./names.js";
+import { canPlaceAll } from "./placement.js";
 import type { SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
@@ -106,6 +108,13 @@ function isPhaseConflict(error: unknown): boolean {
   return error instanceof Error && error.message === "substrate_phase_conflict";
 }
 
+/** Starts every step, waits for all of them, then throws the first failure, if any. */
+async function settleAll(steps: (() => Promise<unknown>)[]): Promise<void> {
+  const results = await Promise.allSettled(steps.map((step) => Promise.resolve().then(step)));
+  const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
 function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
@@ -156,25 +165,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Whether the workers have room for both actors right now: one worker for both, or two workers
-   * for one each. Any doubt (an unbuildable spec, an unreachable API) answers yes; launch decides.
+   * Whether both actors can be placed now on the workers the configured selector matches, by free
+   * CPU and memory (Substrate packs many actors per worker): the larger first on the worker with
+   * the most free room, then the other, on the same worker or another. No workers: false. Any
+   * error (an unbuildable spec, an unreachable API): true, so the launch itself decides (a refusal
+   * there is a JobCapacityError).
    */
   async hasCapacityFor(spec: JobSpec): Promise<boolean> {
     try {
       const { agent, tool } = this.templatesFor(spec);
-      const workers = await this.api.listWorkers();
-      const fits = (worker: (typeof workers)[number], cpu: number, memory: number) =>
-        worker.freeCpuMillicores >= cpu && worker.freeMemoryBytes >= memory;
-      if (
-        workers.some((w) => fits(w, agent.cpuMillicores + tool.cpuMillicores, agent.memoryBytes + tool.memoryBytes))
-      ) {
-        return true;
-      }
-      return workers.some(
-        (w, i) =>
-          fits(w, agent.cpuMillicores, agent.memoryBytes) &&
-          workers.some((v, j) => j !== i && fits(v, tool.cpuMillicores, tool.memoryBytes)),
-      );
+      const selector = Object.entries(this.config.workerSelector ?? {});
+      const free = (await this.api.listWorkers())
+        .filter((worker) => selector.every(([key, value]) => worker.labels?.[key] === value))
+        .map((worker) => ({ cpuMillicores: worker.freeCpuMillicores, memoryBytes: worker.freeMemoryBytes }));
+      const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
+      return canPlaceAll(free, [size(agent), size(tool)]);
     } catch {
       return true;
     }
@@ -278,10 +283,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const record = await this.recordFor(handle);
     if (!record || record.phase === "removed") return;
     if (!(await this.observe(record)).result) throw new Error("job_not_terminal");
-    await this.deleteActors(record.token);
-    await this.deletePolicies(record.token);
-    await this.deleteSecret(record.token);
-    await this.deleteBlobs(record.token);
+    // Every deletion is tried even when one fails; the first failure is reported and the run is
+    // not marked removed, so a later remove() tries again.
+    await settleAll(this.deletions(record.token));
     // The row stays as the tombstone, so the run is never relaunched.
     await this.runs.setPhase(record.runId, "removed");
   }
@@ -360,7 +364,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     try {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
-      if (!isPhaseConflict(error)) throw error;
+      if (!isPhaseConflict(error)) {
+        await this.cleanup(token);
+        await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
+        throw error;
+      }
       // Stopped or timed out while provisioning: whoever moved it may have deleted the actors
       // before they existed, so delete them again.
       await this.deleteActors(token);
@@ -480,10 +488,17 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
     const artifact = await this.resultArtifact(record);
     if (artifact !== undefined) {
+      // Same rule as the Kubernetes launcher's exitedCleanlyInTime: a success reported past the
+      // deadline (with clock skew) is a timeout, since the run kept going after it should have stopped.
+      const at = (await this.blobs.head(BLOB.done(record.token)))?.updatedAt.getTime();
+      if (at === undefined || !Number.isFinite(at) || at > record.deadlineAt.getTime() + FINISHED_AT_SKEW_MS) {
+        return this.settle(record, "timed_out");
+      }
       return { status: { state: "succeeded" }, result: { exitCode: 0, reason: "completed", resultArtifact: artifact } };
     }
+    // No reason string, as on Kubernetes; the collect diagnostic says what was missing.
     return {
-      status: { state: "failed", reason: "worker_exited" },
+      status: { state: "failed" },
       result: { exitCode: await this.exitCode(record.token), reason: "failed", diagnostic: "substrate_result_missing" },
     };
   }
@@ -536,14 +551,24 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Cleanup (each step: missing is success)
 
+  /** Deletes both actors, each tried even if the other fails. */
   private async deleteActors(token: string): Promise<void> {
-    await this.api.deleteActor(this.config.atespace, agentActorName(token));
-    await this.api.deleteActor(this.config.atespace, toolActorName(token));
+    const { atespace } = this.config;
+    await settleAll(
+      [agentActorName(token), toolActorName(token)].map((name) => () => this.api.deleteActor(atespace, name)),
+    );
   }
 
-  private async deletePolicies(token: string): Promise<void> {
-    await this.api.deleteEgressPolicy(this.config.atespace, agentActorName(token));
-    await this.api.deleteEgressPolicy(this.config.atespace, toolActorName(token));
+  /** Every resource of the run, one step per deletion, so none waits on (or is skipped by) another. */
+  private deletions(token: string): (() => Promise<void>)[] {
+    const { atespace } = this.config;
+    const actors = [agentActorName(token), toolActorName(token)];
+    return [
+      ...actors.map((name) => () => this.api.deleteActor(atespace, name)),
+      ...actors.map((name) => () => this.api.deleteEgressPolicy(atespace, name)),
+      () => this.deleteSecret(token),
+      ...Object.values(BLOB).map((blob) => () => this.deleteBlob(blob(token))),
+    ];
   }
 
   private async deleteSecret(token: string): Promise<void> {
@@ -554,21 +579,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async deleteBlobs(token: string): Promise<void> {
-    for (const key of Object.values(BLOB).map((blob) => blob(token))) {
-      try {
-        await this.blobs.delete(key);
-      } catch (error) {
-        if (!isBlobNotFound(error)) throw error;
-      }
+  private async deleteBlob(key: string): Promise<void> {
+    try {
+      await this.blobs.delete(key);
+    } catch (error) {
+      if (!isBlobNotFound(error)) throw error;
     }
   }
 
   /** Best effort after a failed launch: nothing of the attempt is left behind. */
   private async cleanup(token: string): Promise<void> {
-    await this.deleteActors(token).catch(() => undefined);
-    await this.deletePolicies(token).catch(() => undefined);
-    await this.deleteSecret(token).catch(() => undefined);
-    await this.deleteBlobs(token).catch(() => undefined);
+    await settleAll(this.deletions(token)).catch(() => undefined);
   }
 }

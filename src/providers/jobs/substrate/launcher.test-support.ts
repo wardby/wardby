@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
 import { LocalBlobStore } from "../../storage/local.js";
+import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { JobSpec } from "../types.js";
-import { FakeSubstrateApi } from "./fake-api.js";
+import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
 import { SubstrateJobLauncher } from "./launcher.js";
 import { substrateRunToken } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
@@ -40,11 +41,50 @@ export class RecordingSecrets {
   }
 }
 
+/** A worker too small for both default-sized actors at once (agent 750m, tool 250m: 1000m in all). */
+export const SMALL_WORKER = { cpuMillicores: 800, memoryBytes: 2 ** 30 };
+
+/**
+ * A local blob store whose `updatedAt` is the harness clock at the time of the write, so the
+ * launcher's deadline checks compare like with like (the real stores report their write time).
+ */
+export class ClockedBlobStore extends LocalBlobStore {
+  private readonly written = new Map<string, Date>();
+  constructor(
+    root: string,
+    private readonly clock: () => number,
+  ) {
+    super(root);
+  }
+  override async put(key: string, body: Buffer): Promise<void> {
+    await super.put(key, body);
+    this.written.set(key, new Date(this.clock()));
+  }
+  override async putStream(
+    key: string,
+    body: NodeJS.ReadableStream,
+    opts?: { contentType?: string; maxBytes?: number },
+  ): Promise<{ sizeBytes: number; sha256: string }> {
+    const result = await super.putStream(key, body, opts);
+    this.written.set(key, new Date(this.clock()));
+    return result;
+  }
+  override async delete(key: string): Promise<void> {
+    await super.delete(key);
+    this.written.delete(key);
+  }
+  override async head(key: string): Promise<BlobInfo | null> {
+    const info = await super.head(key);
+    const at = this.written.get(key);
+    return info && at ? { ...info, updatedAt: at } : info;
+  }
+}
+
 export interface Harness {
   launcher: SubstrateJobLauncher;
   api: FakeSubstrateApi;
   runs: SubstrateRunStore;
-  blobs: LocalBlobStore;
+  blobs: ClockedBlobStore;
   secrets: RecordingSecrets;
   spec: JobSpec;
   token: string;
@@ -54,7 +94,14 @@ export interface Harness {
 }
 
 export async function makeHarness(
-  options: { workers?: number; runId?: string; runs?: SubstrateRunStore } = {},
+  options: {
+    workers?: number;
+    workerSize?: FakeSubstrateOptions["workerSize"];
+    workerLabels?: FakeSubstrateOptions["workerLabels"];
+    config?: Partial<SubstrateLaunchConfig>;
+    runId?: string;
+    runs?: SubstrateRunStore;
+  } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
   const workspaceRoot = join(root, "runs");
@@ -63,17 +110,21 @@ export async function makeHarness(
   await writeFile(join(workspaceRoot, runId, "workspace", "README.md"), "# hello\n");
   const inputArtifact = join(root, "input.json");
   await writeFile(inputArtifact, JSON.stringify({ schemaVersion: 1, task: "say hello" }));
-  const api = new FakeSubstrateApi({ workers: options.workers ?? 2 });
+  const api = new FakeSubstrateApi({
+    workers: options.workers ?? 2,
+    ...(options.workerSize ? { workerSize: options.workerSize } : {}),
+    ...(options.workerLabels ? { workerLabels: options.workerLabels } : {}),
+  });
   const runs = options.runs ?? new MemorySubstrateRunStore();
-  const blobs = new LocalBlobStore(join(root, "blobs"));
   const secrets = new RecordingSecrets();
   let now = 1_000_000;
+  const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const launcher = new SubstrateJobLauncher({
     api,
     runs,
     blobs,
     secrets,
-    config: CONFIG,
+    config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async () => FAKE_CAP,
     now: () => now,

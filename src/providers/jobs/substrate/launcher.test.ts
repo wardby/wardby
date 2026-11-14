@@ -6,7 +6,8 @@ import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateUnavailableError, type WorkerInfo } from "./api.js";
-import { CONFIG, FAKE_CAP, makeHarness, type Harness } from "./launcher.test-support.js";
+import { agentTemplate, toolTemplate } from "./specs.js";
+import { CONFIG, FAKE_CAP, makeHarness, SMALL_WORKER, type Harness } from "./launcher.test-support.js";
 import { BLOB, agentActorName, toolActorName } from "./names.js";
 
 const BLOB_KINDS = ["input", "toolSetup", "seed", "result", "transcript", "workspace", "exit", "done"] as const;
@@ -98,7 +99,7 @@ describe("SubstrateJobLauncher", () => {
   });
 
   it("refuses for capacity, leaves nothing running, and provisions afresh on a later launch", async () => {
-    const h = await makeHarness({ workers: 1 });
+    const h = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
     await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_capacity: no worker has room");
     expect(h.api.actors.size).toBe(0);
@@ -110,7 +111,7 @@ describe("SubstrateJobLauncher", () => {
     expect(await h.launcher.status(handle)).toEqual({ state: "pending", capacityRefused: true });
 
     // Room again later: the same spec provisions afresh, with a fresh deadline.
-    (h.api as unknown as { options: { workers: number } }).options.workers = 2;
+    h.api.options.workers = 2;
     h.setNow(5_000_000);
     expect(await h.launcher.launch(h.spec)).toEqual(handle);
     expect(h.api.actors.size).toBe(2);
@@ -139,7 +140,7 @@ describe("SubstrateJobLauncher", () => {
     // Collect still in flight.
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
     await finish(h, null);
-    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "worker_exited" });
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
     expect(await h.launcher.collect(handle)).toEqual({
       exitCode: 3,
       reason: "failed",
@@ -152,7 +153,7 @@ describe("SubstrateJobLauncher", () => {
       const h = await makeHarness();
       const handle = await h.launcher.launch(h.spec);
       await finish(h, result);
-      expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "worker_exited" });
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
       expect(await h.launcher.collect(handle)).toEqual({
         exitCode: 1,
         reason: "failed",
@@ -246,7 +247,7 @@ describe("SubstrateJobLauncher", () => {
       const handle = await h.launcher.launch(h.spec);
       await h.launcher.stop(handle);
       await h.launcher.remove(handle);
-      const failing = await makeHarness({ workers: 1 });
+      const failing = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
       await failing.launcher.launch(failing.spec).catch(() => undefined);
     } finally {
       process.stderr.write = write;
@@ -356,22 +357,145 @@ describe("SubstrateJobLauncher", () => {
     await expect(h.launcher.readTranscript(handle, 4)).rejects.toThrow("transcript_too_large");
   });
 
-  it("checks capacity against the workers, and says yes when in doubt", async () => {
+  it("checks capacity by placing both actors on the workers' free room, and says yes when in doubt", async () => {
     const h = await makeHarness();
     expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
-    const workers = (list: WorkerInfo[]) => {
+    const agent = agentTemplate(h.spec, CONFIG);
+    const tool = toolTemplate(h.spec, CONFIG);
+    const worker = (cpu: number, memory: number): WorkerInfo => ({
+      pool: "p",
+      labels: {},
+      freeCpuMillicores: cpu,
+      freeMemoryBytes: memory,
+    });
+    const check = async (list: WorkerInfo[]) => {
       h.api.listWorkers = async () => list;
+      return h.launcher.hasCapacityFor(h.spec);
     };
-    workers([{ pool: "p", freeCpuMillicores: 100, freeMemoryBytes: 2 ** 30 }]);
-    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(false);
-    workers([{ pool: "p", freeCpuMillicores: 1000, freeMemoryBytes: 2 ** 30 }]);
-    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
-    workers([]);
-    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(false);
+    const both = { cpu: agent.cpuMillicores + tool.cpuMillicores, memory: agent.memoryBytes + tool.memoryBytes };
+    // One worker holds both, or each on its own worker.
+    expect(await check([worker(both.cpu, both.memory)])).toBe(true);
+    expect(
+      await check([worker(agent.cpuMillicores, agent.memoryBytes), worker(tool.cpuMillicores, tool.memoryBytes)]),
+    ).toBe(true);
+    // One short in CPU or in memory.
+    expect(await check([worker(both.cpu - 1, both.memory)])).toBe(false);
+    expect(await check([worker(both.cpu, both.memory - 1)])).toBe(false);
+    // The agent (larger) takes the roomier worker; the tool then fits nowhere.
+    expect(
+      await check([worker(agent.cpuMillicores + 10, both.memory), worker(tool.cpuMillicores - 1, both.memory)]),
+    ).toBe(false);
+    expect(await check([])).toBe(false);
     h.api.listWorkers = async () => {
       throw new SubstrateUnavailableError("substrate_unavailable");
     };
     expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
     expect(h.launcher.supportsServicesFor("claude-code")).toBe(false);
+  });
+
+  it("agrees with the launch: one big worker fits both, one small worker fits neither run", async () => {
+    const big = await makeHarness({ workers: 1 });
+    expect(await big.launcher.hasCapacityFor(big.spec)).toBe(true);
+    await big.launcher.launch(big.spec);
+    expect([...big.api.actors.values()].every((actor) => actor.state === "RUNNING" && actor.worker === 0)).toBe(true);
+
+    const small = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    expect(await small.launcher.hasCapacityFor(small.spec)).toBe(false);
+    await expect(small.launcher.launch(small.spec)).rejects.toBeInstanceOf(JobCapacityError);
+  });
+
+  it("counts only the workers the configured selector matches", async () => {
+    const selector = { "wardby.dev/pool": "runs" };
+    const other = await makeHarness({
+      workers: 1,
+      workerLabels: { "wardby.dev/pool": "other" },
+      config: { workerSelector: selector },
+    });
+    expect(await other.launcher.hasCapacityFor(other.spec)).toBe(false);
+    const matching = await makeHarness({
+      workers: 1,
+      workerLabels: { "wardby.dev/pool": "runs", zone: "a" },
+      config: { workerSelector: selector },
+    });
+    expect(await matching.launcher.hasCapacityFor(matching.spec)).toBe(true);
+    // No selector: every worker counts.
+    const any = await makeHarness({ workers: 1, workerLabels: { "wardby.dev/pool": "other" } });
+    expect(await any.launcher.hasCapacityFor(any.spec)).toBe(true);
+  });
+
+  it("does not count a success reported after the deadline (with 5 s of skew)", async () => {
+    const late = await makeHarness();
+    const handle = await late.launcher.launch(late.spec);
+    late.setNow(1_000_000 + 600_000 + 5_001);
+    await finish(late);
+    expect(await late.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(late.api.actors.size).toBe(0);
+    expect(await late.launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+    expect((await late.runs.get(late.spec.runId))?.phase).toBe("timed_out");
+
+    const onTime = await makeHarness();
+    const second = await onTime.launcher.launch(onTime.spec);
+    onTime.setNow(1_000_000 + 600_000 + 5_000);
+    await finish(onTime);
+    onTime.setNow(1_000_000 + 900_000);
+    expect(await onTime.launcher.status(second)).toEqual({ state: "succeeded" });
+  });
+
+  it("cleans up every resource independently when one deletion fails", async () => {
+    const h = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    const deleteActor = h.api.deleteActor.bind(h.api);
+    h.api.deleteActor = async (atespace, name) => {
+      if (name === agentActorName(h.token)) throw new SubstrateUnavailableError("substrate_unavailable");
+      return deleteActor(atespace, name);
+    };
+    const deleteBlob = h.blobs.delete.bind(h.blobs);
+    h.blobs.delete = async (key) => {
+      if (key === BLOB.input(h.token)) throw new Error("blob_down");
+      return deleteBlob(key);
+    };
+    h.secrets.deleteSecret = async () => {
+      throw new Error("k8s_down");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect([...h.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(h.token)}`]);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(await blobKeys(h)).toEqual(["input"]);
+    expect(h.secrets.secrets.size).toBe(1);
+
+    // remove(): every deletion is tried, the first failure is reported, the run is not yet removed.
+    const r = await makeHarness();
+    const handle = await r.launcher.launch(r.spec);
+    await finish(r);
+    const rDeleteActor = r.api.deleteActor.bind(r.api);
+    let fail = true;
+    r.api.deleteActor = async (atespace, name) => {
+      if (fail && name === agentActorName(r.token)) throw new SubstrateUnavailableError("substrate_unavailable");
+      return rDeleteActor(atespace, name);
+    };
+    await expect(r.launcher.remove(handle)).rejects.toThrow("substrate_unavailable");
+    expect([...r.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(r.token)}`]);
+    expect(r.api.egressPolicies.size).toBe(0);
+    expect(r.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(r)).toEqual([]);
+    expect((await r.runs.get(r.spec.runId))?.phase).toBe("running");
+    fail = false;
+    await r.launcher.remove(handle);
+    expect(r.api.actors.size).toBe(0);
+    expect((await r.runs.get(r.spec.runId))?.phase).toBe("removed");
+  });
+
+  it("cleans up and records provisioning_failed when marking the run running fails", async () => {
+    const h = await makeHarness();
+    const setPhase = h.runs.setPhase.bind(h.runs);
+    h.runs.setPhase = async (runId, phase, from) => {
+      if (phase === "running") throw new Error("db_down");
+      return setPhase(runId, phase, from);
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("db_down");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
   });
 });

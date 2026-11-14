@@ -193,6 +193,7 @@ describe("createSubstrateApi (Connect adapter)", () => {
     const worker = (pool: string, capCpu: bigint, usedCpu: bigint) =>
       create(WorkerSchema, {
         workerPool: pool,
+        labels: { pool },
         status: create(WorkerStatusSchema, {
           capacity: create(WorkerResourcesSchema, { cpuMillicores: capCpu, memoryBytes: 100n }),
           allocated: create(WorkerResourcesSchema, { cpuMillicores: usedCpu, memoryBytes: 30n }),
@@ -205,8 +206,8 @@ describe("createSubstrateApi (Connect adapter)", () => {
           : create(ListWorkersResponseSchema, { workers: [worker("a", 1000n, 250n)], nextPageToken: "p2" }),
     });
     expect(await api.listWorkers()).toEqual([
-      { pool: "a", freeCpuMillicores: 750, freeMemoryBytes: 70 },
-      { pool: "b", freeCpuMillicores: 0, freeMemoryBytes: 70 },
+      { pool: "a", labels: { pool: "a" }, freeCpuMillicores: 750, freeMemoryBytes: 70 },
+      { pool: "b", labels: { pool: "b" }, freeCpuMillicores: 0, freeMemoryBytes: 70 },
     ]);
   });
 });

@@ -56,6 +56,9 @@ export interface ActorInfo {
 
 export interface WorkerInfo {
   pool: string;
+  /** The WorkerPool's labels, which a template's worker selector matches against. */
+  labels: Record<string, string>;
+  /** Capacity less allocated (Substrate's allocated includes each actor's runtime overhead). */
   freeCpuMillicores: number;
   freeMemoryBytes: number;
 }

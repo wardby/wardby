@@ -439,7 +439,7 @@ interface PodObservation {
 }
 
 /** Slack for clock skew between the kubelet's finishedAt and the control plane's deadline. */
-const FINISHED_AT_SKEW_MS = 5_000;
+export const FINISHED_AT_SKEW_MS = 5_000;
 
 /** Whether a worker's exit 0 happened on a live pod, not past the deadline, with a parseable finish time. */
 function exitedCleanlyInTime(pod: V1Pod, finishedAt: Date | string | undefined, deadlineAt: number): boolean {
