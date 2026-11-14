@@ -669,6 +669,33 @@ describe("SubstrateJobLauncher", () => {
     expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
   });
 
+  it("refuses a history run's bundle over its limit (capped at the archive size) and leaves no bundle file", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await putWorkspaceTar(h, {
+      "README.md": "# changed\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "b".repeat(4096),
+    });
+    await finish(h);
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    await expect(
+      h.launcher.materializeWorkspace(handle, destination, undefined, {
+        gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("vcs_result_bundle_too_large");
+    await expect(lstat(bundleDestination)).rejects.toThrow(/ENOENT/);
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
+    // A configured limit far above the archive is capped at its size, and a bundle within it is taken.
+    const taken = await h.launcher.materializeWorkspace(handle, destination, undefined, {
+      gitHistory: { bundleDestination, maxBundleBytes: Number.MAX_SAFE_INTEGER },
+    });
+    expect(taken).toEqual({ bundle: true });
+    expect((await readFile(bundleDestination)).length).toBe(4096);
+  });
+
   it("seeds a history run's root .git with the workspace", async () => {
     const h = await makeHarness();
     await mkdir(join(h.workspaceRoot, h.spec.runId, "workspace", ".git"));
