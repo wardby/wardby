@@ -6602,6 +6602,7 @@ describe("CATEGORY_BY_PREFIX", () => {
       vcs_result_history_invalid: "workspace",
       vcs_result_commit_limit: "workspace",
       vcs_result_commit_unsafe: "workspace",
+      vcs_result_path_excluded: "workspace",
       "vcs_remote_fetch_failed:upstream": "workspace",
       vcs_history_shortened: "workspace",
       vcs_git_history_invalid: "workspace",

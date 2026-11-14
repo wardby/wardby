@@ -686,6 +686,7 @@ export class GitVcsProvider implements VcsProvider {
           workspacePath,
           headRef: normalized.headRef,
           head: historyBase,
+          collectExclude: normalized.collectExclude,
           remotes: (normalized.remotes ?? []).map((remote) => ({
             name: remote.name,
             label: remote.label,
@@ -990,8 +991,10 @@ export class GitVcsProvider implements VcsProvider {
     // A path no run ever collects (dependency and cache folders, the agent's collectExclude) is
     // never published from a commit either: the sandbox writes files there that are not the
     // agent's work, its package manager config with the run's registry token among them.
+    // Every commit's own paths count, so one a later commit deletes is refused too: the intermediate
+    // commit would still carry its blob. The worker's info/exclude keeps `git add -A` off these paths.
     if (imported?.agentPaths.some((path) => isCollectExcluded(path, exclusions))) {
-      throw new Error("vcs_result_commit_unsafe");
+      throw new Error("vcs_result_path_excluded");
     }
     const start = imported?.tip ?? historyBase;
     // The index starts at the start's tree, so excluded paths (never collected) keep the start's

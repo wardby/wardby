@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitVcsProvider, NodeGitCommandRunner, type GitCommandOptions, type GitCommandRunner } from "./git.js";
+import { collectExclusions, gitInfoExcludeFile } from "../../coding/collect-exclude.js";
 import { LocalRemote } from "./local-remote.js";
 import type { PreparedWorkspace, VcsPrepareInput } from "./types.js";
 
@@ -115,6 +116,17 @@ async function agentCommit(prepared: PreparedWorkspace, files: Record<string, st
   await agent(prepared, ["commit", "-q", "-m", message]);
   return agent(prepared, ["rev-parse", "HEAD"]);
 }
+
+/** As an agent that forces a path in past the worker's info/exclude (`git add -f`), then commits. */
+async function agentCommitForced(prepared: PreparedWorkspace, files: Record<string, string>, message: string) {
+  await write(prepared.workspacePath, files);
+  await agent(prepared, ["add", "--all", "--force", "--", ...Object.keys(files)]);
+  await agent(prepared, ["commit", "-q", "-m", message]);
+  return agent(prepared, ["rev-parse", "HEAD"]);
+}
+
+const FAKE_REGISTRY_TOKEN = "rrg_FAKEregistrytoken0123456789abcdefFAKE";
+const npmrc = `//proxy/registry/npm/:_authToken=${FAKE_REGISTRY_TOKEN}\n`;
 
 /** What the worker and the collector do: the bundle beside the workspace, and the worker's .git gone. */
 async function collect(f: Fixture, prepared: PreparedWorkspace): Promise<string> {
@@ -249,20 +261,102 @@ describe("finalizing a history run from its result bundle (real git, #536)", { t
     async (_label, path, overrides) => {
       const f = await fixture();
       const prepared = await f.provider.prepareWorkspace(input(f, overrides));
-      const fakeToken = "rrg_FAKEregistrytoken0123456789abcdefFAKE";
-      // As `git add -A` does: the sandbox-only file is committed beside the agent's real change.
-      await agentCommit(
-        prepared,
-        { "b.txt": "b\n", [path]: `//proxy/registry/npm/:_authToken=${fakeToken}\n` },
-        "add b",
-      );
+      // Forced past the worker's info/exclude: the sandbox-only file is committed beside the real change.
+      await agentCommitForced(prepared, { "b.txt": "b\n", [path]: npmrc }, "add b");
       const resultBundle = await collect(f, prepared);
       const error = await errorOf(f.provider.finalizeChanges(prepared, { resultBundle }));
-      expect(error.message).toBe("vcs_result_commit_unsafe");
-      expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(fakeToken);
+      expect(error.message).toBe("vcs_result_path_excluded");
+      expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(FAKE_REGISTRY_TOKEN);
       expect(await git(f.fork, ["branch", "--list", "wardby/run-r1"])).toBe("");
     },
   );
+
+  it("refuses a merge whose resolution introduces a path no run collects", async () => {
+    const f = await fixture();
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    await agent(prepared, ["merge", "-q", "--no-commit", "refs/remotes/upstream/main"]);
+    await write(prepared.workspacePath, { ".cache/x": npmrc });
+    await agent(prepared, ["add", "--force", "--", ".cache/x"]);
+    await agent(prepared, ["commit", "-q", "--no-edit"]);
+    expect(await agent(prepared, ["rev-list", "--parents", "-n", "1", "HEAD"])).toContain(f.upstreamTip);
+    const resultBundle = await collect(f, prepared);
+    const error = await errorOf(f.provider.finalizeChanges(prepared, { resultBundle }));
+    expect(error.message).toBe("vcs_result_path_excluded");
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(FAKE_REGISTRY_TOKEN);
+    expect(await git(f.fork, ["branch", "--list", "wardby/run-r1"])).toBe("");
+  });
+
+  it("refuses a path no run collects that a later commit deletes: the intermediate commit would carry its blob", async () => {
+    const f = await fixture();
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    await agentCommitForced(prepared, { "b.txt": "b\n", ".cache/npm/npmrc": npmrc }, "add b");
+    await agent(prepared, ["rm", "-q", "--cached", "--", ".cache/npm/npmrc"]);
+    await agent(prepared, ["commit", "-q", "-m", "drop npmrc"]);
+    expect(await agent(prepared, ["ls-tree", "-r", "--name-only", "HEAD"])).not.toContain(".cache");
+    const resultBundle = await collect(f, prepared);
+    const error = await errorOf(f.provider.finalizeChanges(prepared, { resultBundle }));
+    expect(error.message).toBe("vcs_result_path_excluded");
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(FAKE_REGISTRY_TOKEN);
+    expect(await git(f.fork, ["branch", "--list", "wardby/run-r1"])).toBe("");
+  });
+
+  it("writes an info/exclude in the worker .git, so `git add -A` never stages what no run collects", async () => {
+    const f = await fixture();
+    const prepared = await f.provider.prepareWorkspace(input(f, { collectExclude: ["build/out"] }));
+    await write(prepared.workspacePath, {
+      "b.txt": "b\n",
+      ".cache/npm/npmrc": npmrc,
+      "node_modules/x/index.js": "x\n",
+      "pkg/node_modules/y/index.js": "y\n",
+      "build/out/app.js": "built\n",
+      "src/build/out/keep.js": "kept: only the root build/out is excluded\n",
+    });
+    await agent(prepared, ["add", "-A"]);
+    expect((await agent(prepared, ["diff", "--cached", "--name-only"])).split("\n")).toEqual([
+      "b.txt",
+      "src/build/out/keep.js",
+    ]);
+    await agent(prepared, ["commit", "-q", "-m", "add b"]);
+    const resultBundle = await collect(f, prepared);
+    const finalized = await f.provider.finalizeChanges(prepared, { resultBundle });
+    expect(finalized.outcome).toBe("branch_pushed");
+    const files = await git(f.fork, ["ls-tree", "-r", "--name-only", "wardby/run-r1"]);
+    expect(files.split("\n")).toEqual(expect.arrayContaining(["b.txt", "src/build/out/keep.js"]));
+    expect(files).not.toMatch(/\.cache|node_modules|^build\//m);
+    expect(await git(f.fork, ["log", "-p", "wardby/run-r1"])).not.toContain(FAKE_REGISTRY_TOKEN);
+  });
+
+  it("cannot hide a change through info/exclude: a file left uncommitted is still collected", async () => {
+    const f = await fixture();
+    const prepared = await f.provider.prepareWorkspace(input(f));
+    const exclude = join(prepared.workspacePath, ".git", "info", "exclude");
+    await writeFile(exclude, `${await readFile(exclude, "utf8")}hidden.txt\n`);
+    await agentCommit(prepared, { "b.txt": "b\n", "hidden.txt": "hidden\n" }, "add b");
+    expect(await agent(prepared, ["ls-tree", "-r", "--name-only", "HEAD"])).not.toContain("hidden.txt");
+    const resultBundle = await collect(f, prepared);
+    const finalized = await f.provider.finalizeChanges(prepared, { resultBundle });
+    expect(finalized.outcome).toBe("branch_pushed");
+    expect(await git(f.fork, ["show", "wardby/run-r1:hidden.txt"])).toBe("hidden");
+  });
+
+  it("gives a writable extra's worker .git the same info/exclude", async () => {
+    const f = await fixture();
+    await f.provider.prepareWorkspace(input(f));
+    const slot = await f.provider.prepareWorkspace(
+      input(f, {
+        repository: `local:${f.upstream}`,
+        slot: { name: "tools" },
+        remotes: [],
+        collectExclude: ["build/out"],
+      }),
+    );
+    expect(await readFile(join(slot.workspacePath, ".git", "info", "exclude"), "utf8")).toBe(
+      gitInfoExcludeFile(collectExclusions(["build/out"])),
+    );
+    await write(slot.workspacePath, { "t.txt": "t\n", ".cache/npm/npmrc": npmrc, "build/out/a.js": "a\n" });
+    await agent(slot, ["add", "-A"]);
+    expect(await agent(slot, ["diff", "--cached", "--name-only"])).toBe("t.txt");
+  });
 
   it("allows a protected path that only the upstream tip changed, brought in unchanged by a merge", async () => {
     const f = await fixture();

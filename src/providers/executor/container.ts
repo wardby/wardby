@@ -4570,8 +4570,9 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   ["vcs_github_not_configured", "preflight"],
   // The same for any other host: a repository whose provider this server has not registered.
   ["vcs_host_provider_not_configured", "preflight"],
-  // Every other vcs_ code is the workspace's: #536's vcs_result_*, vcs_remote_fetch_failed,
-  // vcs_history_shortened, vcs_git_history_invalid and vcs_worker_git_invalid included.
+  // Every other vcs_ code is the workspace's: #536's vcs_result_* (vcs_result_path_excluded among
+  // them), vcs_remote_fetch_failed, vcs_history_shortened, vcs_git_history_invalid and
+  // vcs_worker_git_invalid included.
   ["vcs_", "workspace"],
   // The agent's MCP tool pins could not be read at launch: nothing was launched.
   [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],

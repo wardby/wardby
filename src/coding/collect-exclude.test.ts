@@ -3,6 +3,7 @@ import {
   BUILTIN_COLLECT_EXCLUDE_NAMES,
   collectExclusions,
   gitExcludePathspecs,
+  gitInfoExcludeFile,
   isCollectExcluded,
   normalizeCollectExclusions,
   tarExcludeArgs,
@@ -72,5 +73,18 @@ describe("renderings", () => {
     const specs = gitExcludePathspecs(exclusions);
     expect(specs).toContain(":(exclude,glob)**/node_modules/**");
     expect(specs).toContain(":(exclude,literal)web/dist");
+  });
+
+  it("renders a .git/info/exclude file: names at any depth, paths anchored to the repository root", () => {
+    expect(gitInfoExcludeFile(collectExclusions(["web/dist", "a b/#c", "!d"]))).toBe(
+      [
+        "# Paths a Wardby run never collects (dependency and cache folders, collectExclude).",
+        ...BUILTIN_COLLECT_EXCLUDE_NAMES,
+        "/web/dist",
+        "/a b/#c",
+        "/!d",
+        "",
+      ].join("\n"),
+    );
   });
 });

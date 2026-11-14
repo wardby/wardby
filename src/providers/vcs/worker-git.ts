@@ -1,6 +1,7 @@
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { gitInfoExcludeFile, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { COMMIT_SHA } from "../../coding/protocol.js";
 import type { GitCommandRunner } from "./git.js";
 
@@ -62,8 +63,10 @@ async function exists(path: string): Promise<boolean> {
  * Builds a fresh `<workspace>/.git` for a history run (#536) from the control plane's git dir,
  * which wardby made and fully trusts: `git init` with no templates (so no sample hooks), the fixed
  * WORKER_GIT_CONFIG, one local fetch of `head` as `refs/heads/<headRef>` and of each remote's commit
- * as `refs/remotes/<name>/<label>` (its shallow boundary comes with it), HEAD on the branch, and the
- * index written from `head` without touching the files `read-tree --reset -u` already checked out.
+ * as `refs/remotes/<name>/<label>` (its shallow boundary comes with it), HEAD on the branch, the
+ * index written from `head` without touching the files `read-tree --reset -u` already checked out,
+ * and an `info/exclude` naming every path no run collects (gitInfoExcludeFile), so the agent's own
+ * `git add -A` leaves the sandbox's files (the npm config under `.cache` among them) unstaged.
  * Nothing is ever read from the worker's side; no credential is ever involved.
  */
 export async function buildWorkerGitDir(options: {
@@ -73,6 +76,7 @@ export async function buildWorkerGitDir(options: {
   headRef: string;
   head: string;
   remotes: readonly { name: string; label: string; commit: string }[];
+  collectExclude?: readonly string[];
 }): Promise<void> {
   const { gitMetadataPath, workspacePath, headRef, head, remotes } = options;
   if (!COMMIT_SHA.test(head) || remotes.some((remote) => !COMMIT_SHA.test(remote.commit))) {
@@ -85,6 +89,15 @@ export async function buildWorkerGitDir(options: {
   await mkdir(gitDir, { mode: 0o700 });
   await git(["init", "--quiet", "--template="]);
   await writeFile(resolve(gitDir, "config"), WORKER_GIT_CONFIG, { mode: 0o600 });
+  await mkdir(resolve(gitDir, "info"), { mode: 0o700 });
+  await writeFile(
+    resolve(gitDir, "info", "exclude"),
+    gitInfoExcludeFile(normalizeCollectExclusions(options.collectExclude)),
+    {
+      mode: 0o600,
+      flag: "wx",
+    },
+  );
   const branch = `refs/heads/${headRef}`;
   const remoteRefs = remotes.map((remote) => ({ ref: `refs/remotes/${remote.name}/${remote.label}`, ...remote }));
   // --update-shallow: from a shallow source, fetch otherwise drops (with only a warning) every ref

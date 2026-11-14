@@ -407,10 +407,12 @@ export const HISTORY_MERGE_COMMAND = [
   "git merge --no-ff --no-commit upstream/main > /tmp/merge.out 2>&1; echo merge.rc=$?",
   "if grep -q '^<<<<<<< ' app.txt; then printf '%s\\n' a B-fork B-upstream c > app.txt; echo resolved=app.txt; fi",
   "git rev-parse upstream/main > upstream-sync",
-  "git add app.txt upstream-sync",
+  // `git add -A`, as agents do: the worker .git's info/exclude keeps the sandbox's own files (its
+  // package manager config under .cache, with the run's registry token) out of the commit and out
+  // of `git status`.
+  "git add -A",
   "git commit -q --no-edit; echo commit.rc=$?",
-  // .cache holds the sandbox's package manager config, which runs never collect.
-  "git status --porcelain --untracked-files=all -- . ':(exclude).cache' | sed 's/^/status: /'",
+  "git status --porcelain --untracked-files=all | sed 's/^/status: /'",
   "echo status.end",
 ].join("\n");
 
