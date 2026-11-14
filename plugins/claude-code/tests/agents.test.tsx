@@ -129,9 +129,10 @@ export type Links = typeof LINKS;
 
 /**
  * A fake wardby server with list_agent_links (or, with hasTool false, an older one without it, answered
- * from per-agent calls). `data` defaults to a copy of LINKS, so a test can change its own copy.
+ * from per-agent calls). `data` defaults to a copy of LINKS, so a test can change its own copy; `runs` is
+ * what list_runs answers (none by default).
  */
-export function linksServer(on: On, opts: { hasTool?: boolean; data?: Links } = {}) {
+export function linksServer(on: On, opts: { hasTool?: boolean; data?: Links; runs?: unknown[] } = {}) {
   const data = opts.data ?? structuredClone(LINKS);
   const calls: string[] = [];
   on("mcp.call", (_, e) => {
@@ -162,7 +163,7 @@ export function linksServer(on: On, opts: { hasTool?: boolean; data?: Links } = 
       });
     if (e.tool === "list_repositories")
       return reply({ repositories: data.agents.find((a) => a.id === e.args.agentId)?.repositories ?? [] });
-    if (e.tool === "list_runs") return reply([]);
+    if (e.tool === "list_runs") return reply(e.args.query === undefined ? (opts.runs ?? []) : []);
     if (e.tool === "get_agent")
       return reply({
         id: e.args.id,
@@ -354,4 +355,175 @@ test("nothing is fetched for the Agents tab until it is opened", async ($, on) =
     await ui.unmount();
   }
   expect(calls).not.toContain("list_agent_links");
+});
+
+const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+/** A finished or running run of one agent, as list_runs sends it. */
+const run = (id: string, agentId: string, agentName: string, status: string, costUsd: string, msAgo: number) => ({
+  id,
+  agentId,
+  agentName,
+  agentBudgetUsd: 21,
+  status,
+  trigger: "webhook",
+  costUsd,
+  startedAt: iso(msAgo),
+  finishedAt: status === "running" ? null : iso(msAgo - 60_000),
+  heartbeatAt: iso(8_000),
+  turns: 3,
+});
+
+test("a flow shows its strip, cards and sub-agents, on every surface", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, {
+    runs: [
+      run("r1", "d", "delivery", "succeeded", "0.250000", 3_600_000),
+      run("r2", "d", "delivery", "running", "0.250000", 120_000),
+    ],
+  });
+  await openPane($, clock);
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface });
+    await ui.press({ key: "tab-agents" });
+    await clock.settle();
+    const text = await texts(ui);
+    expect(text).toContain("@mention → delivery ⇢ builder → PR → reviewer ↺ fix ≤2");
+    expect(text).toContain("Routes requests to the right coding sub-agent.");
+    expect(text).toMatch(/builder/);
+    expect(text).toContain("waits for CI");
+    expect(text).toContain("Unlinked agents (1)");
+    expect(text).not.toMatch(/workflow/i);
+    // Every agent opens from the list.
+    for (const id of ["d", "b", "v"]) expect(await ui.find({ key: `agent-${id}` })).toBeDefined();
+    if (surface === "desktop") {
+      // The flow's totals, the agent's kind and chips, and the sub-agent as a line under its lead.
+      expect(text).toContain("3 agents · 2 runs · $0.50");
+      expect(text).toContain("Claude Code");
+      expect(text).toContain("sonnet-5-5");
+      expect(text).toContain("$21.00 / run");
+      expect(text).toContain("⚡ mention");
+      expect(text).toContain("⚡ PR opened");
+      expect(text).toContain("sub-agent");
+    } else {
+      // A row per agent: the role bar, the name, the entry, the sub-agent under its lead.
+      expect(text).toContain("▎");
+      expect(text).toContain("⇢");
+      expect(text).toContain("$21.00");
+      // The terminal takes theme colour names, never a hex colour, a tint or an SVG.
+      expect(await ui.findAll({ type: "Svg" })).toHaveLength(0);
+      for (const el of await ui.findAll({ type: "Text" })) {
+        expect(el.props.backgroundColor).toBeUndefined();
+        if (typeof el.props.color === "string") expect(el.props.color.startsWith("#"), el.props.color).toBe(false);
+      }
+    }
+    await ui.press({ key: "tab-runs" });
+    await clock.settle();
+    await ui.unmount();
+  }
+});
+
+test("a narrow terminal drops the model and cost columns", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 50 }, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("delivery");
+  expect(text).not.toContain("$21.00");
+  expect(text).not.toContain("sonnet-5-5");
+  await ui.unmount();
+});
+
+test("a sub-agent with another lead says so, and hidden agents are counted", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  const data = structuredClone(LINKS);
+  data.agents.push({ ...structuredClone(LINKS.agents[0]), id: "l2", name: "planner", entry: ["manual"] });
+  data.edges.push({ from: "l2", to: "b", kind: "delegates", repository: null, label: "plan" });
+  data.flows[0].agentIds.push("l2");
+  data.hidden = { agents: 2, edges: 1 };
+  linksServer(on, { data });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("also used by planner");
+  expect(text).toContain("2 linked agents you can't see");
+  await ui.unmount();
+});
+
+test("pressing an agent opens its Detail; collapsing a flow hides its rows in the terminal", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "flow-d" });
+  expect(await texts(ui)).not.toContain("Routes requests");
+  await ui.press({ key: "flow-d" });
+  expect(await texts(ui)).toContain("Routes requests");
+  await ui.press({ key: "agent-v" });
+  expect(await texts(ui)).toContain("Agents › your-org/mobile › reviewer");
+  expect(await ui.find({ key: "agent-tab-detail" })).toBeDefined();
+  expect(await ui.find({ key: "agent-tab-flow" })).toBeDefined();
+  // The breadcrumb's Agents goes back to the list.
+  await ui.press({ key: "crumb-agents" });
+  expect(await texts(ui)).toContain("@mention → delivery");
+  // An agent in no flow has no Flow tab.
+  await ui.press({ key: "unlinked" });
+  await ui.press({ key: "agent-s" });
+  expect(await texts(ui)).toContain("Agents › Unlinked › solo");
+  expect(await ui.find({ key: "agent-tab-flow" })).toBeUndefined();
+  await ui.press({ key: "crumb-agents" });
+  await ui.unmount();
+});
+
+test("pressing a flow title on the desktop opens its key agent on Flow", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.press({ key: "flow-d" });
+  expect(await texts(ui)).toContain("Agents › your-org/mobile › delivery");
+  expect((await ui.find({ key: "agent-tab-flow" }))?.props.variant).toBe("primary");
+  expect((await ui.find({ key: "agent-tab-detail" }))?.props.variant).toBe("secondary");
+  await ui.unmount();
+});
+
+test("the text filter narrows agents and drops empty flows", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on);
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  await ui.input({ key: "filter-text", text: "solo", kind: "change" });
+  await clock.settle();
+  let text = await texts(ui);
+  expect(text).not.toContain("your-org/mobile");
+  expect(text).toContain("solo");
+  expect(await ui.find({ key: "agent-s" })).toBeDefined();
+  // A model matches too, and a flow keeps only its matching agents.
+  await ui.input({ key: "filter-text", text: "opus", kind: "change" });
+  await clock.settle();
+  text = await texts(ui);
+  expect(text).toContain("your-org/mobile");
+  expect(await ui.find({ key: "agent-b" })).toBeDefined();
+  // The strip still names the whole flow; only the matching agents get a row.
+  expect(await ui.find({ key: "agent-d" })).toBeUndefined();
+  expect(await ui.find({ key: "agent-v" })).toBeUndefined();
+  expect(text).not.toContain("solo");
+  await ui.unmount();
 });
