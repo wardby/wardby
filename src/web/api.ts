@@ -129,6 +129,9 @@ export async function getDocumentJson(
   });
 }
 
+/** The `review` payload of the page API. */
+export type WebReview = ReturnType<typeof reviewJson>;
+
 /** The review as the page shows it: names and notes as text; refs (principal ids, guest:<id>) for the owner only. */
 export function reviewJson(view: ReviewView) {
   const owner = view.can.submit || view.can.archive || view.can.unarchive;

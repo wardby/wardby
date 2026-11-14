@@ -1662,9 +1662,12 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
 
     it("adds the review to the page payload and runs the review actions", async () => {
       const id = await newDoc();
+      // A linked document is send-capable, so the lock is what turns canSend off.
+      await db.document.update({ where: { id }, data: { repository: "acme/web-docs", path: "docs/plan.md" } });
       const o = await session(owner.id);
       const m = await session(member.id);
       const page = (await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any;
+      expect(page.document.canSend).toBe(true);
       expect(page.review).toMatchObject({ state: "draft", currentVersion: 1, can: { submit: true, review: false } });
       const cands = (await (await call(`/d/api/${id}/review-candidates`, { jar: o.jar })).json()) as any;
       expect(cands.members.map((x: any) => x.principalId)).toContain(owner.id);
@@ -1672,6 +1675,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(sub.status).toBe(200);
       const subbed = ((await sub.json()) as any).review;
       expect(subbed.state).toBe("in_review");
+      expect(((await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any).document.canSend).toBe(true);
       expect(subbed.reviewers[0]).toMatchObject({ ref: member.id, verdict: "none" });
       // The member was granted comment access by being named; their view hides refs and offers the verdict.
       const asMember = ((await (await call(`/d/api/${id}`, { jar: m.jar })).json()) as any).review;
@@ -1693,6 +1697,25 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(locked.document.canSend).toBe(false);
       const reopened = await post(id, o, { action: "reopen" });
       expect(((await reopened.json()) as any).review.state).toBe("in_review");
+    });
+
+    it("shows an anonymous share-link reader a review with no actions and no reviewer refs", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      await post(id, o, { action: "submit", reviewers: [member.id] });
+      const link = await createShareLink(db, {
+        documentId: id,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "view",
+      });
+      const res = await call(`/d/api/${id}`, { headers: { "x-wardby-share": link.token } });
+      expect(res.status).toBe(200);
+      const review = ((await res.json()) as any).review;
+      expect(review.state).toBe("in_review");
+      expect(Object.values(review.can).every((v) => v === false)).toBe(true);
+      expect(review.reviewers[0]).not.toHaveProperty("ref");
+      expect(review.reviewers[0].me).toBe(false);
+      expect(JSON.stringify(review)).not.toContain(member.id);
     });
 
     it("answers the review codes with their statuses and refuses malformed bodies", async () => {
