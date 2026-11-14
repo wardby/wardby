@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  LineTail,
-  findWorkerDiagnostic,
-  parseWorkerDiagnosticLine,
-  redactExact,
-  secretValuesOfToolSetup,
-} from "./diagnostics.js";
+import { LineTail, findWorkerDiagnostic, parseWorkerDiagnosticLine, redactExact } from "./diagnostics.js";
 
 const REGISTRY_TOKEN = "rrg_fake_registry_token_0000001";
 
@@ -50,24 +44,6 @@ describe("redactExact", () => {
       "a [redacted] b [redacted] c",
     );
     expect(redactExact("nothing here", ["", "zzz"])).toBe("nothing here");
-  });
-});
-
-describe("secretValuesOfToolSetup", () => {
-  it("finds the registry-only token in the setup's env values and files", () => {
-    const setup = JSON.stringify({
-      schemaVersion: 1,
-      env: {
-        YARN_NPM_AUTH_TOKEN: REGISTRY_TOKEN,
-        PIP_INDEX_URL: `http://wardby:${REGISTRY_TOKEN}2@proxy:8787/registry/pypi/simple/`,
-        PLAIN: "x",
-      },
-      files: [{ path: "/workspace/.cache/npm/.npmrc", content: `//proxy/:_authToken=${REGISTRY_TOKEN}3\n`, mode: 384 }],
-    });
-    expect(new Set(secretValuesOfToolSetup(setup))).toEqual(
-      new Set([REGISTRY_TOKEN, `${REGISTRY_TOKEN}2`, `${REGISTRY_TOKEN}3`]),
-    );
-    expect(secretValuesOfToolSetup("not json")).toEqual([]);
   });
 });
 

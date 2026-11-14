@@ -10,14 +10,23 @@
  *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
  * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
- * The one exception is `POST diagnostics` (CLAUDE.md's operator-diagnostics exception): a bridge's
- * bounded stderr tail, redacted by the bridge by exact value, logged at warn to the operator log
- * only, and refused unlogged if a token shape is still in it.
+ * The one exception is `POST diagnostics` (CLAUDE.md's operator-diagnostics exception): the agent
+ * bridge's bounded stderr tail, redacted here (trusted code) by exact value against every secret
+ * value delivered to the run's actors that the proxy can know (the capability the request
+ * authenticated with and the registry-only token derived from it), logged at warn to the operator
+ * log only, and refused unlogged if a token shape is still in it. A tool-side tail is refused: the
+ * tool actor runs the model's commands, and the proxy holds no exact value to redact its tail with.
+ *
+ * Once the proxy has written a run's `done` marker its outcome is fixed: `workspace` and
+ * `workspace-failed` are refused (409 substrate_run_collected), so a late or forged post cannot
+ * change it.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport/http-limits.js";
 import { logger } from "../../../core/logger.js";
+import { redactExactSecretValues, withEscapedForms } from "../../../core/secret-spans.js";
+import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { BLOB, TOOL_ACTOR_JWT_HEADER, toolActorSubject } from "../../jobs/substrate/names.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
@@ -36,9 +45,8 @@ const MAX_EXIT_BYTES = 8 * 1024;
 export const MAX_DIAGNOSTICS_BYTES = 8 * 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
 /**
- * A run capability (`rrp_…`) or registry-only token (`rrg_…`) shape. The proxy cannot redact a
- * diagnostics tail by exact value (it holds only the capability's hash), so a tail with either shape
- * left in it after the bridge's own redaction is refused, not logged.
+ * A run capability (`rrp_…`) or registry-only token (`rrg_…`) shape. A tail with either shape left in
+ * it after exact-value redaction (a value the proxy could not know) is refused, not logged.
  */
 const TOKEN_SHAPE = /rr[pg]_[A-Za-z0-9_-]/;
 /** Runs (per side) whose diagnostics this replica already logged; oldest forgotten first past the cap. */
@@ -67,8 +75,7 @@ export interface SubstrateRouteOptions {
   };
 }
 
-/** `either`: the agent (capability) or the tool (actor JWT), told apart by which credential header is sent. */
-type Caller = "agent" | "tool" | "either";
+type Caller = "agent" | "tool";
 type RouteName =
   | "input"
   | "channels.open"
@@ -128,7 +135,7 @@ function match(method: string, rest: string): Matched | undefined {
     case "POST workspace-failed":
       return { name: "workspace-failed", caller: "tool" };
     case "POST diagnostics":
-      return { name: "diagnostics", caller: "either" };
+      return { name: "diagnostics", caller: "agent" };
     default:
       return undefined;
   }
@@ -346,6 +353,29 @@ export function createSubstrateRoutes(
     return readBody(request, MAX_DIAGNOSTICS_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
   }
 
+  /**
+   * The secret values delivered to an agent-authenticated request's run that the proxy can know: the
+   * capability it authenticated with (the gateway injects the real one) and the registry-only token
+   * derived from it.
+   */
+  function agentSecretValues(request: IncomingMessage): string[] {
+    const key = request.headers["x-api-key"];
+    return typeof key === "string" && key !== "" ? [key, deriveRegistryToken(key)] : [];
+  }
+
+  /** The run's outcome is fixed once `done` exists: a later workspace report is refused. */
+  async function refuseOnceCollected(token: string): Promise<void> {
+    if (await options.blobs.head(BLOB.done(token))) throw new RouteError(409, "substrate_run_collected");
+  }
+
+  /** Writes `done` unless it exists (then the post is refused: the first report stands). */
+  async function writeDoneOnce(token: string, workspace: "ok" | "failed"): Promise<void> {
+    await refuseOnceCollected(token);
+    await options.blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace })), {
+      contentType: "application/json",
+    });
+  }
+
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
@@ -371,13 +401,11 @@ export function createSubstrateRoutes(
     });
     try {
       if (!found || !matched) throw new RouteError(404, "not_found");
-      // A diagnostics post comes from either side: the tool's credential header says which.
-      const side: "agent" | "tool" =
-        matched.caller === "either"
-          ? request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined
-            ? "tool"
-            : "agent"
-          : matched.caller;
+      // Diagnostics are agent-side only: a post with the tool's credential header is refused unread.
+      if (matched.name === "diagnostics" && request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined) {
+        throw new RouteError(403, "diagnostics_agent_only");
+      }
+      const side = matched.caller;
       const allowed = side === "agent" ? await agentAuth(request, token) : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
       const { relay, blobs, limits } = options;
@@ -452,10 +480,9 @@ export function createSubstrateRoutes(
           sendJson(response, 200, {});
           return;
         case "workspace": {
+          await refuseOnceCollected(token);
           counters.bytes = await receiveBlob(request, BLOB.workspace(token), limits.workspaceBytes, clearBodyTimer);
-          await blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace: "ok" })), {
-            contentType: "application/json",
-          });
+          await writeDoneOnce(token, "ok");
           await relay.dropRelay(token);
           setupDeleted.delete(token);
           sendJson(response, 200, {});
@@ -480,11 +507,12 @@ export function createSubstrateRoutes(
           return;
         }
         case "diagnostics": {
-          // Operator diagnostics (CLAUDE.md's exception): a bridge's bounded, already redacted stderr
-          // tail after a failure. It goes to the operator log only: never a blob, the database, an
-          // answer, MCP, the viewer or a run record.
-          const tail = await readDiagnostics(request);
-          counters.bytes = Buffer.byteLength(tail);
+          // Operator diagnostics (CLAUDE.md's exception): the agent bridge's bounded stderr tail after
+          // a failure, redacted here by exact value whatever the bridge did. It goes to the operator
+          // log only: never a blob, the database, an answer, MCP, the viewer or a run record.
+          const raw = await readDiagnostics(request);
+          counters.bytes = Buffer.byteLength(raw);
+          const tail = redactExactSecretValues(raw, withEscapedForms(agentSecretValues(request)));
           if (TOKEN_SHAPE.test(tail)) {
             log.warn(
               { event: "substrate.diagnostics_rejected", runToken: token, side },
@@ -506,9 +534,8 @@ export function createSubstrateRoutes(
         }
         case "workspace-failed": {
           // The tool bridge could not produce the workspace tar: say so and end the relay.
-          await blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace: "failed" })), {
-            contentType: "application/json",
-          });
+          await refuseOnceCollected(token);
+          await writeDoneOnce(token, "failed");
           await relay.dropRelay(token);
           setupDeleted.delete(token);
           sendJson(response, 200, {});

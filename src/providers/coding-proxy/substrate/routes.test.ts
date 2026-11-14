@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BLOB, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
 import { LocalBlobStore } from "../../storage/local.js";
+import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
 import { MemoryRelayStore } from "./memory-relay-store.js";
@@ -274,6 +275,31 @@ describe("substrate routes", () => {
     expect((await fetch(`${base}/channels/c1/lines?after=0`, agent())).status).toBe(404);
   });
 
+  it("never changes a run's outcome once done is written: a late or forged workspace report is refused", async () => {
+    await start();
+    expect((await fetch(`${base}/workspace`, tool({ method: "POST", body: "tar" }))).status).toBe(200);
+    const doneAt = (await blobs.head(BLOB.done(TOKEN)))?.updatedAt;
+    for (const [path, init] of [
+      ["workspace", tool({ method: "POST", body: "forged" })],
+      ["workspace-failed", tool({ method: "POST" })],
+    ] as const) {
+      const answer = await fetch(`${base}/${path}`, init);
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+    }
+    expect((await blobs.get(BLOB.workspace(TOKEN))).toString()).toBe("tar");
+    expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+    expect((await blobs.head(BLOB.done(TOKEN)))?.updatedAt).toEqual(doneAt);
+
+    // And the other way round: a failed collect is not turned into a success.
+    await blobs.delete(BLOB.done(TOKEN));
+    await blobs.delete(BLOB.workspace(TOKEN));
+    expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(200);
+    expect((await fetch(`${base}/workspace`, tool({ method: "POST", body: "late" }))).status).toBe(409);
+    expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+    expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+  });
+
   it("stores the worker exit code and queues a collect request (agent only)", async () => {
     await start();
     const body = { method: "POST", body: JSON.stringify({ code: 3 }), headers: { "content-type": "application/json" } };
@@ -346,22 +372,16 @@ describe("substrate routes", () => {
     const allFiles = async (): Promise<string[]> =>
       (await readdir(dir, { recursive: true, withFileTypes: true })).filter((e) => e.isFile()).map((e) => e.name);
 
-    it("logs a bounded tail at warn for the operator, once per run and side, and stores or returns nothing", async () => {
+    it("logs a bounded agent tail at warn for the operator, once per run, and stores or returns nothing", async () => {
       await start();
       const tail = "npm ERR! could not resolve\nexit 1";
       const answer = await fetch(`${base}/diagnostics`, agent(text(tail)));
       expect(answer.status).toBe(200);
       expect(await answer.text()).toBe("{}");
-      // A repeat from the same side is ignored.
+      // A repeat is ignored.
       expect((await fetch(`${base}/diagnostics`, agent(text("again")))).status).toBe(200);
-      expect((await fetch(`${base}/diagnostics`, tool(text("tool side")))).status).toBe(200);
-      expect((await fetch(`${base}/diagnostics`, tool(text("tool again")))).status).toBe(200);
       expect(warnCalls).toEqual([
         [{ event: "substrate.diagnostics", runToken: TOKEN, side: "agent", tail }, "substrate actor diagnostics"],
-        [
-          { event: "substrate.diagnostics", runToken: TOKEN, side: "tool", tail: "tool side" },
-          "substrate actor diagnostics",
-        ],
       ]);
       // Never stored: no blob was written by any of it.
       expect(await allFiles()).toEqual([]);
@@ -369,23 +389,54 @@ describe("substrate routes", () => {
       expect(JSON.stringify(logCalls)).not.toContain("npm ERR");
     });
 
-    it("refuses a tail that still holds a capability or registry token shape, and logs only a fixed event", async () => {
+    it("redacts the agent tail itself, by exact value, against the run's capability and registry-only token", async () => {
       await start();
-      for (const [side, init, secret] of [
-        ["agent", agent, CAPABILITY],
-        ["tool", tool, REGISTRY_TOKEN],
-      ] as const) {
-        const answer = await fetch(`${base}/diagnostics`, init(text(`line one\nkey=${secret}\n`)));
-        expect(answer.status).toBe(400);
-        expect(await answer.json()).toEqual({ error: { type: "bad_request" } });
-        expect(warnCalls.at(-1)).toEqual([
-          { event: "substrate.diagnostics_rejected", runToken: TOKEN, side },
-          "substrate actor diagnostics rejected",
-        ]);
+      const registry = deriveRegistryToken(CAPABILITY);
+      // As an untrusted bridge might send it: nothing redacted, raw and JSON-escaped forms.
+      const raw = `key=${CAPABILITY}\nnpmrc _authToken=${registry}\njson ${JSON.stringify({ k: `"${registry}"` })}\n`;
+      expect((await fetch(`${base}/diagnostics`, agent(text(raw)))).status).toBe(200);
+      const logged = (warnCalls[0]?.[0] as { tail?: string } | undefined)?.tail ?? "";
+      expect(logged).toContain("key=[REDACTED]");
+      expect(logged).toContain("npmrc _authToken=[REDACTED]");
+      const serialized = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [CAPABILITY, registry]) expect(serialized).not.toContain(secret);
+    });
+
+    it("refuses a tool-side tail unread and unlogged, even one carrying a raw registry token", async () => {
+      await start();
+      for (const body of [`registry ${REGISTRY_TOKEN}`, btoa(REGISTRY_TOKEN), "plain tool stderr"]) {
+        const answer = await fetch(`${base}/diagnostics`, tool(text(body)));
+        expect(answer.status).toBe(403);
+        expect(await answer.json()).toEqual({ error: { type: "diagnostics_agent_only" } });
       }
+      // The header decides, whatever the token: a bad or forged actor JWT is refused the same way.
+      const forged = await fetch(`${base}/diagnostics`, {
+        ...text(REGISTRY_TOKEN),
+        headers: { "x-wardby-actor-jwt": "x", "x-api-key": CAPABILITY },
+      });
+      expect(forged.status).toBe(403);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(warnCalls).toEqual([]);
+      const serialized = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [REGISTRY_TOKEN, btoa(REGISTRY_TOKEN), "plain tool stderr"])
+        expect(serialized).not.toContain(secret);
+      expect(await allFiles()).toEqual([]);
+    });
+
+    it("refuses an agent tail that still holds a token shape it could not redact, and logs only a fixed event", async () => {
+      await start();
+      const answer = await fetch(`${base}/diagnostics`, agent(text(`line one\nkey=${OTHER_CAPABILITY}\n`)));
+      expect(answer.status).toBe(400);
+      expect(await answer.json()).toEqual({ error: { type: "bad_request" } });
+      expect(warnCalls).toEqual([
+        [
+          { event: "substrate.diagnostics_rejected", runToken: TOKEN, side: "agent" },
+          "substrate actor diagnostics rejected",
+        ],
+      ]);
       await new Promise((resolve) => setTimeout(resolve, 20));
       const serialized = JSON.stringify([logCalls, warnCalls]);
-      for (const secret of [CAPABILITY, REGISTRY_TOKEN, "line one"]) expect(serialized).not.toContain(secret);
+      for (const secret of [OTHER_CAPABILITY, "line one"]) expect(serialized).not.toContain(secret);
       expect(await allFiles()).toEqual([]);
     });
 
@@ -393,7 +444,7 @@ describe("substrate routes", () => {
       await start();
       expect((await fetch(`${base}/diagnostics`, text("x"))).status).toBe(401);
       expect(
-        (await fetch(`${base}/diagnostics`, { ...text("x"), headers: { "x-wardby-actor-jwt": "Bearer bad" } })).status,
+        (await fetch(`${base}/diagnostics`, { ...text("x"), headers: { "x-api-key": OTHER_CAPABILITY } })).status,
       ).toBe(401);
       expect((await fetch(`${base}/diagnostics`, agent(text("y".repeat(8 * 1024 + 1))))).status).toBe(413);
       const status = await new Promise<number>((resolve, reject) => {
@@ -420,7 +471,8 @@ describe("substrate routes", () => {
     expect((await fetch(`${base}/workspace-failed`, agent({ method: "POST" }))).status).toBe(401);
     expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
     expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(200);
-    expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(200);
+    // The first report stands.
+    expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(409);
     expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
     expect(await relay.pollTool(TOKEN, 0, 0)).toEqual([]);
     expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();

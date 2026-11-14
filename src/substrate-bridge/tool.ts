@@ -7,7 +7,9 @@
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * Nothing secret is logged (see Logger in common.ts); the tool setup is never logged and only
- * reaches the tool runner's environment.
+ * reaches the tool runner's environment. This bridge sends no operator-diagnostics tail: model-run
+ * commands share this actor and its proxy credential, so only the agent side's tail is accepted
+ * (the proxy refuses a tool-side one; see routes.ts). Its children's stderr goes to the actor's log.
  */
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -17,7 +19,6 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import {
-  DiagnosticsTail,
   postBestEffort,
   postCapped,
   requireProxyUrl,
@@ -33,9 +34,7 @@ import {
   DEFAULT_TOOL_SOCKET,
   ACTOR_JWT_HEADER,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
-  PLACEHOLDER_CAPABILITY,
 } from "./constants.js";
-import { secretValuesOfToolSetup, waitAtMost, type LineFeed } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 import { checkTarFile, parseCollectExclusions, tarExcludeArgs, type CollectExclusions } from "./tar.js";
@@ -46,14 +45,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const SETUP_DEADLINE_MS = 5 * 60_000;
 const RUNNER_ENTRY = "/opt/wardby/claude-tool-runner/main.mjs";
 const READY_LINE = "wardby_tool_runner_ready";
-/** How long, after the runner exits, the bridge waits for its stderr to end. */
-const OUTPUT_DRAIN_MS = 2_000;
 
 export interface RunnerHandle {
   /** Resolves when the runner is listening; rejects if it exits first. */
   ready: Promise<void>;
   exited: Promise<number>;
-  /** The runner's stderr, when the bridge can read it (for the operator-diagnostics tail only). */
+  /** The runner's stderr, when the bridge can read it (passed on to the actor's log only). */
   stderr?: NodeJS.ReadableStream;
 }
 
@@ -87,7 +84,7 @@ export interface ToolHandle {
   readyPort: number;
   /** Resolves once the agent asked for the workspace and the upload finished (or was given up on). */
   collected: Promise<"ok" | "rejected" | "failed">;
-  /** Resolves with the tool runner's exit code if it ever exits (after a failure's diagnostics were posted). */
+  /** Resolves with the tool runner's exit code if it ever exits. */
   runnerExited: Promise<number>;
   close(): Promise<void>;
 }
@@ -97,7 +94,7 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  // Passed on unchanged to the actor's log; the bridge also keeps a redacted tail of it.
+  // Passed on unchanged to the actor's log.
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   const exited = new Promise<number>((resolve) => {
     child.once("error", () => resolve(1));
@@ -115,20 +112,14 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
 
 /**
  * Runs a subprocess to completion with no shell; resolves with its exit code once its stderr ended.
- * Its stderr is passed on to the bridge's and fed to `stderrFeed`.
+ * Its stderr is passed on to the bridge's.
  */
-const exec = (command: string, args: string[], stderrFeed?: LineFeed): Promise<number> =>
+const exec = (command: string, args: string[]): Promise<number> =>
   new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
-    child.stderr.on("data", (chunk: Buffer) => {
-      process.stderr.write(chunk);
-      stderrFeed?.push(chunk);
-    });
+    child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
     child.once("error", () => resolve(127));
-    child.once("close", (code) => {
-      stderrFeed?.end();
-      resolve(code ?? 1);
-    });
+    child.once("close", (code) => resolve(code ?? 1));
   });
 
 /** The events of a 200 answer; undefined (a transient error to the caller) unless every event is an object with an integer seq. */
@@ -147,12 +138,7 @@ function parseEvents(body: Buffer): { seq: number; type: string; channel?: strin
 }
 
 export async function run(options: ToolOptions): Promise<ToolHandle> {
-  // The operator-diagnostics tail: tar's and the tool runner's stderr and this bridge's events,
-  // redacted against every secret value the tool setup delivers (the registry-only token) and the
-  // placeholders, before a line is kept.
-  const secretValues: string[] = [PLACEHOLDER_CAPABILITY, GATEWAY_ACTOR_JWT_PLACEHOLDER];
-  const diagnostics = new DiagnosticsTail(() => secretValues);
-  const log = diagnostics.logger(options.log ?? stderrLogger);
+  const log = options.log ?? stderrLogger;
   const policy = options.policy ?? DEFAULT_POLICY;
   const giveUpMs = options.giveUpMs ?? 60_000;
   const env = options.env ?? process.env;
@@ -181,11 +167,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const cleanup = async (): Promise<void> => {
     await rm(stage, { recursive: true, force: true }).catch(() => undefined);
   };
-  const postDiagnostics = (): Promise<void> =>
-    diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
   const abortStart = async (code: string): Promise<never> => {
     log(code, { runToken: token });
-    await postDiagnostics();
     // Tell the run once so the launcher fails it now instead of the agent timing out on a tool runner
     // that never starts (best effort: postCapped gives up quietly when the proxy cannot be reached).
     await postCapped(
@@ -217,7 +200,6 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     if (!parsedExclusions) return await abortStart("substrate_bridge_exclude_invalid");
     toolSetup = parsed.toolSetup;
     exclusions = parsedExclusions;
-    secretValues.push(...secretValuesOfToolSetup(toolSetup));
   } catch (error) {
     if (error instanceof BridgeError && error.code !== "substrate_bridge_retry_exhausted") throw error;
     return abortStart("substrate_bridge_setup_failed");
@@ -238,24 +220,20 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       return await abortStart("substrate_bridge_seed_unsafe");
     }
     await mkdir(workspace, { recursive: true });
-    const code = await exec(
-      tar,
-      [
-        "-x",
-        "-C",
-        workspace,
-        "-f",
-        seedPath,
-        "--no-same-owner",
-        "--delay-directory-restore",
-        // /workspace is a root-owned mount point the bridge (uid 10001) cannot chmod or utime, so the
-        // seed's "." entry must not be applied to it: drop the leading "./" (tar.ts refuses any seed whose
-        // entries are not under "./"). Existing directories keep their metadata.
-        "--strip-components=1",
-        "--no-overwrite-dir",
-      ],
-      diagnostics.tail.feed(),
-    );
+    const code = await exec(tar, [
+      "-x",
+      "-C",
+      workspace,
+      "-f",
+      seedPath,
+      "--no-same-owner",
+      "--delay-directory-restore",
+      // /workspace is a root-owned mount point the bridge (uid 10001) cannot chmod or utime, so the
+      // seed's "." entry must not be applied to it: drop the leading "./" (tar.ts refuses any seed whose
+      // entries are not under "./"). Existing directories keep their metadata.
+      "--strip-components=1",
+      "--no-overwrite-dir",
+    ]);
     if (code !== 0) return await abortStart("substrate_bridge_seed_failed");
     log("substrate_bridge_seed_extracted", { entries: checked.entries });
   } catch (error) {
@@ -267,21 +245,15 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
 
   // 3. The tool runner.
   const runner = (options.launchRunner ?? spawnRunner)(toolSetup, env);
-  const runnerDrained = runner.stderr ? diagnostics.tail.follow(runner.stderr) : Promise.resolve();
   try {
     await runner.ready;
   } catch {
-    await waitAtMost(runnerDrained, OUTPUT_DRAIN_MS);
     return abortStart("substrate_bridge_runner_failed");
   }
   log("substrate_bridge_runner_ready", { runToken: token });
-  // A runner that exits mid-run is a failure: the operator gets the tail before the bridge exits.
-  const runnerExited = runner.exited.then(async (code) => {
-    if (!stopped) {
-      log("substrate_bridge_runner_exited", { runToken: token, code });
-      await waitAtMost(runnerDrained, OUTPUT_DRAIN_MS);
-      await postDiagnostics();
-    }
+  // A runner that exits mid-run is a failure; its stderr is in the actor's log.
+  const runnerExited = runner.exited.then((code) => {
+    if (!stopped) log("substrate_bridge_runner_exited", { runToken: token, code });
     return code;
   });
 
@@ -362,15 +334,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
 
   const collect = async (): Promise<void> => {
     const tarPath = join(stage, "workspace.tar");
-    const code = await exec(
-      tar,
-      ["-c", "-C", workspace, ...tarExcludeArgs(exclusions), "-f", tarPath, "."],
-      diagnostics.tail.feed(),
-    );
+    const code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(exclusions), "-f", tarPath, "."]);
     // 1: some files changed while being read; the tar is still usable.
     if (code !== 0 && code !== 1) {
       log("substrate_bridge_collect_failed", { code });
-      await postDiagnostics();
       await rm(tarPath, { force: true }).catch(() => undefined);
       await postCapped(
         `${base}/workspace-failed`,

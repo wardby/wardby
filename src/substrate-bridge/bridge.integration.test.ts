@@ -582,9 +582,11 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(routeWarns).toEqual([]);
   });
 
-  it("sends the tool runner's stderr tail, redacted against the registry tokens it was given, when it fails to start", async () => {
+  it("sends no tool-side diagnostics tail when the tool runner fails to start, and still fails the run now", async () => {
     const { workspace } = await stage();
     const derived = deriveRegistryToken(CAPABILITY);
+    const posts: string[] = [];
+    proxyDelay = (request) => (posts.push(request), 0);
     await expect(
       runTool({
         proxyUrl,
@@ -605,20 +607,20 @@ describe("substrate bridges, end to end without Substrate", () => {
         },
       }),
     ).rejects.toMatchObject({ code: "substrate_bridge_runner_failed" });
-    const tail = await waitFor(() => diagnosticsTail("tool"));
-    expect(tail).toContain("npm notice auth [redacted]");
-    expect(tail).toContain("registry url http://wardby:[redacted]@proxy/");
-    expect(tail).toContain("runner: EADDRINUSE");
-    // (The staged tool-setup blob holds the token by design; no log does.)
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
+    expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+    expect(posts.some((request) => request.endsWith("/diagnostics"))).toBe(false);
+    expect(diagnosticsTail("tool")).toBeUndefined();
     const logged = JSON.stringify([routeWarns, routeLogs, logs]);
-    for (const secret of [REGISTRY_TOKEN, derived, CAPABILITY]) expect(logged).not.toContain(secret);
-    expect(await everyBlobText()).not.toContain("EADDRINUSE");
+    for (const secret of [REGISTRY_TOKEN, derived, CAPABILITY, "EADDRINUSE"]) expect(logged).not.toContain(secret);
   });
 
-  it("sends the tool runner's stderr tail when it exits mid-run, before reporting the exit", async () => {
+  it("sends no tool-side diagnostics tail when the tool runner exits mid-run", async () => {
     const { workspace } = await stage();
     let exit!: (code: number) => void;
     const stderr = new PassThrough();
+    const posts: string[] = [];
+    proxyDelay = (request) => (posts.push(request), 0);
     tool = await runTool({
       proxyUrl,
       metadataDir: await names("tool"),
@@ -631,13 +633,12 @@ describe("substrate bridges, end to end without Substrate", () => {
       log,
       launchRunner: () => ({ stderr, ready: Promise.resolve(), exited: new Promise<number>((r) => (exit = r)) }),
     });
-    expect(diagnosticsTail("tool")).toBeUndefined();
     stderr.end(`runner crashed: out of memory ${REGISTRY_TOKEN}\n`);
     exit(137);
     expect(await tool.runnerExited).toBe(137);
-    const tail = diagnosticsTail("tool");
-    expect(tail).toContain("runner crashed: out of memory [redacted]");
-    expect(tail).not.toContain(REGISTRY_TOKEN);
+    expect(logs.join("\n")).toContain("substrate_bridge_runner_exited");
+    expect(posts.some((request) => request.endsWith("/diagnostics"))).toBe(false);
+    expect(JSON.stringify([routeWarns, routeLogs, logs])).not.toContain(REGISTRY_TOKEN);
   });
 
   it("reports a rejected result upload as an exit", async () => {
@@ -932,11 +933,9 @@ process.exit(2);
     expect(argv).toContain("--strip-components=1");
     expect(argv).toContain("--no-same-owner");
     expect(logs.filter((l) => l.includes("substrate_bridge_posted") && l.includes("workspace-failed"))).toHaveLength(1);
-    // The operator gets tar's stderr, with the registry-only token redacted.
-    const tail = diagnosticsTail("tool");
-    expect(tail).toContain("tar: cannot extract ./src (token [redacted])");
-    expect(tail).toContain("substrate_bridge_seed_failed");
-    expect(tail).not.toContain(REGISTRY_TOKEN);
+    // No tool-side tail reaches the proxy's log (tar's stderr stays in the actor's own log).
+    expect(diagnosticsTail("tool")).toBeUndefined();
+    expect(JSON.stringify([routeWarns, routeLogs, logs])).not.toContain(REGISTRY_TOKEN);
   });
 
   it("answers the readiness probe", async () => {

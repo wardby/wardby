@@ -141,41 +141,6 @@ export function redactExact(text: string, values: readonly string[]): string {
   return out;
 }
 
-const REGISTRY_TOKEN = /rrg_[A-Za-z0-9_-]+/g;
-const SECRET_ENV_NAME = /TOKEN|AUTH|PASSWORD|SECRET|KEY/i;
-
-/**
- * The secret values the tool setup delivers to the tool runner: every registry-only token (`rrg_…`)
- * in its env values and file contents, and the whole value of any env entry named like a credential.
- * Unparsable setup: none (the runner is never started with one).
- */
-export function secretValuesOfToolSetup(toolSetup: string): string[] {
-  let parsed: { env?: unknown; files?: unknown };
-  try {
-    parsed = JSON.parse(toolSetup) as { env?: unknown; files?: unknown };
-  } catch {
-    return [];
-  }
-  const values = new Set<string>();
-  const scan = (text: string): void => {
-    for (const found of text.matchAll(REGISTRY_TOKEN)) values.add(found[0]);
-  };
-  if (parsed?.env && typeof parsed.env === "object") {
-    for (const [name, value] of Object.entries(parsed.env as Record<string, unknown>)) {
-      if (typeof value !== "string") continue;
-      scan(value);
-      if (SECRET_ENV_NAME.test(name) && value.length >= 8) values.add(value);
-    }
-  }
-  if (Array.isArray(parsed?.files)) {
-    for (const file of parsed.files as unknown[]) {
-      const content = (file as { content?: unknown } | null)?.content;
-      if (typeof content === "string") scan(content);
-    }
-  }
-  return [...values];
-}
-
 export interface WorkerDiagnostic {
   diagnostic: string;
   diagnosticIssues?: string[];
