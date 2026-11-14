@@ -262,8 +262,37 @@ describe("substrate routes", () => {
     expect(events.events.map((e) => e.type)).toContain("collect");
     for (const bad of ["{}", '{"code":"1"}', "[1]", "nope", '{"code":1.5}'])
       expect((await fetch(`${base}/exit`, agent({ method: "POST", body: bad }))).status).toBe(400);
-    const big = await fetch(`${base}/exit`, agent({ method: "POST", body: " ".repeat(2000) }));
+    const big = await fetch(`${base}/exit`, agent({ method: "POST", body: " ".repeat(8 * 1024 + 1) }));
     expect(big.status).toBe(413);
+  });
+
+  it("stores the worker's safe diagnostic with its exit code", async () => {
+    await start();
+    const body = {
+      code: 1,
+      diagnostic: "coding_output_invalid",
+      diagnosticIssues: ["summary:too_big", "$:invalid_type"],
+    };
+    expect((await fetch(`${base}/exit`, agent(json(body)))).status).toBe(200);
+    expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual(body);
+  });
+
+  it("refuses an exit report whose diagnostic is not a safe one, and stores nothing", async () => {
+    await start();
+    for (const bad of [
+      { code: 1, diagnostic: "provider said sk-SECRET" },
+      { code: 1, diagnostic: 5 },
+      { code: 1, diagnostic: "coding_turn_limit", diagnosticIssues: ["summary:too_big", "sk-SECRET"] },
+      { code: 1, diagnostic: "coding_turn_limit", diagnosticIssues: [] },
+      { code: 1, diagnostic: "coding_turn_limit", diagnosticIssues: "summary:too_big" },
+      { code: 1, diagnosticIssues: ["summary:too_big"] },
+      { code: 1, diagnostic: "coding_turn_limit", extra: "x" },
+    ]) {
+      const answer = await fetch(`${base}/exit`, agent(json(bad)));
+      expect(answer.status).toBe(400);
+      expect(await answer.json()).toEqual({ error: { type: "bad_request" } });
+    }
+    expect(await blobs.head(BLOB.exit(TOKEN))).toBeNull();
   });
 
   it("answers exit twice after the workspace was uploaded and the relay dropped", async () => {

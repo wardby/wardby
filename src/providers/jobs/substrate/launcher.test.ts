@@ -148,6 +148,64 @@ describe("SubstrateJobLauncher", () => {
     });
   });
 
+  it("fails a run without a result with the worker's own diagnostic, as the Kubernetes launcher does", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":1,"diagnostic":"coding_turn_limit"}'));
+    await finish(h, null);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_turn_limit",
+    });
+
+    const issues = await makeHarness();
+    const issuesHandle = await issues.launcher.launch(issues.spec);
+    await issues.blobs.put(
+      BLOB.exit(issues.token),
+      Buffer.from('{"code":2,"diagnostic":"coding_output_invalid","diagnosticIssues":["summary:too_big"]}'),
+    );
+    await finish(issues, null);
+    expect(await issues.launcher.collect(issuesHandle)).toEqual({
+      exitCode: 2,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+      diagnosticIssues: ["summary:too_big"],
+    });
+  });
+
+  it("re-validates the exit report's diagnostic and falls back to substrate_result_missing", async () => {
+    for (const exit of [
+      { code: 1, diagnostic: "provider said sk-SECRET" },
+      { code: 1, diagnostic: 7 },
+      { code: 1, diagnosticIssues: ["summary:too_big"] },
+    ]) {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from(JSON.stringify(exit)));
+      await finish(h, null);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "substrate_result_missing",
+      });
+    }
+    // An unsafe issues list is dropped, the safe code kept (the shared parser's rule).
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(
+      BLOB.exit(h.token),
+      Buffer.from('{"code":1,"diagnostic":"coding_output_invalid","diagnosticIssues":["sk-SECRET"]}'),
+    );
+    await finish(h, null);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+    });
+  });
+
   it("fails a result for another run or one that does not parse", async () => {
     for (const result of [{ ...(await makeHarness()).output, runId: "someone-else" }, { nope: true }]) {
       const h = await makeHarness();

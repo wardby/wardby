@@ -42,6 +42,7 @@ import {
   type JobStatus,
   type WorkspaceJobLauncher,
 } from "../types.js";
+import { workerDiagnosticOf, type WorkerDiagnostic } from "../worker-diagnostic.js";
 import { replaceDirectoryFromStaging } from "../workspace-swap.js";
 import {
   SubstrateAlreadyExistsError,
@@ -99,8 +100,10 @@ const BACKEND = "substrate";
 const TOKEN = /^wr-[0-9a-f]{20}$/;
 const MIB = 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
-/** done.json and exit.json are a few bytes; anything bigger is not ours. */
+/** done.json is a few bytes; anything bigger is not ours. */
 const MAX_MARKER_BYTES = 4096;
+/** exit.json: a code and the worker's diagnostic (the proxy accepts at most 8 KiB). */
+const MAX_EXIT_BYTES = 8 * 1024;
 const ACTIVE_PHASES: readonly SubstratePhase[] = ["provisioning", "running", "requeued"];
 const LIVE_PHASES: SubstratePhase[] = ["provisioning", "running"];
 
@@ -571,10 +574,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       }
       return { status: { state: "succeeded" }, result: { exitCode: 0, reason: "completed", resultArtifact: artifact } };
     }
-    // No reason string, as on Kubernetes; the collect diagnostic says what was missing.
+    // No reason string, as on Kubernetes. The worker's own diagnostic (what Kubernetes reads from its
+    // log tail) when its bridge reported one; else the collect diagnostic says what was missing.
+    const exit = await this.exitReport(record.token);
     return {
       status: { state: "failed" },
-      result: { exitCode: await this.exitCode(record.token), reason: "failed", diagnostic: "substrate_result_missing" },
+      result: {
+        exitCode: exit.code,
+        reason: "failed",
+        ...(exit.diagnostic ?? { diagnostic: "substrate_result_missing" }),
+      },
     };
   }
 
@@ -592,9 +601,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /** The worker's exit code from the proxy's `exit` blob; 1 when absent or not a failure code. */
   private async exitCode(token: string): Promise<number> {
-    const exit = (await this.readJson(BLOB.exit(token), MAX_MARKER_BYTES)) as { code?: unknown } | null | undefined;
-    const code = exit?.code;
-    return typeof code === "number" && Number.isInteger(code) && code > 0 && code <= 255 ? code : 1;
+    return (await this.exitReport(token)).code;
+  }
+
+  /**
+   * The proxy's `exit` blob: the worker's exit code (1 when absent or not a failure code) and its own
+   * diagnostic, re-checked with the shared worker-diagnostic rule (the blob is the bridge's report).
+   */
+  private async exitReport(token: string): Promise<{ code: number; diagnostic?: WorkerDiagnostic }> {
+    const exit = (await this.readJson(BLOB.exit(token), MAX_EXIT_BYTES)) as
+      { code?: unknown; diagnostic?: unknown; diagnosticIssues?: unknown } | null | undefined;
+    const raw = exit?.code;
+    const code = typeof raw === "number" && Number.isInteger(raw) && raw > 0 && raw <= 255 ? raw : 1;
+    const diagnostic =
+      exit && typeof exit === "object" ? workerDiagnosticOf(exit.diagnostic, exit.diagnosticIssues) : undefined;
+    return diagnostic ? { code, diagnostic } : { code };
   }
 
   /** A blob of at most maxBytes; undefined when missing or larger. */

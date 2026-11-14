@@ -23,7 +23,14 @@ import {
   waitForRunToken,
   type Logger,
 } from "./common.js";
-import { DEFAULT_METADATA_DIR, DEFAULT_READY_PORT, DEFAULT_TOOL_SOCKET, PLACEHOLDER_CAPABILITY } from "./constants.js";
+import {
+  DEFAULT_METADATA_DIR,
+  DEFAULT_READY_PORT,
+  DEFAULT_TOOL_SOCKET,
+  PLACEHOLDER_CAPABILITY,
+  WORKER_OUTPUT_TAIL,
+} from "./constants.js";
+import { findWorkerDiagnostic, LineTail, waitAtMost } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 
@@ -35,6 +42,9 @@ const WORKER_ENTRY = "/opt/wardby/claude-coding-worker/main.js";
 
 export interface WorkerHandle {
   exited: Promise<number>;
+  /** The worker's output, when the bridge can read it (kept in memory only; see diagnostics.ts). */
+  stdout?: NodeJS.ReadableStream;
+  stderr?: NodeJS.ReadableStream;
 }
 
 export interface AgentOptions {
@@ -71,15 +81,26 @@ export interface AgentHandle {
   close(): Promise<void>;
 }
 
+/**
+ * The worker, with its stdout and stderr piped through the bridge (and passed on to the bridge's own,
+ * so the actor's log is unchanged) so the bridge can read its last lines.
+ */
 const spawnWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
-  const child = spawn(process.execPath, [WORKER_ENTRY], { env, stdio: "inherit" });
+  const child = spawn(process.execPath, [WORKER_ENTRY], { env, stdio: ["inherit", "pipe", "pipe"] });
+  child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
+  child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   return {
+    stdout: child.stdout,
+    stderr: child.stderr,
     exited: new Promise<number>((resolve) => {
       child.once("error", () => resolve(1));
       child.once("exit", (code) => resolve(code ?? 1));
     }),
   };
 };
+
+/** How long, after the worker exits, the bridge waits for its output streams to end. */
+const OUTPUT_DRAIN_MS = 2_000;
 
 export async function run(options: AgentOptions): Promise<AgentHandle> {
   const log = options.log ?? stderrLogger;
@@ -285,13 +306,24 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
   });
   log("substrate_bridge_worker_started", { runToken: token });
+  // The worker's last lines, in memory only: nothing of them leaves the actor except the one fixed
+  // diagnostic findWorkerDiagnostic accepts.
+  const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
+  const drained = Promise.all(
+    [worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
+  );
 
   // 4. Result and transcript, once the worker has exited.
   const uploaded = worker.exited.then(async (code) => {
     log("substrate_bridge_worker_exited", { runToken: token, code });
     const outcome = await uploadFile(`${base}/result`, headers, resultPath, policy, log, "result", shutdown.signal);
-    // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace).
-    if (outcome !== "ok") await postCapped(`${base}/exit`, headers, { code }, policy, log, "exit", shutdown.signal);
+    // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
+    // with the worker's own diagnostic code when it printed one.
+    if (outcome !== "ok") {
+      await waitAtMost(drained, OUTPUT_DRAIN_MS);
+      const diagnostic = findWorkerDiagnostic(output.lines());
+      await postCapped(`${base}/exit`, headers, { code, ...diagnostic }, policy, log, "exit", shutdown.signal);
+    }
     await uploadFile(`${base}/transcript`, headers, transcriptPath, policy, log, "transcript", shutdown.signal);
   });
 

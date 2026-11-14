@@ -16,6 +16,7 @@ import { pipeline, Transform } from "node:stream";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport/http-limits.js";
 import { logger } from "../../../core/logger.js";
 import { BLOB, TOOL_ACTOR_JWT_HEADER, toolActorSubject } from "../../jobs/substrate/names.js";
+import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxyLedger } from "../types.js";
@@ -26,8 +27,10 @@ import { RelayBackpressureError, RelayBusyError, type RelayStore, RelayUnknownEr
 export const MAX_LINE_BYTES = 4 * 1024 * 1024;
 /** A line post's JSON envelope may be larger than the line (escaping), within this bound. */
 const MAX_LINE_BODY_BYTES = 2 * MAX_LINE_BYTES + 4096;
-/** The longest exit report body. */
-const MAX_EXIT_BYTES = 1024;
+/** The longest exit report body (a code, a diagnostic and up to MAX_CODING_OUTPUT_ISSUES issues). */
+const MAX_EXIT_BYTES = 8 * 1024;
+/** The longest operator-diagnostics tail (the bridges' DIAGNOSTICS_TAIL.bytes; constants.test.ts keeps them equal). */
+export const MAX_DIAGNOSTICS_BYTES = 8 * 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
 /** The time an upload has to arrive once it is authenticated. */
 export const SUBSTRATE_UPLOAD_MS = 10 * 60_000;
@@ -270,8 +273,12 @@ export function createSubstrateRoutes(
     return readBody(request, MAX_LINE_BODY_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
   }
 
-  /** The agent bridge's `{"code": <int>}` (Content-Length required, at most MAX_EXIT_BYTES). */
-  async function readExitCode(request: IncomingMessage): Promise<number> {
+  /**
+   * The agent bridge's exit report: `{"code": <int>}`, plus the worker's own diagnostic when it printed
+   * one (`diagnostic`, optional `diagnosticIssues`), each checked with the shared worker-diagnostic rule.
+   * Content-Length required, at most MAX_EXIT_BYTES; any other key or an unsafe value refuses the whole body.
+   */
+  async function readExitReport(request: IncomingMessage): Promise<{ code: number } & Partial<WorkerDiagnostic>> {
     const length = request.headers["content-length"];
     if (length === undefined) throw new RouteError(411, "length_required");
     if (!/^\d+$/.test(length) || Number(length) > MAX_EXIT_BYTES) throw new RouteError(413, "too_large");
@@ -282,10 +289,22 @@ export function createSubstrateRoutes(
     } catch {
       throw new RouteError(400, "bad_request");
     }
-    const code = (value as { code?: unknown } | null)?.code;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RouteError(400, "bad_request");
+    const body = value as Record<string, unknown>;
+    if (Object.keys(body).some((key) => key !== "code" && key !== "diagnostic" && key !== "diagnosticIssues"))
+      throw new RouteError(400, "bad_request");
+    const code = body.code;
     if (typeof code !== "number" || !Number.isSafeInteger(code) || code < -1_000_000 || code > 1_000_000)
       throw new RouteError(400, "bad_request");
-    return code;
+    if (body.diagnostic === undefined) {
+      if (body.diagnosticIssues !== undefined) throw new RouteError(400, "bad_request");
+      return { code };
+    }
+    const diagnostic = workerDiagnosticOf(body.diagnostic, body.diagnosticIssues);
+    // The shared rule drops an unsafe issues list; here that refuses the report instead.
+    if (!diagnostic || (body.diagnosticIssues !== undefined && !diagnostic.diagnosticIssues))
+      throw new RouteError(400, "bad_request");
+    return { code, ...diagnostic };
   }
 
   return async (request, response, clearBodyTimer) => {
@@ -390,8 +409,9 @@ export function createSubstrateRoutes(
           return;
         }
         case "exit": {
-          // The worker exited without a usable result: record its code and still collect the workspace.
-          const code = await readExitCode(request);
+          // The worker exited without a usable result: record its code (and its own safe diagnostic,
+          // if it printed one) and still collect the workspace.
+          const report = await readExitReport(request);
           if (!(await blobs.head(BLOB.exit(token)))) {
             try {
               await relay.requestCollect(token);
@@ -399,7 +419,7 @@ export function createSubstrateRoutes(
               // The relay was already dropped: the run was collected, so there is nothing left to queue.
               if (!(error instanceof RelayUnknownError)) throw error;
             }
-            await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify({ code })), {
+            await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify(report)), {
               contentType: "application/json",
             });
           }

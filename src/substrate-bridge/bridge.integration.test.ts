@@ -4,6 +4,7 @@ import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseToolSetup } from "../claude-tool-runner/command.mjs";
@@ -391,6 +392,59 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(await tool.collected).toBe("ok");
     await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
     expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+  });
+
+  it("reports the worker's own diagnostic line with its exit code, and nothing else of its output", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => {
+          const stdout = new PassThrough();
+          const stderr = new PassThrough();
+          return {
+            stdout,
+            stderr,
+            exited: (async () => {
+              stderr.write('{"error":"coding_stream_failed"}\n');
+              stdout.write("model said: rrp_fake_capability_value_000001\n");
+              stderr.write('{"error":"coding_tu');
+              stderr.write('rn_limit"}\n{"error":"provider said sk-SECRET"}\nnot json\n');
+              stdout.end();
+              stderr.end();
+              return 1;
+            })(),
+          };
+        },
+      }),
+    );
+    await agent.uploaded;
+    expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({
+      code: 1,
+      diagnostic: "coding_turn_limit",
+    });
+    expect(await tool.collected).toBe("ok");
+  });
+
+  it("reports only the exit code when the worker printed no safe diagnostic", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => {
+          const stderr = new PassThrough();
+          return {
+            stderr,
+            exited: (async () => {
+              stderr.end('{"error":"provider said sk-SECRET"}\n{"error":"coding_x","issues":["bad issue"]}garbage\n');
+              return 3;
+            })(),
+          };
+        },
+      }),
+    );
+    await agent.uploaded;
+    expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
   });
 
   it("reports a rejected result upload as an exit", async () => {
