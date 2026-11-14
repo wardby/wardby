@@ -42,6 +42,13 @@ Docker and Kubernetes ones.
 - The Wardby coding proxy deployed in the cluster (with a database connection:
   the relay keeps its state in Postgres), reachable from the actors at a
   hostname you choose (`SUBSTRATE_PROXY_HOST`).
+- **The coding proxy trusts Substrate's internal CA.** The proxy verifies the
+  tool actor's token against the signing keys of Substrate's identity provider,
+  which it fetches over TLS signed by Substrate's internal CA. Mount the CA
+  bundle from the `servicedns.podcert.ate.dev` ClusterTrustBundle into the
+  proxy (for example through a projected volume with a `clusterTrustBundle`
+  source) and set `NODE_EXTRA_CA_CERTS` on the proxy to that file. Without it,
+  every tool request is refused.
 - **One blob store shared by the control plane and the proxy** (`BLOB_STORE` and
   its settings, see [Local coding-agent setup](coding-agent-setup.md)). Without
   it the control plane refuses to start with `JOB_LAUNCHER=substrate`, and so
@@ -66,44 +73,46 @@ Docker and Kubernetes ones.
 ## Configure
 
 Set `JOB_LAUNCHER=substrate` on the control plane and set the same
-`SUBSTRATE_ATESPACE` and `SUBSTRATE_PROXY_HOST` on the coding proxy; the proxy
-serves the Substrate routes only when `SUBSTRATE_ATESPACE` is set. Both
-processes read `BLOB_STORE`.
+`SUBSTRATE_ATESPACE`, `SUBSTRATE_PROXY_HOST` and `SUBSTRATE_PROXY_PORT` on the
+coding proxy; the proxy serves the Substrate routes only when
+`SUBSTRATE_ATESPACE` is set. Both processes read `BLOB_STORE`.
 
 ### Control plane
 
-| Variable                          | Required | Default               | Purpose                                                                                                                        |
-| --------------------------------- | -------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `JOB_LAUNCHER`                    | Yes      | `local`               | Set to `substrate`.                                                                                                            |
-| `SUBSTRATE_API_URL`               | Yes      |                       | Substrate Control API URL (a valid URL).                                                                                       |
-| `SUBSTRATE_TOKEN_FILE`            | Yes      |                       | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.    |
-| `SUBSTRATE_ATESPACE`              | Yes      |                       | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                    |
-| `SUBSTRATE_PROXY_HOST`            | Yes      |                       | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                 |
-| `SUBSTRATE_PROXY_PORT`            |          | the coding proxy port | Port of the coding proxy as the actors reach it (1 to 65535).                                                                  |
-| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets`  | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace. |
-| `SUBSTRATE_KUBE_CONTEXT`          |          | default context       | Kubernetes context used to create and delete the per-run Secrets.                                                              |
-| `SUBSTRATE_CA_FILE`               |          | system trust          | CA bundle that verifies the Substrate API's certificate.                                                                       |
-| `SUBSTRATE_SERVER_NAME`           |          | from the URL          | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                               |
-| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker            | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                           |
-| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                 | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                      |
-| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                 | After the agent finishes, how long the tool side may take to report the workspace before the run fails (10 to 3600).           |
-| `BLOB_STORE` and its settings     | Yes      |                       | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                   |
+| Variable                          | Required | Default              | Purpose                                                                                                                             |
+| --------------------------------- | -------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `JOB_LAUNCHER`                    | Yes      | `local`              | Set to `substrate`.                                                                                                                 |
+| `SUBSTRATE_API_URL`               | Yes      |                      | Substrate Control API URL (a valid URL).                                                                                            |
+| `SUBSTRATE_TOKEN_FILE`            | Yes      |                      | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.         |
+| `SUBSTRATE_ATESPACE`              | Yes      |                      | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                         |
+| `SUBSTRATE_PROXY_HOST`            | Yes      |                      | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                      |
+| `SUBSTRATE_PROXY_PORT`            |          | `8787`               | Port of the coding proxy as the actors reach it (1 to 65535). Set the same value on the proxy.                                      |
+| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets` | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace.      |
+| `SUBSTRATE_KUBE_CONTEXT`          |          | default context      | Kubernetes context used to create and delete the per-run Secrets.                                                                   |
+| `SUBSTRATE_CA_FILE`               |          | system trust         | CA bundle that verifies the Substrate API's certificate.                                                                            |
+| `SUBSTRATE_SERVER_NAME`           |          | from the URL         | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                                    |
+| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker           | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                                |
+| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                           |
+| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                | After the worker exits without a result, how long the tool side may take to report the workspace before the run fails (10 to 3600). |
+| `BLOB_STORE` and its settings     | Yes      |                      | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                        |
 
 The digest requirement for the worker and tool-runner images is the same as for
 `JOB_LAUNCHER=kubernetes`; the control plane refuses to start without digests.
 
 ### Coding proxy
 
-| Variable                      | Required       | Default                   | Purpose                                                                                                   |
-| ----------------------------- | -------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `SUBSTRATE_ATESPACE`          | To turn it on  | unset (routes off)        | Enables the Substrate routes. Must equal the control plane's value.                                       |
-| `SUBSTRATE_PROXY_HOST`        | When routes on |                           | Bare hostname (no scheme, port or path) the actors use; the proxy accepts it as a `Host`.                 |
-| `SUBSTRATE_ACTOR_JWT_ISSUER`  | When routes on |                           | Issuer of the actor tokens Substrate mints for the tool actor (the cluster's service-account issuer URL). |
-| `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                 |
-| `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                          |
-| `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                              |
-| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload. See [Git history](#git-history).                            |
-| `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                 |
+| Variable                      | Required       | Default                   | Purpose                                                                                                                                                                                                     |
+| ----------------------------- | -------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUBSTRATE_ATESPACE`          | To turn it on  | unset (routes off)        | Enables the Substrate routes. Must equal the control plane's value.                                                                                                                                         |
+| `SUBSTRATE_PROXY_HOST`        | When routes on |                           | Bare hostname (no scheme, port or path) the actors use; the proxy accepts it as a `Host`.                                                                                                                   |
+| `SUBSTRATE_PROXY_PORT`        |                | `8787`                    | The port the actors use, as on the control plane; the proxy accepts `<host>:<port>` (and the bare host on port 80) as a `Host`. Required when it is not 8787.                                               |
+| `SUBSTRATE_ACTOR_JWT_ISSUER`  | When routes on |                           | Issuer of the actor tokens Substrate mints for the tool actor: Substrate's own identity provider (for example `https://idp.ate-system.svc` in a default install), not the cluster's service-account issuer. |
+| `NODE_EXTRA_CA_CERTS`         | When routes on |                           | File with Substrate's internal CA bundle (from the `servicedns.podcert.ate.dev` ClusterTrustBundle), so the proxy can fetch the issuer's signing keys over TLS.                                             |
+| `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                                                                                                                   |
+| `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
+| `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
+| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload. See [Git history](#git-history).                                                                                                                              |
+| `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
 The proxy refuses to start when `SUBSTRATE_ATESPACE` is set and a required
 variable is missing, and the error names the variable, never a value. An upload
@@ -122,8 +131,11 @@ must arrive within ten minutes of being authenticated.
 
 A `gitHistory` run is supported. The run's whole `.git` is uploaded with the
 workspace when the run ends, so `SUBSTRATE_WORKSPACE_MAX_MB` on the proxy must be
-large enough for the repository's history as well as its files. The proxy refuses a workspace
-upload over the limit, so a run whose workspace is larger never collects. See
+large enough for the repository's history as well as its files. The proxy
+refuses a workspace upload over the limit, and the run fails with
+[`substrate_collect_failed`](../help/errors/substrate-collect-failed.md). The
+collected archive's entries count toward the extraction limit of 100,000
+entries, the `.git` ones included. See
 [Git history in coding runs](../help/git-history.md).
 
 ## What is not supported
@@ -137,6 +149,9 @@ Use the Docker or Kubernetes launcher for them.
 - MCP tools attached to the coding agent.
 - The run dependency cache.
 - Extra repositories (multi-repository runs).
+- A custom worker image (`codingProfile.workerImageRef`): it has no Substrate
+  bridge. Only the configured tool-runner images run, so a run dispatched with
+  a tool-runner image you have since replaced is refused the same way.
 - Suspend and resume between rounds: every round starts new actors, as on the
   other launchers.
 
@@ -149,10 +164,13 @@ reason are below. Start with:
 1. **Control plane log.** Search for the run's diagnostic id
    (`coding_diag_...`). The reason names the cause, such as
    `job_substrate_startup_timeout`.
-2. **Coding proxy log.** When a worker or tool bridge exits early, the proxy logs
-   a bounded tail of its error output (`substrate.diagnostics`, at warn level, in
-   the operator log only). The tail is redacted by exact value before it leaves
-   the actor and is never stored or shown in a run record.
+2. **Coding proxy log.** When the worker fails, the proxy logs a bounded tail of
+   the agent bridge's error output (`substrate.diagnostics`, at warn level, in
+   the operator log only). The proxy redacts it by exact value against the
+   run's capability and registry-only token before logging it, and never stores
+   it or shows it in a run record. The tool bridge sends no tail (the tool actor
+   runs the agent's commands); its output stays in the tool actor. The proxy's
+   route log (`substrate.route`) shows every actor request with its status.
 3. **The Substrate components.** `kubectl logs` for the API server, router,
    credential provider and egress gateway in the Substrate namespace.
 
@@ -168,8 +186,21 @@ Known recovery steps:
   `SUBSTRATE_CA_FILE` and `SUBSTRATE_SERVER_NAME`; see
   [`substrate_unavailable`](../help/errors/substrate-unavailable.md).
 
+- **Every tool request answers 401.** `SUBSTRATE_ACTOR_JWT_ISSUER` is not
+  Substrate's identity provider, or the proxy cannot fetch its signing keys
+  because it does not trust Substrate's CA (`NODE_EXTRA_CA_CERTS`). Runs then
+  fail with `substrate_startup_timeout`.
+- **Every actor request answers `invalid_host`.** `SUBSTRATE_PROXY_HOST` or
+  `SUBSTRATE_PROXY_PORT` differs between the control plane and the proxy.
+
 Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.md),
 [`substrate_capacity`](../help/errors/substrate-capacity.md),
+[`substrate_provisioning_failed`](../help/errors/substrate-provisioning-failed.md),
 [`substrate_startup_timeout`](../help/errors/substrate-startup-timeout.md),
 [`substrate_collect_timeout`](../help/errors/substrate-collect-timeout.md),
-[`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md).
+[`substrate_collect_failed`](../help/errors/substrate-collect-failed.md),
+[`substrate_result_missing`](../help/errors/substrate-result-missing.md),
+[`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md),
+[`substrate_image_not_digest`](../help/errors/substrate-image-not-digest.md),
+[`substrate_seed_too_large`](../help/errors/substrate-seed-too-large.md),
+[`substrate_limits_too_small`](../help/errors/substrate-limits-too-small.md).

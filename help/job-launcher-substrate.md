@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, coding-agents, experimental, SUBSTRATE_ATESPACE]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, SUBSTRATE_ATESPACE, SUBSTRATE_PROXY_PORT]
 appliesTo: ">=0.9.15"
 ---
 
@@ -22,7 +22,8 @@ proxy.
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
 - your coding agents are Claude Code, without coding services, MCP tools, the
-  dependency cache or extra repositories.
+  dependency cache, extra repositories or a custom worker image
+  (`workerImageRef`).
 
 Otherwise use `kubernetes` (or `docker`): they support Codex and every coding
 feature. A run that needs a feature the Substrate backend lacks fails with
@@ -41,9 +42,17 @@ feature. A run that needs a feature the Substrate backend lacks fails with
    proxy.
 4. On the control plane set `JOB_LAUNCHER=substrate`, `SUBSTRATE_API_URL`,
    `SUBSTRATE_TOKEN_FILE` (a ServiceAccount token with audience
-   `api.ate-system.svc`), `SUBSTRATE_ATESPACE` and `SUBSTRATE_PROXY_HOST`.
-5. On the coding proxy set the same `SUBSTRATE_ATESPACE` and
-   `SUBSTRATE_PROXY_HOST`, plus `SUBSTRATE_ACTOR_JWT_ISSUER`.
+   `api.ate-system.svc`), `SUBSTRATE_ATESPACE` and `SUBSTRATE_PROXY_HOST`
+   (and `SUBSTRATE_PROXY_PORT` if the actors reach the proxy on a port other
+   than 8787).
+5. On the coding proxy set the same `SUBSTRATE_ATESPACE`,
+   `SUBSTRATE_PROXY_HOST` and `SUBSTRATE_PROXY_PORT`, plus
+   `SUBSTRATE_ACTOR_JWT_ISSUER`: the issuer of Substrate's own identity
+   provider (for example `https://idp.ate-system.svc` in a default install),
+   not the cluster's service-account issuer. The proxy fetches its signing keys
+   over TLS signed by Substrate's internal CA, so also set
+   `NODE_EXTRA_CA_CERTS` on the proxy to the CA bundle from the
+   `servicedns.podcert.ate.dev` ClusterTrustBundle.
 
 Every variable, default and limit (`SUBSTRATE_WORKSPACE_MAX_MB` matters for
 `gitHistory` runs, which upload the whole `.git`) is in the
@@ -55,13 +64,24 @@ Every variable, default and limit (`SUBSTRATE_WORKSPACE_MAX_MB` matters for
   could not be reached or refused the call.
 - [substrate_capacity](errors/substrate-capacity.md): no worker has room; the
   run waits and retries.
+- [substrate_provisioning_failed](errors/substrate-provisioning-failed.md):
+  creating the run's actors, policies, Secret or files failed.
 - [substrate_startup_timeout](errors/substrate-startup-timeout.md): the actors
   never reached the coding proxy.
-- [substrate_collect_timeout](errors/substrate-collect-timeout.md): the agent
-  finished but the workspace never arrived.
+- [substrate_collect_timeout](errors/substrate-collect-timeout.md): the worker
+  exited without a result and the workspace never arrived.
+- [substrate_collect_failed](errors/substrate-collect-failed.md): the tool side
+  could not set up, archive or upload the workspace (for example one over
+  `SUBSTRATE_WORKSPACE_MAX_MB`).
+- [substrate_result_missing](errors/substrate-result-missing.md): the run ended
+  without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs Codex, services, MCP tools, the dependency cache or extra
-  repositories.
+  run needs Codex, services, MCP tools, the dependency cache, extra repositories
+  or a custom worker image.
+- At launch, from the deployment's settings:
+  [substrate_image_not_digest](errors/substrate-image-not-digest.md),
+  [substrate_seed_too_large](errors/substrate-seed-too-large.md) and
+  [substrate_limits_too_small](errors/substrate-limits-too-small.md).
 
 See also [Troubleshoot coding workers](troubleshooting/coding-workers.md),
 [Choose a deployment target](deployment-targets.md) and

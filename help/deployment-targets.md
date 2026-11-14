@@ -32,8 +32,8 @@ remaining controls and verification before accepting production work.
   [Deploy on GKE](deploy-gke.md).
 
 An experimental Agent Substrate backend for coding agents
-(`JOB_LAUNCHER=substrate`) is described in
-the `job-launcher-substrate` help article.
+(`JOB_LAUNCHER=substrate`) is described in the `job-launcher-substrate` help
+article.
 
 AWS can run the portable runtime and has a Bedrock Claude adapter, but a native
 AWS deployment module is planned and has not shipped. Other cloud providers

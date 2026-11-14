@@ -663,7 +663,8 @@ includes it. See [Architecture knowledge bundles](knowledge.md).
   [Coding-worker isolation](coding-worker-isolation.md#kubernetes-launcher-job_launcherkubernetes).
 - `substrate` (**experimental**): two gVisor-sandboxed Agent Substrate actors
   per run, with no Wardby secret in either. Claude Code only, and without
-  coding services, MCP tools, the dependency cache or extra repositories. See
+  coding services, MCP tools, the dependency cache, extra repositories or a
+  custom worker image (`workerImageRef`). See
   [Substrate job launcher](substrate-backend.md).
 
 `local` (the default) runs no coding agents.
