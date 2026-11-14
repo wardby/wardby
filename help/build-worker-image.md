@@ -49,10 +49,10 @@ If doctor prints no such line, this Wardby version is too old: ask the user to
 upgrade, and stop.
 
 If the agent will use git history (`codingProfile.gitHistory`, Wardby 0.9.13 or later; see
-the `git-history` article), the image must be built on `driver-v31` or later
+[Git history in a run](git-history.md)), the image must be built on `driver-v31` or later
 and keep `git` installed (the driver image has it; do not remove it). Without
 git the run fails with
-`worker_git_unavailable`.
+[`worker_git_unavailable`](errors/worker-git-unavailable.md).
 
 ## Step 3: write the Dockerfile
 

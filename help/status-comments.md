@@ -52,7 +52,7 @@ this way, add the rule from the [builder prompt](builder-agent.md#builder-prompt
 When a run opened or updated pull requests in several repositories, the
 finished comment lists each one; a mention that arrives while a follow-up for
 the change is already running gets a reply to mention again after it finishes
-(Several repositories in one coding run (help article `multi-repository-runs`)).
+([Several repositories in one coding run](multi-repository-runs.md)).
 
 The status comment doesn't read the repository's own CI checks; see the pull
 request for those.

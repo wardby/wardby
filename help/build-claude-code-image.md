@@ -125,9 +125,9 @@ built `FROM` this release's tool runner, or its `USER` or `ENTRYPOINT` was
 changed. Rebuild the image whenever Wardby is upgraded.
 
 If the agent will use git history (`codingProfile.gitHistory`, Wardby 0.9.13 or later; see
-the `git-history` article), the tool runner must have `git`: the release's
+[Git history in a run](git-history.md)), the tool runner must have `git`: the release's
 tool runner image already does, so keep it. Without git the run fails with
-`worker_git_unavailable`.
+[`worker_git_unavailable`](errors/worker-git-unavailable.md).
 
 To undo it, call `update_agent` with `codingProfile: {workerImageRef: null}`.
 

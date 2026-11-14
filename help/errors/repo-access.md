@@ -17,7 +17,7 @@ access lost during a run prevents publication.
 A coding run over several repositories checks every repository of its set the
 same way, read-only ones included, before anything is cloned and again before
 each push; the first one denied refuses the run. See
-Several repositories in one coding run (help article `multi-repository-runs`).
+[Several repositories in one coding run](../multi-repository-runs.md).
 
 1. Confirm the agent has an owner and the intended repository is attached.
 2. Confirm that owner has linked their GitHub account to Wardby.
