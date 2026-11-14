@@ -39,6 +39,7 @@ import { createSubstrateApi } from "../jobs/substrate/client.js";
 import type { SubstrateApi } from "../jobs/substrate/api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
 import { PrismaSubstrateRunStore } from "../jobs/substrate/run-store.js";
+import { PrismaRelayStore } from "../coding-proxy/substrate/prisma-relay-store.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
 import {
@@ -180,6 +181,7 @@ export function buildSubstrateJobLauncher(options: {
         ...(substrate.serverName ? { serverName: substrate.serverName } : {}),
       }),
     runs: new PrismaSubstrateRunStore(options.db),
+    relay: new PrismaRelayStore(options.db),
     blobs: createBlobStore(blobStoreConfig),
     secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
     config: {

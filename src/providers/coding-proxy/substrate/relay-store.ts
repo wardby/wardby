@@ -50,4 +50,9 @@ export interface RelayStore {
   ): Promise<AgentEvent[]>;
   /** Deletes the run's channels and events (not its SubstrateRun row). */
   dropRelay(runToken: string): Promise<void>;
+  /**
+   * The launcher's cleanup when a run is removed: deletes every channel and event of the run,
+   * whatever state the relay is in. Missing (an unknown run, an already dropped relay) is success.
+   */
+  purgeRelay(runToken: string): Promise<void>;
 }

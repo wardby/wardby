@@ -182,6 +182,22 @@ export class MemoryRelayStore implements RelayStore {
     run.bytes = 0;
     this.wake(run);
   }
+
+  async purgeRelay(runToken: string): Promise<void> {
+    const run = this.runs.get(runToken);
+    if (!run) return;
+    for (const queued of run.tool) run.bytes -= queued.bytes;
+    for (const channel of run.channels.values()) for (const queued of channel.queue) run.bytes -= queued.bytes;
+    run.tool = [];
+    run.channels.clear();
+    this.wake(run);
+  }
+
+  /** Tests: whether the run still holds any channel or queued event (the Prisma store's relay rows). */
+  hasRelayRows(runToken: string): boolean {
+    const run = this.runs.get(runToken);
+    return run !== undefined && (run.tool.length > 0 || run.channels.size > 0);
+  }
 }
 
 type DistributiveOmit<T, K extends keyof never> = T extends unknown ? Omit<T, K> : never;

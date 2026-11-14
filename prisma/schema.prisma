@@ -2350,7 +2350,8 @@ model SubstrateRun {
   token       String                  @unique
   specHash    String
   /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
-  /// tool_failed | provisioning_failed (terminal; see SubstratePhase in run-store.ts)
+  /// tool_failed | provisioning_failed | collect_timeout | startup_timeout (terminal; see
+  /// SubstratePhase in run-store.ts)
   phase       String
   deadlineAt  DateTime
   /// Last seq assigned on the tool-bound queue.
@@ -2380,7 +2381,8 @@ model SubstrateRelayChannel {
 }
 
 /// A queued relay message. queue = "tool" (tool-bound) or the channel id (agent-bound).
-/// line holds repository tool traffic: never logged, deleted once acknowledged or with the run.
+/// line holds repository tool traffic: never logged; deleted once acknowledged, when the tool
+/// bridge reports its workspace, and in any case when the launcher removes the run.
 model SubstrateRelayEvent {
   runToken  String
   run       SubstrateRun @relation(fields: [runToken], references: [token], onDelete: Cascade)

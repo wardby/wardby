@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
+import { MemoryRelayStore } from "../../coding-proxy/substrate/memory-relay-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
@@ -86,6 +87,8 @@ export interface Harness {
   runs: SubstrateRunStore;
   blobs: ClockedBlobStore;
   secrets: RecordingSecrets;
+  /** The proxy's relay, with the run registered (its SubstrateRun row). */
+  relay: MemoryRelayStore;
   spec: JobSpec;
   token: string;
   workspaceRoot: string;
@@ -124,11 +127,14 @@ export async function makeHarness(
   const secrets = new RecordingSecrets();
   const callFailures: SubstrateCallFailure[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
+  const relay = new MemoryRelayStore();
+  relay.register(substrateRunToken(runId), 1 << 20);
   const launcher = new SubstrateJobLauncher({
     api,
     runs,
     blobs,
     secrets,
+    relay,
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async () => FAKE_CAP,
@@ -154,6 +160,7 @@ export async function makeHarness(
     runs,
     blobs,
     secrets,
+    relay,
     spec,
     token: substrateRunToken(runId),
     workspaceRoot,

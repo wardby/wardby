@@ -223,6 +223,14 @@ export class PrismaRelayStore implements RelayStore {
       });
     });
   }
+
+  async purgeRelay(runToken: string): Promise<void> {
+    // No run lock: the run may have no row any more, and its actors are already gone.
+    await this.db.$transaction([
+      this.db.substrateRelayEvent.deleteMany({ where: { runToken } }),
+      this.db.substrateRelayChannel.deleteMany({ where: { runToken } }),
+    ]);
+  }
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

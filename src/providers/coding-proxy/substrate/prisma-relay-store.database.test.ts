@@ -42,6 +42,19 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRelayStore (PostgreSQL)", () =
     expect(seqs.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("purges the run's relay rows and keeps its SubstrateRun row", async () => {
+    const token = `wr-${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    await fixture(token);
+    const store = new PrismaRelayStore(db, { maxBufferedBytesPerRun: 1 << 20 });
+    const ch = await store.openChannel(token);
+    await store.fromAgent(token, ch, 1, "tool request");
+    await store.fromTool(token, ch, 1, "tool output");
+    await store.purgeRelay(token);
+    expect(await db.substrateRelayEvent.count({ where: { runToken: token } })).toBe(0);
+    expect(await db.substrateRelayChannel.count({ where: { runToken: token } })).toBe(0);
+    expect(await db.substrateRun.findUnique({ where: { token } })).not.toBeNull();
+  });
+
   it("rejects an unknown run", async () => {
     const store = new PrismaRelayStore(db, { maxBufferedBytesPerRun: 1024 });
     await expect(store.openChannel("wr-missing")).rejects.toThrow("relay_unknown");

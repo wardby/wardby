@@ -94,5 +94,19 @@ export function relayStoreContract(
       await store.dropRelay("wr-00000000000000000007");
       await expect(store.pollAgent("wr-00000000000000000007", b, 0, 10)).rejects.toThrow("relay_unknown");
     });
+
+    it("purges every channel and queued event of a run, and an unknown run is not an error", async () => {
+      const token = "wr-00000000000000000009";
+      const store = await create(token, 1 << 20);
+      const ch = await store.openChannel(token);
+      await store.fromAgent(token, ch, 1, "tool request");
+      await store.fromTool(token, ch, 1, "tool output");
+      await store.requestCollect(token);
+      await store.purgeRelay(token);
+      expect(await store.pollTool(token, 0, 0)).toEqual([]);
+      await expect(store.pollAgent(token, ch, 0, 0)).rejects.toThrow("relay_unknown");
+      await store.purgeRelay(token);
+      await store.purgeRelay("wr-0000000000000000dead");
+    });
   });
 }

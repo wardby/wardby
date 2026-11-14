@@ -26,6 +26,7 @@ import {
   parseCodingWorkerOutputJson,
 } from "../../../coding/protocol.js";
 import type { CodingProvider } from "../../../coding/provider.js";
+import type { RelayStore } from "../../coding-proxy/substrate/relay-store.js";
 import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
@@ -71,6 +72,8 @@ export interface SubstrateJobLauncherOptions {
   runs: SubstrateRunStore;
   blobs: BlobStore;
   secrets: Pick<KubernetesApi, "createSecret" | "deleteSecret">;
+  /** The proxy's tool relay: a removed run's channels and queued lines are deleted with it. */
+  relay: Pick<RelayStore, "purgeRelay">;
   config: SubstrateLaunchConfig;
   /** Same root the VCS provider prepares workspaces under (as the Kubernetes launcher's). */
   workspaceRoot: string;
@@ -149,6 +152,9 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
   },
   // collect_timeout: its result carries the worker's exit report (see observe).
 };
+
+/** The blobs observe() reads an outcome from besides `done`, which remove() deletes after them. */
+const OUTCOME_BLOBS: readonly ((token: string) => string)[] = [BLOB.result, BLOB.exit];
 
 /** Outcomes whose actors are deleted when recorded: the run must not keep running. */
 const STOP_ACTORS_ON: readonly SubstratePhase[] = ["timed_out", "collect_timeout", "startup_timeout"];
@@ -380,7 +386,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!(await this.observe(record)).result) throw new Error("job_not_terminal");
     // Every deletion is tried even when one fails; the first failure is reported and the run is
     // not marked removed, so a later remove() tries again.
-    await settleAll(this.deletions(record.token));
+    await settleAll(this.deletions(record.token, { outcome: false }));
+    // Then, with the actors gone (nothing can append to it any more), the relay's rows: tool traffic.
+    await this.options.relay.purgeRelay(record.token);
+    // The outcome last, `done` after everything it describes: until every other deletion has
+    // succeeded, a later status() still reads the run's real outcome rather than a lost run.
+    await settleAll(OUTCOME_BLOBS.map((blob) => () => this.deleteBlob(blob(record.token))));
+    await this.deleteBlob(BLOB.done(record.token));
     // The row stays as the tombstone, so the run is never relaunched.
     await this.runs.setPhase(record.runId, "removed");
   }
@@ -745,15 +757,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     );
   }
 
-  /** Every resource of the run, one step per deletion, so none waits on (or is skipped by) another. */
-  private deletions(token: string): (() => Promise<void>)[] {
+  /**
+   * Every resource of the run, one step per deletion, so none waits on (or is skipped by) another.
+   * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done).
+   */
+  private deletions(token: string, { outcome = true }: { outcome?: boolean } = {}): (() => Promise<void>)[] {
     const { atespace } = this.config;
     const actors = [agentActorName(token), toolActorName(token)];
+    const blobs = Object.values(BLOB).filter(
+      (blob) => outcome || (blob !== BLOB.done && !OUTCOME_BLOBS.includes(blob)),
+    );
     return [
       ...actors.map((name) => () => this.api.deleteActor(atespace, name)),
       ...actors.map((name) => () => this.api.deleteEgressPolicy(atespace, name)),
       () => this.deleteSecret(token),
-      ...Object.values(BLOB).map((blob) => () => this.deleteBlob(blob(token))),
+      ...blobs.map((blob) => () => this.deleteBlob(blob(token))),
     ];
   }
 
@@ -776,5 +794,6 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /** Best effort after a failed launch: nothing of the attempt is left behind. */
   private async cleanup(token: string): Promise<void> {
     await settleAll(this.deletions(token)).catch(() => undefined);
+    await this.options.relay.purgeRelay(token).catch(() => undefined);
   }
 }

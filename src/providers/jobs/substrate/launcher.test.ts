@@ -407,6 +407,43 @@ describe("SubstrateJobLauncher", () => {
     await expect(h.launcher.status(handle)).rejects.toThrow("job_removed");
   });
 
+  it("deletes a removed run's relay rows (tool traffic) on every path, not only after a collect", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    const channel = await h.relay.openChannel(h.token);
+    await h.relay.fromAgent(h.token, channel, 1, '{"jsonrpc":"2.0","method":"tool"}');
+    await h.relay.fromTool(h.token, channel, 1, '{"jsonrpc":"2.0","result":"output"}');
+    // Stopped mid-run: the tool bridge never posts workspace or workspace-failed.
+    await h.launcher.stop(handle, "cancelled");
+    expect(h.relay.hasRelayRows(h.token)).toBe(true);
+    await h.launcher.remove(handle);
+    expect(h.relay.hasRelayRows(h.token)).toBe(false);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("removed");
+  });
+
+  it("deletes done last on remove: a failed outcome deletion leaves done, never done without what it reports", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h);
+    const order: string[] = [];
+    const deleteBlob = h.blobs.delete.bind(h.blobs);
+    let failResult = true;
+    h.blobs.delete = async (key) => {
+      order.push(key.split("/").pop()!);
+      if (failResult && key === BLOB.result(h.token)) throw new Error("blob_down");
+      return deleteBlob(key);
+    };
+    await expect(h.launcher.remove(handle)).rejects.toThrow("blob_down");
+    expect(await blobKeys(h)).toEqual(["result", "done"]);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    failResult = false;
+    order.length = 0;
+    await h.launcher.remove(handle);
+    expect(order.at(-1)).toBe("done.json");
+    expect(order.indexOf("result.json")).toBeLessThan(order.indexOf("done.json"));
+    expect(await blobKeys(h)).toEqual([]);
+  });
+
   it("deletes the actors and records stopped on stop", async () => {
     const h = await makeHarness();
     const handle = await h.launcher.launch(h.spec);
@@ -758,7 +795,9 @@ describe("SubstrateJobLauncher", () => {
     expect([...r.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(r.token)}`]);
     expect(r.api.egressPolicies.size).toBe(0);
     expect(r.secrets.secrets.size).toBe(0);
-    expect(await blobKeys(r)).toEqual([]);
+    // The outcome is kept until every other deletion succeeds, so the run still reads as it ended.
+    expect(await blobKeys(r)).toEqual(["result", "done"]);
+    expect(await r.launcher.status(handle)).toEqual({ state: "succeeded" });
     expect((await r.runs.get(r.spec.runId))?.phase).toBe("running");
     fail = false;
     await r.launcher.remove(handle);
