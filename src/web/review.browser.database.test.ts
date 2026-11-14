@@ -85,6 +85,31 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => editable(o)).toBe("true");
     }, 90_000);
 
+    it("a reviewer is offered only the verdict they have not given: once approved, only Request changes on vN", async () => {
+      const d = await server.design({ title: "Offer", kind: "document", markdown: "# O\n\nx\n", access: "comment" });
+      await submitForReview(server.db, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.first },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const a = await open(d.cookie, d.documentId);
+      expect(await banner(a)).toContain("Approved · v1");
+      await a.getByRole("tab", { name: "Review" }).click();
+      const verdicts = a.locator(".rv-panel .rv-verdict");
+      expect(await verdicts.getByRole("button").allTextContents()).toEqual(["Request changes on v1"]);
+      expect(await verdicts.textContent()).toContain("You approved v1");
+      await verdicts.getByRole("button", { name: "Request changes on v1" }).click();
+      await expect.poll(() => banner(a)).toContain("Changes requested · v1");
+      await expect.poll(() => verdicts.getByRole("button").allTextContents()).toEqual(["Approve"]);
+      expect(await verdicts.textContent()).toContain("You requested changes on v1");
+    }, 90_000);
+
     it("force approve lists who it overrides and needs a note", async () => {
       const d = await server.design({ title: "Force", kind: "document", markdown: "# F\n\nx\n", access: "comment" });
       await submitForReview(server.db, {

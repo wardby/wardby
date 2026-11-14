@@ -171,6 +171,44 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     ]);
   });
 
+  it("a repeat of the verdict that counts now changes nothing and writes no event", async () => {
+    const id = await doc();
+    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    const approve = (p: Principal, note?: string) =>
+      reviewDocument(db, cipher, {
+        documentId: id,
+        viewer: as(p),
+        verdict: "approve",
+        versionNumber: 1,
+        ...(note ? { note } : {}),
+      });
+    await approve(ann, "First");
+    const [before] = await db.documentReviewer.findMany({ where: { documentId: id, principalId: ann.id } });
+    const v = await approve(ann, "Second");
+    expect(v.reviewers.find((r) => r.me)).toMatchObject({ verdict: "approved", versionNumber: 1, note: "First" });
+    const [after] = await db.documentReviewer.findMany({ where: { documentId: id, principalId: ann.id } });
+    expect(after.verdictAt?.getTime()).toBe(before.verdictAt?.getTime());
+    expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted", "approved"]);
+    // Approved: the approval that made it so, repeated, still changes nothing.
+    await approve(ben);
+    await approve(ben);
+    expect(await stateOf(id)).toBe("approved");
+    expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted", "approved", "approved"]);
+    // Request changes twice: one event.
+    const changes = () =>
+      reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
+    await changes();
+    await changes();
+    expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted", "approved", "approved", "changes_requested"]);
+    // A verdict from before a reopen does not count, so the same verdict after it is recorded.
+    const id2 = await doc();
+    await submitForReview(db, { documentId: id2, viewer: as(owner), reviewers: [ann.id] });
+    await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    await reopenDocument(db, { documentId: id2, viewer: as(owner) });
+    await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    expect((await eventsOf(id2)).map((e) => e.kind)).toEqual(["submitted", "approved", "reopened", "approved"]);
+  });
+
   it("only a named reviewer gives a verdict, only on the current version, never on a draft", async () => {
     const id = await doc();
     await expect(

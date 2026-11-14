@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { ReviewPayload, ReviewerPayload } from "./api.js";
-import { bannerText, newerNote, pendingLines, raceNote, reviewerChip, verdictLabels } from "./review-model.js";
+import {
+  bannerText,
+  myCurrentVerdict,
+  newerNote,
+  pendingLines,
+  raceNote,
+  reviewerChip,
+  verdictControls,
+  verdictLabels,
+} from "./review-model.js";
 
 const rv = (over: Partial<ReviewerPayload>): ReviewerPayload => ({
   id: "r",
@@ -76,5 +85,77 @@ describe("review model", () => {
       ],
     });
     expect(pendingLines(r)).toEqual(["Ben has not reviewed v4", "Cy has requested changes on v4"]);
+  });
+
+  it("finds the viewer's own verdict only while it counts", () => {
+    expect(
+      myCurrentVerdict(review({ reviewers: [rv({ me: true, verdict: "approved", versionNumber: 4, current: true })] })),
+    ).toBe("approved");
+    // Before a reopen, or on an older version: does not count.
+    expect(myCurrentVerdict(review({ reviewers: [rv({ me: true, verdict: "approved", versionNumber: 4 })] }))).toBe(
+      "none",
+    );
+    expect(
+      myCurrentVerdict(review({ reviewers: [rv({ verdict: "approved", versionNumber: 4, current: true })] })),
+    ).toBe("none");
+  });
+
+  describe("verdict controls for every state and verdict", () => {
+    const none = { review: null, status: null, approve: null, changes: null };
+    const at = (state: ReviewPayload["state"], mine: "none" | "approved" | "changes_requested", raced = false) =>
+      verdictControls({ state, mine, read: 4, current: 4, raced });
+
+    it("in review and changes requested", () => {
+      for (const state of ["in_review", "changes_requested"] as const) {
+        expect(at(state, "none")).toEqual({ ...none, approve: "Approve", changes: "Request changes" });
+        expect(at(state, "approved")).toEqual({ ...none, status: "You approved v4", changes: "Request changes" });
+        expect(at(state, "changes_requested")).toEqual({
+          ...none,
+          status: "You requested changes on v4",
+          approve: "Approve",
+        });
+        // A lost race names the version on the buttons.
+        expect(at(state, "none", true)).toEqual({ ...none, approve: "Approve v4", changes: "Request changes on v4" });
+        expect(at(state, "approved", true)).toEqual({
+          ...none,
+          status: "You approved v4",
+          changes: "Request changes on v4",
+        });
+        expect(at(state, "changes_requested", true)).toEqual({
+          ...none,
+          status: "You requested changes on v4",
+          approve: "Approve v4",
+        });
+      }
+    });
+
+    it("approved: only Request changes on vN, never Approve", () => {
+      expect(at("approved", "none")).toEqual({ ...none, changes: "Request changes on v4" });
+      expect(at("approved", "approved")).toEqual({
+        ...none,
+        status: "You approved v4",
+        changes: "Request changes on v4",
+      });
+      expect(at("approved", "none", true)).toEqual({ ...none, changes: "Request changes on v4" });
+      // Forced over this reviewer's request for changes: repeating it changes nothing, Approve is not offered.
+      expect(at("approved", "changes_requested")).toEqual({ ...none, status: "You requested changes on v4" });
+    });
+
+    it("draft and archived take no verdict", () => {
+      for (const state of ["draft", "archived"] as const) {
+        for (const mine of ["none", "approved", "changes_requested"] as const) expect(at(state, mine)).toEqual(none);
+      }
+    });
+
+    it("a newer version than the one read: only Review vN, whatever the state and verdict", () => {
+      for (const state of ["in_review", "changes_requested", "approved"] as const) {
+        for (const mine of ["none", "approved", "changes_requested"] as const) {
+          expect(verdictControls({ state, mine, read: 4, current: 5, raced: false })).toEqual({
+            ...none,
+            review: "Review v5",
+          });
+        }
+      }
+    });
   });
 });

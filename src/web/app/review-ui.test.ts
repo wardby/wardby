@@ -100,3 +100,26 @@ describe("ReviewPanel: the lock", () => {
     ]);
   });
 });
+
+describe("ReviewPanel: the verdicts offered", () => {
+  const buttons = (el: HTMLElement) => [...el.querySelectorAll(".rv-verdict button")].map((b) => b.textContent);
+  const mine = (verdict: "approved" | "changes_requested"): ReviewPayload["reviewers"] => [
+    { ...payload(2).reviewers[0], verdict, versionNumber: 2, current: true },
+  ];
+
+  it("once approved: only Request changes on vN, with what the viewer gave", () => {
+    const { host, panel } = setup(null);
+    new ReviewPanel(host, { ...payload(2), state: "approved", reviewers: mine("approved") }, 2);
+    expect(buttons(panel)).toEqual(["Request changes on v2"]);
+    expect(panel.querySelector(".rv-verdict")?.textContent).toContain("You approved v2");
+  });
+
+  it("in review: hides the verdict the viewer already gave on this version", () => {
+    const { host, panel } = setup(null);
+    const p = new ReviewPanel(host, { ...payload(2), reviewers: mine("approved") }, 2);
+    expect(buttons(panel)).toEqual(["Request changes"]);
+    p.apply({ ...payload(2), state: "changes_requested", reviewers: mine("changes_requested") });
+    expect(buttons(panel)).toEqual(["Approve"]);
+    expect(panel.querySelector(".rv-verdict")?.textContent).toContain("You requested changes on v2");
+  });
+});

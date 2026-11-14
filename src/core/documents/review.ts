@@ -328,7 +328,7 @@ export async function reviewDocument(
   const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
-  await inReviewTx(db, async (tx) => {
+  const changed = await inReviewTx(db, async (tx) => {
     // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
     await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
     const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
@@ -339,6 +339,9 @@ export async function reviewDocument(
     if (!mine) throw new Error("document_review_forbidden");
     if (!REVIEWABLE.has(row.reviewState)) invalid();
     if (input.versionNumber !== rule.currentVersion) throw new ReviewVersionConflictError(rule.currentVersion);
+    // A repeat of the verdict that counts now changes nothing: no row update, no event (a new note is dropped).
+    const counted = rule.reviewers.find((r) => r.id === mine.id);
+    if (counted && counted.verdict === verdict && reviewerCounts(counted, rule)) return false;
     // One clock for the verdict and its event (see the file header).
     const at = await actionTime(tx, lastEventAt);
     await tx.documentReviewer.update({
@@ -356,8 +359,9 @@ export async function reviewDocument(
       at,
       note,
     });
+    return true;
   });
-  await notifyDocumentChange(db, input.documentId, "review");
+  if (changed) await notifyDocumentChange(db, input.documentId, "review");
   return getReviewView(db, input.documentId, input.viewer);
 }
 

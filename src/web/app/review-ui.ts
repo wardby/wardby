@@ -12,12 +12,13 @@ import {
   bannerText,
   EVENT_LABEL,
   isLockedState,
+  myCurrentVerdict,
   newerNote,
   pendingLines,
   raceNote,
   reviewerChip,
   STATE_LABEL,
-  verdictLabels,
+  verdictControls,
 } from "./review-model.js";
 
 export interface ReviewHost {
@@ -177,6 +178,15 @@ export class ReviewPanel {
   private verdictBox(): HTMLElement {
     const r = this.review;
     const box = h("div", { class: "rv-verdict" });
+    const c = verdictControls({
+      state: r.state,
+      mine: myCurrentVerdict(r),
+      read: this.read,
+      current: r.currentVersion,
+      raced: this.raced !== null,
+    });
+    if (c.status) box.append(h("div", { class: "rv-mine", role: "status" }, c.status));
+    if (!c.review && !c.approve && !c.changes) return box;
     const note = h("textarea", {
       attrs: { placeholder: "Note (optional)", rows: "3" },
       aria: { label: "Review note" },
@@ -184,29 +194,14 @@ export class ReviewPanel {
     });
     note.value = this.note;
     box.append(note);
-    if (r.currentVersion !== this.read && !this.raced) {
-      box.append(
-        h(
-          "button",
-          { type: "button", class: "primary", disabled: this.busy, onClick: () => void this.reviewNewer() },
-          `Review v${r.currentVersion}`,
-        ),
-      );
+    const btn = (label: string, run: () => void, primary: boolean) =>
+      h("button", { type: "button", class: primary ? "primary" : "", disabled: this.busy, onClick: run }, label);
+    if (c.review) {
+      box.append(btn(c.review, () => void this.reviewNewer(), true));
       return box;
     }
-    const labels = verdictLabels(this.read, this.raced !== null);
-    box.append(
-      h(
-        "button",
-        { type: "button", class: "primary", disabled: this.busy, onClick: () => void this.verdict("approve") },
-        labels.approve,
-      ),
-      h(
-        "button",
-        { type: "button", disabled: this.busy, onClick: () => void this.verdict("request_changes") },
-        labels.changes,
-      ),
-    );
+    if (c.approve) box.append(btn(c.approve, () => void this.verdict("approve"), true));
+    if (c.changes) box.append(btn(c.changes, () => void this.verdict("request_changes"), false));
     return box;
   }
 
