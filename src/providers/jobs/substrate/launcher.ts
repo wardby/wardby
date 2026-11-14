@@ -75,6 +75,12 @@ export interface SubstrateJobLauncherOptions {
   /** The proxy's tool relay: a removed run's channels and queued lines are deleted with it. */
   relay: Pick<RelayStore, "purgeRelay">;
   config: SubstrateLaunchConfig;
+  /**
+   * The tool-runner images the deployment configures (CODING_CLAUDE_TOOL_RUNNER_IMAGE and its
+   * per-toolchain variants), which carry the Substrate tool bridge. Any other tool image is an
+   * agent's custom image (workerImageRef), which has no bridge: refused.
+   */
+  bridgeToolImages: readonly string[];
   /** Same root the VCS provider prepares workspaces under (as the Kubernetes launcher's). */
   workspaceRoot: string;
   resolveCapability: (runId: string) => Promise<string>;
@@ -187,8 +193,11 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-/** Phase A runs Claude Code only, without the features that need more than two actors or extra secrets. */
-function validateSpec(spec: JobSpec): void {
+/**
+ * Phase A runs Claude Code only, without the features that need more than two actors or extra
+ * secrets, and only on the configured bridge tool images (a custom tool image has no bridge).
+ */
+function validateSpec(spec: JobSpec, bridgeToolImages: readonly string[]): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
   if (spec.provider !== "claude-code") throw new Error("substrate_provider_unsupported");
   if (!isRepositoryDigest(spec.image) || spec.toolImage === undefined || !isRepositoryDigest(spec.toolImage)) {
@@ -197,6 +206,7 @@ function validateSpec(spec: JobSpec): void {
   for (const feature of ["services", "mcpTools", "dependencyCache", "repositories"] as const) {
     if (spec[feature] !== undefined) throw new Error(`substrate_feature_unsupported:${feature}`);
   }
+  if (!bridgeToolImages.includes(spec.toolImage)) throw new Error("substrate_feature_unsupported:workerImage");
 }
 
 export class SubstrateJobLauncher implements WorkspaceJobLauncher {
@@ -401,7 +411,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // Launch
 
   private templatesFor(spec: JobSpec): { agent: ActorTemplateSpec; tool: ActorTemplateSpec } {
-    validateSpec(spec);
+    validateSpec(spec, this.options.bridgeToolImages);
     return { agent: agentTemplate(spec, this.config), tool: toolTemplate(spec, this.config) };
   }
 

@@ -15,6 +15,9 @@ import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js"
 import type { SubstrateLaunchConfig } from "./specs.js";
 
 export const FAKE_CAP = "rrp_fake_capability_value_000001";
+/** The configured bridge tool images (the default toolchain's and a per-toolchain one). */
+export const TOOL_IMAGE = `registry.example/tool@sha256:${"b".repeat(64)}`;
+export const PYTHON_TOOL_IMAGE = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
 export const ATESPACE = "wardby-runs";
 export const CONFIG: SubstrateLaunchConfig = {
   atespace: ATESPACE,
@@ -135,6 +138,7 @@ export async function makeHarness(
     blobs,
     secrets,
     relay,
+    bridgeToolImages: [TOOL_IMAGE, PYTHON_TOOL_IMAGE],
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async () => FAKE_CAP,
@@ -148,7 +152,7 @@ export async function makeHarness(
     runId,
     provider: "claude-code",
     image: `registry.example/agent@sha256:${"a".repeat(64)}`,
-    toolImage: `registry.example/tool@sha256:${"b".repeat(64)}`,
+    toolImage: TOOL_IMAGE,
     inputArtifact,
     timeoutSec: 600,
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 64 },

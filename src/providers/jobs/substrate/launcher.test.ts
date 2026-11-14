@@ -7,7 +7,14 @@ import { hostTarArchive } from "../kubernetes.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateUnavailableError, type WorkerInfo } from "./api.js";
 import { agentTemplate, toolTemplate } from "./specs.js";
-import { CONFIG, FAKE_CAP, makeHarness, SMALL_WORKER, type Harness } from "./launcher.test-support.js";
+import {
+  CONFIG,
+  FAKE_CAP,
+  makeHarness,
+  PYTHON_TOOL_IMAGE,
+  SMALL_WORKER,
+  type Harness,
+} from "./launcher.test-support.js";
 import { BLOB, agentActorName, toolActorName } from "./names.js";
 
 const BLOB_KINDS = [
@@ -593,6 +600,8 @@ describe("SubstrateJobLauncher", () => {
         { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
         "substrate_feature_unsupported:repositories",
       ],
+      // An agent's custom tool image (workerImageRef) is a digest but carries no bridge.
+      [{ toolImage: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
     ];
     for (const [change, code] of cases) {
       await expect(h.launcher.launch({ ...h.spec, ...change })).rejects.toThrow(code);
@@ -600,7 +609,8 @@ describe("SubstrateJobLauncher", () => {
     }
     expect(await h.runs.get(h.spec.runId)).toBeUndefined();
     expect(h.api.templates.size).toBe(0);
-    // Session resume is accepted.
+    // Session resume is accepted, and so is another configured (per-toolchain) bridge tool image.
+    expect(h.launcher.plannedHandle({ ...h.spec, toolImage: PYTHON_TOOL_IMAGE })).toBeDefined();
     await expect(h.launcher.launch({ ...h.spec, sessionResume: true })).resolves.toBeDefined();
   });
 

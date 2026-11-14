@@ -130,6 +130,19 @@ export interface ConfiguredExecutorOptions {
   secretCipher?: Parameters<typeof loadAgentSecretValues>[1];
 }
 
+/**
+ * Every Claude tool-runner image the deployment configures (the default and the per-toolchain ones):
+ * on Substrate, the images that carry the tool bridge. An agent's workerImageRef is not among them.
+ */
+export function configuredClaudeToolImages(
+  config: Pick<ReturnType<typeof loadContainerExecutorConfig>, "claudeToolRunnerImage" | "claudeToolRunnerImages">,
+): string[] {
+  return [
+    ...(config.claudeToolRunnerImage !== undefined ? [config.claudeToolRunnerImage] : []),
+    ...Object.values(config.claudeToolRunnerImages).flatMap((versions) => Object.values(versions)),
+  ];
+}
+
 /** The worker images a registry-pulling launcher (Kubernetes, Substrate) will run must be digests. */
 function assertDigestImages(
   config: Pick<
@@ -167,6 +180,8 @@ export function buildSubstrateJobLauncher(options: {
   resolveCapability: (runId: string) => Promise<string>;
   substrateApi?: SubstrateApi;
   kubernetesApi?: KubernetesApi;
+  /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
+  bridgeToolImages: readonly string[];
 }): SubstrateJobLauncher {
   const substrate = loadSubstrateJobConfig(options.env);
   const blobStoreConfig = loadBlobStoreConfig(options.env);
@@ -182,6 +197,7 @@ export function buildSubstrateJobLauncher(options: {
       }),
     runs: new PrismaSubstrateRunStore(options.db),
     relay: new PrismaRelayStore(options.db),
+    bridgeToolImages: options.bridgeToolImages,
     blobs: createBlobStore(blobStoreConfig),
     secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
     config: {
@@ -284,6 +300,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       resolveCapability: (runId) => capabilities.get(runId),
       substrateApi: options.substrateApi,
       kubernetesApi: options.kubernetesApi,
+      bridgeToolImages: configuredClaudeToolImages(config),
     });
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));

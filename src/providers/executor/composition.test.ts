@@ -8,7 +8,12 @@ import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
-import { buildConfiguredExecutor, buildSubstrateJobLauncher, reReviewOnCodingRunTerminal } from "./composition.js";
+import {
+  buildConfiguredExecutor,
+  buildSubstrateJobLauncher,
+  configuredClaudeToolImages,
+  reReviewOnCodingRunTerminal,
+} from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 
@@ -84,6 +89,17 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(build({})).toBeInstanceOf(RoutingExecutor);
   });
 
+  it("lists every configured Claude tool-runner image as a bridge image, and nothing else", () => {
+    const python = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
+    expect(
+      configuredClaudeToolImages({
+        claudeToolRunnerImage: REGISTRY_IMAGE,
+        claudeToolRunnerImages: { "node-python": { "3.12": python } },
+      }),
+    ).toEqual([REGISTRY_IMAGE, python]);
+    expect(configuredClaudeToolImages({ claudeToolRunnerImage: undefined, claudeToolRunnerImages: {} })).toEqual([]);
+  });
+
   it("builds a SubstrateJobLauncher", () => {
     const launcher = buildSubstrateJobLauncher({
       env,
@@ -92,6 +108,7 @@ describe("JOB_LAUNCHER=substrate", () => {
       resolveCapability: async () => "cap",
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
+      bridgeToolImages: [],
     });
     expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
   });
@@ -104,6 +121,7 @@ describe("JOB_LAUNCHER=substrate", () => {
       resolveCapability: async () => "cap",
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
+      bridgeToolImages: [],
     });
     const options = (launcher as unknown as { options: { collectGraceMs?: number; startupTimeoutMs?: number } })
       .options;
