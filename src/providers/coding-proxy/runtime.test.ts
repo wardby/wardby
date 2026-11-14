@@ -161,6 +161,19 @@ describe("configured coding proxy runtime", () => {
       ((await substrateOf(env)) as unknown as { expectedHosts: string[] }).expectedHosts;
     expect(await hostsOf(base)).toEqual(["wardby-proxy:8787"]);
     expect(await hostsOf(on)).toEqual(["wardby-proxy:8787", "coding-proxy.example.svc.cluster.local:8787"]);
+    // A Service that maps another port to 8787: the guard accepts the port actors use (same parser as
+    // the control plane), and the bare host on port 80, which clients leave out of Host.
+    expect(await hostsOf({ ...on, SUBSTRATE_PROXY_PORT: "9000" })).toEqual([
+      "wardby-proxy:8787",
+      "coding-proxy.example.svc.cluster.local:9000",
+    ]);
+    expect(await hostsOf({ ...on, SUBSTRATE_PROXY_PORT: "80" })).toEqual([
+      "wardby-proxy:8787",
+      "coding-proxy.example.svc.cluster.local:80",
+      "coding-proxy.example.svc.cluster.local",
+    ]);
+    for (const bad of ["0", "65536", "8787x", "1.5", "-1"])
+      await expect(substrateOf({ ...on, SUBSTRATE_PROXY_PORT: bad })).rejects.toThrow("SUBSTRATE_PROXY_PORT");
     for (const bad of ["", "http://proxy.example", "proxy.example:8787", "proxy.example/x", "a b"])
       await expect(substrateOf({ ...on, SUBSTRATE_PROXY_HOST: bad })).rejects.toThrow("SUBSTRATE_PROXY_HOST");
     await expect(substrateOf({ ...on, SUBSTRATE_ACTOR_JWT_ISSUER: "" })).rejects.toThrow(

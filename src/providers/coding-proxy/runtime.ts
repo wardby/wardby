@@ -11,7 +11,7 @@ import { loadRunStepsLevel } from "../../core/run-steps/config.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
-import { loadBlobStoreConfig } from "../../config/providers.js";
+import { loadBlobStoreConfig, substrateProxyPort } from "../../config/providers.js";
 import { substrateRunToken } from "../jobs/substrate/names.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
 import type { BlobStore } from "../storage/types.js";
@@ -131,6 +131,8 @@ export interface SubstrateProxyConfig {
   atespace: string;
   /** Hostname actors use to reach this proxy (SUBSTRATE_PROXY_HOST). */
   proxyHost: string;
+  /** Port actors use to reach it (SUBSTRATE_PROXY_PORT, default 8787), as the control plane reads it. */
+  proxyPort: number;
   issuer: string;
   jwksUrl: URL;
   blobStore: BlobStoreConfig;
@@ -141,8 +143,18 @@ export interface SubstrateProxyConfig {
  * The experimental Substrate job launcher's proxy routes (`/substrate/...`). Off unless SUBSTRATE_ATESPACE is
  * set; then SUBSTRATE_ACTOR_JWT_ISSUER and a blob store (BLOB_STORE) are required, and the error names the
  * missing variable (never a value). SUBSTRATE_ACTOR_JWKS_URL overrides the default `<issuer>/openid/v1/jwks`.
- * SUBSTRATE_{RESULT,TRANSCRIPT,WORKSPACE}_MAX_MB bound what a run may transfer.
+ * SUBSTRATE_{RESULT,TRANSCRIPT,WORKSPACE}_MAX_MB bound what a run may transfer. SUBSTRATE_PROXY_PORT
+ * (default 8787) is the port actors connect to, which the Host guard accepts.
  */
+/**
+ * The Host values actor requests carry: `<SUBSTRATE_PROXY_HOST>:<SUBSTRATE_PROXY_PORT>`, and the bare
+ * host on port 80, which HTTP clients leave out of the Host header.
+ */
+export function substrateExpectedHosts(config: Pick<SubstrateProxyConfig, "proxyHost" | "proxyPort">): string[] {
+  const withPort = `${config.proxyHost}:${config.proxyPort}`;
+  return config.proxyPort === 80 ? [withPort, config.proxyHost] : [withPort];
+}
+
 export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxyConfig | undefined {
   const atespace = env.SUBSTRATE_ATESPACE?.trim();
   if (!atespace) return undefined;
@@ -160,9 +172,11 @@ export function loadSubstrateProxyConfig(env: NodeJS.ProcessEnv): SubstrateProxy
   if (!proxyHost) throw new Error("SUBSTRATE_PROXY_HOST is required when SUBSTRATE_ATESPACE is set");
   if (!/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(proxyHost))
     throw new Error("SUBSTRATE_PROXY_HOST must be a bare hostname (no scheme, port, or path)");
+  const proxyPort = substrateProxyPort(env);
   return {
     atespace,
     proxyHost,
+    proxyPort,
     issuer,
     jwksUrl,
     blobStore,
@@ -336,7 +350,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
       port: CODING_PROXY_PORT,
       expectedHosts: [
         `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
-        ...(substrateConfig ? [`${substrateConfig.proxyHost}:${CODING_PROXY_PORT}`] : []),
+        ...(substrateConfig ? substrateExpectedHosts(substrateConfig) : []),
       ],
       registry,
       ...(dependencyCache ? { dependencyCache } : {}),

@@ -766,6 +766,20 @@ function parseWorkerSelector(raw: string | undefined): Record<string, string> | 
   return selector;
 }
 
+/**
+ * SUBSTRATE_PROXY_PORT: the port actors use to reach the coding proxy at SUBSTRATE_PROXY_HOST
+ * (default the proxy's own, 8787). The one parser, shared by the control plane (actor URLs and
+ * egress) and the coding proxy (its Host guard), so the two can never disagree.
+ */
+export function substrateProxyPort(env: NodeJS.ProcessEnv = process.env): number {
+  const portText = env.SUBSTRATE_PROXY_PORT?.trim();
+  const proxyPort = portText ? Number(portText) : CODING_PROXY_PORT;
+  if ((portText && !/^\d+$/.test(portText)) || !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) {
+    throw new Error("SUBSTRATE_PROXY_PORT must be an integer from 1 to 65535.");
+  }
+  return proxyPort;
+}
+
 export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
   const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL");
   try {
@@ -775,11 +789,7 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   }
   const tokenFile = requiredEnv(env, "SUBSTRATE_TOKEN_FILE");
   const proxyHost = requiredEnv(env, "SUBSTRATE_PROXY_HOST");
-  const portText = env.SUBSTRATE_PROXY_PORT?.trim();
-  const proxyPort = portText ? Number(portText) : CODING_PROXY_PORT;
-  if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) {
-    throw new Error("SUBSTRATE_PROXY_PORT must be an integer from 1 to 65535.");
-  }
+  const proxyPort = substrateProxyPort(env);
   // Required, no default: the coding proxy uses the same variable as its on/off switch.
   const atespace = dnsLabel(requiredEnv(env, "SUBSTRATE_ATESPACE"), "SUBSTRATE_ATESPACE", "");
   const credentialsNamespace = dnsLabel(
