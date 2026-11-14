@@ -17,7 +17,15 @@ export interface SubstrateLaunchConfig {
   proxyHost: string;
   proxyPort: number;
   workerSelector?: Record<string, string>;
+  /**
+   * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): the templates tell both bridges to stay for a
+   * follow-up round instead of idling after their uploads. Absent or false: templates are unchanged.
+   */
+  warmRounds?: boolean;
 }
+
+/** The template env that switches the bridges into warm rounds (substrate-bridge/constants.ts WARM_ROUNDS_ENV). */
+export const WARM_ROUNDS_ENV = "WARDBY_SUBSTRATE_WARM_ROUNDS";
 
 const READY_PORT = 8080;
 const ACTOR_METADATA_DIR = "/run/ate/actor";
@@ -26,7 +34,11 @@ const TOOL_JWT_SECONDS = 600;
 
 /** Env shared by both templates. Lives in the template, so it must never hold a per-run value. */
 export function workerEnv(config: SubstrateLaunchConfig): { name: string; value: string }[] {
-  return [{ name: "WARDBY_PROXY_URL", value: `http://${config.proxyHost}:${config.proxyPort}` }];
+  return [
+    { name: "WARDBY_PROXY_URL", value: `http://${config.proxyHost}:${config.proxyPort}` },
+    // Not a per-run value: the same for every run of a deployment with warm rounds on.
+    ...(config.warmRounds ? [{ name: WARM_ROUNDS_ENV, value: "1" }] : []),
+  ];
 }
 
 interface Size {
@@ -115,7 +127,8 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
   };
 }
 
-export function agentEgress(token: string, config: SubstrateLaunchConfig): EgressRule[] {
+/** `secretName`: the per-run Secret holding the capability (the token itself unless a warm round got a fresh one). */
+export function agentEgress(token: string, config: SubstrateLaunchConfig, secretName: string = token): EgressRule[] {
   return [
     {
       kind: "http",
@@ -124,7 +137,7 @@ export function agentEgress(token: string, config: SubstrateLaunchConfig): Egres
       replaceHeaders: [
         {
           header: "X-Api-Key",
-          credentialUri: `ate-secret://k8s.io/default/${config.credentialsNamespace}/${token}/capability`,
+          credentialUri: `ate-secret://k8s.io/default/${config.credentialsNamespace}/${secretName}/capability`,
         },
       ],
     },
@@ -149,12 +162,17 @@ export function toolEgress(config: SubstrateLaunchConfig): EgressRule[] {
 }
 
 /** The only place the capability appears. Never log or serialize this object. */
-export function runSecret(token: string, capability: string, config: SubstrateLaunchConfig): V1Secret {
+export function runSecret(
+  token: string,
+  capability: string,
+  config: SubstrateLaunchConfig,
+  secretName: string = token,
+): V1Secret {
   return {
     apiVersion: "v1",
     kind: "Secret",
     metadata: {
-      name: token,
+      name: secretName,
       namespace: config.credentialsNamespace,
       labels: { "wardby.dev/substrate-run": token },
     },

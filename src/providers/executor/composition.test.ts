@@ -128,6 +128,26 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(options.collectGraceMs).toBe(45_000);
     expect(options.startupTimeoutMs).toBe(900_000);
   });
+
+  it("passes warm rounds to the launcher only when SUBSTRATE_WARM_ROUNDS=true", () => {
+    const build = (extra: Record<string, string>) =>
+      (
+        buildSubstrateJobLauncher({
+          env: { ...env, ...extra },
+          db,
+          workspaceRoot: join(dir, "ws"),
+          resolveCapability: async () => "cap",
+          substrateApi: new FakeSubstrateApi({ workers: 1 }),
+          kubernetesApi: new FakeKubernetesApi(),
+          bridgeToolImages: [],
+        }) as unknown as { options: { warmRounds?: unknown } }
+      ).options;
+    expect(build({})).not.toHaveProperty("warmRounds");
+    expect(build({ SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_PARK_TTL_SEC: "600" }).warmRounds).toEqual({
+      parkTtlMs: 600_000,
+      secret: "same",
+    });
+  });
 });
 
 describe("buildConfiguredExecutor", () => {

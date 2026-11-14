@@ -79,6 +79,13 @@ export class FakeSubstrateApi implements SubstrateApi {
     actor.state = "RUNNING";
     actor.worker = worker;
   }
+  /** Like Substrate: a running actor gives back its room; a suspended one is returned as it is. */
+  async suspendActor(atespace: string, name: string): Promise<void> {
+    const actor = this.actors.get(`${atespace}/${name}`);
+    if (!actor) throw new SubstrateNotFoundError("substrate_not_found");
+    actor.state = "SUSPENDED";
+    delete actor.worker;
+  }
   async deleteActor(atespace: string, name: string): Promise<void> {
     this.actors.delete(`${atespace}/${name}`);
     // The policy belongs to the actor and goes with it.

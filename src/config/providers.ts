@@ -741,6 +741,12 @@ export interface SubstrateJobConfig {
   collectGraceSec?: number;
   /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
   startupTimeoutSec?: number;
+  /**
+   * SUBSTRATE_WARM_ROUNDS=true (experimental spike): park a succeeded run's actors for a follow-up
+   * and let a continuation adopt them. SUBSTRATE_PARK_TTL_SEC (60..86400, default 3600) bounds the
+   * park; SUBSTRATE_WARM_SECRET (`same`, default, or `fresh`) picks how the new capability is handed over.
+   */
+  warmRounds?: { parkTtlSec: number; secret: "same" | "fresh" };
 }
 
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
@@ -820,6 +826,18 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
     7_200,
   );
   if (startupTimeoutSec !== undefined) config.startupTimeoutSec = startupTimeoutSec;
+  const warm = env.SUBSTRATE_WARM_ROUNDS?.trim().toLowerCase();
+  if (warm !== undefined && warm !== "" && warm !== "true" && warm !== "false") {
+    throw new Error("SUBSTRATE_WARM_ROUNDS must be true or false.");
+  }
+  if (warm === "true") {
+    const parkTtlSec =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined, "SUBSTRATE_PARK_TTL_SEC", 60, 86_400) ??
+      3_600;
+    const secret = env.SUBSTRATE_WARM_SECRET?.trim() || "same";
+    if (secret !== "same" && secret !== "fresh") throw new Error("SUBSTRATE_WARM_SECRET must be same or fresh.");
+    config.warmRounds = { parkTtlSec, secret };
+  }
   return config;
 }
 

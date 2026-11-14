@@ -72,4 +72,39 @@ describe("MemorySubstrateRunStore", () => {
     now = 4_000;
     expect((await store.reclaim("r1", new Date(9_000)))?.updatedAt).toEqual(new Date(4_000));
   });
+
+  it("writes a park's deadline with its phase", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    const until = new Date("2026-11-14T00:00:00Z");
+    expect(await store.setPhase("r1", "parked", ["provisioning"], until)).toMatchObject({
+      phase: "parked",
+      deadlineAt: until,
+    });
+  });
+
+  it("adopts a parked run atomically, and only a parked one", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    const next = { ...record, runId: "r2", specHash: "h2" };
+    expect(await store.adopt("r1", "wa-retired", next)).toBeUndefined();
+    await store.setPhase("r1", "parked");
+    expect(await store.adopt("r1", "wa-retired", { ...next, token: "wr-other" })).toBeUndefined();
+    expect(await store.adopt("r1", "wa-retired", next)).toMatchObject({ runId: "r2", token: record.token });
+    expect(await store.get("r1")).toMatchObject({ phase: "adopted", token: "wa-retired" });
+    expect(await store.getByToken(record.token)).toMatchObject({ runId: "r2" });
+    // Not parked any more: a second adopter gets nothing.
+    expect(await store.adopt("r1", "wa-retired", { ...next, runId: "r3" })).toBeUndefined();
+    expect(await store.get("r3")).toBeUndefined();
+  });
+
+  it("lists runs by phase", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    await store.claim({ ...record, runId: "r0", token: "wr-00000000000000000000" });
+    await store.setPhase("r1", "parked");
+    await store.setPhase("r0", "parked");
+    expect((await store.listByPhase("parked")).map((r) => r.runId)).toEqual(["r0", "r1"]);
+    expect(await store.listByPhase("running")).toEqual([]);
+  });
 });

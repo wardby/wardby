@@ -6,9 +6,14 @@ import { PrismaSubstrateRunStore } from "./run-store.js";
 const db = createPrismaClient();
 const token = "wr-0000000000000000run1";
 const runId = `substrate-run-${token}`;
+const adopterToken = "wr-0000000000000000run2";
+const adopterRunId = `substrate-run-${adopterToken}`;
 
 describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)", () => {
   afterAll(async () => {
+    await db.codingRun.deleteMany({ where: { runId: { in: [runId, adopterRunId] } } });
+    await db.run.deleteMany({ where: { id: adopterRunId } });
+    await db.agent.deleteMany({ where: { id: `substrate-agent-${adopterToken}` } });
     await db.codingRun.deleteMany({ where: { runId } });
     await db.run.deleteMany({ where: { id: runId } });
     await db.agent.deleteMany({ where: { id: `substrate-agent-${token}` } });
@@ -53,5 +58,36 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
 
     await db.codingRun.delete({ where: { runId } });
     expect(await store.get(runId)).toBeUndefined();
+  });
+
+  it("parks with a deadline, adopts in one transaction, and lists parked runs (warm rounds)", async () => {
+    await createSubstrateRunFixture(db, token, { phase: "running" });
+    // The adopter's CodingRun (its SubstrateRun row comes from adopt()).
+    await createSubstrateRunFixture(db, adopterToken);
+    await db.substrateRun.delete({ where: { runId: adopterRunId } });
+    const store = new PrismaSubstrateRunStore(db);
+    const until = new Date(Date.now() + 3_600_000);
+    expect(await store.setPhase(runId, "parked", ["running"], until)).toMatchObject({
+      phase: "parked",
+      deadlineAt: until,
+    });
+    expect((await store.listByPhase("parked")).map((r) => r.runId)).toContain(runId);
+    const record = {
+      runId: adopterRunId,
+      token,
+      specHash: "h2",
+      phase: "provisioning" as const,
+      deadlineAt: new Date(Date.now() + 60_000),
+    };
+    // A wrong token changes nothing.
+    expect(await store.adopt(runId, "wa-retired0000000000001", { ...record, token: adopterToken })).toBeUndefined();
+    expect(await store.get(adopterRunId)).toBeUndefined();
+    const adopted = await store.adopt(runId, "wa-retired0000000000001", record);
+    expect(adopted).toMatchObject({ runId: adopterRunId, token, phase: "provisioning" });
+    expect(await store.get(runId)).toMatchObject({ phase: "adopted", token: "wa-retired0000000000001" });
+    expect(await store.getByToken(token)).toMatchObject({ runId: adopterRunId });
+    // Not parked any more: nothing changes, and no row appears.
+    expect(await store.adopt(runId, "wa-retired0000000000002", { ...record, runId: "nope" })).toBeUndefined();
+    expect(await store.get(runId)).toMatchObject({ token: "wa-retired0000000000001" });
   });
 });

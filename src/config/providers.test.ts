@@ -545,6 +545,30 @@ describe("loadSubstrateJobConfig", () => {
       expect(() => loadSubstrateJobConfig({ ...base, [name]: value })).toThrow(name);
     }
   });
+
+  it("turns warm rounds on only with SUBSTRATE_WARM_ROUNDS=true, with its park TTL and Secret mode", () => {
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_PARK_TTL_SEC: "120" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true" }).warmRounds).toEqual({
+      parkTtlSec: 3600,
+      secret: "same",
+    });
+    expect(
+      loadSubstrateJobConfig({
+        ...base,
+        SUBSTRATE_WARM_ROUNDS: "true",
+        SUBSTRATE_PARK_TTL_SEC: "120",
+        SUBSTRATE_WARM_SECRET: "fresh",
+      }).warmRounds,
+    ).toEqual({ parkTtlSec: 120, secret: "fresh" });
+    for (const [name, value] of [
+      ["SUBSTRATE_WARM_ROUNDS", "yes"],
+      ["SUBSTRATE_PARK_TTL_SEC", "30"],
+      ["SUBSTRATE_WARM_SECRET", "rotate"],
+    ] as const) {
+      expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", [name]: value })).toThrow(name);
+    }
+  });
 });
 
 describe("loadGitHubEventConfig", () => {

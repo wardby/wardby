@@ -211,6 +211,9 @@ export function buildSubstrateJobLauncher(options: {
     resolveCapability: options.resolveCapability,
     ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
     ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
+    ...(substrate.warmRounds
+      ? { warmRounds: { parkTtlMs: substrate.warmRounds.parkTtlSec * 1000, secret: substrate.warmRounds.secret } }
+      : {}),
   });
 }
 

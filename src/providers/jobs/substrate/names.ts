@@ -42,18 +42,66 @@ export function templateName(
   return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}|${variant}`, 16)}`;
 }
 
+/**
+ * The name of a per-round blob: round 1 (every run without warm rounds) keeps the original name,
+ * round n > 1 gets `-<n>` before the extension.
+ */
+function perRound(t: string, base: string, extension: string, round = 1): string {
+  return round === 1 ? `substrate/runs/${t}/${base}.${extension}` : `substrate/runs/${t}/${base}-${round}.${extension}`;
+}
+
 /** Blob keys for one run. The launch record lives in Postgres, not in the blob store. */
 export const BLOB = {
-  input: (t: string) => `substrate/runs/${t}/input.json`,
+  input: (t: string, round?: number) => perRound(t, "input", "json", round),
   toolSetup: (t: string) => `substrate/runs/${t}/tool-setup.json`,
   seed: (t: string) => `substrate/runs/${t}/seed.tar`,
-  result: (t: string) => `substrate/runs/${t}/result.json`,
-  transcript: (t: string) => `substrate/runs/${t}/transcript.jsonl`,
-  workspace: (t: string) => `substrate/runs/${t}/workspace.tar`,
-  exit: (t: string) => `substrate/runs/${t}/exit.json`,
-  done: (t: string) => `substrate/runs/${t}/done.json`,
+  result: (t: string, round?: number) => perRound(t, "result", "json", round),
+  transcript: (t: string, round?: number) => perRound(t, "transcript", "jsonl", round),
+  workspace: (t: string, round?: number) => perRound(t, "workspace", "tar", round),
+  exit: (t: string, round?: number) => perRound(t, "exit", "json", round),
+  done: (t: string, round?: number) => perRound(t, "done", "json", round),
   /** Written by the proxy (if absent) on the agent's first successful input download: the run reached the proxy. */
-  started: (t: string) => `substrate/runs/${t}/started.json`,
+  started: (t: string, round?: number) => perRound(t, "started", "json", round),
 };
+
+/** The BLOB keys that exist once per round (warm rounds, SUBSTRATE_WARM_ROUNDS). */
+export const ROUND_BLOBS = ["input", "result", "transcript", "workspace", "exit", "done", "started"] as const;
+
+/**
+ * Warm rounds only: `{"round": n}`, the round the actors of this token are on, written by the
+ * launcher when it adopts a parked run. Absent means round 1.
+ */
+export function roundBlob(t: string): string {
+  return `substrate/runs/${t}/round.json`;
+}
+
+/** The highest round a token may reach (a bound on the rounds the proxy and launcher accept). */
+export const MAX_ROUND = 1000;
+
+/** Parses a round.json body; undefined when it is not `{"round": <1..MAX_ROUND>}`. */
+export function parseRound(body: string): number | undefined {
+  try {
+    const round = (JSON.parse(body) as { round?: unknown } | null)?.round;
+    return typeof round === "number" && Number.isInteger(round) && round >= 1 && round <= MAX_ROUND ? round : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The token a run's row moves to when another run adopts its parked actors (which keep the original
+ * token): `wa-` + 20 hex chars of the run id, so it never matches a run token or a route.
+ */
+export function retiredRunToken(runId: string): string {
+  return `wa-${hex(`retired|${runId}`, 20)}`;
+}
+
+/**
+ * The per-run Secret holding the capability. Round 1 (and every run without warm rounds) uses the
+ * token itself; with SUBSTRATE_WARM_SECRET=fresh a later round gets its own name.
+ */
+export function runSecretName(token: string, round = 1): string {
+  return round === 1 ? token : `${token}-r${round}`;
+}
 
 export const PLACEHOLDER_CAPABILITY = "rrp_placeholder_injected_by_gateway";
