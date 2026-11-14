@@ -1,5 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import { grantedIds } from "../grants.js";
+import { isReviewState, type ReviewState } from "./review-state.js";
 
 export interface ListedDocument {
   id: string;
@@ -12,6 +13,7 @@ export interface ListedDocument {
   path: string | null;
   updatedAt: Date;
   latestVersion: number;
+  reviewState: ReviewState;
 }
 
 /**
@@ -44,6 +46,7 @@ export async function listDocumentsFor(
       repository: true,
       path: true,
       updatedAt: true,
+      reviewState: true,
       currentVersion: { select: { number: true } },
     },
   });
@@ -59,6 +62,7 @@ export async function listDocumentsFor(
       path: d.path,
       updatedAt: d.updatedAt,
       latestVersion: d.currentVersion?.number ?? 0,
+      reviewState: isReviewState(d.reviewState) ? d.reviewState : "draft",
     })),
     truncated: found.length > opts.limit,
   };
