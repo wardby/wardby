@@ -16,7 +16,7 @@ const CAPABILITY = "rrp_fake_capability_value_000001";
 const OTHER_CAPABILITY = "rrp_fake_capability_value_000002";
 const REGISTRY_TOKEN = "rrg_fake_registry_token_0000001";
 const TOKEN = substrateRunToken("run-1");
-const AUTH = { authorization: "Bearer good" };
+const AUTH = { "x-wardby-actor-jwt": "Bearer good" };
 
 const sessionFor = (runId: string): ProxySession =>
   ({ runId, deadlineAt: new Date(Date.now() + 60_000), status: "active" }) as ProxySession;
@@ -43,8 +43,8 @@ describe("substrate routes", () => {
               ? sessionFor("run-2")
               : null,
       },
-      verifyActor: async (authorization, subject) =>
-        authorization === "Bearer good" && subject === toolActorSubject(ATESPACE, TOKEN)
+      verifyActor: async (actorJwt, subject) =>
+        actorJwt === "Bearer good" && subject === toolActorSubject(ATESPACE, TOKEN)
           ? { ok: true, subject }
           : { ok: false, code: "invalid" },
       tokenForRun: substrateRunToken,
@@ -127,7 +127,12 @@ describe("substrate routes", () => {
     // A real capability, but for another run.
     const other = await fetch(`${base}/channels`, { method: "POST", headers: { "x-api-key": OTHER_CAPABILITY } });
     expect(other.status).toBe(401);
-    expect((await fetch(`${base}/events?after=0`, { headers: { authorization: "Bearer bad" } })).status).toBe(401);
+    expect((await fetch(`${base}/events?after=0`, { headers: { "x-wardby-actor-jwt": "Bearer bad" } })).status).toBe(
+      401,
+    );
+    // The tool actor's JWT travels only in its own header: in Authorization it opens nothing.
+    expect((await fetch(`${base}/events?after=0`, { headers: { authorization: "Bearer good" } })).status).toBe(401);
+    expect((await fetch(`${base}/tool-setup`, { headers: { authorization: "Bearer good" } })).status).toBe(401);
     expect((await fetch(`${base}/events?after=0`, { headers: { "x-api-key": CAPABILITY } })).status).toBe(401);
     // The tool's JWT does not open an agent route, nor the capability a tool route.
     expect((await fetch(`${base}/channels`, { method: "POST", headers: AUTH })).status).toBe(401);

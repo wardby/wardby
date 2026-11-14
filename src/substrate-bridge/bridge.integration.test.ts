@@ -106,8 +106,8 @@ describe("substrate bridges, end to end without Substrate", () => {
             ? ({ runId: "run-1", deadlineAt: new Date(Date.now() + 60_000), status: "active" } as ProxySession)
             : null,
       },
-      verifyActor: async (authorization, subject) =>
-        authorization === "placeholder" && subject === toolActorSubject(ATESPACE, TOKEN)
+      verifyActor: async (actorJwt, subject) =>
+        actorJwt === "placeholder" && subject === toolActorSubject(ATESPACE, TOKEN)
           ? { ok: true, subject }
           : { ok: false, code: "invalid" },
       tokenForRun: substrateRunToken,

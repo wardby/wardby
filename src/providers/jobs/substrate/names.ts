@@ -16,6 +16,13 @@ export function toolActorName(token: string): string {
   return `${token}-tool`;
 }
 
+/**
+ * The header the tool actor's egress rule fills with its actor JWT (`Bearer <jwt>`). Not
+ * `Authorization`: package managers send their registry-only token there, and the gateway replaces
+ * only a header the request already carries.
+ */
+export const TOOL_ACTOR_JWT_HEADER = "X-Wardby-Actor-Jwt";
+
 export function toolActorSubject(atespace: string, token: string): string {
   return `actor/${atespace}/${toolActorName(token)}`;
 }

@@ -30,7 +30,8 @@ import {
   DEFAULT_METADATA_DIR,
   DEFAULT_READY_PORT,
   DEFAULT_TOOL_SOCKET,
-  GATEWAY_AUTHORIZATION_PLACEHOLDER,
+  ACTOR_JWT_HEADER,
+  GATEWAY_ACTOR_JWT_PLACEHOLDER,
 } from "./constants.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
@@ -130,7 +131,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
   const token = await readRunToken(options.metadataDir ?? DEFAULT_METADATA_DIR, "tool");
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
-  const headers = { authorization: GATEWAY_AUTHORIZATION_PLACEHOLDER };
+  const headers = { [ACTOR_JWT_HEADER]: GATEWAY_ACTOR_JWT_PLACEHOLDER };
   const shutdown = new AbortController();
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
   const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);

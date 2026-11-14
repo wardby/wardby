@@ -86,7 +86,7 @@ describe("substrate spec builders", () => {
         ports: [CONFIG.proxyPort],
         replaceHeaders: [
           {
-            header: "Authorization",
+            header: "X-Wardby-Actor-Jwt",
             prefix: "Bearer ",
             actorJwt: { audiences: ["wardby-coding-proxy"], expirationSeconds: 600 },
           },

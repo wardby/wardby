@@ -80,6 +80,9 @@ describe("SubstrateJobLauncher", () => {
       collectExclude: { names: string[]; paths: string[] };
     };
     expect(JSON.parse(setup.toolSetup).schemaVersion).toBe(1);
+    // The registry settings point at the proxy host the tool actor's egress allows, not the k8s alias.
+    expect(setup.toolSetup).toContain(`http://${CONFIG.proxyHost}:${CONFIG.proxyPort}`);
+    expect(setup.toolSetup).not.toContain("wardby-proxy");
     expect(setup.collectExclude.paths).toEqual([]);
     expect(setup.collectExclude.names.length).toBeGreaterThan(0);
     expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("# hello");

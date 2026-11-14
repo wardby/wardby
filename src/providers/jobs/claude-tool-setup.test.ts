@@ -98,6 +98,19 @@ describe("claudeToolSetup", () => {
     });
   });
 
+  it("points the registry at a caller-given proxy base URL, and only there", () => {
+    const expected = registryWorkerSetup({
+      proxyBaseUrl: "http://coding-proxy.example.internal:9000",
+      capability: CAPABILITY,
+      cacheRoot: "/workspace/.cache",
+    });
+    const raw = claudeToolSetup(spec, CAPABILITY, { proxyBaseUrl: "http://coding-proxy.example.internal:9000" });
+    expect(JSON.parse(raw)).toEqual({ schemaVersion: 1, env: expected.env, files: expected.files });
+    expect(raw).not.toContain("wardby-proxy");
+    // No options, or no proxyBaseUrl, is exactly the default.
+    expect(claudeToolSetup(spec, CAPABILITY, {})).toBe(claudeToolSetup(spec, CAPABILITY));
+  });
+
   it("carries the registry-only token and never the capability", () => {
     const raw = claudeToolSetup(spec, CAPABILITY);
     expect(raw).not.toContain(CAPABILITY);

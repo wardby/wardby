@@ -5,7 +5,8 @@
  * workspace) through the blob store.
  *
  * Callers: the agent actor authenticates with the run capability (`x-api-key`, injected by Substrate's
- * egress gateway); the tool actor with its Substrate actor JWT.
+ * egress gateway); the tool actor with its Substrate actor JWT in `x-wardby-actor-jwt` (never
+ * `Authorization`, which its package managers use for the registry-only token).
  *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
  * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
@@ -14,7 +15,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport/http-limits.js";
 import { logger } from "../../../core/logger.js";
-import { BLOB, toolActorSubject } from "../../jobs/substrate/names.js";
+import { BLOB, TOOL_ACTOR_JWT_HEADER, toolActorSubject } from "../../jobs/substrate/names.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxyLedger } from "../types.js";
@@ -36,7 +37,8 @@ export interface SubstrateRouteOptions {
   relay: RelayStore;
   blobs: BlobStore;
   ledger: Pick<ProxyLedger, "findSessionByCapabilityHash">;
-  verifyActor: (authorization: string | undefined, expectedSubject: string) => Promise<IdentityResult>;
+  /** Given the tool actor's `x-wardby-actor-jwt` value (`Bearer <jwt>`). */
+  verifyActor: (actorJwt: string | undefined, expectedSubject: string) => Promise<IdentityResult>;
   /** substrateRunToken */
   tokenForRun: (runId: string) => string;
   limits: { resultBytes: number; transcriptBytes: number; workspaceBytes: number };
@@ -217,7 +219,11 @@ export function createSubstrateRoutes(
   }
 
   async function toolAuth(request: IncomingMessage, token: string): Promise<boolean> {
-    const result = await options.verifyActor(request.headers.authorization, toolActorSubject(options.atespace, token));
+    const header = request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()];
+    const result = await options.verifyActor(
+      typeof header === "string" ? header : undefined,
+      toolActorSubject(options.atespace, token),
+    );
     return result.ok;
   }
 

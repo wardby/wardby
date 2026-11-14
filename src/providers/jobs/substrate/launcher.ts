@@ -313,7 +313,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.api.ensureActorTemplate(templates.tool);
       await this.stageInput(spec.inputArtifact, token);
       const setup = {
-        toolSetup: claudeToolSetup(spec, capability),
+        toolSetup: claudeToolSetup(spec, capability, {
+          proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
+        }),
         // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
         collectExclude: spec.collectExclude ?? collectExclusions([]),
       };

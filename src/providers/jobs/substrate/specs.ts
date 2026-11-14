@@ -8,7 +8,7 @@ import type { V1Secret } from "@kubernetes/client-node";
 import { claudeToolLimits } from "../docker-isolation.js";
 import type { JobSpec } from "../types.js";
 import type { ActorTemplateSpec, EgressRule } from "./api.js";
-import { templateName } from "./names.js";
+import { TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
 
 export interface SubstrateLaunchConfig {
   atespace: string;
@@ -139,7 +139,7 @@ export function toolEgress(config: SubstrateLaunchConfig): EgressRule[] {
       ports: [config.proxyPort],
       replaceHeaders: [
         {
-          header: "Authorization",
+          header: TOOL_ACTOR_JWT_HEADER,
           prefix: "Bearer ",
           actorJwt: { audiences: [TOOL_JWT_AUDIENCE], expirationSeconds: TOOL_JWT_SECONDS },
         },

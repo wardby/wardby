@@ -4,8 +4,13 @@
  * constants.test.ts asserts they stay equal.
  */
 export const PLACEHOLDER_CAPABILITY = "rrp_placeholder_injected_by_gateway";
-/** The tool actor's `authorization` value; the egress gateway replaces it with the actor JWT. */
-export const GATEWAY_AUTHORIZATION_PLACEHOLDER = "placeholder";
+/**
+ * The header the tool actor sends on every proxy call (names.ts TOOL_ACTOR_JWT_HEADER, lower-cased);
+ * the egress gateway replaces its placeholder value with the actor JWT.
+ */
+export const ACTOR_JWT_HEADER = "x-wardby-actor-jwt";
+/** The tool actor's ACTOR_JWT_HEADER value; the egress gateway replaces it with the actor JWT. */
+export const GATEWAY_ACTOR_JWT_PLACEHOLDER = "placeholder";
 export const AGENT_SUFFIX = "-agent";
 export const TOOL_SUFFIX = "-tool";
 /** substrateRunToken: "wr-" + 20 hex chars. */
