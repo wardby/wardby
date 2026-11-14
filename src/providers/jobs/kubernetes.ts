@@ -259,7 +259,8 @@ function observedServiceState(status: V1ContainerStatus | undefined): {
   if (status.state?.running !== undefined) return { state: "probing" };
   return { state: "pending" };
 }
-const CAPABILITY = /^rrp_[A-Za-z0-9_-]{16,512}$/;
+/** A run capability as the launchers accept it (also the Substrate launcher's check). */
+export const CAPABILITY = /^rrp_[A-Za-z0-9_-]{16,512}$/;
 const TOKEN = /^[a-f0-9]{20}$/;
 const WORKSPACE_STORAGE = `${STORAGE_ROOT}/workspace`;
 const INPUT_STORAGE = `${STORAGE_ROOT}/input`;
@@ -357,7 +358,8 @@ export interface KubernetesJobLauncherOptions {
 // ---------------------------------------------------------------------------
 // Pure helpers: the lifecycle rules.
 
-function stableSpecHash(spec: JobSpec): string {
+/** The spec hash a launch fence compares (also the Substrate launcher's). */
+export function stableSpecHash(spec: JobSpec): string {
   return createHash("sha256")
     .update(
       JSON.stringify({

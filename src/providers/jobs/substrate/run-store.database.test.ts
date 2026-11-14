@@ -37,6 +37,15 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
     await expect(store.setPhase(runId, "running", ["requeued"])).rejects.toThrow("substrate_phase_conflict");
     expect((await store.setPhase(runId, "running", ["provisioning"])).phase).toBe("running");
     expect((await store.setPhase(runId, "stopped")).phase).toBe("stopped");
+    expect(await store.getByToken(token)).toMatchObject({ runId, phase: "stopped" });
+    expect(await store.getByToken("wr-ffffffffffffffffffff")).toBeUndefined();
+
+    const later = new Date(Date.now() + 120_000);
+    expect(await store.reclaim(runId, later)).toBeUndefined();
+    await store.setPhase(runId, "requeued");
+    expect(await store.reclaim(runId, later)).toMatchObject({ phase: "provisioning", deadlineAt: later });
+    expect(await store.reclaim(runId, later)).toBeUndefined();
+    expect((await store.setPhase(runId, "timed_out", ["provisioning"])).phase).toBe("timed_out");
 
     await db.codingRun.delete({ where: { runId } });
     expect(await store.get(runId)).toBeUndefined();

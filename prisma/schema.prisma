@@ -2336,7 +2336,8 @@ model SubstrateRun {
   /// substrateRunToken(runId): names the run's actors, blobs and relay.
   token       String                  @unique
   specHash    String
-  /// provisioning | running | requeued | stopped | removed
+  /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
+  /// tool_failed | provisioning_failed (terminal; see SubstratePhase in run-store.ts)
   phase       String
   deadlineAt  DateTime
   /// Last seq assigned on the tool-bound queue.

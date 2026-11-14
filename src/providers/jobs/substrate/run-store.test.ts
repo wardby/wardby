@@ -25,4 +25,30 @@ describe("MemorySubstrateRunStore", () => {
     expect((await store.get("r1"))?.phase).toBe("running");
     await expect(store.setPhase("missing", "running")).rejects.toThrow("substrate_phase_conflict");
   });
+
+  it("finds a run by its token", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    expect(await store.getByToken(record.token)).toEqual(record);
+    expect(await store.getByToken("wr-ffffffffffffffffffff")).toBeUndefined();
+  });
+
+  it("reclaims only a requeued run, with a fresh deadline", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    const later = new Date("2026-11-14T00:00:00Z");
+    expect(await store.reclaim("r1", later)).toBeUndefined();
+    await store.setPhase("r1", "requeued");
+    expect(await store.reclaim("r1", later)).toEqual({ ...record, phase: "provisioning", deadlineAt: later });
+    expect(await store.reclaim("r1", later)).toBeUndefined();
+    expect(await store.reclaim("missing", later)).toBeUndefined();
+  });
+
+  it("records observed terminal phases", async () => {
+    const store = new MemorySubstrateRunStore();
+    await store.claim(record);
+    for (const phase of ["timed_out", "lost", "crashed", "tool_failed", "provisioning_failed"] as const) {
+      expect((await store.setPhase("r1", phase)).phase).toBe(phase);
+    }
+  });
 });

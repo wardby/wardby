@@ -1,6 +1,22 @@
 import type { PrismaClient } from "#prisma";
 
-export type SubstratePhase = "provisioning" | "running" | "requeued" | "stopped" | "removed";
+/**
+ * provisioning, running and requeued are active. The rest are terminal and never change except to
+ * `removed`: stopped (stop()), and the outcomes the launcher observed itself rather than read from a
+ * reported result — timed_out, lost (an actor is gone), crashed (the agent actor), tool_failed (the
+ * tool actor) and provisioning_failed (launch failed after the fence).
+ */
+export type SubstratePhase =
+  | "provisioning"
+  | "running"
+  | "requeued"
+  | "stopped"
+  | "removed"
+  | "timed_out"
+  | "lost"
+  | "crashed"
+  | "tool_failed"
+  | "provisioning_failed";
 
 export interface SubstrateRunRecord {
   runId: string;
@@ -14,6 +30,10 @@ export interface SubstrateRunStore {
   /** Inserts; on an existing row returns it unchanged with created=false (the launch fence). */
   claim(record: SubstrateRunRecord): Promise<{ created: boolean; record: SubstrateRunRecord }>;
   get(runId: string): Promise<SubstrateRunRecord | undefined>;
+  /** The run named by a handle's token (substrateRunToken(runId)). */
+  getByToken(token: string): Promise<SubstrateRunRecord | undefined>;
+  /** Moves a requeued run back to provisioning with a fresh deadline; undefined when it is not requeued. */
+  reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined>;
   /** Moves the run to `phase`; with `from`, only when its current phase is listed (else substrate_phase_conflict). */
   setPhase(runId: string, phase: SubstratePhase, from?: SubstratePhase[]): Promise<SubstrateRunRecord>;
 }
@@ -66,6 +86,20 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
     return row ? toRecord(row) : undefined;
   }
 
+  async getByToken(token: string): Promise<SubstrateRunRecord | undefined> {
+    const row = await this.db.substrateRun.findUnique({ where: { token } });
+    return row ? toRecord(row) : undefined;
+  }
+
+  async reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined> {
+    const result = await this.db.substrateRun.updateMany({
+      where: { runId, phase: "requeued" },
+      data: { phase: "provisioning", deadlineAt },
+    });
+    if (result.count === 0) return undefined;
+    return this.get(runId);
+  }
+
   async setPhase(runId: string, phase: SubstratePhase, from?: SubstratePhase[]): Promise<SubstrateRunRecord> {
     const result = await this.db.substrateRun.updateMany({
       where: { runId, ...(from ? { phase: { in: from } } : {}) },
@@ -91,6 +125,19 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
   async get(runId: string): Promise<SubstrateRunRecord | undefined> {
     const row = this.rows.get(runId);
     return row ? { ...row } : undefined;
+  }
+
+  async getByToken(token: string): Promise<SubstrateRunRecord | undefined> {
+    const row = [...this.rows.values()].find((candidate) => candidate.token === token);
+    return row ? { ...row } : undefined;
+  }
+
+  async reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined> {
+    const row = this.rows.get(runId);
+    if (!row || row.phase !== "requeued") return undefined;
+    row.phase = "provisioning";
+    row.deadlineAt = deadlineAt;
+    return { ...row };
   }
 
   async setPhase(runId: string, phase: SubstratePhase, from?: SubstratePhase[]): Promise<SubstrateRunRecord> {

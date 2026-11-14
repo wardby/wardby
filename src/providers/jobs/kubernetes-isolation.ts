@@ -107,7 +107,7 @@ export const ENFORCEMENT_PROBE_PROXY_UNREACHABLE = 4;
  */
 export const ENFORCEMENT_PROBE_DENY_REFUSED = 5;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
-const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
+export const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
 /** The worker waits for the launcher's seeded marker, then runs its provider's entrypoint. */
 function workerGate(entrypoint: string): string {
