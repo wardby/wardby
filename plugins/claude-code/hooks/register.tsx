@@ -207,7 +207,7 @@ const APPROXIMATE_NOTICE = "Older wardby: flows are approximate.";
 const FIX_ROUNDS = 2;
 // The Agents tab's "Unlinked agents" fold, kept in flowOpen beside the flows (whose keys are agent ids).
 const UNLINKED_KEY = "~unlinked";
-const EDGE_ORDER: LinkEdge["kind"][] = ["delegates", "fixes", "reviews", "after_merge"];
+const EDGE_ORDER: LinkEdge["kind"][] = ["delegates", "fixes", "reviews", "after_merge", "status"];
 
 /** A repository as the server keys it in flows: "provider:name", a GitHub name in lower case. */
 const linkRepoKey = (provider: string, repository: string): string =>
@@ -345,10 +345,22 @@ function shortRepo(key: string): string {
 }
 
 /**
+ * The status in "status:<provider>:<project>:<status>": a ticket status only a person sets (an approval
+ * column, say) that starts the agent. Null for any other entry.
+ */
+function personStatus(entry: string): string | null {
+  if (!entry.startsWith("status:")) return null;
+  const parts = entry.split(":");
+  return parts.length >= 4 ? parts.slice(3).join(":") : null;
+}
+
+/**
  * How an agent starts, as a short label: "@mention", "Jira KEY", "schedule", "webhook", "▶ manual", or for
  * a reviewer or after-merge agent whose pull requests come from people, "⚡ PR opened · <repo>" or "⚡ merged · <repo>".
  */
 function entryLabel(entry: string): string {
+  const gate = personStatus(entry);
+  if (gate) return `◆ ${gate} · person`;
   if (entry.startsWith("mention:")) return "@mention";
   if (entry.startsWith("jira:")) return `Jira ${entry.slice("jira:".length)}`;
   if (entry.startsWith("pull_request:")) return `⚡ PR opened · ${shortRepo(entry.slice("pull_request:".length))}`;
@@ -375,9 +387,22 @@ function flowStrip(flow: LinkFlow, data: AgentLinks): string {
   const walked = new Set([flow.key, ...children]);
   const reviewers = [...new Set(out(walked, "reviews").map((edge) => edge.to))];
   for (const id of reviewers) parts.push("→ PR →", nameOf(id));
-  for (const edge of out(new Set(reviewers), "fixes")) parts.push(`↺ ${edge.label ?? "fix"}`);
+  for (const label of new Set(out(new Set(reviewers), "fixes").map((edge) => edge.label ?? "fix")))
+    parts.push(`↺ ${label}`);
   for (const id of new Set(out(new Set([...walked, ...reviewers]), "after_merge").map((edge) => edge.to)))
     parts.push("→ merged →", nameOf(id));
+  // Ticket hand-offs: an agent moves the ticket to a status that starts the next one.
+  for (const edge of out(new Set([...walked, ...reviewers]), "status"))
+    parts.push(`→ ${edge.label} →`, nameOf(edge.to));
+  // The flow's other person-started agents, in the order they appear: "◆ Approved · person → builder".
+  for (const id of flow.entryAgentIds) {
+    if (id === flow.key) continue;
+    const gate = data.agents
+      .find((a) => a.id === id)
+      ?.entry.map(personStatus)
+      .find((s) => s !== null);
+    if (gate) parts.push(`· ◆ ${gate} · person →`, nameOf(id));
+  }
   return parts.join(" ");
 }
 
@@ -417,12 +442,19 @@ function entryChip(agent: LinkAgent, data: AgentLinks): string | null {
   if (entry?.startsWith("mention:")) return "⚡ mention";
   if (entry === "manual") return "▶ manual";
   if (entry === "schedule") return "⏱ schedule";
-  if (entry?.startsWith("jira:") || entry?.startsWith("pull_request:") || entry?.startsWith("push:"))
+  if (
+    entry?.startsWith("jira:") ||
+    entry?.startsWith("status:") ||
+    entry?.startsWith("pull_request:") ||
+    entry?.startsWith("push:")
+  )
     return entryLabel(entry);
   if (entry) return `⚡ ${entry}`;
   const into = data.edges.filter((edge) => edge.to === agent.id);
   if (into.some((edge) => edge.kind === "reviews")) return "⚡ PR opened";
   if (into.some((edge) => edge.kind === "after_merge")) return "⚡ merged";
+  const status = into.find((edge) => edge.kind === "status");
+  if (status) return `⚡ ${status.label ?? "status"}`;
   return null;
 }
 
@@ -447,7 +479,7 @@ function entryText(agent: LinkAgent): string {
 /** One line of the terminal's Flow tree: its depth, the agent it names (null for an entry or an event). */
 type TreeLine = { depth: number; agentId: string | null; text: string; ref?: boolean };
 // The order an agent's links are walked in the tree: hand-offs first, the loop back last.
-const TREE_ORDER: LinkEdge["kind"][] = ["delegates", "reviews", "after_merge", "fixes"];
+const TREE_ORDER: LinkEdge["kind"][] = ["delegates", "reviews", "after_merge", "status", "fixes"];
 
 /**
  * A flow as a top-down tree, one block per entry agent (the key agent first): its entry line, then the
@@ -480,7 +512,12 @@ function flowTree(flow: LinkFlow, data: AgentLinks): TreeLine[] {
       else if (edge.kind === "fixes")
         lines.push({ depth: depth + 1, agentId: null, text: `↺ ${edge.label ?? "fix"} → back to ${nameOf(edge.to)}` });
       else {
-        const event = edge.kind === "reviews" ? (edge.label ?? "PR opened") : "merged";
+        const event =
+          edge.kind === "reviews"
+            ? (edge.label ?? "PR opened")
+            : edge.kind === "status"
+              ? `status: ${edge.label ?? "changed"}`
+              : "merged";
         lines.push({ depth: depth + 1, agentId: null, text: `→ (${event})` });
         agentLine(edge.to, depth + 2, "");
       }
@@ -547,15 +584,28 @@ function flowMap(
 
   for (const id of members) nodes.set(id, { kind: "agent", label: byId.get(id)!.name });
   for (const id of flow.entryAgentIds.filter((id) => inFlow.has(id))) {
-    const entry = `entry:${id}`;
-    nodes.set(entry, { kind: "entry", label: entryText(byId.get(id)!) });
-    row.set(entry, 0);
+    const agent = byId.get(id)!;
+    // A status only a person sets (an approval) gets a pill of its own; other entries share one line.
+    const gates = agent.entry.map(personStatus).filter((s): s is string => s !== null);
+    const rest = agent.entry.filter((e) => personStatus(e) === null);
+    const starts = [
+      ...(rest.length > 0 || gates.length === 0
+        ? [{ node: `entry:${id}`, label: entryText({ ...agent, entry: rest }) }]
+        : []),
+      ...gates.map((gate) => ({ node: `gate:${id}:${gate}`, label: `◆ ${gate} · person` })),
+    ];
+    for (const { node, label } of starts) {
+      nodes.set(node, { kind: "entry", label });
+      row.set(node, 0);
+      addEdge({ from: node, to: id, dashed: false, label: null });
+    }
     row.set(id, 1);
-    addEdge({ from: entry, to: id, dashed: false, label: null });
   }
   const eventOf = (edge: LinkEdge): string => {
-    const id = `event:${edge.kind}:${edge.repository ?? ""}`;
-    if (!nodes.has(id)) nodes.set(id, { kind: "event", label: edge.kind === "reviews" ? "PR opened" : "merged" });
+    const id = `event:${edge.kind}:${edge.repository ?? ""}${edge.kind === "status" ? `:${(edge.label ?? "").toLowerCase()}` : ""}`;
+    const label =
+      edge.kind === "reviews" ? "PR opened" : edge.kind === "status" ? `status: ${edge.label ?? "changed"}` : "merged";
+    if (!nodes.has(id)) nodes.set(id, { kind: "event", label });
     return id;
   };
   // Shortest depth from the entries; an event takes a row of its own.
@@ -577,8 +627,29 @@ function flowMap(
       }
     }
   }
+  // Then push each node below everything that leads into it (bounded, so a status loop can't run away):
+  // an agent that a later agent delegates to sits under that agent, not beside its earlier lead.
+  const push = (id: string, depth: number): boolean => {
+    if ((row.get(id) ?? -1) >= depth) return false;
+    row.set(id, depth);
+    return true;
+  };
+  for (let changed = true, rounds = 0; changed && rounds <= nodes.size; rounds++) {
+    changed = false;
+    for (const edge of links) {
+      const from = row.get(edge.from);
+      if (from === undefined || edge.kind === "fixes") continue;
+      if (edge.kind === "delegates") changed = push(edge.to, from + 1) || changed;
+      else {
+        const event = eventOf(edge);
+        changed = push(event, from + 1) || changed;
+        changed = push(edge.to, row.get(event)! + 1) || changed;
+      }
+    }
+  }
   for (const edge of links) {
-    if (edge.kind === "delegates") addEdge({ from: edge.from, to: edge.to, dashed: true, label: edge.label });
+    // The bound name is written in the sub-agent's box, so the line carries no label.
+    if (edge.kind === "delegates") addEdge({ from: edge.from, to: edge.to, dashed: true, label: null });
     else if (edge.kind === "fixes") addEdge({ from: edge.from, to: edge.to, dashed: true, label: edge.label ?? "fix" });
     else {
       const event = eventOf(edge);
@@ -647,6 +718,8 @@ function flowMap(
 const svgText = (text: string): string =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 const EVENT_STROKE = "#a8a29e";
+// A ticket status only a person sets (an approval): wardby gold, readable on light and dark.
+const PERSON_GOLD = "#c9aa70";
 // Agent names on the map: a mid-tone that reads on light and dark (SVG takes no theme names).
 const MAP_LABEL = "#8a94a6";
 
@@ -730,8 +803,14 @@ function flowMapSvg(
   for (const node of map.nodes) {
     const cx = node.x + node.w / 2;
     if (node.kind === "entry") {
+      // A status only a person sets (an approval) is a gold pill; other entries are plain text.
+      const isPerson = node.label.includes("· person");
+      if (isPerson)
+        parts.push(
+          `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="${node.h / 2}" fill="${PERSON_GOLD}2a" stroke="${PERSON_GOLD}" />`,
+        );
       parts.push(
-        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="12" fill="${EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
+        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="12"${isPerson ? ' font-weight="600"' : ""} fill="${isPerson ? PERSON_GOLD : EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
       );
       continue;
     }

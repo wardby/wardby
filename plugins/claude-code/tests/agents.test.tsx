@@ -1297,3 +1297,71 @@ test("a server that keeps failing shows the error after a few tries, and backs o
   expect(calls.filter((t) => t === "list_agent_links")).toHaveLength(4);
   await ui.unmount();
 });
+
+/** A Jira board flow: people start the planner and the builder; the builder's pull request starts triage. */
+function boardLinks() {
+  const base = LINKS.agents[0];
+  const a = (id: string, name: string, entry: string[]) => ({ ...base, id, name, entry, repositories: [] });
+  return {
+    agents: [
+      a("p", "planner", ["status:jira:ABC:Ready for agent"]),
+      a("b", "builder", ["status:jira:ABC:Approved"]),
+      a("t", "triage", []),
+    ],
+    edges: [{ from: "b", to: "t", kind: "status", repository: "jira:ABC", label: "In Review" }],
+    flows: [
+      {
+        key: "b",
+        name: "Jira ABC",
+        agentIds: ["b", "p", "t"],
+        entryAgentIds: ["b", "p"],
+        repositories: [],
+        issueProjects: ["jira:ABC"],
+        related: [],
+      },
+    ],
+    unlinked: [],
+    hidden: { agents: 0, edges: 0 },
+  } as unknown as Links;
+}
+
+test("a Jira board: person-only statuses are gold entry pills and a status hand-off is a pill on the map", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, { data: boardLinks() });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "desktop", "agent-b");
+  const svg = (await ui.findAll({ type: "Svg" })).find((el) => String(el.props.alt).startsWith("Flow map"));
+  const source = String(svg?.props.source);
+  expect(source).toContain("◆ Approved · person");
+  expect(source).toContain("◆ Ready for agent · person");
+  expect(source).toMatch(/stroke="#c9aa70"/);
+  expect(source).toContain("status: In Review");
+  await ui.unmount();
+});
+
+test("a Jira board in the terminal: each person-started agent has its own block and the hand-off is a status line", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, { data: boardLinks() });
+  await openPane($, clock);
+  const ui = await openFlow($, clock, "terminal", "agent-b");
+  const text = await texts(ui);
+  expect(text).toContain("◆ Approved · person");
+  expect(text).toContain("◆ Ready for agent · person");
+  expect(text).toContain("→ (status: In Review)");
+  await ui.unmount();
+});
+
+test("a Jira board's flow strip names the hand-off and the person-started agents", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on);
+  linksServer(on, { data: boardLinks() });
+  await openPane($, clock);
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await ui.press({ key: "tab-agents" });
+  await clock.settle();
+  const text = await texts(ui);
+  expect(text).toContain("◆ Approved · person → builder → In Review → triage · ◆ Ready for agent · person → planner");
+  await ui.unmount();
+});

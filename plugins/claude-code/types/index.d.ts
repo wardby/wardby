@@ -164,7 +164,7 @@ export type LinkAgent = {
 export type LinkEdge = {
   from: string;
   to: string;
-  kind: "delegates" | "reviews" | "fixes" | "after_merge";
+  kind: "delegates" | "reviews" | "fixes" | "after_merge" | "status";
   repository: string | null;
   label: string | null;
 };
@@ -175,6 +175,8 @@ export type LinkFlow = {
   agentIds: string[];
   entryAgentIds: string[];
   repositories: string[];
+  /** Issue projects (e.g. "jira:SCRUM") the flow's agents start from or move tickets in; absent before Jira status links. */
+  issueProjects?: string[];
   related: string[];
 };
 export type AgentLinks = {
