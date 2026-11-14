@@ -21,7 +21,7 @@ directory.
   prototype (Play), and export them (see [Designs](#designs)).
 - Select text to start a comment thread; threads anchor to the quoted text and
   follow it across versions. If the text is deleted, the thread is marked
-  outdated.
+  outdated; it still takes replies.
 - Replies, resolve and reopen, edit and delete your own comments, and
   `@`-mentions (stored and highlighted; Wardby sends no notification in this
   phase). Members can mention members and the guests who have commented on
@@ -56,7 +56,7 @@ directory.
 | `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)    |
 | `reopen_document`                                            | `documents:write` | Reopen an approved document for review (needs `write`)                                          |
 | `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                         |
-| `wait_for_review`                                            | `documents:read`  | Wait until the review state changes or a timeout (default 300 s, at most 600 s) passes          |
+| `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)     |
 | `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                     |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
@@ -201,7 +201,10 @@ in review or has changes requested recomputes it, so earlier verdicts stop
 counting. A reviewer's verdict names the version they read
 (`review_document` takes `versionNumber`); if a newer version was published
 first it is refused with `document_version_conflict`, and the page offers
-**Review vN** to see what changed.
+**Review vN** to see what changed. A reviewer is offered only the verdict they
+have not already given on the current version (on an approved document, only
+**Request changes on vN**); repeating a verdict changes nothing and records no
+event.
 
 - **Force approve**: the owner or the final approver approves the current
   version over missing verdicts and requested changes. A note is required and
@@ -230,7 +233,10 @@ state and approval count and a **Review** tab with reviewers, verdicts, history
 and the actions you may take. The desktop Viewer's Documents tab shows the state
 as a chip. An agent session can wait for approval with `wait_for_review`: create
 the document, submit it, send reviewers a comment link if they have no account,
-wait, revise on `changes_requested`, continue on `approved`. Errors:
+wait, revise on `changes_requested`, continue on `approved`. The wait also
+returns when someone else comments (`reason: "comment"`); many MCP clients time
+out a request after 60 seconds, so pass `timeoutSeconds` of 50 or less and call
+again. Errors:
 `document_locked` (409), `document_review_forbidden` (403),
 `document_review_state_invalid` (409) and `document_version_conflict` (409). See
 [Review and approve documents](../help/document-review.md) for the details and

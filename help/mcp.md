@@ -107,7 +107,7 @@ document's owner no longer has execute access to the agent, or is not its
 owner and the owner does not allow others' task text),
 `document_too_large_for_agent` (the current version is over 60,000 characters,
 or does not fit in a coding task with the agent's instructions),
-`comment_thread_closed` (a thread is not open), `comment_thread_already_sent` (a
+`comment_thread_closed` (a reply to a resolved thread, or a send of a thread that is not open), `comment_thread_already_sent` (a
 thread's earlier run has not finished yet), `comment_send_rate_limited` (30
 sends per document per hour), `document_send_failed` (the run could not be
 started, or a design's repository copy could not be read; try again).

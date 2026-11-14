@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Review and approve documents
 
-A whole [document](documents.md) or [design](designs.md) has a review state. Comment threads keep their own states (open, resolved, outdated); the review state is about the document as a whole.
+A whole [document](documents.md) or [design](designs.md) has a review state. Comment threads keep their own states (open, resolved, outdated; open and outdated threads take replies); the review state is about the document as a whole.
 
 ## States
 
@@ -36,7 +36,9 @@ Reviewers act only with live access: a member needs at least comment access, and
 
 A reviewer approves or requests changes on the version they read, with an optional note. If a newer version was published meanwhile, the verdict is refused (`document_version_conflict`): read the new version and review it. The page shows "vN was published while you were reviewing vM" and a **Review vN** button that shows what changed since vM (on a design, vN opens in History with the boards changed since vM marked "changed").
 
-A named reviewer can also request changes on an approved document: it moves to Changes requested and unlocks, so a new version can be published.
+A reviewer is offered only the verdict they have not already given on the current version. With no verdict yet, they see **Approve** and **Request changes**. After approving, they see "You approved vN" and only **Request changes**; after requesting changes, "You requested changes on vN" and only **Approve**. Giving the same verdict again (for example `review_document` with `approve` twice) changes nothing: no event is recorded and a new note sent with it is not stored. A verdict from before a reopen does not count, so the same verdict after the reopen is recorded.
+
+A named reviewer can also request changes on an approved document: the Review tab offers only **Request changes on vN** (no Approve). It moves the document to Changes requested and unlocks it, so a new version can be published.
 
 **Force approve**: while the document is in review or has changes requested, the owner or the final approver approves the current version over missing verdicts and requested changes. A note is required, and the history records who was overridden.
 
@@ -59,7 +61,7 @@ Every document and design page shows a banner with the state and the approval co
 | `force_approve_document` | owner or final approver | `note` required; the result lists `overridden`                                                                                                                      |
 | `reopen_document`        | writers                 | approved to in review                                                                                                                                               |
 | `archive_document`       | owner                   | `archived: true` or `false`                                                                                                                                         |
-| `wait_for_review`        | `documents:read`        | waits until the state differs from `state` or `timeoutSeconds` (default 300, at most 600) passes                                                                    |
+| `wait_for_review`        | `documents:read`        | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`            |
 
 `get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events. Only the owner gets the ids of people: each reviewer's `ref`, each event's `actorRef`, `finalApproverId`, and `reviewCandidates` (the people and guests that can be named); everyone else gets names and verdicts. Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
 
@@ -68,7 +70,7 @@ Every document and design page shows a banner with the state and the approval co
 1. `create_document` with the plan.
 2. `submit_for_review` with the reviewers.
 3. `create_share_link` (comment) if reviewers have no account, and send them the link; once they have opened it and given a name, they appear in `reviewCandidates`.
-4. `wait_for_review` with the state you saw (`in_review`); call it again when it returns `changed: false`. If your MCP client times out before the wait returns, pass a smaller `timeoutSeconds` (for example 50) and loop.
+4. `wait_for_review` with the state you saw (`in_review`). It returns `changed` (whether the state differs) and `reason`: `state` (the review state changed), `comment` (someone other than you started a thread or replied, including an agent's reply) or `timeout`. On `comment`, read the threads with `list_comment_threads`, reply, and wait again with the same state; on `timeout`, call it again. Many MCP clients give up on a request after 60 seconds, so pass `timeoutSeconds` of 50 or less and loop while `changed` is `false`.
 5. On `changes_requested`: read the notes (`get_document`) and threads (`list_comment_threads`), revise with `publish_version`, reply to or resolve the threads, and wait again.
 6. On `approved`: continue, citing the approved version number.
 
