@@ -9,7 +9,7 @@
  * - Nothing is exec'd into an actor. Data moves through the blob store, served to the actors by the
  *   coding proxy: the launcher stages `input`, `toolSetup` (the run's registry-only token: its only
  *   home) and `seed`; the actors post `result`, `transcript`, `workspace`, and the proxy writes
- *   `exit` and `done`.
+ *   `exit` (with the worker's own diagnostic, if it printed one), `done` and `started`.
  * - The `SubstrateRun` row is the launch fence (a second launch of the same run finds it) and the
  *   phase record. Completion is reported, not observed: `done` with a parseable `result`, written by
  *   the deadline (plus 5 s of clock skew), is success; a later one is a timeout.
@@ -76,7 +76,20 @@ export interface SubstrateJobLauncherOptions {
   now?: () => number;
   /** Where a failed Substrate call during a launch is reported (default: the server log, as a warning). */
   onSubstrateCallFailed?: (failure: SubstrateCallFailure) => void;
+  /**
+   * How long after the worker's exit report (`exit`) the workspace (`done`) may take before the run
+   * fails as substrate_collect_timeout (default 120 s): a tool side that died never sends it.
+   */
+  collectGraceMs?: number;
+  /**
+   * How long a running run may go without both actors reaching the proxy (the agent's first input
+   * download, the tool's first events poll) before it fails as substrate_startup_timeout (default 300 s).
+   */
+  startupTimeoutMs?: number;
 }
+
+export const DEFAULT_COLLECT_GRACE_MS = 120_000;
+export const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
 
 /** The Substrate calls a launch makes, by SubstrateApi method name. */
 export type SubstrateCall =
@@ -128,7 +141,15 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
     status: { state: "failed" },
     result: { exitCode: 1, reason: "failed", diagnostic: "substrate_provisioning_failed" },
   },
+  startup_timeout: {
+    status: { state: "failed" },
+    result: { exitCode: 1, reason: "failed", diagnostic: "substrate_startup_timeout" },
+  },
+  // collect_timeout: its result carries the worker's exit report (see observe).
 };
+
+/** Outcomes whose actors are deleted when recorded: the run must not keep running. */
+const STOP_ACTORS_ON: readonly SubstratePhase[] = ["timed_out", "collect_timeout", "startup_timeout"];
 
 /** The fixed code of a failed Substrate call; any other error is "unexpected" (its message is never read). */
 function substrateErrorCode(error: unknown): string {
@@ -177,6 +198,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private readonly config: SubstrateLaunchConfig;
   private readonly workspaceRoot: string;
   private readonly now: () => number;
+  private readonly collectGraceMs: number;
+  private readonly startupTimeoutMs: number;
 
   constructor(private readonly options: SubstrateJobLauncherOptions) {
     this.api = options.api;
@@ -186,6 +209,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.workspaceRoot = resolve(options.workspaceRoot);
     if (this.workspaceRoot === resolve("/")) throw new Error("substrate_launcher_path_invalid");
     this.now = options.now ?? Date.now;
+    this.collectGraceMs = options.collectGraceMs ?? DEFAULT_COLLECT_GRACE_MS;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
   }
 
   /** Phase A: no coding-run services on Substrate. */
@@ -509,13 +534,27 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * The job's state, and its result when terminal. Order: a recorded outcome; a reported one (the
-   * proxy's `done` blob); the deadline; then the actors. An `exit` without `done` is a collect still
-   * in flight, so the run stays running until `done` or the deadline.
+   * proxy's `done` blob); the deadline; the actors; then the two fail-fast checks. An `exit` without
+   * `done` is a collect still in flight, so the run stays running until `done`, collectGraceMs after
+   * `exit` (collect_timeout) or the deadline; a run whose actors never reached the proxy fails after
+   * startupTimeoutMs (startup_timeout).
    */
   private async observe(record: SubstrateRunRecord): Promise<Observation> {
     if (record.phase === "removed") throw new Error("job_removed");
     const recorded = RECORDED[record.phase];
     if (recorded) return structuredClone(recorded);
+    if (record.phase === "collect_timeout") {
+      // The worker's exit code and its own diagnostic when it reported one, as for a missing result.
+      const exit = await this.exitReport(record.token);
+      return {
+        status: { state: "failed" },
+        result: {
+          exitCode: exit.code,
+          reason: "failed",
+          ...(exit.diagnostic ?? { diagnostic: "substrate_collect_timeout" }),
+        },
+      };
+    }
     if (record.phase === "requeued") return { status: { state: "pending", capacityRefused: true } };
     const reported = await this.reported(record);
     if (reported) return reported;
@@ -530,7 +569,27 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!agent || !tool) return this.settle(record, "lost");
     if (agent.state === "CRASHED") return this.settle(record, "crashed");
     if (tool.state === "CRASHED") return this.settle(record, "tool_failed");
+    // The worker exited (exit) but the workspace (done) never came: the tool side is gone.
+    const exited = await this.blobs.head(BLOB.exit(record.token));
+    if (exited && this.now() - exited.updatedAt.getTime() > this.collectGraceMs) {
+      return this.settle(record, "collect_timeout");
+    }
+    if (await this.startupTimedOut(record)) return this.settle(record, "startup_timeout");
     return { status: { state: "running" } };
+  }
+
+  /**
+   * Running longer than startupTimeoutMs while an actor has not reached the proxy: no `started`
+   * record (the agent never downloaded its input) or the tool setup still staged (the tool never
+   * made its first events poll, which deletes it). Measured from the row's updatedAt, which is the
+   * move to running while neither has happened (the relay writes the row only once the agent has
+   * its input, and then only ever later, so the timeout can only come late, never early).
+   */
+  private async startupTimedOut(record: SubstrateRunRecord): Promise<boolean> {
+    const since = record.updatedAt?.getTime();
+    if (since === undefined || !Number.isFinite(since) || this.now() - since <= this.startupTimeoutMs) return false;
+    if (!(await this.blobs.head(BLOB.started(record.token)))) return true;
+    return (await this.blobs.head(BLOB.toolSetup(record.token))) !== null;
   }
 
   /** Records an outcome the launcher observed; if another caller recorded one first, that one stands. */
@@ -545,7 +604,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       return this.observe(current);
     }
     // A timed-out run must not keep running; the others are left for remove().
-    if (phase === "timed_out") await this.deleteActors(record.token).catch(() => undefined);
+    if (STOP_ACTORS_ON.includes(phase)) await this.deleteActors(record.token).catch(() => undefined);
     return this.observe(stored);
   }
 

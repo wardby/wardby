@@ -103,6 +103,8 @@ export async function makeHarness(
     config?: Partial<SubstrateLaunchConfig>;
     runId?: string;
     runs?: SubstrateRunStore;
+    collectGraceMs?: number;
+    startupTimeoutMs?: number;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -117,9 +119,9 @@ export async function makeHarness(
     ...(options.workerSize ? { workerSize: options.workerSize } : {}),
     ...(options.workerLabels ? { workerLabels: options.workerLabels } : {}),
   });
-  const runs = options.runs ?? new MemorySubstrateRunStore();
-  const secrets = new RecordingSecrets();
   let now = 1_000_000;
+  const runs = options.runs ?? new MemorySubstrateRunStore(() => now);
+  const secrets = new RecordingSecrets();
   const callFailures: SubstrateCallFailure[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const launcher = new SubstrateJobLauncher({
@@ -132,6 +134,8 @@ export async function makeHarness(
     resolveCapability: async () => FAKE_CAP,
     now: () => now,
     onSubstrateCallFailed: (failure) => callFailures.push(failure),
+    ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
+    ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
   });
   const spec: JobSpec = {
     kind: "coding-agent",

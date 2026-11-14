@@ -4,7 +4,8 @@ import type { PrismaClient } from "#prisma";
  * provisioning, running and requeued are active. The rest are terminal and never change except to
  * `removed`: stopped (stop()), and the outcomes the launcher observed itself rather than read from a
  * reported result — timed_out, lost (an actor is gone), crashed (the agent actor), tool_failed (the
- * tool actor) and provisioning_failed (launch failed after the fence).
+ * tool actor), provisioning_failed (launch failed after the fence), collect_timeout (the worker
+ * exited but the workspace never arrived) and startup_timeout (an actor never reached the proxy).
  */
 export type SubstratePhase =
   | "provisioning"
@@ -16,7 +17,9 @@ export type SubstratePhase =
   | "lost"
   | "crashed"
   | "tool_failed"
-  | "provisioning_failed";
+  | "provisioning_failed"
+  | "collect_timeout"
+  | "startup_timeout";
 
 export interface SubstrateRunRecord {
   runId: string;
@@ -24,6 +27,12 @@ export interface SubstrateRunRecord {
   specHash: string;
   phase: SubstratePhase;
   deadlineAt: Date;
+  /**
+   * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
+   * neither actor has reached the proxy, that is when it became running: the relay's own writes to
+   * the row (channels, lines) only start once the agent has its input.
+   */
+  updatedAt?: Date;
 }
 
 export interface SubstrateRunStore {
@@ -48,6 +57,7 @@ function toRecord(row: {
   specHash: string;
   phase: string;
   deadlineAt: Date;
+  updatedAt: Date;
 }): SubstrateRunRecord {
   return {
     runId: row.runId,
@@ -55,6 +65,7 @@ function toRecord(row: {
     specHash: row.specHash,
     phase: row.phase as SubstratePhase,
     deadlineAt: row.deadlineAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -115,11 +126,15 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
 export class MemorySubstrateRunStore implements SubstrateRunStore {
   private readonly rows = new Map<string, SubstrateRunRecord>();
 
+  /** `now` stamps updatedAt on every write (tests pass their clock). */
+  constructor(private readonly now: () => number = Date.now) {}
+
   async claim(record: SubstrateRunRecord): Promise<{ created: boolean; record: SubstrateRunRecord }> {
     const existing = this.rows.get(record.runId);
     if (existing) return { created: false, record: { ...existing } };
-    this.rows.set(record.runId, { ...record });
-    return { created: true, record: { ...record } };
+    const row = { ...record, updatedAt: new Date(this.now()) };
+    this.rows.set(record.runId, row);
+    return { created: true, record: { ...row } };
   }
 
   async get(runId: string): Promise<SubstrateRunRecord | undefined> {
@@ -137,6 +152,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
     if (!row || row.phase !== "requeued") return undefined;
     row.phase = "provisioning";
     row.deadlineAt = deadlineAt;
+    row.updatedAt = new Date(this.now());
     return { ...row };
   }
 
@@ -144,6 +160,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
     const row = this.rows.get(runId);
     if (!row || (from && !from.includes(row.phase))) throw phaseConflict();
     row.phase = phase;
+    row.updatedAt = new Date(this.now());
     return { ...row };
   }
 }

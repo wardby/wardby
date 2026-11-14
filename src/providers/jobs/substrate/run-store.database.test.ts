@@ -35,7 +35,11 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
     expect(await store.get(runId)).toEqual(first.record);
 
     await expect(store.setPhase(runId, "running", ["requeued"])).rejects.toThrow("substrate_phase_conflict");
-    expect((await store.setPhase(runId, "running", ["provisioning"])).phase).toBe("running");
+    const before = Date.now();
+    const running = await store.setPhase(runId, "running", ["provisioning"]);
+    expect(running.phase).toBe("running");
+    // The row's @updatedAt: when it last changed (here, when it became running).
+    expect(running.updatedAt?.getTime()).toBeGreaterThanOrEqual(before - 1_000);
     expect((await store.setPhase(runId, "stopped")).phase).toBe("stopped");
     expect(await store.getByToken(token)).toMatchObject({ runId, phase: "stopped" });
     expect(await store.getByToken("wr-ffffffffffffffffffff")).toBeUndefined();

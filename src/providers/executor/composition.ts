@@ -190,6 +190,8 @@ export function buildSubstrateJobLauncher(options: {
     },
     workspaceRoot: options.workspaceRoot,
     resolveCapability: options.resolveCapability,
+    ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
+    ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
   });
 }
 

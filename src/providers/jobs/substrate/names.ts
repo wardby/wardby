@@ -52,6 +52,8 @@ export const BLOB = {
   workspace: (t: string) => `substrate/runs/${t}/workspace.tar`,
   exit: (t: string) => `substrate/runs/${t}/exit.json`,
   done: (t: string) => `substrate/runs/${t}/done.json`,
+  /** Written by the proxy (if absent) on the agent's first successful input download: the run reached the proxy. */
+  started: (t: string) => `substrate/runs/${t}/started.json`,
 };
 
 export const PLACEHOLDER_CAPABILITY = "rrp_placeholder_injected_by_gateway";

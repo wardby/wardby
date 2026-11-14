@@ -74,6 +74,9 @@ describe("substrate routes", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  const waitForBlob = async (key: string): Promise<void> => {
+    for (let i = 0; i < 100 && !(await blobs.head(key)); i++) await new Promise((r) => setTimeout(r, 10));
+  };
   const agent = (init: RequestInit = {}) => ({
     ...init,
     headers: { "x-api-key": CAPABILITY, ...(init.headers as Record<string, string> | undefined) },
@@ -210,6 +213,26 @@ describe("substrate routes", () => {
     expect(await (await fetch(`${base}/input`, agent())).text()).toBe('{"task":"x"}');
     expect(await (await fetch(`${base}/seed`, tool())).text()).toBe("tar-bytes");
     expect((await fetch(`${base}/input`, tool())).status).toBe(401);
+  });
+
+  it("records that the run started on the agent's first successful input download, once", async () => {
+    await start();
+    // No input yet: a 404 is not a start.
+    expect((await fetch(`${base}/input`, agent())).status).toBe(404);
+    expect(await blobs.head(BLOB.started(TOKEN))).toBeNull();
+    await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+    expect((await fetch(`${base}/input`, tool())).status).toBe(401);
+    expect(await blobs.head(BLOB.started(TOKEN))).toBeNull();
+    expect(await (await fetch(`${base}/input`, agent())).text()).toBe('{"task":"x"}');
+    await waitForBlob(BLOB.started(TOKEN));
+    const first = await blobs.head(BLOB.started(TOKEN));
+    await blobs.put(BLOB.started(TOKEN), Buffer.from("{}"));
+    const put = vi.spyOn(blobs, "put");
+    expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Put-if-absent: an existing record is never rewritten.
+    expect(put.mock.calls.filter(([key]) => key === BLOB.started(TOKEN))).toEqual([]);
+    expect(first).not.toBeNull();
   });
 
   it("stores the result and queues a collect request for the tool", async () => {

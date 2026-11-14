@@ -10,7 +10,17 @@ import { agentTemplate, toolTemplate } from "./specs.js";
 import { CONFIG, FAKE_CAP, makeHarness, SMALL_WORKER, type Harness } from "./launcher.test-support.js";
 import { BLOB, agentActorName, toolActorName } from "./names.js";
 
-const BLOB_KINDS = ["input", "toolSetup", "seed", "result", "transcript", "workspace", "exit", "done"] as const;
+const BLOB_KINDS = [
+  "input",
+  "toolSetup",
+  "seed",
+  "result",
+  "transcript",
+  "workspace",
+  "exit",
+  "done",
+  "started",
+] as const;
 
 async function blobKeys(h: Harness): Promise<string[]> {
   const present: string[] = [];
@@ -267,12 +277,104 @@ describe("SubstrateJobLauncher", () => {
     expect(await h.launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
   });
 
+  describe("fails fast instead of waiting for the deadline", () => {
+    const START = 1_000_000;
+    /** The proxy's records of a started run: the agent fetched its input, the tool polled (tool setup gone). */
+    const started = async (h: Harness): Promise<void> => {
+      await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
+      await h.blobs.delete(BLOB.toolSetup(h.token));
+    };
+
+    it("fails a run whose workspace never arrives within the collect grace after the worker exited", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      h.setNow(START + 60_000);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":3}'));
+      h.setNow(START + 60_000 + 120_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 60_000 + 120_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(h.api.actors.size).toBe(0);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 3,
+        reason: "failed",
+        diagnostic: "substrate_collect_timeout",
+      });
+      // Terminal: a late `done` changes nothing.
+      await finish(h, h.output);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_collect_timeout");
+    });
+
+    it("reports the worker's own diagnostic on a collect timeout, and honours a configured grace", async () => {
+      const h = await makeHarness({ collectGraceMs: 10_000 });
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":1,"diagnostic":"coding_turn_limit"}'));
+      h.setNow(START + 10_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "coding_turn_limit",
+      });
+    });
+
+    it("fails a run whose agent never fetched its input within the startup timeout", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      h.setNow(START + 300_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 300_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(h.api.actors.size).toBe(0);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "substrate_startup_timeout",
+      });
+      h.setNow(START + 10_000_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    });
+
+    it("fails a run whose tool never made its first events poll (tool setup still there)", async () => {
+      const h = await makeHarness({ startupTimeoutMs: 60_000 });
+      const handle = await h.launcher.launch(h.spec);
+      await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
+      h.setNow(START + 60_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_startup_timeout");
+    });
+
+    it("keeps a started run running past the startup timeout, until its deadline", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      h.setNow(START + 599_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 600_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    });
+
+    it("counts the startup timeout from when the run became running, not from the launch claim", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      // The row's last write is the move to running (memory store: the harness clock at that moment).
+      const record = await h.runs.get(h.spec.runId);
+      expect(record?.updatedAt).toEqual(new Date(START));
+      h.setNow(START + 200_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    });
+  });
+
   it("removes actors, policies, Secret and blobs, keeps a tombstone and never relaunches", async () => {
     const h = await makeHarness();
     const handle = await h.launcher.launch(h.spec);
     await h.blobs.put(BLOB.transcript(h.token), Buffer.from("{}\n"));
     await h.blobs.put(BLOB.workspace(h.token), Buffer.from("tar"));
     await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":0}'));
+    await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
     await finish(h);
     await h.launcher.remove(handle);
     expect(h.api.actors.size).toBe(0);

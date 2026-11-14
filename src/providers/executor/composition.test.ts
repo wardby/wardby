@@ -95,6 +95,21 @@ describe("JOB_LAUNCHER=substrate", () => {
     });
     expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
   });
+
+  it("passes the collect grace and startup timeout to the launcher, in milliseconds", () => {
+    const launcher = buildSubstrateJobLauncher({
+      env: { ...env, SUBSTRATE_COLLECT_GRACE_SEC: "45", SUBSTRATE_STARTUP_TIMEOUT_SEC: "900" },
+      db,
+      workspaceRoot: join(dir, "ws"),
+      resolveCapability: async () => "cap",
+      substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    const options = (launcher as unknown as { options: { collectGraceMs?: number; startupTimeoutMs?: number } })
+      .options;
+    expect(options.collectGraceMs).toBe(45_000);
+    expect(options.startupTimeoutMs).toBe(900_000);
+  });
 });
 
 describe("buildConfiguredExecutor", () => {

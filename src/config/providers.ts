@@ -721,6 +721,10 @@ export interface SubstrateJobConfig {
   proxyHost: string;
   proxyPort: number;
   workerSelector?: Record<string, string>;
+  /** SUBSTRATE_COLLECT_GRACE_SEC: after the worker exits, how long the workspace may take (launcher default 120 s). */
+  collectGraceSec?: number;
+  /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
+  startupTimeoutSec?: number;
 }
 
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
@@ -776,6 +780,20 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   if (kubeContext) config.kubeContext = kubeContext;
   const workerSelector = parseWorkerSelector(env.SUBSTRATE_WORKER_SELECTOR);
   if (workerSelector) config.workerSelector = workerSelector;
+  const collectGraceSec = optionalBoundedInteger(
+    env.SUBSTRATE_COLLECT_GRACE_SEC?.trim() || undefined,
+    "SUBSTRATE_COLLECT_GRACE_SEC",
+    10,
+    3_600,
+  );
+  if (collectGraceSec !== undefined) config.collectGraceSec = collectGraceSec;
+  const startupTimeoutSec = optionalBoundedInteger(
+    env.SUBSTRATE_STARTUP_TIMEOUT_SEC?.trim() || undefined,
+    "SUBSTRATE_STARTUP_TIMEOUT_SEC",
+    30,
+    7_200,
+  );
+  if (startupTimeoutSec !== undefined) config.startupTimeoutSec = startupTimeoutSec;
   return config;
 }
 

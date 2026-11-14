@@ -256,8 +256,18 @@ export function createSubstrateRoutes(
     key: string,
     contentType: string,
     counter: { bytes: number },
+    /** Runs once the blob is known to exist, before anything is sent (a failure answers 500, so the caller retries). */
+    beforeSend?: () => Promise<void>,
   ): Promise<void> {
     const source = await options.blobs.getStream(key);
+    if (beforeSend) {
+      try {
+        await beforeSend();
+      } catch (error) {
+        (source as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+        throw error;
+      }
+    }
     const meter = countBytes();
     response.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
     await new Promise<void>((resolve) => {
@@ -374,7 +384,14 @@ export function createSubstrateRoutes(
       const channel = matched.channel ?? "";
       switch (matched.name) {
         case "input":
-          await sendBlob(response, BLOB.input(token), "application/json", counters);
+          // The agent reached the proxy: record it (if not yet recorded) before the input is sent, so
+          // a failed write answers 500 and the agent asks again, and the launcher's startup timeout
+          // (no `started` record) never fires on a run that did start.
+          await sendBlob(response, BLOB.input(token), "application/json", counters, async () => {
+            if (!(await blobs.head(BLOB.started(token)))) {
+              await blobs.put(BLOB.started(token), Buffer.from("{}"), { contentType: "application/json" });
+            }
+          });
           return;
         case "tool-setup":
           // Not deleted here: a lost response would strand the run. The first events poll deletes it.

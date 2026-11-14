@@ -502,8 +502,12 @@ describe("loadSubstrateJobConfig", () => {
         SUBSTRATE_KUBE_CONTEXT: "kind-x",
         SUBSTRATE_PROXY_PORT: "9000",
         SUBSTRATE_WORKER_SELECTOR: "pool=a, zone=b",
+        SUBSTRATE_COLLECT_GRACE_SEC: "60",
+        SUBSTRATE_STARTUP_TIMEOUT_SEC: "600",
       }),
     ).toMatchObject({
+      collectGraceSec: 60,
+      startupTimeoutSec: 600,
       caFile: "/ca.pem",
       serverName: "api.ate",
       atespace: "runs",
@@ -531,6 +535,14 @@ describe("loadSubstrateJobConfig", () => {
     );
     expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_API_URL: "not a url" })).toThrow("SUBSTRATE_API_URL");
     expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_ATESPACE: "Bad_Name" })).toThrow("SUBSTRATE_ATESPACE");
+    for (const [name, value] of [
+      ["SUBSTRATE_COLLECT_GRACE_SEC", "5"],
+      ["SUBSTRATE_COLLECT_GRACE_SEC", "soon"],
+      ["SUBSTRATE_STARTUP_TIMEOUT_SEC", "10"],
+      ["SUBSTRATE_STARTUP_TIMEOUT_SEC", "1.5"],
+    ] as const) {
+      expect(() => loadSubstrateJobConfig({ ...base, [name]: value })).toThrow(name);
+    }
   });
 });
 
