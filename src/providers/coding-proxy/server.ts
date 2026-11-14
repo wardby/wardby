@@ -206,6 +206,10 @@ export async function startCodingProxyServer(
         sendError(response, 403, "invalid_host");
         return;
       }
+      // The registry builds its URLs on this host, so only a value the guard
+      // above matched exactly is ever passed (never X-Forwarded-*); with no
+      // guard configured the registry keeps its own fixed base.
+      const validatedHost = config.expectedHosts ? request.headers.host : undefined;
       if (request.url?.startsWith("/cache/")) {
         if (!config.dependencyCache) {
           closeIfBodyUnread(request, response);
@@ -244,6 +248,7 @@ export async function startCodingProxyServer(
           const result = await config.registry.plan({
             ecosystem: plan[1],
             token: registryToken(request.headers.authorization),
+            ...(validatedHost ? { host: validatedHost } : {}),
             readBody: () => {
               bodyRead = true;
               return readPlanBody(request, AbortSignal.any([controller.signal, AbortSignal.timeout(PLAN_UPLOAD_MS)]));
@@ -290,6 +295,7 @@ export async function startCodingProxyServer(
           subpath: match[2].split("?")[0],
           token: registryToken(request.headers.authorization),
           signal: controller.signal,
+          ...(validatedHost ? { host: validatedHost } : {}),
         });
         response.statusCode = result.status;
         response.setHeader("content-type", result.contentType);

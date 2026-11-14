@@ -448,6 +448,56 @@ describe("coding proxy registry routing", () => {
     await server.close();
   });
 
+  it("passes the registry only a Host the guard matched, never a forwarded one", async () => {
+    const handled: (string | undefined)[] = [];
+    const planned: (string | undefined)[] = [];
+    const registry = {
+      handle: async (request: RegistryRequest): Promise<RegistryResponse> => {
+        handled.push(request.host);
+        return { status: 200, contentType: "text", body: "" };
+      },
+      plan: async (request: RegistryPlanRequest): Promise<RegistryResponse> => {
+        planned.push(request.host);
+        return { status: 200, contentType: "application/json", body: "{}" };
+      },
+    };
+    const hosts = ["wardby-proxy:8787", "coding-proxy.example.svc.cluster.local:8787"];
+    const send = (port: number, host: string, path: string, method = "GET") =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port, path, method, headers: { host, "x-forwarded-host": "evil.example:8787" } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end(method === "POST" ? "{}" : undefined);
+      });
+    const guarded = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHosts: hosts,
+      registry,
+    });
+    expect(await send(guarded.port, hosts[1], "/registry/pypi/simple/demo/")).toBe(200);
+    expect(await send(guarded.port, hosts[0], "/registry/pypi/simple/demo/")).toBe(200);
+    expect(await send(guarded.port, hosts[1], "/registry/npm/-/plan", "POST")).toBe(200);
+    expect(await send(guarded.port, "evil.example:8787", "/registry/pypi/simple/demo/")).toBe(403);
+    expect(handled).toEqual([hosts[1], hosts[0]]);
+    expect(planned).toEqual([hosts[1]]);
+    await guarded.close();
+    // No guard configured: no host is passed, so the registry keeps its default base.
+    const open = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    expect(await send(open.port, hosts[1], "/registry/pypi/simple/demo/")).toBe(200);
+    expect(await send(open.port, hosts[1], "/registry/npm/-/plan", "POST")).toBe(200);
+    expect(handled.at(-1)).toBeUndefined();
+    expect(handled).toHaveLength(3);
+    expect(planned.at(-1)).toBeUndefined();
+    expect(planned).toHaveLength(2);
+    await open.close();
+  });
+
   it("accepts any exactly listed host and rejects the rest", async () => {
     const registry = {
       handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
