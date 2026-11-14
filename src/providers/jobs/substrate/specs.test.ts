@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { JobSpec } from "../types.js";
 import {
   agentEgress,
-  agentEnv,
   agentTemplate,
   runSecret,
   toolEgress,
   toolTemplate,
+  workerEnv,
   type SubstrateLaunchConfig,
 } from "./specs.js";
 
@@ -42,7 +42,7 @@ describe("substrate spec builders", () => {
       toolTemplate(spec, CONFIG),
       agentEgress(TOKEN, CONFIG),
       toolEgress(CONFIG),
-      agentEnv(CONFIG),
+      workerEnv(CONFIG),
     ]);
     expect(all).not.toContain(FAKE_CAP);
     expect(all).not.toContain("rrg_");
@@ -102,6 +102,36 @@ describe("substrate spec builders", () => {
     const bigger = fakeClaudeSpec();
     bigger.limits.memoryMb = 4096;
     expect(agentTemplate(bigger, CONFIG).name).not.toBe(a.name);
+  });
+
+  it("names the template by everything in it, not only image and size", () => {
+    const base = agentTemplate(fakeClaudeSpec(), { ...CONFIG, workerSelector: { pool: "x", zone: "a" } }).name;
+    const name = (config: SubstrateLaunchConfig) => agentTemplate(fakeClaudeSpec(), config).name;
+    expect(name({ ...CONFIG, workerSelector: { zone: "a", pool: "x" } })).toBe(base);
+    expect(
+      name({ ...CONFIG, proxyHost: "other.svc.cluster.local", workerSelector: { pool: "x", zone: "a" } }),
+    ).not.toBe(base);
+    expect(name({ ...CONFIG, proxyPort: 9999, workerSelector: { pool: "x", zone: "a" } })).not.toBe(base);
+    expect(name({ ...CONFIG, workerSelector: { pool: "y", zone: "a" } })).not.toBe(base);
+    expect(toolTemplate(fakeClaudeSpec(), { ...CONFIG, proxyPort: 9999 }).name).not.toBe(
+      toolTemplate(fakeClaudeSpec(), CONFIG).name,
+    );
+  });
+
+  it("keeps the template name the same across runs and labels", () => {
+    const a = fakeClaudeSpec();
+    const b = { ...fakeClaudeSpec(), runId: "run-2", labels: { owner: "someone-else" } };
+    expect(agentTemplate(b, CONFIG).name).toBe(agentTemplate(a, CONFIG).name);
+    expect(toolTemplate(b, CONFIG).name).toBe(toolTemplate(a, CONFIG).name);
+  });
+
+  it("refuses a run whose agent share of the limits is not positive", () => {
+    const tooSmallMemory = fakeClaudeSpec();
+    tooSmallMemory.limits.memoryMb = 128;
+    expect(() => agentTemplate(tooSmallMemory, CONFIG)).toThrow("substrate_limits_too_small");
+    const tooSmallCpu = fakeClaudeSpec();
+    tooSmallCpu.limits.cpus = 0.25;
+    expect(() => agentTemplate(tooSmallCpu, CONFIG)).toThrow("substrate_limits_too_small");
   });
 
   it("builds the agent template", () => {

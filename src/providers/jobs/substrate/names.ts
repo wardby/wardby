@@ -20,14 +20,19 @@ export function toolActorSubject(atespace: string, token: string): string {
   return `actor/${atespace}/${toolActorName(token)}`;
 }
 
-/** Template name derived from its content: `wardby-<role>-` + 16 hex chars. */
+/**
+ * Template name derived from its content: `wardby-<role>-` + 16 hex chars. `variant` is a stable
+ * digest of everything else in the template (env, worker selector), so two templates that differ
+ * in any field never share a name.
+ */
 export function templateName(
   role: "agent" | "tool",
   image: string,
   cpuMillicores: number,
   memoryBytes: number,
+  variant: string,
 ): string {
-  return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}`, 16)}`;
+  return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}|${variant}`, 16)}`;
 }
 
 /** Blob keys for one run. The launch record lives in Postgres, not in the blob store. */

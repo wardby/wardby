@@ -11,9 +11,11 @@ describe("substrate names", () => {
     expect(toolActorSubject("wardby-runs", t)).toBe(`actor/wardby-runs/${t}-tool`);
   });
   it("names templates by content", () => {
-    const a = templateName("agent", "r@sha256:aa", 1000, 2 ** 30);
+    const a = templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v1");
     expect(a).toMatch(/^wardby-agent-[0-9a-f]{16}$/);
-    expect(templateName("agent", "r@sha256:bb", 1000, 2 ** 30)).not.toBe(a);
+    expect(templateName("agent", "r@sha256:bb", 1000, 2 ** 30, "v1")).not.toBe(a);
+    expect(templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v2")).not.toBe(a);
+    expect(templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v1")).toBe(a);
   });
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");
