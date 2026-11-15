@@ -605,6 +605,45 @@ describe("the agent's package policy is not part of the key", () => {
   });
 });
 
+describe("an adopted round (reused workspace)", () => {
+  it("refuses lookup, download and upload with 409 reused_workspace, and still seals", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    expect(await s.lookup()).toEqual({ status: 409, body: { error: "reused_workspace" } });
+    const response = await s.download(s.derived().keyId);
+    expect([response.status, await response.json()]).toEqual([409, { error: "reused_workspace" }]);
+    expect(await s.upload(archive)).toEqual({ status: 409, body: { error: "reused_workspace" } });
+    expect(s.store.rows).toEqual([]);
+    expect(await storedFiles(s.dir)).toEqual([]);
+    expect(await s.seal()).toEqual({ status: 200, body: { sealed: true } });
+  });
+
+  it("answers reused_workspace, not sealed, after the seal", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    await s.seal();
+    expect(await s.lookup()).toEqual({ status: 409, body: { error: "reused_workspace" } });
+  });
+
+  it("leaves another run alone", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    const result = await s.lookup({ lock: LOCK }, OTHER_TOKEN);
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ hit: false });
+  });
+
+  it("answers 500 and writes nothing when the store cannot tell", async () => {
+    const s = await setup();
+    vi.spyOn(s.store, "workspaceReused").mockRejectedValue(new Error("db unavailable"));
+    expect(await s.lookup()).toEqual({ status: 500, body: { error: "internal_error" } });
+    expect((await s.upload(archive)).status).toBe(500);
+    expect(s.store.rows).toEqual([]);
+    expect(await storedFiles(s.dir)).toEqual([]);
+    expect((await s.seal()).status).toBe(200);
+  });
+});
+
 describe("dependency cache seal", () => {
   it("is idempotent and closes every other route", async () => {
     const { seal, lookup, upload, download, store, registry, derived } = await setup();

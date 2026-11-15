@@ -83,6 +83,21 @@ describe("dependency cache logging", () => {
     expect(logged).not.toContain(LOCK);
   });
 
+  it("logs a reused-workspace refusal as one fixed line, never the token or the query", async () => {
+    const { call, store } = await setup();
+    store.reusedRuns.add("run-1");
+    expect(await call(`lookup?lock=${LOCK}`)).toBe(409);
+    expect(await call(`blob?lock=${LOCK}`, { method: "PUT", body: "bytes" })).toBe(409);
+    expect(refusals()).toEqual([
+      { event: "dependency_cache.refused", runId: "run-1", route: "lookup", status: 409, code: "reused_workspace" },
+      { event: "dependency_cache.refused", runId: "run-1", route: "upload", status: 409, code: "reused_workspace" },
+    ]);
+    const logged = JSON.stringify(Object.values(log).map((fn) => fn.mock.calls));
+    expect(logged).not.toContain(TOKEN);
+    expect(logged).not.toContain("lock=");
+    expect(logged).not.toContain(LOCK);
+  });
+
   it("logs a row dropped for its missing blob", async () => {
     const { call, store, blobs, keyId } = await setup();
     expect(await call(`blob?lock=${LOCK}`, { method: "PUT", body: "bytes" })).toBe(201);

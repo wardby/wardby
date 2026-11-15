@@ -88,6 +88,11 @@ export class PrismaDependencyCacheStore implements DependencyCacheStore {
     return row ? toSnapshot(row) : null;
   }
 
+  async workspaceReused(runId: string): Promise<boolean> {
+    const row = await this.db.substrateRun.findUnique({ where: { runId }, select: { round: true } });
+    return (row?.round ?? 1) > 1;
+  }
+
   async hasUploaded(runId: string, ecosystem: string, projectPath: string): Promise<boolean> {
     const row = await this.db.dependencySnapshot.findFirst({
       where: { createdByRunId: runId, projectPath, ecosystem },

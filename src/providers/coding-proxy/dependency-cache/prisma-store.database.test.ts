@@ -133,6 +133,27 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     expect((await cache.session(off))?.sealedAt).toBeNull();
   });
 
+  it("says a run's workspace is reused only past round 1 of its SubstrateRun row", async () => {
+    const { runId } = await seedRun();
+    const cache = new PrismaDependencyCacheStore(db);
+    expect(await cache.workspaceReused(runId)).toBe(false);
+    await db.substrateRun.create({
+      data: {
+        runId,
+        token: `wr-cache-${runId}`,
+        specHash: "x",
+        phase: "running",
+        deadlineAt: new Date(Date.now() + 60_000),
+      },
+    });
+    expect(await cache.workspaceReused(runId)).toBe(false);
+    await db.substrateRun.update({ where: { runId }, data: { round: 2 } });
+    expect(await cache.workspaceReused(runId)).toBe(true);
+    await db.substrateRun.update({ where: { runId }, data: { round: 3 } });
+    expect(await cache.workspaceReused(runId)).toBe(true);
+    expect(await cache.workspaceReused("cache-run-unknown")).toBe(false);
+  });
+
   it("inserts a snapshot once, answering a concurrent duplicate as exists", async () => {
     const { runId, repository } = await seedRun();
     const cache = new PrismaDependencyCacheStore(db);

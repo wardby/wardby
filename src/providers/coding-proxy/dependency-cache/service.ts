@@ -13,6 +13,10 @@
  *   (ModelRequestSeal). After the seal every route except the (idempotent)
  *   seal answers 409 `sealed`, and an upload still streaming when the seal
  *   lands is discarded.
+ * - A run whose environment was resumed from an earlier run (Substrate warm
+ *   rounds; `workspaceReused`) gets 409 `reused_workspace` on every route
+ *   except the seal: its workspace holds what an agent ran, so nothing it
+ *   builds may become a snapshot, and it needs no restore.
  * - A run uploads at most once per project, only within its upload window,
  *   and only for its derived key. Each upload writes its own blob object
  *   (a unique key), so no upload can replace a committed snapshot's bytes;
@@ -228,6 +232,9 @@ export class DependencyCacheService {
       send(response, 200, { sealed: true });
       return;
     }
+    // A run resumed on an earlier run's environment (Substrate warm rounds) never reads or writes the
+    // cache: its workspace holds what the previous round's agent ran. Seal stays allowed (idempotent).
+    if (await this.options.store.workspaceReused(context.runId)) throw new CacheRefusal(409, "reused_workspace");
     if (session.sealedAt) throw new CacheRefusal(409, "sealed");
     for (const name of new Set(params.keys()))
       if (params.getAll(name).length > 1) throw new CacheRefusal(400, "bad_request");
