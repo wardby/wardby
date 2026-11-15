@@ -17,6 +17,7 @@ import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } f
 import { inputHasGitHistory } from "./launcher.js";
 import { agentEgress, agentTemplate, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
+  allBlobs,
   CODEX_IMAGE,
   CONFIG,
   FAKE_CAP,
@@ -27,6 +28,7 @@ import {
   type Harness,
 } from "./launcher.test-support.js";
 import { BLOB, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
+import { MemorySubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
 
 const BLOB_KINDS = [
   "input",
@@ -61,6 +63,18 @@ async function putWorkspaceTarFor(h: Harness, token: string, files: Record<strin
   }
   const archive = hostTarArchive(source);
   await h.blobs.putStream(BLOB.workspace(token), archive.stream);
+  expect(await archive.done).toBe(0);
+}
+
+/** Posts these files as a named extra's workspace tar (REPO_BLOB.workspace) for round `round`. */
+async function putRepoWorkspaceTar(h: Harness, name: string, files: Record<string, string>, round = 1): Promise<void> {
+  const source = await mkdtemp(join(tmpdir(), "wardby-substrate-repo-ws-"));
+  for (const [file, content] of Object.entries(files)) {
+    await mkdir(join(source, file, ".."), { recursive: true });
+    await writeFile(join(source, file), content);
+  }
+  const archive = hostTarArchive(source);
+  await h.blobs.putStream(REPO_BLOB.workspace(h.token, name, round), archive.stream);
   expect(await archive.done).toBe(0);
 }
 
@@ -185,6 +199,45 @@ jobLauncherContract(
     return {
       launcher: h.launcher,
       spec: { ...h.spec, mcpTools: true },
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+const CONTRACT_REPOS = [
+  { name: "extra-alpha", access: "write" as const },
+  { name: "extra-beta", access: "read" as const },
+];
+
+// The shared suite has no named-repository case (on any backend): this proves the default
+// repository's contract is unchanged on a spec with extras; the named cases are under "extra repositories".
+jobLauncherContract(
+  "substrate with extra repositories",
+  async () => {
+    const h = await makeHarness({ repositories: CONTRACT_REPOS.map((r) => ({ ...r })) });
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness({ repositories: CONTRACT_REPOS.map((r) => ({ ...r })) });
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
       destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
       finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
@@ -1359,20 +1412,6 @@ describe("Codex (single actor)", () => {
   });
 });
 
-/** Every file the blob store holds, with its contents. */
-async function allBlobs(h: Harness): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  const walk = async (dir: string, prefix: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(path, `${prefix}${entry.name}/`);
-      else out.set(`${prefix}${entry.name}`, await readFile(path, "utf8"));
-    }
-  };
-  await walk(join(h.root, "blobs"), "");
-  return out;
-}
-
 describe("MCP tools", () => {
   const agentPolicy = (h: Harness) => h.api.egressPolicies.get(`${CONFIG.atespace}/${agentActorName(h.token)}`);
   const secretOf = (h: Harness) => h.secrets.secrets.get(`${CONFIG.credentialsNamespace}/${h.token}`);
@@ -1683,5 +1722,199 @@ describe("extra repositories", () => {
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_seed_too_large");
     expect(h.api.actors.size).toBe(0);
     expect(await anySeed(h)).toBe(false);
+  });
+
+  const repoFolder = (h: Harness, name: string) => join(h.workspaceRoot, "run-1", "repos", name, "workspace");
+  const defaultFolder = (h: Harness) => join(h.workspaceRoot, "run-1", "workspace");
+  const underToken = async (h: Harness) =>
+    [...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`));
+
+  it("collects a writable extra into its own folder", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    await putRepoWorkspaceTar(h, "extra-alpha", { "README.md": "# changed alpha\n" });
+    await finish(h);
+    expect(await h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-alpha"), "extra-alpha")).toEqual({
+      bundle: false,
+    });
+    expect(await readFile(join(repoFolder(h, "extra-alpha"), "README.md"), "utf8")).toBe("# changed alpha\n");
+    expect(await readFile(join(defaultFolder(h), "README.md"), "utf8")).toBe("# hello\n");
+  });
+
+  const REFUSED: [string, string, (h: Harness) => string][] = [
+    ["a read extra to its own folder", "extra-beta", (h) => repoFolder(h, "extra-beta")],
+    ["an unknown name", "extra-gamma", (h) => join(h.workspaceRoot, "run-1", "repos", "extra-gamma", "workspace")],
+    ["a writable extra to the default workspace", "extra-alpha", defaultFolder],
+    ["a writable extra to another extra's folder", "extra-alpha", (h) => repoFolder(h, "extra-beta")],
+  ];
+
+  it.each(REFUSED)(
+    "refuses a named collection that is not a writable extra's own: %s",
+    async (_label, name, destination) => {
+      const h = await makeHarness({ repositories: repos() });
+      const handle = await h.launcher.launch(h.spec);
+      for (const r of [...REPOS, { name: "extra-gamma" }]) {
+        await putRepoWorkspaceTar(h, r.name, { "README.md": "# changed\n" });
+      }
+      // Before the run finishes, job_not_succeeded comes first.
+      await expect(h.launcher.materializeWorkspace(handle, destination(h), name)).rejects.toThrow("job_not_succeeded");
+      await finish(h);
+      await expect(h.launcher.materializeWorkspace(handle, destination(h), name)).rejects.toThrow(
+        "substrate_workspace_destination_invalid",
+      );
+      // Nothing was written anywhere.
+      expect(await readFile(join(defaultFolder(h), "README.md"), "utf8")).toBe("# hello\n");
+      for (const r of REPOS) {
+        expect(await readFile(join(repoFolder(h, r.name), "README.md"), "utf8")).toBe(`# ${r.name}\n`);
+      }
+      await expect(lstat(join(h.workspaceRoot, "run-1", "repos", "extra-gamma"))).rejects.toThrow(/ENOENT/);
+    },
+  );
+
+  it("fails only that repository when its upload is missing", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h);
+    await expect(h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-alpha"), "extra-alpha")).rejects.toThrow(
+      "substrate_workspace_missing",
+    );
+    expect(await readFile(join(repoFolder(h, "extra-alpha"), "README.md"), "utf8")).toBe("# extra-alpha\n");
+    await putWorkspaceTar(h, { "README.md": "# changed\n" });
+    expect(await h.launcher.materializeWorkspace(handle, defaultFolder(h))).toEqual({ bundle: false });
+    expect(await readFile(join(defaultFolder(h), "README.md"), "utf8")).toBe("# changed\n");
+  });
+
+  it("takes a history extra's bundle and refuses a nested .git", async () => {
+    const tree = {
+      "README.md": "# changed alpha\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "# v2 git bundle\n",
+    };
+    const h = await makeHarness({ repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    await putRepoWorkspaceTar(h, "extra-alpha", tree);
+    await finish(h);
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    const gitHistory = { bundleDestination, maxBundleBytes: 1024 };
+    expect(
+      await h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-alpha"), "extra-alpha", { gitHistory }),
+    ).toEqual({ bundle: true });
+    expect(await readFile(bundleDestination, "utf8")).toBe("# v2 git bundle\n");
+    expect(await readFile(join(repoFolder(h, "extra-alpha"), "README.md"), "utf8")).toBe("# changed alpha\n");
+    await expect(lstat(join(repoFolder(h, "extra-alpha"), ".git"))).rejects.toThrow(/ENOENT/);
+
+    const nested = await makeHarness({ repositories: repos() });
+    const nestedHandle = await nested.launcher.launch(nested.spec);
+    await putRepoWorkspaceTar(nested, "extra-alpha", { ...tree, "vendor/x/.git/HEAD": "ref: refs/heads/main\n" });
+    await finish(nested);
+    const nestedBundle = join(trusted, "nested.bundle");
+    await expect(
+      nested.launcher.materializeWorkspace(nestedHandle, repoFolder(nested, "extra-alpha"), "extra-alpha", {
+        gitHistory: { bundleDestination: nestedBundle, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("docker_workspace_nested_repository");
+    await expect(lstat(nestedBundle)).rejects.toThrow(/ENOENT/);
+    expect(await readFile(join(repoFolder(nested, "extra-alpha"), "README.md"), "utf8")).toBe("# extra-alpha\n");
+  });
+
+  it("never reads a read extra's blob", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    await putRepoWorkspaceTar(h, "extra-beta", { "README.md": "# changed beta\n" });
+    await finish(h);
+    const read: string[] = [];
+    const getStream = h.blobs.getStream.bind(h.blobs);
+    const head = h.blobs.head.bind(h.blobs);
+    h.blobs.getStream = async (key) => (read.push(key), getStream(key));
+    h.blobs.head = async (key) => (read.push(key), head(key));
+    await expect(h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-beta"), "extra-beta")).rejects.toThrow(
+      "substrate_workspace_destination_invalid",
+    );
+    expect(read.length).toBeGreaterThan(0);
+    for (const key of read) expect(key).not.toContain("/repos/extra-beta/");
+  });
+
+  it("removes every per-repository blob, of every round, and keeps none after a stop", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    for (const r of REPOS) {
+      expect(await h.blobs.head(REPO_BLOB.seed(h.token, r.name))).not.toBeNull();
+      await putRepoWorkspaceTar(h, r.name, { "README.md": `# changed ${r.name}\n` });
+    }
+    await putWorkspaceTar(h, { "README.md": "# changed\n" });
+    await finish(h);
+    expect((await underToken(h)).some((key) => key.includes("/repos/"))).toBe(true);
+    await h.launcher.remove(handle);
+    expect(await underToken(h)).toEqual([]);
+    expect((await h.runs.get("run-1"))?.phase).toBe("removed");
+
+    const stopped = await makeHarness({ repositories: repos() });
+    const stoppedHandle = await stopped.launcher.launch(stopped.spec);
+    await putRepoWorkspaceTar(stopped, "extra-alpha", { "README.md": "# partial\n" });
+    await stopped.launcher.stop(stoppedHandle, "cancelled");
+    await stopped.launcher.remove(stoppedHandle);
+    expect(await underToken(stopped)).toEqual([]);
+    expect(stopped.api.actors.size).toBe(0);
+  });
+
+  it("cleans up per-repository seeds when provisioning fails late", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    h.api.resumeActor = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect((await h.runs.get("run-1"))?.phase).toBe("provisioning_failed");
+    for (const r of REPOS) expect(await h.blobs.head(REPO_BLOB.seed(h.token, r.name))).toBeNull();
+    expect(await anySeed(h)).toBe(false);
+  });
+
+  it("Codex: collects and removes extras the same way", async () => {
+    const h = await makeHarness({ provider: "codex", repositories: repos() });
+    const handle = await h.launcher.launch(h.spec);
+    await putRepoWorkspaceTar(h, "extra-alpha", { "README.md": "# changed alpha\n" });
+    await finish(h);
+    expect(await h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-alpha"), "extra-alpha")).toEqual({
+      bundle: false,
+    });
+    expect(await readFile(join(repoFolder(h, "extra-alpha"), "README.md"), "utf8")).toBe("# changed alpha\n");
+    await expect(h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-beta"), "extra-beta")).rejects.toThrow(
+      "substrate_workspace_destination_invalid",
+    );
+    await h.launcher.remove(handle);
+    expect(await underToken(h)).toEqual([]);
+  });
+
+  it("logs a fixed event, and still removes the rest, when the row's repositories cannot be read", async () => {
+    const store = new MemorySubstrateRunStore(() => 1_000_000);
+    const h = await makeHarness({ repositories: repos(), runs: store });
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h);
+    // What the database store gives for a stored value that does not parse.
+    const get = store.get.bind(store);
+    const getByToken = store.getByToken.bind(store);
+    const unreadable = (record: SubstrateRunRecord | undefined): SubstrateRunRecord | undefined => {
+      if (!record) return record;
+      const { repositories: _dropped, ...rest } = record;
+      return { ...rest, repositoriesUnreadable: true };
+    };
+    store.get = async (runId) => unreadable(await get(runId));
+    store.getByToken = async (token) => unreadable(await getByToken(token));
+    const lines: string[] = [];
+    setLogLineFilter((line) => (lines.push(line), line));
+    try {
+      await h.launcher.remove(handle);
+    } finally {
+      setLogLineFilter((line) => line);
+    }
+    expect((await get("run-1"))?.phase).toBe("removed");
+    for (const kind of BLOB_KINDS) expect(await h.blobs.head(BLOB[kind](h.token))).toBeNull();
+    if (logger.isLevelEnabled("warn")) {
+      const event = lines
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((entry) => entry.msg === "substrate_run_repositories_unreadable");
+      expect(event).toMatchObject({ runId: "run-1" });
+      expect(JSON.stringify(event)).not.toContain("extra-");
+    }
   });
 });

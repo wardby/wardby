@@ -91,6 +91,12 @@ export interface SubstrateRunRecord {
   /** Set on claim (spec order) for a run with extra repositories; absent otherwise. Names and access only. */
   repositories?: SubstrateRunRepository[];
   /**
+   * Set by the store (ignored on claim) when the row holds a repositories value that does not parse
+   * (never written by claim): the record then carries no repositories, so removal cannot name the
+   * extras' blobs, and the launcher logs that (a fixed event, no content).
+   */
+  repositoriesUnreadable?: true;
+  /**
    * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
    * neither actor has reached the proxy, that is when it became running: the relay's own writes to
    * the row (channels, lines) only start once the agent has its input.
@@ -202,6 +208,7 @@ function toRecord(row: Row): SubstrateRunRecord {
     ...(row.coldReason !== null ? { coldReason: row.coldReason as WarmColdReason } : {}),
     actorShape: row.actorShape === "single" ? "single" : "pair",
     ...(repositories ? { repositories } : {}),
+    ...(row.repositories !== null && !repositories ? { repositoriesUnreadable: true as const } : {}),
     updatedAt: row.updatedAt,
   };
 }

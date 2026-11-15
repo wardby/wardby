@@ -1,11 +1,12 @@
 // Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): retain() parks, a continuation (JobSpec.warm) adopts.
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
 import { warmFingerprint } from "../warm-fingerprint.js";
 import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } from "../types.js";
 import {
+  allBlobs,
   CONFIG,
   FAKE_CAP,
   FAKE_MCP,
@@ -16,7 +17,15 @@ import {
 } from "./launcher.test-support.js";
 import type { Room } from "./placement.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
-import { BLOB, agentActorName, retiredRunToken, roundBlob, substrateRunToken, toolActorName } from "./names.js";
+import {
+  BLOB,
+  REPO_BLOB,
+  agentActorName,
+  retiredRunToken,
+  roundBlob,
+  substrateRunToken,
+  toolActorName,
+} from "./names.js";
 import { agentEgress, agentTemplate, toolTemplate, WARM_ROUNDS_ENV } from "./specs.js";
 
 const WARM: WarmRoundsOptions = { parkTtlMs: 3_600_000, parkMax: 10 };
@@ -89,6 +98,23 @@ async function followUp(
   };
 }
 
+const EXTRAS = [
+  { name: "extra-alpha", access: "write" as const },
+  { name: "extra-beta", access: "read" as const },
+];
+
+/** `spec` with EXTRAS as its extra repositories, each folder prepared as makeHarness does. */
+async function withExtras(h: Harness, spec: JobSpec): Promise<JobSpec> {
+  const repositories = [];
+  for (const { name, access } of EXTRAS) {
+    const hostPath = join(h.workspaceRoot, spec.runId, "repos", name, "workspace");
+    await mkdir(hostPath, { recursive: true });
+    await writeFile(join(hostPath, "README.md"), `# ${name}\n`);
+    repositories.push({ name, access, hostPath });
+  }
+  return { ...spec, repositories };
+}
+
 /** What the proxy writes when a round's worker and tool finish: result-n and done-n. */
 async function finishRound(h: Harness, token: string, runId: string, round: number): Promise<void> {
   const output = { ...h.output, runId };
@@ -99,20 +125,6 @@ async function finishRound(h: Harness, token: string, runId: string, round: numb
 
 function actorStates(h: Harness, token: string): string[] {
   return [agentActorName(token), toolActorName(token)].map((name) => h.api.actors.get(`wardby-runs/${name}`)!.state);
-}
-
-/** Every file the blob store holds, with its contents. */
-async function allBlobs(h: Harness): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  const walk = async (dir: string, prefix: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(path, `${prefix}${entry.name}/`);
-      else out.set(`${prefix}${entry.name}`, await readFile(path, "utf8"));
-    }
-  };
-  await walk(join(h.root, "blobs"), "");
-  return out;
 }
 
 async function parkedRoundOne(h: Harness, retention: JobRetention = RETAIN): Promise<JobHandle> {
@@ -171,6 +183,43 @@ describe("SubstrateJobLauncher without warm rounds", () => {
 });
 
 describe("SubstrateJobLauncher with warm rounds", () => {
+  it("never adopts for a spec with repositories, and leaves the park alone", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    h.warmEvents.length = 0;
+    const spec = await withExtras(h, await followUp(h, "run-2"));
+    const handle = await h.launcher.launch(spec);
+    const row = await h.runs.get("run-2");
+    expect(row?.token).toBe(substrateRunToken("run-2"));
+    expect(row?.round).toBe(1);
+    expect(row).not.toHaveProperty("coldReason");
+    expect(row?.repositories).toEqual(EXTRAS);
+    expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
+    expect(h.warmEvents.map((event) => event.event)).not.toContain("substrate_warm_not_adopted");
+    expect(h.warmEvents.map((event) => event.event)).not.toContain("substrate_warm_adopted");
+    expect((await h.runs.get("run-1"))?.phase).toBe("parked");
+    expect(actorStates(h, h.token)).toEqual(["SUSPENDED", "SUSPENDED"]);
+  });
+
+  it("retain removes a run with repositories", async () => {
+    const h = await warmHarness();
+    const spec = await withExtras(h, h.spec);
+    const handle = await h.launcher.launch(spec);
+    await finishRound(h, h.token, "run-1", 1);
+    await h.blobs.put(REPO_BLOB.workspace(h.token, "extra-alpha"), Buffer.from("tar"));
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    const suspended: string[] = [];
+    h.api.suspendActor = async (_atespace, name) => {
+      suspended.push(name);
+    };
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect(suspended).toEqual([]);
+    expect((await h.runs.get("run-1"))?.phase).toBe("removed");
+    expect(await h.runs.countParked()).toBe(0);
+    expect(h.api.actors.size).toBe(0);
+    for (const key of (await allBlobs(h)).keys()) expect(key).not.toContain(h.token);
+  });
+
   it("gives the bridges the warm-rounds switch through the templates (their own templates)", async () => {
     const h = await warmHarness();
     // Plannable again: `<atespace>/<runId>`, the same handle launch() returns.
@@ -1102,13 +1151,16 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       await finishRound(h, h.token, "run-2", 2);
       await logged.retain(second, RETAIN);
       await logged.launch({ ...(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 })), mcpTools: true });
+      // A run with extra repositories (cold, never adopting), whose setup and seeds are blobs too.
+      await logged.launch(await withExtras(h, await otherRun(h, "run-4")));
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
       setLogLineFilter((line) => line);
     }
     const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_", FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3, "rmt_"];
-    const rows = await Promise.all(["run-1", "run-2", "run-3"].map((id) => h.runs.get(id)));
+    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4"].map((id) => h.runs.get(id)));
+    expect(rows[3]?.repositories).toEqual(EXTRAS);
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),
       JSON.stringify([...h.api.egressPolicies.values()]),

@@ -516,8 +516,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     let coldReason: WarmColdReason | undefined;
     // Removal of kept rounds never depends on the switch (warm rounds off: every one goes).
     await this.sweepParkedSometimes();
-    // A single-shape (Codex) run never adopts: it always launches cold, with no cold reason.
-    if (this.warm && templates.shape === "pair") {
+    // A single-shape (Codex) run never adopts: it always launches cold, with no cold reason. Nor does
+    // a run with extra repositories (W1; the executor never asks one to): cold, no cold reason, and
+    // the park it names is left alone.
+    if (this.warm && templates.shape === "pair" && spec.repositories === undefined) {
       // A relaunch of a run that has a row keeps whatever that row says.
       if (!(await this.runs.get(spec.runId))) {
         if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
@@ -566,7 +568,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Extracts the tool actor's posted workspace tar into the run's own folder. With `gitHistory`
+   * Extracts the tool actor's posted workspace tar into the run's own folder; with `name`, a writable
+   * extra's posted tar (REPO_BLOB.workspace) into its own repos/<name>/workspace. With `gitHistory`
    * (#536), as on Docker: the root `.git`'s result bundle is taken to `bundleDestination` and the
    * root `.git` dropped before validation, so a nested `.git` elsewhere is still refused; without
    * it, a `.git` anywhere is refused.
@@ -577,15 +580,37 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     name?: string,
     options: MaterializeWorkspaceOptions = {},
   ): Promise<MaterializedWorkspace> {
-    // Phase A has no extra repositories, so there is never a named one to collect.
-    if (name !== undefined) throw new Error("substrate_workspace_destination_invalid");
     const record = await this.requireRecord(handle);
     if ((await this.observe(record)).status.state !== "succeeded") throw new Error("job_not_succeeded");
-    const expected = resolve(this.workspaceRoot, record.runId, "workspace");
-    if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
+    if (name === undefined) {
+      const expected = resolve(this.workspaceRoot, record.runId, "workspace");
+      if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
+        throw new Error("substrate_workspace_destination_invalid");
+      }
+      return this.extractCollected(BLOB.workspace(record.token, roundOf(record)), expected, options);
+    }
+    // Only a writable extra of the launched spec (its row) is ever collected, into its own folder,
+    // as on Kubernetes: a read or unknown one is refused before any blob is read.
+    if (!record.repositories?.some((r) => r.name === name && r.access === "write")) {
       throw new Error("substrate_workspace_destination_invalid");
     }
-    const key = BLOB.workspace(record.token, roundOf(record));
+    const expected = expectedRepositoryHostPath(this.workspaceRoot, record.runId, name);
+    if (!expected || resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
+      throw new Error("substrate_workspace_destination_invalid");
+    }
+    return this.extractCollected(REPO_BLOB.workspace(record.token, name, roundOf(record)), expected, options);
+  }
+
+  /**
+   * Extracts the collected tar at `key` into `expected` (already checked to be the run's own folder):
+   * the blob's size bounds the tree and any result bundle; a history run's root .git leaves for its
+   * bundle before validation. Shared by the default workspace and every writable extra.
+   */
+  private async extractCollected(
+    key: string,
+    expected: string,
+    options: MaterializeWorkspaceOptions,
+  ): Promise<MaterializedWorkspace> {
     const info = await this.blobs.head(key);
     if (!info) throw new Error("substrate_workspace_missing");
     // The archive holds every extracted byte plus headers, so its size bounds the tree.
@@ -670,7 +695,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!observed.result) throw new Error("job_not_terminal");
     // Every deletion is tried even when one fails; the first failure is reported and the run is
     // not marked removed, so a later remove() tries again.
-    await this.removeInFull(record.token, roundOf(record), shapeOf(record));
+    await this.removeInFull(record.token, roundOf(record), shapeOf(record), this.repositoryNamesOf(record));
     // The row stays as the tombstone, so the run is never relaunched.
     await this.runs.setPhase(record.runId, "removed");
   }
@@ -827,6 +852,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     collectResultBundle: boolean,
     historyPaths: ReadonlySet<string>,
   ): Promise<void> {
+    // Bounded before any launch: validateSpec's jobRepositoriesValid allows at most 16 (MAX_RUN_REPOSITORIES_IN_INPUT) valid, distinct names.
     const repositories = holderSetupRepositories(spec, historyPaths);
     const body =
       spec.provider === "codex"
@@ -1150,8 +1176,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   async retain(handle: JobHandle, retention: JobRetention): Promise<boolean> {
     const record = await this.recordFor(handle);
     if (!record || record.phase === "removed") return false;
-    // A single-shape (Codex) run is never parked: warm rounds are Claude Code only.
-    if (record.actorShape === "single") {
+    // A single-shape (Codex) run is never parked: warm rounds are Claude Code only. Nor is a run with
+    // extra repositories (W1: runs with them never park or adopt; the executor never asks either).
+    if (record.actorShape === "single" || record.repositories || record.repositoriesUnreadable) {
       await this.remove(handle);
       return false;
     }
@@ -1366,7 +1393,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       throw error;
     }
     // Only paired runs are ever parked.
-    await this.removeInFull(record.token, roundOf(record), "pair");
+    await this.removeInFull(record.token, roundOf(record), "pair", this.repositoryNamesOf(record));
     try {
       await this.runs.setPhase(record.runId, "removed", ["parked"]);
     } catch (error) {
@@ -1510,8 +1537,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await timed("resumeTool", () => call("resumeActor", () => this.api.resumeActor(atespace, tool)));
       await timed("resumeAgent", () => call("resumeActor", () => this.api.resumeActor(atespace, agent)));
     } catch (error) {
-      // Only paired runs are ever adopted.
-      await this.cleanup(token, round, "pair");
+      // Only paired runs are ever adopted; the row's extras (none: W1, a spec with any never adopts).
+      await this.cleanup(token, round, "pair", this.repositoryNamesOf(record));
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -1523,7 +1550,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
       if (!isPhaseConflict(error)) {
-        await this.cleanup(token, round, "pair");
+        await this.cleanup(token, round, "pair", this.repositoryNamesOf(record));
         await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
         throw error;
       }
@@ -1542,6 +1569,22 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   // -------------------------------------------------------------------------
   // Cleanup (each step: missing is success)
+
+  /**
+   * The names of the run's extra repositories, from its row (removal deletes each one's blobs). A
+   * row whose stored value does not parse names none: that is logged as a fixed event (the run id
+   * only, never the value), and everything else of the run is still removed.
+   */
+  private repositoryNamesOf(record: SubstrateRunRecord): string[] {
+    if (record.repositoriesUnreadable) {
+      try {
+        substrateLog.warn({ runId: record.runId }, "substrate_run_repositories_unreadable");
+      } catch {
+        // Logging never changes the removal.
+      }
+    }
+    return (record.repositories ?? []).map((r) => r.name);
+  }
 
   /** Deletes the run's actors (both, or a single-shape run's one), each tried even if another fails. */
   private async deleteActors(token: string, shape: SubstrateActorShape): Promise<void> {
@@ -1599,8 +1642,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * round record after that: until every other deletion has succeeded, a later status() still reads
    * the run's real outcome rather than a lost run.
    */
-  private async removeInFull(token: string, rounds: number, shape: SubstrateActorShape): Promise<void> {
-    await settleAll(this.deletions(token, rounds, { outcome: false, shape }));
+  private async removeInFull(
+    token: string,
+    rounds: number,
+    shape: SubstrateActorShape,
+    repositories: readonly string[] = [],
+  ): Promise<void> {
+    await settleAll(this.deletions(token, rounds, { outcome: false, shape, repositories }));
     await this.options.relay.purgeRelay(token);
     const outcome: (() => Promise<void>)[] = [];
     for (let round = 1; round <= rounds; round += 1) {

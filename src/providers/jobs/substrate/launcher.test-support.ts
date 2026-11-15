@@ -1,5 +1,5 @@
 // Shared harness for the Substrate launcher's unit, contract and database tests.
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
@@ -214,4 +214,18 @@ export async function makeHarness(
     warmEvents,
     root,
   };
+}
+
+/** Every file the blob store holds, with its contents. */
+export async function allBlobs(h: Harness): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path, `${prefix}${entry.name}/`);
+      else out.set(`${prefix}${entry.name}`, await readFile(path, "utf8"));
+    }
+  };
+  await walk(join(h.root, "blobs"), "");
+  return out;
 }
