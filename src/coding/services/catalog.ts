@@ -121,7 +121,15 @@ function checkMounts(value: { dataPath: string; writablePaths: string[] }, ctx: 
 }
 
 /** One run's snapshot of an entry: what dispatch stores on CodingRun.services and the launcher reads. */
-export const ResolvedCodingServiceSchema = z.object(serviceFields).strict().superRefine(checkMounts);
+export const ResolvedCodingServiceSchema = z
+  .object({
+    ...serviceFields,
+    /** The catalog row's id and updatedAt (ISO 8601) when the snapshot was taken: identity and version for the warm fingerprint. */
+    catalogId: z.string().max(64).optional(),
+    catalogUpdatedAt: z.string().max(40).optional(),
+  })
+  .strict()
+  .superRefine(checkMounts);
 
 /** A catalog entry, as create_service takes it and the CodingService table holds it. */
 export const CodingServiceDefinitionSchema = z
@@ -136,6 +144,8 @@ export const StoredCodingServicesSchema = z.array(ResolvedCodingServiceSchema).m
 
 /** The columns of a CodingService row the definition is read from. */
 export interface CodingServiceRow {
+  id?: string;
+  updatedAt?: Date;
   name: string;
   version: string;
   kind: string;
@@ -171,9 +181,16 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
 }
 
 /** The per-run snapshot of an entry. */
-export function resolvedFromDefinition(definition: CodingServiceDefinition): ResolvedCodingService {
+export function resolvedFromDefinition(
+  definition: CodingServiceDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedCodingService {
   const { kind: _kind, ...service } = definition;
-  return service;
+  return {
+    ...service,
+    ...(catalog?.id === undefined ? {} : { catalogId: catalog.id }),
+    ...(catalog?.updatedAt === undefined ? {} : { catalogUpdatedAt: catalog.updatedAt.toISOString() }),
+  };
 }
 
 /** CodingRun.services, parsed; a run from before services existed has []. Throws on anything else. */

@@ -152,7 +152,7 @@ describe("warmFingerprint services", () => {
     expect(both).toBe(servicesFingerprint([redis7, postgres16]));
     expect(both).not.toBe(servicesFingerprint([postgres16]));
     expect(servicesFingerprint([postgres16])).not.toBe(
-      servicesFingerprint([{ ...postgres16, startCommand: ["other"] }]),
+      servicesFingerprint([{ ...postgres16, port: postgres16.port + 1 }]),
     );
     expect(servicesFingerprint([])).toBeUndefined();
     expect(servicesFingerprint(undefined)).toBeUndefined();
@@ -160,20 +160,28 @@ describe("warmFingerprint services", () => {
 
   it("pins the hash", () => {
     const hash = servicesFingerprint([postgres16]);
-    expect(hash).toBe("3fef43fb0210cf8b3d48921c76eaa0011d4a2ce8e325201d2fc30e41122c8c56");
+    expect(hash).toBe("c95213a9b147111313beb3227fed1962cf3d5dac68ead609355c5a44006dfd89");
     expect(warmFingerprint({ ...INPUT, services: hash })).not.toBe(warmFingerprint(INPUT));
   });
 
-  it("carries a hash, never a service value", () => {
-    const fake = {
-      ...postgres16,
-      serviceEnv: { ...postgres16.serviceEnv, FAKE_SERVICE: "FAKE_SERVICE_ENV_VALUE_0001" },
-    };
-    const hash = servicesFingerprint([fake]);
+  it("never depends on an env value; changes with a key, version, digest or updatedAt", () => {
+    const base = { ...postgres16, catalogId: "svc-1", catalogUpdatedAt: "2026-11-01T00:00:00.000Z" };
+    const hash = servicesFingerprint([base]);
     expect(hash).toMatch(WARM_FINGERPRINT);
-    const input = { ...INPUT, services: hash };
-    expect(canonicalJson(input)).toContain(hash);
-    expect(canonicalJson(input)).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
-    expect(hash).not.toBe(servicesFingerprint([postgres16]));
+    const withValue = {
+      ...base,
+      serviceEnv: Object.fromEntries(Object.keys(base.serviceEnv).map((key) => [key, "FAKE_SERVICE_ENV_VALUE_0001"])),
+      testEnv: Object.fromEntries(Object.keys(base.testEnv).map((key) => [key, "FAKE_TEST_ENV_VALUE_0001"])),
+    };
+    expect(servicesFingerprint([withValue])).toBe(hash);
+    const changed = [
+      { ...base, serviceEnv: { ...base.serviceEnv, EXTRA_KEY: "x" } },
+      { ...base, testEnv: { ...base.testEnv, EXTRA_KEY: "x" } },
+      { ...base, version: "17" },
+      { ...base, image: `repo@sha256:${"a".repeat(64)}` },
+      { ...base, catalogUpdatedAt: "2026-11-02T00:00:00.000Z" },
+      { ...base, catalogId: "svc-2" },
+    ];
+    for (const service of changed) expect(servicesFingerprint([service])).not.toBe(hash);
   });
 });

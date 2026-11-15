@@ -14,8 +14,10 @@
  * The run's MCP tool pins go in as identity only (which tool of which server, never its definition),
  * and only when the run has some, so a fingerprint without them is unchanged.
  *
- * The run's services go in as one hash of their resolved entries (never a value), and only when the
- * run has some, so a fingerprint without them is unchanged.
+ * The run's services go in as one hash of their identity and version (name, version, image digest,
+ * port, data path, the env KEY names, the catalog row's id and updatedAt): never an env value, since
+ * catalog env values can be secrets. Only when the run has some, so a fingerprint without them is
+ * unchanged.
  *
  * SHA-256 hex (WARM_FINGERPRINT) over the canonical JSON of exactly these fields: object keys
  * sorted, no whitespace. The fingerprint is not secret, but it is never logged or published either
@@ -88,7 +90,21 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 export function servicesFingerprint(services: readonly ResolvedCodingService[] | undefined): string | undefined {
   if (!services || services.length === 0) return undefined;
   const sorted = [...services].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
-  return sha256(canonicalJson(sorted));
+  return sha256(
+    canonicalJson(
+      sorted.map((service) => ({
+        name: service.name,
+        version: service.version,
+        image: service.image,
+        port: service.port,
+        dataPath: service.dataPath,
+        serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
+        testEnvKeys: Object.keys(service.testEnv).sort(),
+        catalogId: service.catalogId ?? null,
+        catalogUpdatedAt: service.catalogUpdatedAt ?? null,
+      })),
+    ),
+  );
 }
 
 /** The fingerprint of `input`'s fields (and only those): 64 lowercase hex characters. */

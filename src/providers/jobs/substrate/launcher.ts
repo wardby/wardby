@@ -129,6 +129,7 @@ import {
   toolActorName,
 } from "./names.js";
 import { canPlaceAll, type Room } from "./placement.js";
+import { SERVICE_START_MARKER_MS } from "./service-script.js";
 import type { SubstrateActorShape, SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
@@ -594,6 +595,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.collectGraceMs = options.collectGraceMs ?? DEFAULT_COLLECT_GRACE_MS;
     this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    // A services run waits SERVICE_START_MARKER_MS for its services before startup_timeout can apply.
+    if (!Number.isFinite(this.startupTimeoutMs) || this.startupTimeoutMs < SERVICE_START_MARKER_MS) {
+      throw new Error("substrate_startup_timeout_invalid");
+    }
     this.templates = options.templates;
     this.templateReadyMs = options.templateReadyMs ?? DEFAULT_TEMPLATE_READY_MS;
     this.templateRetryMs = options.templateRetryMs ?? DEFAULT_TEMPLATE_RETRY_MS;

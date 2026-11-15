@@ -598,6 +598,11 @@ describe("SubstrateJobLauncher", () => {
       expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
     });
 
+    it("refuses a startup timeout below the services start window at construction", async () => {
+      await expect(makeHarness({ startupTimeoutMs: 29_999 })).rejects.toThrow("substrate_startup_timeout_invalid");
+      await expect(makeHarness({ startupTimeoutMs: 30_000 })).resolves.toBeDefined();
+    });
+
     it("fails a run whose tool never made its first events poll (tool setup still there)", async () => {
       const h = await makeHarness({ startupTimeoutMs: 60_000 });
       const handle = await h.launcher.launch(h.spec);
@@ -2100,7 +2105,7 @@ describe("bridge protocol", () => {
   });
 
   it("decides before the startup timeout", async () => {
-    const h = await makeHarness({ startupTimeoutMs: 1_000 });
+    const h = await makeHarness({ startupTimeoutMs: 30_000 });
     const handle = await h.launcher.launch(h.spec);
     h.setNow(START + 5_000);
     await refuse(h);
@@ -2177,7 +2182,7 @@ describe("image self-check", () => {
   });
 
   it("decides before the startup timeout", async () => {
-    const h = await makeHarness({ startupTimeoutMs: 1_000 });
+    const h = await makeHarness({ startupTimeoutMs: 30_000 });
     const handle = await h.launcher.launch(h.spec);
     h.setNow(1_000_000 + 5_000);
     await report(h, "tar");
