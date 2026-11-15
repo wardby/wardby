@@ -146,6 +146,7 @@ function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null = WA
     blobs: h.blobs,
     secrets: h.secrets,
     relay: h.relay,
+    templates: h.templates,
     config: CONFIG,
     workspaceRoot: h.workspaceRoot,
     resolveCapability: async (runId) => CAPS[runId] ?? FAKE_CAP,
@@ -456,6 +457,41 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.launcher.launch(spec2)).toEqual(handle);
     // After a restart, the outcome is read from the row.
     expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: true });
+  });
+
+  it("park and adoption bump the run's templates", async () => {
+    const T0 = 1_000_000;
+    const HOUR = 3_600_000;
+    const h = await warmHarness({ warmRounds: { parkTtlMs: 4 * HOUR, parkMax: 10 } });
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    // The templates the actors were created from, as Substrate reports them.
+    const names = [agentActorName(h.token), toolActorName(h.token)].map(
+      (name) => h.api.actors.get(`${CONFIG.atespace}/${name}`)!.templateName,
+    );
+    const lastUsed = async () => Promise.all(names.map(async (name) => (await h.templates.get(name))?.lastUsedAt));
+    expect(await lastUsed()).toEqual([new Date(T0), new Date(T0)]);
+    h.setNow(T0 + HOUR);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    expect(await lastUsed()).toEqual([new Date(T0 + HOUR), new Date(T0 + HOUR)]);
+    h.setNow(T0 + 2 * HOUR);
+    // A continuation whose own spec names another tool template: the bump follows the parked actors.
+    const spec2 = { ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
+    const second = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await lastUsed()).toEqual([new Date(T0 + 2 * HOUR), new Date(T0 + 2 * HOUR)]);
+    expect(await h.templates.get(toolTemplate(spec2, { ...CONFIG, warmRounds: true }).name)).toBeUndefined();
+    expect(await h.templates.get(names[0])).toMatchObject({ createdAt: new Date(T0) });
+
+    // Best effort: a park whose getActor fails still parks.
+    const b = await warmHarness();
+    const handleB = await b.launcher.launch(b.spec);
+    await finishRound(b, b.token, "run-1", 1);
+    b.api.getActor = async () => {
+      throw new Error("substrate down");
+    };
+    expect(await b.launcher.retain(handleB, RETAIN)).toBe(true);
+    expect((await b.runs.get("run-1"))!.phase).toBe("parked");
   });
 
   it("adopts on the same custom digest and starts fresh on a new one", async () => {
@@ -836,6 +872,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       blobs: s.blobs,
       secrets: s.secrets,
       relay: s.relay,
+      templates: s.templates,
       config: CONFIG,
       workspaceRoot: s.workspaceRoot,
       resolveCapability: async () => FAKE_CAP,

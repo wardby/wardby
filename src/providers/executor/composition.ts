@@ -41,6 +41,7 @@ import { createSubstrateApi } from "../jobs/substrate/client.js";
 import type { SubstrateApi } from "../jobs/substrate/api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
 import { PrismaSubstrateRunStore } from "../jobs/substrate/run-store.js";
+import { PrismaSubstrateTemplateStore } from "../jobs/substrate/template-store.js";
 import { PrismaRelayStore } from "../coding-proxy/substrate/prisma-relay-store.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
@@ -203,6 +204,7 @@ export function buildSubstrateJobLauncher(options: {
         ...(substrate.serverName ? { serverName: substrate.serverName } : {}),
       }),
     runs: new PrismaSubstrateRunStore(options.db),
+    templates: new PrismaSubstrateTemplateStore(options.db),
     relay: new PrismaRelayStore(options.db),
     blobs: createBlobStore(blobStoreConfig),
     secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
@@ -218,6 +220,9 @@ export function buildSubstrateJobLauncher(options: {
     ...(options.resolveMcpToken ? { resolveMcpToken: options.resolveMcpToken } : {}),
     ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
     ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
+    ...(substrate.templateTtlSec !== undefined ? { templateTtlMs: substrate.templateTtlSec * 1000 } : {}),
+    ...(substrate.templateReadySec !== undefined ? { templateReadyMs: substrate.templateReadySec * 1000 } : {}),
+    ...(substrate.templateRetrySec !== undefined ? { templateRetryMs: substrate.templateRetrySec * 1000 } : {}),
     ...(substrate.warmRounds
       ? { warmRounds: { parkTtlMs: substrate.warmRounds.parkTtlSec * 1000, parkMax: substrate.warmRounds.parkMax } }
       : {}),

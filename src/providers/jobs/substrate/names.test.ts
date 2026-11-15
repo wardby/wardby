@@ -10,6 +10,7 @@ import {
   agentActorName,
   substrateRunToken,
   templateName,
+  templateRoleOf,
   toolActorName,
   toolActorSubject,
 } from "./names.js";
@@ -21,6 +22,22 @@ describe("substrate names", () => {
     expect(substrateRunToken("Run_ABC/123")).toBe(t);
     expect(agentActorName(t)).toMatch(/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$/);
     expect(toolActorSubject("wardby-runs", t)).toBe(`actor/wardby-runs/${t}-tool`);
+  });
+  it("reads a template name's role back, and nothing else", () => {
+    for (const role of ["agent", "tool", "codex"] as const) {
+      expect(templateRoleOf(templateName(role, "r@sha256:aa", 1000, 2 ** 30, "v1"))).toBe(role);
+    }
+    for (const name of [
+      "",
+      "wardby-agent-",
+      "wardby-agent-0123456789abcdeF",
+      "wardby-agent-0123456789abcdef0",
+      "wardby-other-0123456789abcdef",
+      "xwardby-tool-0123456789abcdef",
+      "wardby-tool-0123456789abcdef\n",
+    ]) {
+      expect(templateRoleOf(name)).toBeUndefined();
+    }
   });
   it("names templates by content", () => {
     const a = templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v1");

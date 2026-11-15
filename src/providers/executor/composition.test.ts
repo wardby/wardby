@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
+import { PrismaSubstrateTemplateStore } from "../jobs/substrate/template-store.js";
 import {
   assertSubstrateDigestImages,
   buildConfiguredExecutor,
@@ -155,6 +156,34 @@ describe("JOB_LAUNCHER=substrate", () => {
       .options;
     expect(options.collectGraceMs).toBe(45_000);
     expect(options.startupTimeoutMs).toBe(900_000);
+  });
+
+  it("passes the template settings to the launcher, in milliseconds", () => {
+    const build = (extra: Record<string, string>) =>
+      (
+        buildSubstrateJobLauncher({
+          env: { ...env, ...extra },
+          db,
+          workspaceRoot: join(dir, "ws"),
+          resolveCapability: async () => "cap",
+          substrateApi: new FakeSubstrateApi({ workers: 1 }),
+          kubernetesApi: new FakeKubernetesApi(),
+        }) as unknown as {
+          options: { templates: unknown; templateTtlMs?: number; templateReadyMs?: number; templateRetryMs?: number };
+        }
+      ).options;
+    const options = build({
+      SUBSTRATE_TEMPLATE_TTL_SEC: "86400",
+      SUBSTRATE_TEMPLATE_READY_SEC: "300",
+      SUBSTRATE_TEMPLATE_RETRY_SEC: "120",
+    });
+    expect(options.templates).toBeInstanceOf(PrismaSubstrateTemplateStore);
+    expect(options.templateTtlMs).toBe(86_400_000);
+    expect(options.templateReadyMs).toBe(300_000);
+    expect(options.templateRetryMs).toBe(120_000);
+    const defaults = build({});
+    expect(defaults.templates).toBeInstanceOf(PrismaSubstrateTemplateStore);
+    for (const key of ["templateTtlMs", "templateReadyMs", "templateRetryMs"]) expect(defaults).not.toHaveProperty(key);
   });
 
   it("passes warm rounds to the launcher only when SUBSTRATE_WARM_ROUNDS=true", () => {

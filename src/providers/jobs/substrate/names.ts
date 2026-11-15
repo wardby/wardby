@@ -60,6 +60,14 @@ export function templateName(
   return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}|${variant}`, 16)}`;
 }
 
+const TEMPLATE_NAME = /^wardby-(agent|tool|codex)-[0-9a-f]{16}$/;
+
+/** The role a templateName() names; undefined for any other string (not a template wardby names). */
+export function templateRoleOf(name: string): "agent" | "tool" | "codex" | undefined {
+  const match = TEMPLATE_NAME.exec(name);
+  return match ? (match[1] as "agent" | "tool" | "codex") : undefined;
+}
+
 /**
  * The name of a per-round blob: round 1 (every run without warm rounds) keeps the original name,
  * round n > 1 gets `-<n>` before the extension.

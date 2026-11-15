@@ -2362,7 +2362,7 @@ model SubstrateRun {
   specHash     String
   /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
   /// tool_failed | provisioning_failed | collect_timeout | startup_timeout | bridge_incompatible |
-  /// image_incomplete (terminal; see SubstratePhase in run-store.ts)
+  /// image_incomplete | image_unready (terminal; see SubstratePhase in run-store.ts)
   phase        String
   deadlineAt   DateTime
   /// Last seq assigned on the tool-bound queue.
@@ -2396,6 +2396,30 @@ model SubstrateRun {
 
   @@index([phase, parkedAt])
   @@index([agentId, phase])
+}
+
+/// A Substrate actor template wardby created (JOB_LAUNCHER=substrate): one row per template name, so
+/// the launcher can count golden-snapshot failures, tell a template that never became ready, and
+/// remove templates no run has used for SUBSTRATE_TEMPLATE_TTL_SEC. Control plane only.
+model SubstrateTemplate {
+  /// templateName(...): wardby-<role>-<16 hex>.
+  name           String    @id
+  atespace       String
+  /// agent | tool | codex
+  role           String
+  /// The template's image (repo@sha256:...), for operator diagnostics.
+  image          String
+  createdAt      DateTime  @default(now())
+  /// Bumped by every launch, park and adoption that uses the template.
+  lastUsedAt     DateTime
+  /// Golden-snapshot failures seen in the current window (SUBSTRATE_TEMPLATE_RETRY_SEC).
+  goldenFailures Int       @default(0)
+  /// When the current failure window began (the window's first failure); null before any failure.
+  lastFailureAt  DateTime?
+  /// When an actor from the template first reached running; null until then and after a rebuild.
+  readyAt        DateTime?
+
+  @@index([lastUsedAt])
 }
 
 /// One socket connection between a run's agent and tool bridges.

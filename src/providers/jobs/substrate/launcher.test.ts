@@ -16,7 +16,7 @@ import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cac
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
 import { inputGitHistory } from "./launcher.js";
-import { agentEgress, agentTemplate, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
+import { agentEgress, agentTemplate, BRIDGE_COMMANDS, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   allBlobs,
   ATESPACE,
@@ -33,8 +33,9 @@ import {
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
-import { BLOB, BRIDGE_PROTOCOL_HEADER, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
+import { BLOB, BRIDGE_PROTOCOL_HEADER, REPO_BLOB, agentActorName, substrateRunToken, toolActorName } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
+import { MemorySubstrateTemplateStore } from "./template-store.js";
 
 const BLOB_KINDS = [
   "input",
@@ -2236,6 +2237,10 @@ describe("custom images (workerImageRef)", () => {
     const tool = h.api.actors.get(`${ATESPACE}/${toolActorName(h.token)}`);
     expect(tool?.templateName).toBe(toolTemplate(h.spec, CONFIG).name);
     expect(h.api.templates.get(`${ATESPACE}/${tool!.templateName}`)?.containers[0]?.image).toBe(CUSTOM_TOOL_IMAGE);
+    // The bridge runs whatever the custom image's ENTRYPOINT is (ruling D5).
+    expect(h.api.templates.get(`${ATESPACE}/${tool!.templateName}`)?.containers[0]?.command).toEqual(
+      BRIDGE_COMMANDS.tool,
+    );
     // The agent actor never takes the custom image: its template is the unchanged spec's.
     const agent = h.api.actors.get(`${ATESPACE}/${agentActorName(h.token)}`);
     const expectedAgent = agentTemplate(standard, CONFIG);
@@ -2259,6 +2264,9 @@ describe("custom images (workerImageRef)", () => {
     const actor = h.api.actors.get(`${ATESPACE}/${agentActorName(h.token)}`);
     expect(actor?.templateName).toBe(codexTemplate(h.spec, CONFIG).name);
     expect(h.api.templates.get(`${ATESPACE}/${actor!.templateName}`)?.containers[0]?.image).toBe(CUSTOM_CODEX_IMAGE);
+    expect(h.api.templates.get(`${ATESPACE}/${actor!.templateName}`)?.containers[0]?.command).toEqual(
+      BRIDGE_COMMANDS.codex,
+    );
   });
 
   it.each([
@@ -2298,5 +2306,305 @@ describe("custom images (workerImageRef)", () => {
     const source = await readFile(new URL("./launcher.ts", import.meta.url), "utf8");
     expect(source).not.toContain("substrate_feature_unsupported:workerImage");
     expect(source).not.toContain(":workerImage");
+  });
+});
+
+describe("template record and readiness", () => {
+  const T0 = 1_000_000;
+  const MINUTE = 60_000;
+  const EVENT_FIELDS = ["event", "name", "role", "failures", "reason", "ageSec"];
+
+  /** Another run's spec on the same launcher: its own input and workspace, the same templates. */
+  async function secondRun(h: Harness, runId: string): Promise<JobSpec> {
+    await mkdir(join(h.workspaceRoot, runId, "workspace"), { recursive: true });
+    await writeFile(join(h.workspaceRoot, runId, "workspace", "README.md"), "# hello\n");
+    const inputArtifact = join(h.root, `input-${runId}.json`);
+    await writeFile(inputArtifact, JSON.stringify({ schemaVersion: 1, task: `task of ${runId}` }));
+    return { ...h.spec, runId, inputArtifact };
+  }
+
+  /** Counts deleteActorTemplate calls from here on. */
+  function countTemplateDeletes(h: Harness): { names: string[] } {
+    const seen = { names: [] as string[] };
+    const original = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async (atespace, name) => {
+      seen.names.push(name);
+      return original(atespace, name);
+    };
+    return seen;
+  }
+
+  /** resumeActor refuses the tool actor of every run, as a full cluster would (the workers still list room). */
+  function refuseToolResume(h: Harness): void {
+    const original = h.api.resumeActor.bind(h.api);
+    h.api.resumeActor = async (atespace, name) => {
+      if (name.endsWith("-tool")) throw new SubstrateExhaustedError("no worker has room");
+      return original(atespace, name);
+    };
+  }
+
+  async function noTraceOf(h: Harness, runId: string): Promise<void> {
+    const token = substrateRunToken(runId);
+    expect([...h.api.actors.keys()].filter((key) => key.includes(token))).toEqual([]);
+    expect([...h.secrets.secrets.keys()].filter((key) => key.includes(token))).toEqual([]);
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.includes(token))).toEqual([]);
+  }
+
+  it("records each template it ensures and marks it ready once a run reaches running", async () => {
+    const h = await makeHarness();
+    await h.launcher.launch(h.spec);
+    const at = new Date(T0);
+    const agent = await h.templates.get(agentTemplate(h.spec, CONFIG).name);
+    expect(agent).toEqual({
+      name: agentTemplate(h.spec, CONFIG).name,
+      atespace: ATESPACE,
+      role: "agent",
+      image: h.spec.image,
+      createdAt: at,
+      lastUsedAt: at,
+      goldenFailures: 0,
+      readyAt: at,
+    });
+    expect(await h.templates.get(toolTemplate(h.spec, CONFIG).name)).toMatchObject({
+      role: "tool",
+      image: TOOL_IMAGE,
+      atespace: ATESPACE,
+      readyAt: at,
+    });
+
+    const c = await makeHarness({ provider: "codex" });
+    await c.launcher.launch(c.spec);
+    expect(await c.templates.get(codexTemplate(c.spec, CONFIG).name)).toMatchObject({
+      role: "codex",
+      image: CODEX_IMAGE,
+      readyAt: new Date(T0),
+    });
+    expect(await c.templates.listUnusedBefore(new Date(T0 + 1), 10)).toHaveLength(1);
+  });
+
+  it("does not mark a template ready while the run has not reached running", async () => {
+    const h = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect(await h.templates.get(agentTemplate(h.spec, CONFIG).name)).not.toHaveProperty("readyAt");
+    expect(await h.templates.get(toolTemplate(h.spec, CONFIG).name)).not.toHaveProperty("readyAt");
+  });
+
+  it("bumps lastUsedAt on every launch", async () => {
+    const h = await makeHarness();
+    await h.launcher.launch(h.spec);
+    h.setNow(T0 + 60 * MINUTE);
+    await h.launcher.launch(await secondRun(h, "run-2"));
+    for (const name of [agentTemplate(h.spec, CONFIG).name, toolTemplate(h.spec, CONFIG).name]) {
+      expect(await h.templates.get(name)).toMatchObject({
+        createdAt: new Date(T0),
+        lastUsedAt: new Date(T0 + 60 * MINUTE),
+        readyAt: new Date(T0),
+      });
+    }
+  });
+
+  it("fails the launch as provisioning_failed when the record cannot be written", async () => {
+    const templates = new MemorySubstrateTemplateStore();
+    templates.touch = async () => {
+      throw new Error("database down");
+    };
+    const h = await makeHarness({ templates });
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("database down");
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
+    expect(h.api.templates.size).toBe(0);
+  });
+
+  it("counts the failure", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    // Before the move to running: the row has its failure and no readyAt.
+    const setPhase = h.runs.setPhase.bind(h.runs);
+    let beforeRunning: unknown;
+    h.runs.setPhase = async (runId, phase, from, deadline) => {
+      if (phase === "running") beforeRunning = await h.templates.get(agent.name);
+      return setPhase(runId, phase, from, deadline);
+    };
+    await h.launcher.launch(h.spec);
+    expect(beforeRunning).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0) });
+    expect(beforeRunning).not.toHaveProperty("readyAt");
+    expect(await h.templates.get(agent.name)).toMatchObject({
+      goldenFailures: 1,
+      lastFailureAt: new Date(T0),
+      readyAt: new Date(T0),
+    });
+    expect(h.templateEvents).toEqual([
+      { event: "substrate_template_golden_failed", name: agent.name, role: "agent", failures: 1 },
+    ]);
+  });
+
+  it("rebuilds as before when the failure cannot be recorded", async () => {
+    const templates = new MemorySubstrateTemplateStore();
+    templates.recordGoldenFailure = async () => {
+      throw new Error("database down");
+    };
+    const h = await makeHarness({ templates });
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    const deletes = countTemplateDeletes(h);
+    await h.launcher.launch(h.spec);
+    expect(deletes.names).toEqual([agent.name]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    expect(h.templateEvents).toEqual([]);
+  });
+
+  /** run-1 on a template whose golden snapshot failed (recreated, running), then failed again. */
+  async function failedTwice(h: Harness): Promise<string> {
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    return agent.name;
+  }
+
+  it("fails a run on a second golden failure in the window, without rebuilding", async () => {
+    const h = await makeHarness();
+    const name = await failedTwice(h);
+    const deletes = countTemplateDeletes(h);
+    h.setNow(T0 + 5 * MINUTE);
+    const spec = await secondRun(h, "run-2");
+    const handle = await h.launcher.launch(spec);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "substrate_image_unready",
+    });
+    expect((await h.runs.get("run-2"))?.phase).toBe("image_unready");
+    expect(deletes.names).toEqual([]);
+    await noTraceOf(h, "run-2");
+    expect(h.templateEvents).toContainEqual({
+      event: "substrate_template_unready",
+      name,
+      role: "agent",
+      reason: "golden_failed",
+    });
+    expect(h.templateEvents).toContainEqual({
+      event: "substrate_template_golden_failed",
+      name,
+      role: "agent",
+      failures: 2,
+    });
+    // Never requeued: a relaunch of the same run finds its terminal row and leaves it.
+    await h.launcher.launch(spec);
+    expect((await h.runs.get("run-2"))?.phase).toBe("image_unready");
+  });
+
+  it("keeps failing until the window from the first failure passes, then rebuilds", async () => {
+    const h = await makeHarness();
+    const name = await failedTwice(h);
+    h.setNow(T0 + 5 * MINUTE);
+    await h.launcher.launch(await secondRun(h, "run-2"));
+    h.setNow(T0 + 9 * MINUTE);
+    await h.launcher.launch(await secondRun(h, "run-3"));
+    expect((await h.runs.get("run-3"))?.phase).toBe("image_unready");
+    expect(await h.templates.get(name)).toMatchObject({ goldenFailures: 3, lastFailureAt: new Date(T0) });
+    const deletes = countTemplateDeletes(h);
+    h.setNow(T0 + 10 * MINUTE + 1000);
+    await h.launcher.launch(await secondRun(h, "run-4"));
+    expect(deletes.names).toEqual([name]);
+    expect((await h.runs.get("run-4"))?.phase).toBe("running");
+    expect(await h.templates.get(name)).toMatchObject({
+      goldenFailures: 1,
+      lastFailureAt: new Date(T0 + 10 * MINUTE + 1000),
+      readyAt: new Date(T0 + 10 * MINUTE + 1000),
+    });
+  });
+
+  it("fails a never-ready template that builds past the ready window while workers have room", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    refuseToolResume(h);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    const tool = toolTemplate(h.spec, CONFIG).name;
+    expect(await h.templates.get(tool)).toMatchObject({ createdAt: new Date(T0) });
+    // Within the window: still a capacity wait.
+    h.setNow(T0 + 60_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 61_000);
+    const handle = await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_unready");
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "substrate_image_unready",
+    });
+    expect(h.templateEvents).toEqual([
+      { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
+    ]);
+    await noTraceOf(h, h.spec.runId);
+  });
+
+  it("still requeues an old template that once ran", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    refuseToolResume(h);
+    const spec = await secondRun(h, "run-2");
+    await expect(h.launcher.launch(spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 61_000);
+    await expect(h.launcher.launch(spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get("run-2"))?.phase).toBe("requeued");
+    expect(h.templateEvents).toEqual([]);
+  });
+
+  it("still requeues when the workers have no room", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000, workers: 1, workerSize: SMALL_WORKER });
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 10 * 60_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    expect(await h.templates.get(toolTemplate(h.spec, CONFIG).name)).not.toHaveProperty("readyAt");
+    expect(h.templateEvents).toEqual([]);
+  });
+
+  it("still requeues when the template record cannot be read", async () => {
+    const templates = new MemorySubstrateTemplateStore();
+    const h = await makeHarness({ templates, templateReadyMs: 60_000 });
+    refuseToolResume(h);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    templates.get = async () => {
+      throw new Error("database down");
+    };
+    h.setNow(T0 + 61_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+  });
+
+  it("reports fixed fields only", async () => {
+    const options = { capabilityFor: () => FAKE_CAP, mcpTokenFor: () => FAKE_MCP };
+    const golden = await makeHarness(options);
+    golden.spec = { ...golden.spec, mcpTools: true };
+    const name = await failedTwice(golden);
+    golden.setNow(T0 + 5 * MINUTE);
+    await golden.launcher.launch({ ...(await secondRun(golden, "run-2")), mcpTools: true });
+    const never = await makeHarness({ ...options, templateReadyMs: 60_000 });
+    never.spec = { ...never.spec, mcpTools: true };
+    refuseToolResume(never);
+    await expect(never.launcher.launch(never.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    never.setNow(T0 + 61_000);
+    await never.launcher.launch(never.spec);
+    expect((await never.runs.get(never.spec.runId))?.phase).toBe("image_unready");
+    const tool = toolTemplate(never.spec, CONFIG).name;
+    for (const [h, names] of [
+      [golden, [name]],
+      [never, [tool]],
+    ] as const) {
+      expect(h.templateEvents.length).toBeGreaterThan(0);
+      for (const event of h.templateEvents) {
+        for (const key of Object.keys(event)) expect(EVENT_FIELDS).toContain(key);
+      }
+      const recorded = JSON.stringify([h.templateEvents, ...(await Promise.all(names.map((n) => h.templates.get(n))))]);
+      expect(recorded).not.toContain(FAKE_CAP);
+      expect(recorded).not.toContain(FAKE_MCP);
+    }
   });
 });

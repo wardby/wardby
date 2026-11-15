@@ -741,6 +741,18 @@ export interface SubstrateJobConfig {
   collectGraceSec?: number;
   /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
   startupTimeoutSec?: number;
+  /** SUBSTRATE_TEMPLATE_TTL_SEC (3600..7776000): how long a template no run used is kept (launcher default). */
+  templateTtlSec?: number;
+  /**
+   * SUBSTRATE_TEMPLATE_READY_SEC (60..7200): how long a template that never started an actor may build
+   * before a run on it fails as substrate_image_unready (launcher default 900 s).
+   */
+  templateReadySec?: number;
+  /**
+   * SUBSTRATE_TEMPLATE_RETRY_SEC (60..86400): the window after a golden-snapshot failure within which
+   * another one fails runs instead of rebuilding the template (launcher default 600 s).
+   */
+  templateRetrySec?: number;
   /**
    * SUBSTRATE_WARM_ROUNDS=true (experimental spike): park a succeeded run's actors for a follow-up
    * and let a continuation adopt them. SUBSTRATE_PARK_TTL_SEC (60..86400, default 3600) bounds the
@@ -826,6 +838,27 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
     7_200,
   );
   if (startupTimeoutSec !== undefined) config.startupTimeoutSec = startupTimeoutSec;
+  const templateTtlSec = optionalBoundedInteger(
+    env.SUBSTRATE_TEMPLATE_TTL_SEC?.trim() || undefined,
+    "SUBSTRATE_TEMPLATE_TTL_SEC",
+    3_600,
+    7_776_000,
+  );
+  if (templateTtlSec !== undefined) config.templateTtlSec = templateTtlSec;
+  const templateReadySec = optionalBoundedInteger(
+    env.SUBSTRATE_TEMPLATE_READY_SEC?.trim() || undefined,
+    "SUBSTRATE_TEMPLATE_READY_SEC",
+    60,
+    7_200,
+  );
+  if (templateReadySec !== undefined) config.templateReadySec = templateReadySec;
+  const templateRetrySec = optionalBoundedInteger(
+    env.SUBSTRATE_TEMPLATE_RETRY_SEC?.trim() || undefined,
+    "SUBSTRATE_TEMPLATE_RETRY_SEC",
+    60,
+    86_400,
+  );
+  if (templateRetrySec !== undefined) config.templateRetrySec = templateRetrySec;
   const warm = env.SUBSTRATE_WARM_ROUNDS?.trim().toLowerCase();
   if (warm !== undefined && warm !== "" && warm !== "true" && warm !== "false") {
     throw new Error("SUBSTRATE_WARM_ROUNDS must be true or false.");

@@ -9,10 +9,17 @@ import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
-import { SubstrateJobLauncher, type SubstrateCallFailure, type WarmEvent, type WarmRoundsOptions } from "./launcher.js";
+import {
+  SubstrateJobLauncher,
+  type SubstrateCallFailure,
+  type TemplateEvent,
+  type WarmEvent,
+  type WarmRoundsOptions,
+} from "./launcher.js";
 import { substrateRunToken } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
+import { MemorySubstrateTemplateStore, type SubstrateTemplateStore } from "./template-store.js";
 
 export const FAKE_CAP = "rrp_fake_capability_value_000001";
 /** Fake MCP tokens, isMcpToken-shaped (`rmt_` + 43 characters). */
@@ -111,6 +118,10 @@ export interface Harness {
   callFailures: SubstrateCallFailure[];
   /** Every warm-round event the launcher reported (warm rounds only). */
   warmEvents: WarmEvent[];
+  /** The launcher's template record. */
+  templates: SubstrateTemplateStore;
+  /** Every template event the launcher reported. */
+  templateEvents: TemplateEvent[];
   root: string;
 }
 
@@ -123,6 +134,10 @@ export async function makeHarness(
     config?: Partial<SubstrateLaunchConfig>;
     runId?: string;
     runs?: SubstrateRunStore;
+    /** The template record (default: a fresh MemorySubstrateTemplateStore). */
+    templates?: SubstrateTemplateStore;
+    templateReadyMs?: number;
+    templateRetryMs?: number;
     collectGraceMs?: number;
     startupTimeoutMs?: number;
     warmRounds?: WarmRoundsOptions;
@@ -164,6 +179,8 @@ export async function makeHarness(
   const secrets = new RecordingSecrets();
   const callFailures: SubstrateCallFailure[] = [];
   const warmEvents: WarmEvent[] = [];
+  const templates = options.templates ?? new MemorySubstrateTemplateStore();
+  const templateEvents: TemplateEvent[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const relay = new MemoryRelayStore();
   relay.register(substrateRunToken(runId), 1 << 20);
@@ -179,6 +196,10 @@ export async function makeHarness(
     resolveMcpToken: async (id) => options.mcpTokenFor?.(id),
     now: () => now,
     onSubstrateCallFailed: (failure) => callFailures.push(failure),
+    templates,
+    onTemplateEvent: (event) => templateEvents.push(event),
+    ...(options.templateReadyMs !== undefined ? { templateReadyMs: options.templateReadyMs } : {}),
+    ...(options.templateRetryMs !== undefined ? { templateRetryMs: options.templateRetryMs } : {}),
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
     ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),
@@ -215,6 +236,8 @@ export async function makeHarness(
     },
     callFailures,
     warmEvents,
+    templates,
+    templateEvents,
     root,
   };
 }

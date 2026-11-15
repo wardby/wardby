@@ -51,6 +51,12 @@
  *   actor's only, Codex's the one actor's. The image must carry this release's bridge; the proxy's
  *   protocol check, the bridge's image check and the template readiness rules turn a broken one into
  *   a fixed code.
+ * - Templates: each one wardby ensures has a SubstrateTemplate row (its name, role and image; when
+ *   it was last used by a launch, park or adoption; its golden-snapshot failures in the current
+ *   window; when an actor from it first reached running). A first golden-snapshot failure rebuilds
+ *   the template; a second in SUBSTRATE_TEMPLATE_RETRY_SEC, or a never-ready template past
+ *   SUBSTRATE_TEMPLATE_READY_SEC with room on the workers, fails the run as substrate_image_unready
+ *   instead of requeueing it.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -110,6 +116,7 @@ import {
   roundBlob,
   type SubstrateImageItem,
   substrateRunToken,
+  templateRoleOf,
   toolActorName,
 } from "./names.js";
 import { canPlaceAll, type Room } from "./placement.js";
@@ -123,6 +130,7 @@ import {
   toolTemplate,
   type SubstrateLaunchConfig,
 } from "./specs.js";
+import type { SubstrateTemplateRole, SubstrateTemplateStore } from "./template-store.js";
 
 export interface SubstrateJobLauncherOptions {
   api: SubstrateApi;
@@ -158,6 +166,49 @@ export interface SubstrateJobLauncherOptions {
   warmRounds?: WarmRoundsOptions;
   /** Where warm-round steps are reported with their timings (default: the server log, at info). */
   onWarmEvent?: (event: WarmEvent) => void;
+  /** The launcher's record of the templates it created (readiness, cleanup). */
+  templates: SubstrateTemplateStore;
+  /**
+   * SUBSTRATE_TEMPLATE_READY_SEC: how long a template that never started an actor may build before a
+   * run on it fails as substrate_image_unready (default 900 s).
+   */
+  templateReadyMs?: number;
+  /**
+   * SUBSTRATE_TEMPLATE_RETRY_SEC: the window after a golden-snapshot failure within which another one
+   * fails runs instead of rebuilding (default 600 s).
+   */
+  templateRetryMs?: number;
+  /** SUBSTRATE_TEMPLATE_TTL_SEC: how long a template no run used is kept (the cleanup sweep). */
+  templateTtlMs?: number;
+  /** Where template steps are reported (default: the server log; info, and warn for failures). */
+  onTemplateEvent?: (event: TemplateEvent) => void;
+}
+
+/** A template step, fixed fields only (never a Substrate message, a spec or a run value). */
+export interface TemplateEvent {
+  event:
+    | "substrate_template_golden_failed"
+    | "substrate_template_unready"
+    | "substrate_template_removed"
+    | "substrate_template_remove_failed";
+  name: string;
+  role: SubstrateTemplateRole;
+  /** golden_failed: the failures in the window. */
+  failures?: number;
+  /** unready: why. */
+  reason?: "golden_failed" | "never_ready";
+  /** removed: seconds since its last use. */
+  ageSec?: number;
+}
+
+export const DEFAULT_TEMPLATE_READY_MS = 900_000;
+export const DEFAULT_TEMPLATE_RETRY_MS = 600_000;
+
+/** A run's template cannot start an actor (see ensureTemplate and neverReady): the run fails, never requeues. */
+class TemplateUnreadyError extends Error {
+  constructor() {
+    super("substrate_image_unready");
+  }
 }
 
 export interface WarmRoundsOptions {
@@ -305,6 +356,11 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
     status: { state: "failed" },
     result: { exitCode: 1, reason: "failed", diagnostic: "substrate_bridge_incompatible" },
   },
+  // A template of the run failed its golden snapshot twice in the window, or never became ready.
+  image_unready: {
+    status: { state: "failed" },
+    result: { exitCode: 1, reason: "failed", diagnostic: "substrate_image_unready" },
+  },
   // collect_timeout: its result carries the worker's exit report (see observe).
   // image_incomplete: its diagnostic carries the reported item (see observe).
   // Warm rounds: a run whose parked actors another run took over had succeeded.
@@ -439,6 +495,11 @@ function actorTemplates(templates: RunTemplates): ActorTemplateSpec[] {
   return templates.shape === "pair" ? [templates.agent, templates.tool] : [templates.agent];
 }
 
+/** The run's templates in the order its actors resume (the tool first), so the first refused is first. */
+function resumeOrder(templates: RunTemplates): ActorTemplateSpec[] {
+  return templates.shape === "pair" ? [templates.tool, templates.agent] : [templates.agent];
+}
+
 /** Whether every actor of the run can be placed in `free`; true when the room is unknown (the launch decides). */
 function placeable(free: Room[] | undefined, templates: RunTemplates): boolean {
   if (!free) return true;
@@ -464,6 +525,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private readonly now: () => number;
   private readonly collectGraceMs: number;
   private readonly startupTimeoutMs: number;
+  private readonly templates: SubstrateTemplateStore;
+  private readonly templateReadyMs: number;
+  private readonly templateRetryMs: number;
   private readonly warm: WarmRoundsOptions | undefined;
   /** WorkspaceJobLauncher.warmRounds: set from the configuration (warm rounds on). */
   readonly warmRounds: boolean;
@@ -482,6 +546,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.collectGraceMs = options.collectGraceMs ?? DEFAULT_COLLECT_GRACE_MS;
     this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    this.templates = options.templates;
+    this.templateReadyMs = options.templateReadyMs ?? DEFAULT_TEMPLATE_READY_MS;
+    this.templateRetryMs = options.templateRetryMs ?? DEFAULT_TEMPLATE_RETRY_MS;
   }
 
   /** Phase A: no coding-run services on Substrate. */
@@ -823,6 +890,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     } catch (error) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
       await this.cleanup(token, 1, shape, repositoryNames(spec));
+      // A template that cannot start an actor: the run fails now (substrate_image_unready) and is
+      // never requeued. The launch resolves with its handle; status() answers the recorded failure.
+      if (
+        error instanceof TemplateUnreadyError ||
+        (error instanceof SubstrateExhaustedError && (await this.neverReady(templates)))
+      ) {
+        await this.runs.setPhase(spec.runId, "image_unready", ["provisioning"]).catch(() => undefined);
+        return;
+      }
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -841,24 +917,90 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // Stopped or timed out while provisioning: whoever moved it may have deleted the actors
       // before they existed, so delete them again.
       await this.deleteActors(token, shape);
+      return;
+    }
+    // Every actor resumed from its template: each one is ready (best effort, never fails the run).
+    await this.templates
+      .markReady(
+        actorTemplates(templates).map((t) => t.name),
+        new Date(this.now()),
+      )
+      .catch(() => undefined);
+  }
+
+  /**
+   * Whether a refused resume is an image that never becomes ready rather than a full cluster: the
+   * workers have room for the run, and one of its templates (in resume order) has never started an
+   * actor (no readyAt) and has been building (since it was created, or since its window's first
+   * golden-snapshot failure) for longer than templateReadyMs. Reports that template. Any store
+   * error: false (the run requeues, as before).
+   */
+  private async neverReady(templates: RunTemplates): Promise<boolean> {
+    try {
+      if (!(await this.fits(templates))) return false;
+      for (const template of resumeOrder(templates)) {
+        const row = await this.templates.get(template.name);
+        if (!row || row.readyAt !== undefined) continue;
+        const since = (row.lastFailureAt ?? row.createdAt).getTime();
+        if (this.now() - since <= this.templateReadyMs) continue;
+        this.templateEvent({
+          event: "substrate_template_unready",
+          name: row.name,
+          role: row.role,
+          reason: "never_ready",
+        });
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
     }
   }
 
   /**
-   * Creates the template unless it exists. An existing template whose golden snapshot build failed
-   * for good can never start an actor, so it is deleted and created again, once per launch (a fresh
-   * golden snapshot build follows). A template's name is derived from its image, size and settings,
-   * so the one deleted is this same spec.
+   * Records the template (its SubstrateTemplate row, created or its lastUsedAt bumped; a store that
+   * cannot be written fails the launch), then creates it unless it exists. An existing template
+   * whose golden snapshot build failed for good can never start an actor: the failure is counted in
+   * the row's window (SUBSTRATE_TEMPLATE_RETRY_SEC, anchored at its first failure). The first one in
+   * a window deletes the template and creates it again, once per launch (a fresh golden snapshot
+   * build follows); a second one within the window fails the run (TemplateUnreadyError:
+   * substrate_image_unready) without rebuilding, since the image itself is broken. A template's
+   * name is derived from its image, size and settings, so the one deleted is this same spec.
+   * Substrate's failure message is never read (the client maps only goldenSnapshotFailed).
    */
   private async ensureTemplate(
     template: ActorTemplateSpec,
     call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
   ): Promise<void> {
+    const { name, atespace } = template;
+    const role = templateRoleOf(name)!;
+    await this.templates.touch({ name, atespace, role, image: template.containers[0].image }, new Date(this.now()));
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
-    const info = await call("getActorTemplate", () => this.api.getActorTemplate(template.atespace, template.name));
+    const info = await call("getActorTemplate", () => this.api.getActorTemplate(atespace, name));
     if (!info?.goldenSnapshotFailed) return;
-    await call("deleteActorTemplate", () => this.api.deleteActorTemplate(template.atespace, template.name));
+    // A record that cannot be written counts as no earlier failure: the template is rebuilt, as before.
+    const failures = await this.templates
+      .recordGoldenFailure(name, new Date(this.now()), this.templateRetryMs)
+      .catch(() => undefined);
+    if (failures !== undefined) {
+      this.templateEvent({ event: "substrate_template_golden_failed", name, role, failures });
+    }
+    if (failures !== undefined && failures > 1) {
+      this.templateEvent({ event: "substrate_template_unready", name, role, reason: "golden_failed" });
+      throw new TemplateUnreadyError();
+    }
+    await call("deleteActorTemplate", () => this.api.deleteActorTemplate(atespace, name));
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
+  }
+
+  private templateEvent(event: TemplateEvent): void {
+    try {
+      if (this.options.onTemplateEvent) this.options.onTemplateEvent(event);
+      else if (event.event === "substrate_template_removed") substrateLog.info({ ...event }, event.event);
+      else substrateLog.warn({ ...event }, event.event);
+    } catch {
+      // Reporting never changes the launch's outcome.
+    }
   }
 
   /**
@@ -1392,13 +1534,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * otherwise follow the retired token on adoption), then records the run as parked until now +
    * parkTtlMs with the round, its commit and fingerprint. Keeps the egress policies, the actors'
    * state and the small files the run's outcome is read from. False, with nothing recorded, when any
-   * step fails: the caller then removes the run.
+   * step fails: the caller then removes the run. First, best effort, the templates the actors were
+   * created from (getActor's templateName, never a name recomputed from a spec) are marked used.
    */
   private async park(record: SubstrateRunRecord, retention: JobRetention): Promise<boolean> {
     const { atespace } = this.config;
     const startedAt = this.now();
     const clock = performance.now();
     const round = roundOf(record);
+    await this.touchActorTemplates(record.token);
     try {
       try {
         // The tool first: it holds the workspace and the agent never needs it while suspended.
@@ -1433,6 +1577,24 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const ms = Math.round(performance.now() - clock);
     this.warmEvent({ event: "substrate_warm_parked", runId: record.runId, runToken: record.token, round, ms });
     return true;
+  }
+
+  /**
+   * Bumps lastUsedAt on the templates a pair's actors were created from (getActor's templateName),
+   * so the cleanup sweep never removes a template a parked chain still runs on. Never throws.
+   */
+  private async touchActorTemplates(token: string): Promise<void> {
+    try {
+      const { atespace } = this.config;
+      const actors = await Promise.all([
+        this.api.getActor(atespace, agentActorName(token)),
+        this.api.getActor(atespace, toolActorName(token)),
+      ]);
+      const names = actors.map((actor) => actor?.templateName).filter((name): name is string => !!name);
+      await this.templates.touchNames(names, new Date(this.now()));
+    } catch {
+      // Best effort: a park never fails for it.
+    }
   }
 
   /**
@@ -1525,7 +1687,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       specHash,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
     });
-    if (!record) {
+    if (record) {
+      // The templates the parked actors run on (as Substrate reports them): best effort.
+      await this.templates
+        .touchNames([agent.templateName, tool.templateName], new Date(this.now()))
+        .catch(() => undefined);
+    } else {
       // Another launch of this same run got its row first: that launch decides, and reports.
       if (await this.runs.get(spec.runId)) return undefined;
       // Expired meanwhile (or being removed, which expires it first), else adopted or removed first.
