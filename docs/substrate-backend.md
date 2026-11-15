@@ -64,11 +64,37 @@ Docker and Kubernetes ones.
   (and the per-toolchain tool-runner images), each as a registry digest
   (`repo@sha256:<64 hex>`), as for the Kubernetes launcher. For Substrate these
   must be the worker and tool-runner images with the bridge added as the
-  entrypoint: build `src/substrate-bridge/Dockerfile.agent` on the Claude Code
-  worker image and `src/substrate-bridge/Dockerfile.tool` on the tool-runner
-  image (`--build-arg BASE=<image>`, build context the repository root, after
-  `npm run build`), push both, and pin the resulting digests. `CODING_WORKER_IMAGE`
-  (Codex) is not used by this backend.
+  entrypoint. `CODING_WORKER_IMAGE` (Codex) is not used by this backend. See
+  [Images](#images).
+
+### Images
+
+Releases publish the bridge images to the GitHub Container Registry, each built
+on that release's Claude Code worker or tool-runner image. The digest-pinned
+reference for the installed version is listed in `dist/quickstart-images.json`
+inside the npm package; use each one as-is:
+
+| Variable                                           | Key in `dist/quickstart-images.json` | Image                               |
+| -------------------------------------------------- | ------------------------------------ | ----------------------------------- |
+| `CODING_CLAUDE_WORKER_IMAGE`                       | `substrateAgent`                     | `wardby-substrate-agent`            |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE`                  | `substrateTool`                      | `wardby-substrate-tool`             |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` | `substrateToolNodePython`            | `wardby-substrate-tool-node-python` |
+
+```dotenv
+CODING_CLAUDE_WORKER_IMAGE=ghcr.io/your-org/wardby-substrate-agent@sha256:replace-with-digest
+CODING_CLAUDE_TOOL_RUNNER_IMAGE=ghcr.io/your-org/wardby-substrate-tool@sha256:replace-with-digest
+```
+
+Use the bridge images from the same release as the control plane and coding
+proxy, so the bridge and the proxy's Substrate routes match. A release before
+these images existed has none of the keys; build your own as below.
+
+To use your own worker or tool-runner image, or a build from a checkout, add
+the bridge yourself: build `src/substrate-bridge/Dockerfile.agent` on the
+Claude Code worker image and `src/substrate-bridge/Dockerfile.tool` on each
+tool-runner image (`--build-arg BASE=<repo>@sha256:<digest>`, build context the
+repository root, after `npm run build`), push them to a registry the cluster
+can pull from, and pin the resulting digests.
 
 ## Configure
 

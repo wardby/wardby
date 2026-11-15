@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, SUBSTRATE_ATESPACE, SUBSTRATE_PROXY_PORT]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, SUBSTRATE_ATESPACE, SUBSTRATE_PROXY_PORT, images]
 appliesTo: ">=0.9.15"
 ---
 
@@ -35,9 +35,14 @@ feature. A run that needs a feature the Substrate backend lacks fails with
    and egress gateway; grant the credential provider read access to the
    namespace in `SUBSTRATE_CREDENTIALS_NAMESPACE` (default
    `wardby-run-secrets`) and restart it.
-2. Build the Claude worker and tool-runner images with the Substrate bridge
-   entrypoint and set their registry digests (`CODING_CLAUDE_WORKER_IMAGE`,
-   `CODING_CLAUDE_TOOL_RUNNER_IMAGE`).
+2. Set the Substrate bridge images by digest: `CODING_CLAUDE_WORKER_IMAGE` to
+   `substrateAgent`, `CODING_CLAUDE_TOOL_RUNNER_IMAGE` to `substrateTool` and,
+   for the Node + Python toolchain,
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` to
+   `substrateToolNodePython`, each from `dist/quickstart-images.json` in the
+   installed npm package. For your own images, build the bridge onto them from
+   a checkout (see Images in the
+   [Substrate backend guide](../docs/substrate-backend.md#images)).
 3. Set one blob store (`BLOB_STORE`) on both the control plane and the coding
    proxy.
 4. On the control plane set `JOB_LAUNCHER=substrate`, `SUBSTRATE_API_URL`,
