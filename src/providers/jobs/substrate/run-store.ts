@@ -1,6 +1,11 @@
 import type { PrismaClient } from "#prisma";
 import type { WarmColdReason } from "../types.js";
-import { isCodingRepositoryName, MAX_RUN_REPOSITORIES_IN_INPUT } from "../../../coding/protocol.js";
+import {
+  CODING_SERVICE_NAME,
+  isCodingRepositoryName,
+  MAX_CODING_SERVICES,
+  MAX_RUN_REPOSITORIES_IN_INPUT,
+} from "../../../coding/protocol.js";
 import { retiredRunToken } from "./names.js";
 
 /**
@@ -46,10 +51,31 @@ export interface SubstrateRunRepository {
   access: "read" | "write";
 }
 
-/** A run's actor shape and extra repositories (the proxy's layout lookup). */
+/** A run's actor shape, extra repositories and services (the proxy's layout lookup). */
 export interface SubstrateRunLayout {
   shape: SubstrateActorShape;
   repositories?: SubstrateRunRepository[];
+  /** The run's service names (sorted), only for a run with services. */
+  services?: string[];
+}
+
+/**
+ * The services column's value as records carry it: 1 to MAX_CODING_SERVICES distinct catalog names
+ * (CODING_SERVICE_NAME), sorted; undefined for null or anything else.
+ */
+export function parseRunServices(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_CODING_SERVICES) return undefined;
+  const names: string[] = [];
+  for (const entry of value as unknown[]) {
+    if (typeof entry !== "string" || !CODING_SERVICE_NAME.test(entry) || names.includes(entry)) return undefined;
+    names.push(entry);
+  }
+  return names.sort();
+}
+
+/** What claim stores for a run's services: each name once, sorted. */
+function claimedServices(services: readonly string[]): string[] {
+  return [...new Set(services)].sort();
 }
 
 /**
@@ -103,6 +129,13 @@ export interface SubstrateRunRecord {
    * extras' blobs, and the launcher logs that (a fixed event, no content).
    */
   repositoriesUnreadable?: true;
+  /** Set on claim (sorted catalog names) for a run with services; absent otherwise. Names only. */
+  services?: string[];
+  /**
+   * Set by the store (ignored on claim) when the row's services value does not parse: the launcher
+   * treats the run as having services (never parks it).
+   */
+  servicesUnreadable?: true;
   /**
    * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
    * neither actor has reached the proxy, that is when it became running: the relay's own writes to
@@ -196,11 +229,13 @@ interface Row {
   coldReason: string | null;
   actorShape: string;
   repositories: unknown;
+  services: unknown;
   updatedAt: Date;
 }
 
 function toRecord(row: Row): SubstrateRunRecord {
   const repositories = parseRunRepositories(row.repositories);
+  const services = parseRunServices(row.services);
   return {
     runId: row.runId,
     token: row.token,
@@ -216,6 +251,8 @@ function toRecord(row: Row): SubstrateRunRecord {
     actorShape: row.actorShape === "single" ? "single" : "pair",
     ...(repositories ? { repositories } : {}),
     ...(row.repositories !== null && !repositories ? { repositoriesUnreadable: true as const } : {}),
+    ...(services ? { services } : {}),
+    ...(row.services !== null && !services ? { servicesUnreadable: true as const } : {}),
     updatedAt: row.updatedAt,
   };
 }
@@ -249,6 +286,7 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
           ...(record.repositories
             ? { repositories: record.repositories.map(({ name, access }) => ({ name, access })) }
             : {}),
+          ...(record.services ? { services: claimedServices(record.services) } : {}),
         },
       });
       return { created: true, record: toRecord(row) };
@@ -398,6 +436,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
       ...(record.repositories
         ? { repositories: record.repositories.map(({ name, access }) => ({ name, access })) }
         : {}),
+      ...(record.services ? { services: claimedServices(record.services) } : {}),
       updatedAt: new Date(this.now()),
     };
     this.rows.set(record.runId, row);

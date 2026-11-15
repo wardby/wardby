@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { describeSubstrateRunStoreContract } from "./run-store.contract.test-support.js";
-import { MemorySubstrateRunStore, parseRunRepositories, type SubstrateRunRecord } from "./run-store.js";
+import {
+  MemorySubstrateRunStore,
+  parseRunRepositories,
+  parseRunServices,
+  type SubstrateRunRecord,
+} from "./run-store.js";
 
 const record: SubstrateRunRecord = {
   runId: "r1",
@@ -112,5 +117,27 @@ describe("parseRunRepositories", () => {
     ["17 entries", Array.from({ length: 17 }, (_, i) => ({ name: `extra-${i}`, access: "read" }))],
   ])("reads nothing for %s", (_label, value) => {
     expect(parseRunRepositories(value)).toBeUndefined();
+  });
+});
+
+describe("parseRunServices", () => {
+  it("reads nothing for null or undefined", () => {
+    expect(parseRunServices(null)).toBeUndefined();
+    expect(parseRunServices(undefined)).toBeUndefined();
+  });
+
+  it("returns the names sorted", () => {
+    expect(parseRunServices(["redis", "postgres"])).toEqual(["postgres", "redis"]);
+  });
+
+  it.each([
+    ["an empty list", []],
+    ["a string", "postgres"],
+    ["an invalid name", ["Postgres"]],
+    ["a name twice", ["postgres", "postgres"]],
+    ["an object entry", [{ name: "postgres" }]],
+    ["six names", ["a", "b", "c", "d", "e", "f"]],
+  ])("reads nothing for %s", (_label, value) => {
+    expect(parseRunServices(value)).toBeUndefined();
   });
 });

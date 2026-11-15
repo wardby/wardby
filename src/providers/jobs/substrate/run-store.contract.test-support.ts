@@ -178,6 +178,42 @@ export function describeSubstrateRunStoreContract(name: string, setup: RunStoreC
       expect("repositories" in adopted!).toBe(false);
     });
 
+    it("records the services on claim, sorted, and keeps them through reclaim and setPhase", async () => {
+      now = NOW;
+      const r = setup.id("services");
+      const r2 = setup.id("services-none");
+      await setup.runs(r, r2);
+      const s = store();
+      const SORTED = ["postgres", "redis"];
+      expect((await s.claim(record(r, { services: ["redis", "postgres"] }))).record.services).toEqual(SORTED);
+      expect((await s.get(r))?.services).toEqual(SORTED);
+      expect((await s.getByToken(substrateRunToken(r)))?.services).toEqual(SORTED);
+      expect((await s.setPhase(r, "requeued", ["provisioning"])).services).toEqual(SORTED);
+      expect((await s.reclaim(r, new Date(NOW + HOUR)))?.services).toEqual(SORTED);
+      expect((await s.setPhase(r, "running", ["provisioning"])).services).toEqual(SORTED);
+      expect("servicesUnreadable" in (await s.get(r))!).toBe(false);
+
+      await s.claim(record(r2));
+      const none = await s.get(r2);
+      expect("services" in none!).toBe(false);
+      expect("servicesUnreadable" in none!).toBe(false);
+    });
+
+    it("gives an adopter no services", async () => {
+      now = NOW;
+      const r1 = setup.id("services-adopt-1");
+      const r2 = setup.id("services-adopt-2");
+      await setup.runs(r1, r2);
+      const s = store();
+      await s.claim(record(r1));
+      await s.setPhase(r1, "running", ["provisioning"]);
+      await park(s, r1, NOW);
+      const adopted = await s.adopt(r1, r2, new Date(NOW + HOUR), { specHash: "h2" });
+      expect(adopted).toBeDefined();
+      expect("services" in adopted!).toBe(false);
+      expect("servicesUnreadable" in adopted!).toBe(false);
+    });
+
     it("parks only a running run, with what it was parked with", async () => {
       now = NOW;
       const r1 = setup.id("park");

@@ -49,6 +49,7 @@ const BLOB_KINDS = [
   "started",
   "bridgeRefused",
   "imageIncomplete",
+  "services",
 ] as const;
 
 async function blobKeys(h: Harness): Promise<string[]> {
