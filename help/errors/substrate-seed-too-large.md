@@ -12,8 +12,8 @@ appliesTo: ">=0.9.15"
 `substrate_seed_too_large` means the run's prepared workspace (the checked-out
 repository, with its `.git` for a `gitHistory` run) and its extra repositories
 are larger, as tars together, than the run's disk limit. Each extra repository
-counts toward the same limit. The tool actor would have no room for it, so the run fails
-at launch and nothing is left behind.
+counts toward the same limit. The tool actor would have no room for it, so the
+run fails at launch and nothing is left behind.
 
 The limit is the agent's `codingProfile.workspaceDiskMb` when it has one, else
 `CODING_DISK_MB` (2048 MiB by default); `CODING_MAX_DISK_MB` caps what an agent

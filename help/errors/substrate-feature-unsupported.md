@@ -11,8 +11,8 @@ appliesTo: ">=0.9.15"
 
 `substrate_feature_unsupported` means the run asked for something the
 experimental Substrate launcher cannot do. The run fails at launch, before any
-actor is created. The control plane log names the feature (`services`, `dependencyCache` or
-`workerImage`).
+actor is created. The control plane log names the feature (`services`,
+`dependencyCache` or `workerImage`).
 
 | Trigger                                                                     | Feature           |
 | --------------------------------------------------------------------------- | ----------------- |
@@ -24,7 +24,8 @@ What to do:
 
 1. Run these agents on a deployment that uses `JOB_LAUNCHER=kubernetes` or
    `docker`, which support all of them; or
-2. remove the trigger: use an agent that allows no services and has no custom worker image.
+2. remove the trigger: use an agent that allows no services and has no custom
+   worker image.
 
 A custom image (`codingProfile.workerImageRef`, for Claude Code and Codex
 agents alike) is refused because it has no Substrate bridge: only the

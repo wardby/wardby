@@ -245,9 +245,11 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
   `SUBSTRATE_WORKSPACE_MAX_MB` on its own. An extra over it, or whose folder
   was replaced during the run (for example with a symlink, recorded as code
   `repository_changed` in the tool side's `substrate_bridge_collect_failed`
-  log line), fails only that repository: the run ends
-  `partially_published`, as on Docker and Kubernetes. A missing collected
-  workspace fails the run in the `workspace` category.
+  log line), fails only that repository. If another repository published
+  changes, the run ends `partially_published`, as on Docker and Kubernetes. If
+  none did, the run fails with that failure. A missing collected workspace
+  fails only that extra repository (`failed(workspace)`, counted the same
+  way); only the default repository's missing workspace fails the whole run.
 - **Git history** works per repository: each writable extra uploads its own
   result bundle (see [Git history](#git-history)).
 - **One difference from Docker and Kubernetes.** If collecting the default
@@ -262,8 +264,12 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
 - **Cleanup.** If a run's stored repository list cannot be read when the run is
   removed, the control plane logs the warning
   `substrate_run_repositories_unreadable` (the run id only) and the extras'
-  stored blobs are left behind. The blob store cannot delete by prefix, so put
-  a lifecycle rule on the bucket's Substrate prefix to expire them.
+  stored blobs are left behind. The blob store cannot delete by prefix. Each
+  extra's blobs are under `substrate/runs/<token>/repos/<name>/` (`<token>` is
+  the run's Substrate token, not its run id). A lifecycle rule on the bucket
+  prefix `substrate/runs/` is safe if its age is well past the longest run's
+  timeout plus `SUBSTRATE_PARK_TTL_SEC` (at most a day), because that prefix
+  also holds live and kept runs' blobs: for example 7 days.
 
 ## Warm rounds
 
@@ -331,7 +337,8 @@ saying so (`get_run` shows `warmStart: true` or `false` on the round):
 A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
 workspace lacks that merge; it writes no step line. A round with extra
-repositories always starts fresh too, and writes no step line.
+repositories always starts fresh too, and writes no step line (the launcher
+records no start reason for it).
 
 ### What is kept and what is removed
 
