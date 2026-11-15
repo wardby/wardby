@@ -2700,24 +2700,68 @@ describe("template record and readiness", () => {
     expect(h.templateEvents).toEqual([]);
   });
 
-  it("fails a template with a golden-snapshot status and no tag past the clock, even one that once ran", async () => {
+  it("fails a template with a golden-snapshot status and no tag past the clock when no actor ever started from it", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    const tool = toolTemplate(h.spec, CONFIG).name;
+    h.api.setGoldenSnapshotReady(CONFIG.atespace, tool, false);
+    refuseToolResume(h);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 60_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 61_000);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_unready");
+    expect(h.templateEvents).toEqual([
+      { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
+    ]);
+  });
+
+  it("never fails a template that once ran, whatever a later status read says, and skips the read", async () => {
     const h = await makeHarness({ templateReadyMs: 60_000 });
     await h.launcher.launch(h.spec);
     const tool = toolTemplate(h.spec, CONFIG).name;
     expect(await h.templates.get(tool)).toMatchObject({ readyAt: new Date(T0) });
-    // Substrate's status says not built: it outranks the record of an earlier running actor.
     h.api.setGoldenSnapshotReady(CONFIG.atespace, tool, false);
+    let reads = 0;
+    const get = h.api.getActorTemplate.bind(h.api);
+    h.api.getActorTemplate = async (...args: Parameters<typeof get>) => {
+      // The never-ready check's own read (not the launch path's ensureTemplate read).
+      if (new Error().stack?.includes("goldenSnapshotReady")) reads++;
+      return get(...args);
+    };
     refuseToolResume(h);
     const spec = await secondRun(h, "run-2");
+    h.setNow(T0 + 1000);
     await expect(h.launcher.launch(spec)).rejects.toBeInstanceOf(JobCapacityError);
-    h.setNow(T0 + 60_000);
+    h.setNow(T0 + 10 * MINUTE);
     await expect(h.launcher.launch(spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get("run-2"))?.phase).toBe("requeued");
+    expect(h.templateEvents).toEqual([]);
+    expect(await h.templates.get(tool)).toMatchObject({ readyAt: new Date(T0) });
+    expect(reads).toBe(0);
+  });
+
+  it("logs one fixed-field line when the status read fails, then falls back to the readiness record", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    const tool = toolTemplate(h.spec, CONFIG).name;
+    refuseToolResume(h);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    const get = h.api.getActorTemplate.bind(h.api);
+    h.api.getActorTemplate = async (...args: Parameters<typeof get>) => {
+      if (new Error().stack?.includes("goldenSnapshotReady"))
+        throw new SubstrateUnavailableError("substrate_unavailable");
+      return get(...args);
+    };
+    h.templateEvents.length = 0;
     h.setNow(T0 + 61_000);
-    await h.launcher.launch(spec);
-    expect((await h.runs.get("run-2"))?.phase).toBe("image_unready");
-    expect(h.templateEvents).toEqual([
-      { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
-    ]);
+    await h.launcher.launch(h.spec);
+    h.api.getActorTemplate = get;
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_unready");
+    expect(h.templateEvents).toContainEqual({
+      event: "substrate_template_status_read_failed",
+      name: tool,
+      role: "tool",
+    });
   });
 
   it("falls back to the readiness record when Substrate reports no golden-snapshot status", async () => {

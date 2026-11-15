@@ -426,15 +426,19 @@ park or adoption last used it.
   restart starts the count again. Wardby judges ready from Substrate's template
   status when Substrate reports it: a template whose golden snapshot is tagged
   is ready (its runs only ever wait for room), and one whose status has no tag
-  yet is not, even if actors started from it before. When Substrate reports no
-  golden-snapshot status, a template counts as ready once an actor from it has
-  started. A golden-snapshot failure always counts as a failure, whatever else
-  the status says. A run that finds
+  yet is not. A template an actor has already started from is always ready: it
+  never fails this way, whatever its status says later, and Wardby does not
+  read the status again for it. When Substrate reports no golden-snapshot
+  status, a template counts as ready once an actor from it has started. A
+  golden-snapshot failure always counts as a failure, whatever else the status
+  says. A run that finds
   another launch rebuilding its template goes back to the queue and waits, as
   for a capacity refusal; no error is recorded on the run.
 - **Log events**, each with the template's name and role and never an image's
   content or Substrate's message: `substrate_template_golden_failed`,
-  `substrate_template_unready`, `substrate_template_record_failed` (the
+  `substrate_template_unready`, `substrate_template_status_read_failed` (the
+  template's status could not be read; Wardby falls back to whether an actor has
+  started from it), `substrate_template_record_failed` (the
   failure count could not be written; the template is rebuilt),
   `substrate_template_remove_failed` (all warn) and `substrate_template_removed`
   (info).

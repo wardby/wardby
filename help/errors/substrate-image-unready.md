@@ -21,9 +21,11 @@ actor, so the run fails instead of waiting in the queue. One of these happened:
 
 Wardby uses Substrate's template status to judge ready when Substrate reports
 it: a template whose golden snapshot is tagged is ready and never fails this
-way, and one with a golden-snapshot status but no tag yet is not ready. When
-Substrate reports no such status, a template counts as ready once an actor from
-it has started. A failed golden-snapshot build always counts as a failure.
+way, and one with a golden-snapshot status but no tag yet is not ready. A
+template an actor has already started from is always ready and never fails this
+way, whatever its status says later. When Substrate reports no such status, a
+template counts as ready once an actor from it has started. A failed
+golden-snapshot build always counts as a failure.
 
 The control plane logs `substrate_template_unready` (with the template's name,
 its role and the reason `golden_failed` or `never_ready`) and, for each failed
