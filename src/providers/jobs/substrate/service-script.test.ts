@@ -219,6 +219,35 @@ describe("serviceStartScript in a real shell", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it("passes a leading - argument through as one argument, not an option of the script", async () => {
+    const dir = tempDir();
+    const out = join(dir, "args.out");
+    const service: ResolvedCodingService = {
+      ...FAKE_SERVICE,
+      startCommand: ["/bin/sh", "-c", 'printf "%s|%s" "$1" "$#" > "$0"; exec sleep 30', out, "-e --rf x"],
+      readiness: { ...FAKE_SERVICE.readiness, command: ["/bin/sh", "-c", 'test -f "$0"', out] },
+    };
+    run(serviceStartScript(service, { stateDir: dir }));
+    await waitFor(() => readState(dir) === "state=ready", 5000);
+    expect(readState(dir)).toBe("state=ready");
+    expect(readFileSync(out, "utf8")).toBe("-e --rf x|1");
+  });
+
+  it("keeps backslashes in a value literal", async () => {
+    const dir = tempDir();
+    const out = join(dir, "env.out");
+    const value = "a\\b\\nc\\\\'\\";
+    const service: ResolvedCodingService = {
+      ...FAKE_SERVICE,
+      serviceEnv: { FAKEDB_PASSWORD: value },
+      startCommand: ["/bin/sh", "-c", 'printf "%s" "$FAKEDB_PASSWORD" > "$0"; exec sleep 30', out],
+      readiness: { ...FAKE_SERVICE.readiness, command: ["/bin/sh", "-c", 'test -f "$0"', out] },
+    };
+    run(serviceStartScript(service, { stateDir: dir }));
+    await waitFor(() => readState(dir) === "state=ready", 5000);
+    expect(readFileSync(out, "utf8")).toBe(value);
+  });
+
   it("fails after the threshold and never exits", async () => {
     const dir = tempDir();
     const service: ResolvedCodingService = {
@@ -336,6 +365,8 @@ describe("substrateServiceProblems", () => {
     ]);
   });
 
+  // Deliberate: only the script directory and its parents are reserved. "/run/wardby" shares a
+  // string prefix with "/run/wardby-svc" but not a path segment, so it does not overlap it.
   it.each([["/run/wardby-other"], ["/run/wardby"], ["/var/run/wardby-svc"]])("allows data path %s", (dataPath) => {
     expect(substrateServiceProblems([{ ...FAKE_SERVICE, dataPath }])).toEqual([]);
   });
@@ -399,6 +430,10 @@ describe("servicesWaitMs", () => {
     expect(servicesWaitMs([builtin("postgres", "16")], 300_000)).toBe(150_000);
     expect(servicesWaitMs([builtin("postgres", "16"), builtin("mysql", "8")], 300_000)).toBe(300_000);
     expect(servicesWaitMs([], 300_000)).toBe(30_000);
+  });
+
+  it.each([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])("refuses a cap of %s", (capMs) => {
+    expect(() => servicesWaitMs([builtin("postgres", "16")], capMs)).toThrow("substrate_services_wait_cap_invalid");
   });
 });
 

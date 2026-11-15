@@ -119,9 +119,12 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
 
 /**
  * How long the holder's bridge waits for every service: SERVICE_START_MARKER_MS plus the sum of
- * failureThreshold x (periodSeconds + timeoutSeconds) seconds, at most `capMs`.
+ * failureThreshold x (periodSeconds + timeoutSeconds) seconds, at most `capMs`. Throws
+ * "substrate_services_wait_cap_invalid" for a cap that is not a positive finite number.
  */
 export function servicesWaitMs(services: readonly ResolvedCodingService[], capMs: number): number {
+  // The cap is the launcher's startup timeout: a zero, negative or non-finite one is a caller bug.
+  if (!Number.isFinite(capMs) || capMs <= 0) throw new Error("substrate_services_wait_cap_invalid");
   const probing = services.reduce(
     (sum, { readiness }) =>
       sum + readiness.failureThreshold * (readiness.periodSeconds + readiness.timeoutSeconds) * 1000,
