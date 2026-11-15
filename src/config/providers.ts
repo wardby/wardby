@@ -744,8 +744,8 @@ export interface SubstrateJobConfig {
   /** SUBSTRATE_TEMPLATE_TTL_SEC (3600..7776000): how long a template no run used is kept (launcher default). */
   templateTtlSec?: number;
   /**
-   * SUBSTRATE_TEMPLATE_READY_SEC (60..7200): how long a template that never started an actor may build
-   * before a run on it fails as substrate_image_unready (launcher default 900 s).
+   * SUBSTRATE_TEMPLATE_READY_SEC (60..7200): how long a template that is not ready may build before a
+   * run on it fails as substrate_image_unready (launcher default 900 s).
    */
   templateReadySec?: number;
   /**

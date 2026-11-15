@@ -264,8 +264,11 @@ class GrpcSubstrateApi implements SubstrateApi {
         const template = await this.control.getActorTemplate(
           create(GetActorTemplateRequestSchema, { actorTemplate: ref(atespace, name) }),
         );
-        // Only whether the build failed: the error message itself is never read out.
-        return { goldenSnapshotFailed: (template.status?.goldenSnapshotStatus?.errorMessage ?? "") !== "" };
+        // Only whether the build failed or is done: neither the error message nor the tag is read out.
+        const golden = template.status?.goldenSnapshotStatus;
+        const info: TemplateInfo = { goldenSnapshotFailed: (golden?.errorMessage ?? "") !== "" };
+        if (golden) info.goldenSnapshotReady = (golden.goldenTag?.name ?? "") !== "";
+        return info;
       },
       { [Code.NotFound]: () => undefined },
     );

@@ -48,6 +48,8 @@ export class FakeSubstrateApi implements SubstrateApi {
   readonly egressPolicies = new Map<string, EgressRule[]>();
   /** Templates whose golden snapshot build failed (see failGoldenSnapshot). */
   readonly goldenFailed = new Set<string>();
+  /** Templates' golden-snapshot ready signal (see setGoldenSnapshotReady); absent: not reported. */
+  readonly goldenReady = new Map<string, boolean>();
   constructor(readonly options: FakeSubstrateOptions) {}
 
   /** Like Substrate: an existing template is left as it is (AlreadyExists is success). */
@@ -57,11 +59,16 @@ export class FakeSubstrateApi implements SubstrateApi {
   }
   async getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined> {
     const key = `${atespace}/${name}`;
-    return this.templates.has(key) ? { goldenSnapshotFailed: this.goldenFailed.has(key) } : undefined;
+    if (!this.templates.has(key)) return undefined;
+    const info: TemplateInfo = { goldenSnapshotFailed: this.goldenFailed.has(key) };
+    const ready = this.goldenReady.get(key);
+    if (ready !== undefined) info.goldenSnapshotReady = ready;
+    return info;
   }
   async deleteActorTemplate(atespace: string, name: string): Promise<void> {
     this.templates.delete(`${atespace}/${name}`);
     this.goldenFailed.delete(`${atespace}/${name}`);
+    this.goldenReady.delete(`${atespace}/${name}`);
   }
   async createActor(atespace: string, name: string, template: string): Promise<void> {
     const key = `${atespace}/${name}`;
@@ -120,6 +127,15 @@ export class FakeSubstrateApi implements SubstrateApi {
   /** Test hook: the template's golden snapshot build failed for good. */
   failGoldenSnapshot(atespace: string, name: string): void {
     this.goldenFailed.add(`${atespace}/${name}`);
+  }
+  /**
+   * Test hook: the template's golden-snapshot status (true: tagged; false: a status without a tag
+   * yet; undefined: no status reported, the default).
+   */
+  setGoldenSnapshotReady(atespace: string, name: string, ready: boolean | undefined): void {
+    const key = `${atespace}/${name}`;
+    if (ready === undefined) this.goldenReady.delete(key);
+    else this.goldenReady.set(key, ready);
   }
   /** Test hook: put an actor in a state (e.g. CRASHED); only a RUNNING actor holds room. */
   setState(atespace: string, name: string, state: ActorState): void {
