@@ -151,7 +151,7 @@ The digest requirement for the worker and tool-runner images is the same as for
 | `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                                                                                                                   |
 | `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
 | `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
-| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload.                                                                                                                                                               |
+| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload, per repository (the default one and each writable extra).                                                                                                     |
 | `WARDBY_MCP_GATEWAY_URL`      |                | unset                     | For MCP tools: see [Remote MCP servers](security-deployment.md#remote-mcp-servers).                                                                                                                         |
 | `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
@@ -170,6 +170,8 @@ must arrive within ten minutes of being authenticated.
 - `codingProfile.gitHistory` runs (see [Git history](#git-history)).
 - Coding runs with remote MCP tools, for Claude Code and Codex (see
   [MCP tools](#mcp-tools)).
+- Coding runs with extra repositories, for Claude Code and Codex (see
+  [Extra repositories](#extra-repositories)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -222,6 +224,46 @@ and the whole workspace upload, bundle included, must fit
 `SUBSTRATE_WORKSPACE_MAX_MB`. A run with no `.git` or no bundle behaves as on
 Docker and Kubernetes. See
 [Git history in coding runs](../help/git-history.md).
+
+### Extra repositories
+
+A run with extra repositories (see
+[Several repositories in one run](coding-agent-setup.md#several-repositories-in-one-run))
+works for Claude Code and Codex. Each extra is at `/repos/<name>` in the tool
+actor (Claude Code) or the Codex actor, never in Claude's agent actor.
+
+- **Read repositories** are read-only through file permissions, not a mount:
+  a file with an execute bit becomes `0555`, other files `0444`, directories
+  `0555`, and setuid, setgid and sticky bits are cleared. A command can still
+  change its own copy's permissions, but a read repository's content is never
+  uploaded or collected.
+- **Disk.** The default repository and every extra are seeded as tars into one
+  budget, the run's disk (`workspaceDiskMb`, else `CODING_DISK_MB`). Over it,
+  the run fails at launch with
+  [`substrate_seed_too_large`](../help/errors/substrate-seed-too-large.md).
+- **Upload cap.** Each writable repository's upload must fit
+  `SUBSTRATE_WORKSPACE_MAX_MB` on its own. An extra over it, or whose folder
+  was replaced during the run (for example with a symlink, recorded as code
+  `repository_changed` in the tool side's `substrate_bridge_collect_failed`
+  log line), fails only that repository: the run ends
+  `partially_published`, as on Docker and Kubernetes. A missing collected
+  workspace fails the run in the `workspace` category.
+- **Git history** works per repository: each writable extra uploads its own
+  result bundle (see [Git history](#git-history)).
+- **One difference from Docker and Kubernetes.** If collecting the default
+  repository fails, the whole run fails on Substrate, extras included; Docker
+  and Kubernetes still publish the extras.
+- **Warm rounds.** A run with extra repositories never keeps or resumes a warm
+  round: every round starts fresh (see
+  [When a round starts fresh](#when-a-round-starts-fresh)).
+- **Upgrade the coding proxy first.** These runs need this release's coding
+  proxy and Substrate bridge images. An older proxy has no per-repository
+  routes, so such a run fails at start with `substrate_collect_failed`.
+- **Cleanup.** If a run's stored repository list cannot be read when the run is
+  removed, the control plane logs the warning
+  `substrate_run_repositories_unreadable` (the run id only) and the extras'
+  stored blobs are left behind. The blob store cannot delete by prefix, so put
+  a lifecycle rule on the bucket's Substrate prefix to expire them.
 
 ## Warm rounds
 
@@ -288,7 +330,8 @@ saying so (`get_run` shows `warmStart: true` or `false` on the round):
 
 A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
-workspace lacks that merge; it writes no step line.
+workspace lacks that merge; it writes no step line. A round with extra
+repositories always starts fresh too, and writes no step line.
 
 ### What is kept and what is removed
 
@@ -362,7 +405,6 @@ Use the Docker or Kubernetes launcher for them.
 
 - Coding services (`.wardby/services.yaml`).
 - The run dependency cache.
-- Extra repositories (multi-repository runs).
 - A custom worker image (`codingProfile.workerImageRef`), for Claude Code and
   Codex alike: it has no Substrate bridge. Only the configured worker and
   tool-runner images run, so a run dispatched with a tool-runner image you have

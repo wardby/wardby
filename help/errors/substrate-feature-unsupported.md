@@ -1,7 +1,7 @@
 ---
 id: errors/substrate-feature-unsupported
 title: The Substrate launcher does not support this run (substrate_feature_unsupported)
-summary: A coding run needs coding services, the dependency cache, extra repositories or a custom worker image, which the experimental Substrate launcher does not support; use the Docker or Kubernetes launcher.
+summary: A coding run needs coding services, the dependency cache or a custom worker image, which the experimental Substrate launcher does not support; use the Docker or Kubernetes launcher.
 audience: operator
 tags: [error, substrate, substrate_feature_unsupported, job launcher, coding-agents, workerImageRef]
 appliesTo: ">=0.9.15"
@@ -11,21 +11,20 @@ appliesTo: ">=0.9.15"
 
 `substrate_feature_unsupported` means the run asked for something the
 experimental Substrate launcher cannot do. The run fails at launch, before any
-actor is created. The control plane log names the feature (`services`, `dependencyCache`, `repositories`
-or `workerImage`).
+actor is created. The control plane log names the feature (`services`, `dependencyCache` or
+`workerImage`).
 
 | Trigger                                                                     | Feature           |
 | --------------------------------------------------------------------------- | ----------------- |
 | A repository with `.wardby/services.yaml` and an agent that allows services | `services`        |
 | The run dependency cache                                                    | `dependencyCache` |
-| Extra repositories (a default set, or a `repositories` list)                | `repositories`    |
 | A custom worker image (`codingProfile.workerImageRef`)                      | `workerImage`     |
 
 What to do:
 
 1. Run these agents on a deployment that uses `JOB_LAUNCHER=kubernetes` or
    `docker`, which support all of them; or
-2. remove the trigger: use an agent that allows no services, only the default repository, and no custom worker image.
+2. remove the trigger: use an agent that allows no services and has no custom worker image.
 
 A custom image (`codingProfile.workerImageRef`, for Claude Code and Codex
 agents alike) is refused because it has no Substrate bridge: only the

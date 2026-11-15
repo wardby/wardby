@@ -3,7 +3,7 @@ id: multi-repository-runs
 title: Several repositories in one coding run (read-only and writable)
 summary: Give one coding agent a default set of extra repositories, writable or read-only, mounted at /repos/<name>; choose them per run with repositories, and see how pull requests, follow-ups and failures work.
 audience: operator
-tags: [coding-agents, multiple repositories, read-only repository, link_repository, repositories, inDefaultSet]
+tags: [substrate, coding-agents, multiple repositories, read-only repository, link_repository, inDefaultSet]
 appliesTo: ">=0.9.13"
 ---
 
@@ -140,6 +140,9 @@ recipes](agent-recipes.md), [Local repositories](local-repositories.md) and
 
 ## Substrate launcher
 
-The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
-run that needs it fails with `substrate_feature_unsupported`. Use the Docker or
-Kubernetes launcher. See the `job-launcher-substrate` help article.
+On the experimental `JOB_LAUNCHER=substrate` (0.9.15 and later) these runs work
+for Claude Code and Codex. A read repository is read-only by file permissions
+and never uploaded; the default repository and the extras share the run's disk
+limit; a failed collection of the default repository fails the whole run; and
+such runs always start fresh under warm rounds. See the
+`job-launcher-substrate` help article.

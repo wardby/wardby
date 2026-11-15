@@ -165,4 +165,6 @@ A bundle that is not a regular file, or comes from a `.git` that was swapped
 while it was read, fails the run (`substrate_collect_failed`). A bundle over the
 run's limit (`CODING_MAX_RESULT_BUNDLE_MB`) fails it with
 `vcs_result_bundle_too_large`, and the whole workspace upload, bundle included,
-must fit `SUBSTRATE_WORKSPACE_MAX_MB`. See the `job-launcher-substrate` help article.
+must fit `SUBSTRATE_WORKSPACE_MAX_MB`. Each writable extra repository uploads
+its own result bundle the same way, and each upload must fit
+`SUBSTRATE_WORKSPACE_MAX_MB`. See the `job-launcher-substrate` help article.

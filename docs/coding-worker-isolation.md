@@ -478,6 +478,7 @@ The worker sees only these volume subpaths:
 - `/workspace`: read-write checkout files.
 - `/repos/<name>`: one folder for each extra repository of a run that has
   several (see [A coding agent's repositories](coding-agent-setup.md#several-repositories-in-one-run)).
+  On the Substrate launcher a read link's folder is made read-only with file permissions instead of a read-only mount; it is never uploaded or collected (see [Extra repositories](substrate-backend.md#extra-repositories)).
   A writable extra is read-write like `/workspace`; a read link's folder is
   mounted read-only and holds one commit's files with no git metadata (a remote link has no folder: it
   is fetched into `/workspace`'s history). The

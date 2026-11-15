@@ -674,8 +674,7 @@ includes it. See [Architecture knowledge bundles](knowledge.md).
 - `substrate` (**experimental**): two gVisor-sandboxed Agent Substrate actors
   per run for Claude Code, or one actor for Codex, with no Wardby secret in
   either. Both providers are refused the same features: coding services, the
-  dependency cache, extra repositories and a custom worker image
-  (`workerImageRef`). See
+  dependency cache and a custom worker image (`workerImageRef`). See
   [Substrate job launcher](substrate-backend.md).
 
 `local` (the default) runs no coding agents.
