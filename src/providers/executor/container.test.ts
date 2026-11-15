@@ -6864,6 +6864,27 @@ describe("ContainerExecutor warm rounds", () => {
       expect(created.events).toContain("retain");
     });
 
+    it("fingerprints a run's services", async () => {
+      const postgres = resolvedFromDefinition(
+        BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+      );
+      const supports = (created: Awaited<ReturnType<typeof warmHarness>>) => {
+        (created.jobs as { supportsServicesFor?: (provider: string) => boolean }).supportsServicesFor = () => true;
+      };
+      const plain = await warmHarness();
+      await plain.executor.start("run-1");
+      const withServices = await warmHarness({ services: [postgres] });
+      supports(withServices);
+      await withServices.executor.start("run-1");
+      const none = await warmHarness({ services: [] });
+      await none.executor.start("run-1");
+      const fingerprint = (created: Awaited<ReturnType<typeof warmHarness>>) => created.fingerprints[0]?.[1];
+      expect(fingerprint(plain)).toBe(fingerprintFor());
+      expect(fingerprint(withServices)).toMatch(/^[0-9a-f]{64}$/);
+      expect(fingerprint(withServices)).not.toBe(fingerprint(plain));
+      expect(fingerprint(none)).toBe(fingerprint(plain));
+    });
+
     it("retains a pushed branch (a local repository) too", async () => {
       const created = await warmHarness();
       created.vcs.pushBranchOnly = true;

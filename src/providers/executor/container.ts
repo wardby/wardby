@@ -134,7 +134,12 @@ import {
   type UnstartableService,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
-import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
+import {
+  servicesFingerprint,
+  systemPromptSha256,
+  warmFingerprint,
+  type WarmSecretVersion,
+} from "../jobs/warm-fingerprint.js";
 import { agentSecretVersions, parseSecretVersions } from "../../core/secret-versions.js";
 import { RUN_ID } from "../jobs/kubernetes-isolation.js";
 import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
@@ -4203,6 +4208,7 @@ export class ContainerExecutor implements Executor {
         repository: run.repository,
         secrets: run.secretVersions,
         mcpTools: pins,
+        services: servicesFingerprint(spec.services),
       });
       return WARM_FINGERPRINT.test(fingerprint) ? fingerprint : undefined;
     } catch {

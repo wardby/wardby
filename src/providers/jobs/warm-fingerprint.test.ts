@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { WARM_FINGERPRINT } from "./types.js";
 import {
   canonicalJson,
+  servicesFingerprint,
   systemPromptSha256,
   warmFingerprint,
   type WarmFingerprintInput,
@@ -130,5 +133,47 @@ describe("warmFingerprint MCP tool pins", () => {
     ["no pins", []],
   ] as const)("changes with %s", (_label, pins) => {
     expect(warmFingerprint({ ...INPUT, mcpTools: pins })).not.toBe(warmFingerprint(WITH));
+  });
+});
+
+describe("warmFingerprint services", () => {
+  const entry = (name: string, version: string) =>
+    resolvedFromDefinition(BUILTIN_CODING_SERVICES.find((s) => s.name === name && s.version === version)!);
+  const postgres16 = entry("postgres", "16");
+  const redis7 = entry("redis", "7");
+
+  it("leaves a fingerprint without services unchanged", () => {
+    expect(warmFingerprint({ ...INPUT, services: undefined })).toBe(warmFingerprint(INPUT));
+    expect(warmFingerprint(INPUT)).toBe("3c002da7b8612c87bd6ee1970a57542b28c5c23b8f65d5df50d4b698aed1e1df");
+  });
+
+  it("changes with the services and their order does not matter", () => {
+    const both = servicesFingerprint([postgres16, redis7]);
+    expect(both).toBe(servicesFingerprint([redis7, postgres16]));
+    expect(both).not.toBe(servicesFingerprint([postgres16]));
+    expect(servicesFingerprint([postgres16])).not.toBe(
+      servicesFingerprint([{ ...postgres16, startCommand: ["other"] }]),
+    );
+    expect(servicesFingerprint([])).toBeUndefined();
+    expect(servicesFingerprint(undefined)).toBeUndefined();
+  });
+
+  it("pins the hash", () => {
+    const hash = servicesFingerprint([postgres16]);
+    expect(hash).toBe("3fef43fb0210cf8b3d48921c76eaa0011d4a2ce8e325201d2fc30e41122c8c56");
+    expect(warmFingerprint({ ...INPUT, services: hash })).not.toBe(warmFingerprint(INPUT));
+  });
+
+  it("carries a hash, never a service value", () => {
+    const fake = {
+      ...postgres16,
+      serviceEnv: { ...postgres16.serviceEnv, FAKE_SERVICE: "FAKE_SERVICE_ENV_VALUE_0001" },
+    };
+    const hash = servicesFingerprint([fake]);
+    expect(hash).toMatch(WARM_FINGERPRINT);
+    const input = { ...INPUT, services: hash };
+    expect(canonicalJson(input)).toContain(hash);
+    expect(canonicalJson(input)).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    expect(hash).not.toBe(servicesFingerprint([postgres16]));
   });
 });
