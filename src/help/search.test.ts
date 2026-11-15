@@ -352,6 +352,24 @@ describe("package audit mode help", () => {
   });
 });
 
+describe("Substrate Codex help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const query of ["substrate codex", "codex substrate", "CODING_WORKER_IMAGE substrate"]) {
+      expect(top3(query), query).toContain("job-launcher-substrate");
+    }
+    expect(top3("substrate warm rounds codex")).toEqual(
+      expect.arrayContaining(["job-launcher-substrate", "substrate-warm-rounds"]),
+    );
+  });
+});
+
 describe("pnpm and yarn help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

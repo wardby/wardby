@@ -134,12 +134,18 @@ cannot be asked to reach somewhere else. Model APIs can do that on the
 caller's behalf: an OpenAI hosted `mcp` tool or a remote `input_image` URL
 makes OpenAI's servers contact any host, and hosted-tool fees and non-default
 service tiers are billed outside the metered tokens. Code in a Codex worker can
-read the run capability, so the proxy validates every request body against an
+read the run capability on the Docker and Kubernetes launchers, so the proxy validates every request body against an
 allowlist before it resolves a credential, and refuses anything else with a
 `400` (`src/providers/coding-proxy/proxy.ts`). Each refusal is also written to
 the proxy audit log as `request.rejected` with the run id and the refusal
 code, so a smuggling attempt is attributable to its run. JSON nested too
 deeply to process is refused with `request_nesting_too_deep`.
+
+On the experimental [Substrate launcher](substrate-backend.md) a Codex worker
+holds only a placeholder, not the run capability. Substrate's egress gateway
+injects the real capability on the wire, so commands in the worker can use it
+within the proxy allowlist and budget but cannot read it or send it anywhere
+else.
 
 - **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
   text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool

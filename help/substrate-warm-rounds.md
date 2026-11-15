@@ -36,7 +36,7 @@ Every detail is in the [Substrate backend guide](../docs/substrate-backend.md#wa
 
 ## When a round is kept
 
-Only a Claude Code round that succeeded, whose push succeeded and pushed
+Warm rounds are Claude Code only; Codex rounds always start fresh. Only a Claude Code round that succeeded, whose push succeeded and pushed
 changes (a round with no changes is not kept), and whose session was cancelled (its credentials revoked) is kept. Any other round is removed, as
 without warm rounds.
 

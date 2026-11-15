@@ -8,7 +8,8 @@
 
 The Substrate backend runs each Claude Code coding run as two actors on
 [Agent Substrate](https://github.com/agent-substrate) (version 1.0 or later), a
-Kubernetes add-on that runs sandboxed actors under gVisor:
+Kubernetes add-on that runs sandboxed actors under gVisor. A Codex coding run
+is a single actor instead (see [Codex runs](#codex-runs)).
 
 - the **agent actor** runs the Claude Code worker;
 - the **tool actor** runs the credential-free tool runner (the commands and the
@@ -64,8 +65,16 @@ Docker and Kubernetes ones.
   (and the per-toolchain tool-runner images), each as a registry digest
   (`repo@sha256:<64 hex>`), as for the Kubernetes launcher. For Substrate these
   must be the worker and tool-runner images with the bridge added as the
-  entrypoint. `CODING_WORKER_IMAGE` (Codex) is not used by this backend. See
-  [Images](#images).
+  entrypoint. For Codex agents, `CODING_WORKER_IMAGE` (and
+  `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` for the Node + Python toolchain) must
+  be the Substrate Codex bridge images, by digest. See [Images](#images).
+- **A coding proxy of this release or later** before Codex runs are sent: the
+  proxy accepts the `x-api-key` header on the Responses route only when no
+  `Authorization` header is present, and serves the routes the Codex actor
+  uses to hold the workspace. An older proxy refuses those requests.
+- **The `20261121000000_substrate_codex_shape` migration**, applied with
+  `prisma migrate deploy` (`npm run prisma:migrate`) before the new control
+  plane and proxy start, as for any upgrade that ships a migration.
 
 ### Images
 
@@ -74,11 +83,13 @@ on that release's Claude Code worker or tool-runner image. The digest-pinned
 reference for the installed version is listed in `dist/quickstart-images.json`
 inside the npm package; use each one as-is:
 
-| Variable                                           | Key in `dist/quickstart-images.json` | Image                               |
-| -------------------------------------------------- | ------------------------------------ | ----------------------------------- |
-| `CODING_CLAUDE_WORKER_IMAGE`                       | `substrateAgent`                     | `wardby-substrate-agent`            |
-| `CODING_CLAUDE_TOOL_RUNNER_IMAGE`                  | `substrateTool`                      | `wardby-substrate-tool`             |
-| `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` | `substrateToolNodePython`            | `wardby-substrate-tool-node-python` |
+| Variable                                           | Key in `dist/quickstart-images.json` | Image                                |
+| -------------------------------------------------- | ------------------------------------ | ------------------------------------ |
+| `CODING_CLAUDE_WORKER_IMAGE`                       | `substrateAgent`                     | `wardby-substrate-agent`             |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE`                  | `substrateTool`                      | `wardby-substrate-tool`              |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` | `substrateToolNodePython`            | `wardby-substrate-tool-node-python`  |
+| `CODING_WORKER_IMAGE`                              | `substrateCodex`                     | `wardby-substrate-codex`             |
+| `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`             | `substrateCodexNodePython`           | `wardby-substrate-codex-node-python` |
 
 ```dotenv
 CODING_CLAUDE_WORKER_IMAGE=ghcr.io/your-org/wardby-substrate-agent@sha256:replace-with-digest
@@ -93,7 +104,10 @@ To use your own worker or tool-runner image, or a build from a checkout, add
 the bridge yourself: build `src/substrate-bridge/Dockerfile.agent` on the
 Claude Code worker image and `src/substrate-bridge/Dockerfile.tool` on each
 tool-runner image (`--build-arg BASE=<repo>@sha256:<digest>`, build context the
-repository root, after `npm run build`), push them to a registry the cluster
+repository root, after `npm run build`). For Codex, build
+`src/substrate-bridge/Dockerfile.codex` on the Codex worker image the same way
+(`docker build -f src/substrate-bridge/Dockerfile.codex --build-arg BASE=<worker>@sha256:… .`).
+Push them to a registry the cluster
 can pull from, and pin the resulting digests.
 
 ## Configure
@@ -149,9 +163,23 @@ must arrive within ten minutes of being authenticated.
 - Claude Code coding runs, including the package registry (npm and PyPI through
   the proxy), session transcripts (so a run can be resumed), run steps, stop,
   run deadlines and turn limits.
+- Codex coding runs, with the same features: the package registry, run steps,
+  stop, run deadlines, the budget stop, `codingProfile.gitHistory` runs and
+  capacity requeue. See [Codex runs](#codex-runs).
 - `codingProfile.gitHistory` runs (see [Git history](#git-history)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
+
+### Codex runs
+
+A Codex run is a single actor: the Codex worker holds the workspace itself, so
+there is no tool actor and no workspace hand-off between two actors. The actor
+holds only a placeholder for the run capability; Substrate's egress gateway
+adds the real one to its requests to the coding proxy (see
+[Coding-worker isolation](coding-worker-isolation.md)).
+Its commands run inside the same actor, under the same proxy allowlist and
+budget as on the other launchers. When the run stops, the bridge ends any
+process the run's commands left behind.
 
 ### Git history
 
@@ -170,6 +198,8 @@ Docker and Kubernetes. See
 [Git history in coding runs](../help/git-history.md).
 
 ## Warm rounds
+
+Warm rounds apply to Claude Code only; Codex rounds always start fresh.
 
 By default every round of a coding run (a continuation made with
 `trigger_agent`'s `continuePriorRun`, a lead's follow-up, a review fix round)
@@ -287,7 +317,10 @@ when the WorkerPool is short of room (see above).
 ### Diagnostics
 
 The proxy's `substrate.diagnostics` warn line carries a `round` field on rounds
-after the first, so a tail can be matched to its round.
+after the first, so a tail can be matched to its round. The Codex actor sends a
+tail of its worker's output the same way. The bridge redacts the worker's
+output by exact value (the capability and its placeholder) before it reaches
+the actor's own log, and the proxy redacts the tail again before logging it.
 
 ## What is not supported
 
@@ -295,14 +328,14 @@ A run that needs one of these fails at launch with
 [`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md).
 Use the Docker or Kubernetes launcher for them.
 
-- Codex agents (Claude Code only).
 - Coding services (`.wardby/services.yaml`).
 - MCP tools attached to the coding agent.
 - The run dependency cache.
 - Extra repositories (multi-repository runs).
-- A custom worker image (`codingProfile.workerImageRef`): it has no Substrate
-  bridge. Only the configured tool-runner images run, so a run dispatched with
-  a tool-runner image you have since replaced is refused the same way.
+- A custom worker image (`codingProfile.workerImageRef`), for Claude Code and
+  Codex alike: it has no Substrate bridge. Only the configured worker and
+  tool-runner images run, so a run dispatched with a tool-runner image you have
+  since replaced is refused the same way.
 - Suspend and resume between rounds is off by default: every round starts new
   actors, as on the other launchers. Turn it on with
   [warm rounds](#warm-rounds).
