@@ -634,6 +634,180 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
   });
 
+  it("a capacity-short probe removes at most one park where suspended actors give back their room", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const b = await otherRun(h, "run-b");
+    const handleB = await h.launcher.launch(b);
+    await finishRound(h, substrateRunToken("run-b"), "run-b", 1);
+    h.setNow(1_000_100);
+    expect(await h.launcher.retain(handleB, RETAIN)).toBe(true);
+    // Workers too small for any run: removing parks frees nothing, so one removal shows it.
+    h.api.options.workerSize = { cpuMillicores: 500, memoryBytes: 2 ** 30 };
+    expect(await h.launcher.hasCapacityFor(await otherRun(h, "run-c"))).toBe(false);
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_evicted").map((e) => e.runId)).toEqual(["run-1"]);
+    expect((await h.runs.get("run-b"))!.phase).toBe("parked");
+  });
+
+  it("where a park holds its room, removes parks one at a time and stops once the run fits", async () => {
+    // One worker with room for two runs; each park keeps its room.
+    const h = await warmHarness({
+      workers: 1,
+      workerSize: { cpuMillicores: 2000, memoryBytes: 16 * 2 ** 30 },
+      suspendedHoldRoom: true,
+    });
+    await parkedRoundOne(h);
+    const handleB = await h.launcher.launch(await otherRun(h, "run-b"));
+    await finishRound(h, substrateRunToken("run-b"), "run-b", 1);
+    h.setNow(1_000_100);
+    expect(await h.launcher.retain(handleB, RETAIN)).toBe(true);
+    expect(await h.launcher.hasCapacityFor(await otherRun(h, "run-c"))).toBe(true);
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_evicted").map((e) => e.runId)).toEqual(["run-1"]);
+    expect((await h.runs.get("run-b"))!.phase).toBe("parked");
+  });
+
+  it("holds parkMax across control planes after the fact: two retains at once leave one park", async () => {
+    const warm = { ...WARM, parkMax: 1 };
+    const h = await warmHarness({ warmRounds: warm });
+    const other = restartedLauncher(h, warm);
+    const handleA = await h.launcher.launch(h.spec);
+    const handleB = await other.launch(await otherRun(h, "run-b"));
+    await finishRound(h, h.token, "run-1", 1);
+    await finishRound(h, substrateRunToken("run-b"), "run-b", 1);
+    // Both retains pass every step before parking (the relay purge) before either parks.
+    const purge = h.relay.purgeRelay.bind(h.relay);
+    let release!: () => void;
+    const both = new Promise<void>((resolve) => (release = resolve));
+    let waiting = 0;
+    h.relay.purgeRelay = async (token: string) => {
+      if (++waiting === 2) release();
+      await both;
+      return purge(token);
+    };
+    expect(await Promise.all([h.launcher.retain(handleA, RETAIN), other.retain(handleB, RETAIN)])).toEqual([
+      true,
+      true,
+    ]);
+    expect(await h.runs.countParked()).toBe(1);
+    // Parked at the same moment: ordered by run id, so run-1 is the older and goes.
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect((await h.runs.get("run-b"))!.phase).toBe("parked");
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_evicted")).toEqual([
+      { event: "substrate_warm_evicted", runId: "run-1", runToken: h.token, reason: "park_max" },
+    ]);
+  });
+
+  it("two removals of one park at once both succeed", async () => {
+    const h = await warmHarness();
+    const handle = await parkedRoundOne(h);
+    const other = restartedLauncher(h);
+    // Both have expired the park before either records it removed.
+    const setPhase = h.runs.setPhase.bind(h.runs);
+    let release!: () => void;
+    const both = new Promise<void>((resolve) => (release = resolve));
+    let waiting = 0;
+    h.runs.setPhase = async (...args: Parameters<typeof setPhase>) => {
+      if (args[1] === "removed" && args[0] === "run-1") {
+        if (++waiting === 2) release();
+        await both;
+      }
+      return setPhase(...args);
+    };
+    await expect(Promise.all([h.launcher.remove(handle), other.remove(handle)])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.api.actors.size).toBe(0);
+  });
+
+  it("reports nothing for a second launch of the same continuation that lost the adoption", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const other = restartedLauncher(h);
+    const spec2 = await followUp(h, "run-2");
+    // Both launches reach the adoption before either takes it.
+    const adopt = h.runs.adopt.bind(h.runs);
+    let release!: () => void;
+    const both = new Promise<void>((resolve) => (release = resolve));
+    let waiting = 0;
+    h.runs.adopt = async (...args: Parameters<typeof adopt>) => {
+      if (++waiting === 2) release();
+      await both;
+      return adopt(...args);
+    };
+    const [a, b] = await Promise.all([h.launcher.launch(spec2), other.launch(spec2)]);
+    expect(a).toEqual(b);
+    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, round: 2, phase: "running" });
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_not_adopted")).toEqual([]);
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_adopted")).toHaveLength(1);
+    expect(await h.launcher.warmOutcome(a)).toEqual({ adopted: true });
+  });
+
+  it("says expired, not not_parked, when the park expires between the checks and the adoption", async () => {
+    const h = await warmHarness({ warmRounds: { ...WARM, parkTtlMs: 10_000 } });
+    await parkedRoundOne(h);
+    const adopt = h.runs.adopt.bind(h.runs);
+    h.runs.adopt = async (...args: Parameters<typeof adopt>) => {
+      h.setNow(1_000_000 + 10_001);
+      return adopt(...args);
+    };
+    const handle = await h.launcher.launch(await followUp(h, "run-2"));
+    expect(await h.runs.get("run-2")).toMatchObject({ token: substrateRunToken("run-2"), coldReason: "expired" });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "expired" });
+    expect(h.warmEvents.find((e) => e.event === "substrate_warm_not_adopted")).toEqual({
+      event: "substrate_warm_not_adopted",
+      runId: "run-2",
+      runToken: h.token,
+      adoptedRunId: "run-1",
+      reason: "expired",
+    });
+  });
+
+  it("an adoption and a removal of the same park: exactly one wins, and nothing resumes once deletion began", async () => {
+    const outcomes = new Set<string>();
+    for (let ticks = 0; ticks <= 40; ticks += 2) {
+      const h = await warmHarness();
+      const handle1 = await parkedRoundOne(h);
+      const other = restartedLauncher(h);
+      const calls: string[] = [];
+      const api = h.api;
+      const resume = api.resumeActor.bind(api);
+      const del = api.deleteActor.bind(api);
+      api.resumeActor = async (atespace: string, name: string) => {
+        calls.push(`resume ${name}`);
+        return resume(atespace, name);
+      };
+      api.deleteActor = async (atespace: string, name: string) => {
+        calls.push(`delete ${name}`);
+        return del(atespace, name);
+      };
+      const spec2 = await followUp(h, "run-2");
+      const removal = (async () => {
+        for (let i = 0; i < ticks; i += 1) await Promise.resolve();
+        await other.remove(handle1);
+      })();
+      await Promise.all([h.launcher.launch(spec2), removal]);
+      const run2 = (await h.runs.get("run-2"))!;
+      const mine = (c: string) => c.endsWith(agentActorName(h.token)) || c.endsWith(toolActorName(h.token));
+      const resumes = calls.filter((c) => c.startsWith("resume") && mine(c));
+      const deletes = calls.filter((c) => c.startsWith("delete") && mine(c));
+      if (run2.token === h.token) {
+        outcomes.add("adopted");
+        expect(run2).toMatchObject({ round: 2, phase: "running" });
+        expect(deletes).toEqual([]);
+        expect(actorStates(h, h.token)).toEqual(["RUNNING", "RUNNING"]);
+      } else {
+        outcomes.add("removed");
+        expect(run2).toMatchObject({ token: substrateRunToken("run-2"), round: 1 });
+        expect(resumes).toEqual([]);
+        expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
+      }
+      expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    }
+    expect([...outcomes].sort()).toEqual(["adopted", "removed"]);
+  });
+
   it("records the spec's agent on the row, on a cold launch and on an adoption", async () => {
     const h = await warmHarness();
     await h.launcher.launch({ ...h.spec, agentId: "agent-1" });

@@ -71,7 +71,7 @@ import {
   type SubstrateApi,
 } from "./api.js";
 import { BLOB, ROUND_BLOBS, agentActorName, roundBlob, substrateRunToken, toolActorName } from "./names.js";
-import { canPlaceAll } from "./placement.js";
+import { canPlaceAll, type Room } from "./placement.js";
 import type { SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
@@ -307,6 +307,25 @@ function validRetention(retention: JobRetention): boolean {
 /** Parks oldest first; a park without parkedAt (from before it was recorded) counts as the oldest. */
 function oldestFirst(parks: SubstrateRunRecord[]): SubstrateRunRecord[] {
   return [...parks.filter((park) => !park.parkedAt), ...parks.filter((park) => park.parkedAt)];
+}
+
+/** Whether both actors can be placed in `free`; true when the room is unknown (the launch decides). */
+function placeable(
+  free: Room[] | undefined,
+  templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
+): boolean {
+  if (!free) return true;
+  const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
+  return canPlaceAll(free, [size(templates.agent), size(templates.tool)]);
+}
+
+/** Whether the workers' total free CPU or memory went up from `before` to `after`. */
+function grew(before: Room[], after: Room[]): boolean {
+  const total = (rooms: Room[], key: keyof Room) => rooms.reduce((sum, room) => sum + room[key], 0);
+  return (
+    total(after, "cpuMillicores") > total(before, "cpuMillicores") ||
+    total(after, "memoryBytes") > total(before, "memoryBytes")
+  );
 }
 
 export class SubstrateJobLauncher implements WorkspaceJobLauncher {
@@ -923,8 +942,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * Keeps a succeeded, delivered run's actors for the next round (see WorkspaceJobLauncher.retain):
-   * with warm rounds on, parking allowed (parkMax > 0) and the run running and succeeded, the oldest
-   * parks go until there is room under parkMax, then the run is parked with `retention`. Anything
+   * with warm rounds on, parking allowed (parkMax > 0) and the run running and succeeded, the run is
+   * parked with `retention`, then the oldest parks go until no more than parkMax remain. Anything
    * else, or any failed step, removes the run as remove() does, and the answer is false. Retaining a
    * run already parked with the same retention is true again (a retried call); with another, it is
    * removed.
@@ -942,8 +961,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
     if (this.warm && this.warm.parkMax > 0 && record.phase === "running" && validRetention(retention)) {
       const observed = await this.observe(record);
-      if (observed.status.state === "succeeded" && (await this.roomForPark(record.runId))) {
-        if (await this.park(record, retention)) return true;
+      if (observed.status.state === "succeeded" && (await this.park(record, retention))) {
+        await this.trimParks(record.runId).catch(() => undefined);
+        return true;
       }
     }
     await this.remove(handle);
@@ -988,15 +1008,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * unreachable API): true, so the launch itself decides (a refusal there is a JobCapacityError).
    */
   private async fits(templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec }): Promise<boolean> {
+    return placeable(await this.freeRoom(), templates);
+  }
+
+  /** The free room of each worker the configured selector matches; undefined when it cannot be read. */
+  private async freeRoom(): Promise<Room[] | undefined> {
     try {
       const selector = Object.entries(this.config.workerSelector ?? {});
-      const free = (await this.api.listWorkers())
+      return (await this.api.listWorkers())
         .filter((worker) => selector.every(([key, value]) => worker.labels?.[key] === value))
         .map((worker) => ({ cpuMillicores: worker.freeCpuMillicores, memoryBytes: worker.freeMemoryBytes }));
-      const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
-      return canPlaceAll(free, [size(templates.agent), size(templates.tool)]);
     } catch {
-      return true;
+      return undefined;
     }
   }
 
@@ -1005,27 +1028,44 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     return oldestFirst(await this.runs.listParked().catch(() => []));
   }
 
-  /** Removes parks, oldest first and never `keep`, until the templates fit; whether they do. */
+  /**
+   * Removes parks, oldest first and never `keep`, one at a time, until the templates fit; whether
+   * they do. After each removal the workers' free room is read again, and the removals stop as soon
+   * as one did not add to it: where a suspended actor already gives back its room, removing parks
+   * cannot make room, so at most one goes per call.
+   */
   private async evictUntilFits(
     templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
     keep: string | undefined,
   ): Promise<boolean> {
+    let before = await this.freeRoom();
+    if (placeable(before, templates)) return true;
     for (const park of await this.parks()) {
       if (park.runId === keep || !(await this.evict(park, "capacity"))) continue;
-      if (await this.fits(templates)) return true;
+      const after = await this.freeRoom();
+      if (placeable(after, templates)) return true;
+      if (!before || !after || !grew(before, after)) return false;
+      before = after;
     }
     return false;
   }
 
-  /** Removes the oldest parks (never `runId`'s own) until fewer than parkMax remain; whether they do. */
-  private async roomForPark(runId: string): Promise<boolean> {
-    const parks = (await this.parks()).filter((park) => park.runId !== runId);
-    let count = parks.length;
-    for (const park of parks) {
-      if (count < this.warm!.parkMax) break;
-      if (await this.evict(park, "park_max")) count -= 1;
+  /**
+   * After `parked` was parked: while more than parkMax runs are parked, removes the parks ahead of it
+   * (oldest first; never itself or a newer one). The cap holds after the fact, not before: control
+   * planes that park at the same time each see room, so parks can exceed parkMax briefly, by at most
+   * the number of retains in flight, until each trims. Only older parks go, so two control planes
+   * trimming at once never remove each other's new park.
+   */
+  private async trimParks(parked: string): Promise<void> {
+    const max = this.warm!.parkMax;
+    const parks = await this.parks();
+    const index = parks.findIndex((park) => park.runId === parked);
+    const ahead = index > 0 ? parks.slice(0, index) : [];
+    for (const park of ahead) {
+      if ((await this.runs.countParked().catch(() => 0)) <= max) return;
+      await this.evict(park, "park_max");
     }
-    return count < this.warm!.parkMax;
   }
 
   private async evict(park: SubstrateRunRecord, reason: WarmEvictReason): Promise<boolean> {
@@ -1101,7 +1141,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       throw error;
     }
     await this.removeInFull(record.token, roundOf(record));
-    await this.runs.setPhase(record.runId, "removed", ["parked"]);
+    try {
+      await this.runs.setPhase(record.runId, "removed", ["parked"]);
+    } catch (error) {
+      // Another removal of the same park finished first: removed either way.
+      if (!isPhaseConflict(error) || (await this.runs.get(record.runId))?.phase !== "removed") throw error;
+    }
     return true;
   }
 
@@ -1132,13 +1177,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * carries: the parked row moves to `adopted` and this run's row takes its token, then the next
    * round's files and the new capability are staged and both actors resume. Undefined for a spec
    * without `warm`. Otherwise why not (the caller launches cold); a park that does not fit is
-   * removed, so no later round adopts state older than the branch.
+   * removed, so no later round adopts state older than the branch. Undefined, too, when another
+   * launch of the same run got its row first (no event: that launch reports).
    */
   private async adoptParked(spec: JobSpec, specHash: string, deadlineAt: Date): Promise<WarmOutcome | undefined> {
     const warm = spec.warm;
     if (!warm) return undefined;
     const parked = await this.runs.get(warm.fromRunId);
-    const notAdopted = async (reason: WarmColdReason, park?: SubstrateRunRecord): Promise<WarmOutcome> => {
+    const notAdopted = async (
+      reason: WarmColdReason,
+      park?: SubstrateRunRecord,
+      removePark = true,
+    ): Promise<WarmOutcome> => {
       this.warmEvent({
         event: "substrate_warm_not_adopted",
         runId: spec.runId,
@@ -1146,7 +1196,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         adoptedRunId: warm.fromRunId,
         reason,
       });
-      if (park) await this.removeParked(park).catch(() => undefined);
+      if (park && removePark) await this.removeParked(park).catch(() => undefined);
       return { adopted: false, reason };
     };
     if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return notAdopted("not_parked");
@@ -1164,8 +1214,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       specHash,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
     });
-    // Another launch adopted or removed it first, it expired meanwhile, or this run got a row.
-    if (!record) return notAdopted("not_parked");
+    if (!record) {
+      // Another launch of this same run got its row first: that launch decides, and reports.
+      if (await this.runs.get(spec.runId)) return undefined;
+      // Expired meanwhile (or being removed, which expires it first), else adopted or removed first.
+      // Left for whoever removes it, or the sweep.
+      const current = await this.runs.get(parked.runId);
+      const expired = current?.phase === "parked" && current.deadlineAt.getTime() <= this.now();
+      return expired ? notAdopted("expired", current, false) : notAdopted("not_parked");
+    }
     await this.resumeAdopted(spec, record, roundOf(record), parked.runId);
     return { adopted: true };
   }
