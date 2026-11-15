@@ -40,6 +40,14 @@ describe("buildInfraInfo", () => {
     expect(buildInfraInfo({})).toEqual({ launcher: "local", kubernetes: null, native: null });
   });
 
+  it("reports the substrate launcher as its own kind, with no kubernetes block", () => {
+    expect(buildInfraInfo({ JOB_LAUNCHER: "substrate" })).toEqual({
+      launcher: "substrate",
+      kubernetes: null,
+      native: null,
+    });
+  });
+
   it("normalises an unknown JOB_LAUNCHER to local", () => {
     expect(buildInfraInfo({ JOB_LAUNCHER: "k8s" })).toEqual({ launcher: "local", kubernetes: null, native: null });
   });

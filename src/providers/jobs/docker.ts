@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeCollectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
 import { pruneCollectExcluded } from "./collect-prune.js";
+import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./worker-diagnostic.js";
 import { spawn } from "node:child_process";
 import {
   lstat,
@@ -25,8 +26,6 @@ import {
   redactAndTruncate,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
-  MAX_CODING_OUTPUT_ISSUES,
-  SAFE_CODING_OUTPUT_ISSUE,
 } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
@@ -88,37 +87,8 @@ export const SERVICE_IMAGE_PULL_TIMEOUT_MS = 300_000;
 export const DEFAULT_SERVICE_READY_TIMEOUT_MS = 120_000;
 const MAX_SERVICE_PROBE_OUTPUT_BYTES = 64 * 1024;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
-export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
-
-export interface WorkerDiagnostic {
-  diagnostic: string;
-  diagnosticIssues?: string[];
-}
-
-/**
- * Worker output is untrusted: recognizes only the fixed `{"error": code}` line,
- * plus an optional `issues` list whose every entry must pass the shared pattern.
- * A list with any entry that does not is dropped whole rather than filtered, so
- * a malformed worker cannot smuggle a partial value through.
- */
-export function parseWorkerDiagnosticLine(line: string): WorkerDiagnostic | undefined {
-  let value: { error?: unknown; issues?: unknown } | null;
-  try {
-    value = JSON.parse(line) as { error?: unknown; issues?: unknown } | null;
-  } catch {
-    return undefined;
-  }
-  if (typeof value?.error !== "string" || !SAFE_WORKER_DIAGNOSTIC.test(value.error)) return undefined;
-  const issues = value.issues;
-  const safeIssues =
-    Array.isArray(issues) &&
-    issues.length > 0 &&
-    issues.length <= MAX_CODING_OUTPUT_ISSUES &&
-    issues.every((issue) => typeof issue === "string" && SAFE_CODING_OUTPUT_ISSUE.test(issue))
-      ? (issues as string[])
-      : undefined;
-  return { diagnostic: value.error, ...(safeIssues ? { diagnosticIssues: safeIssues } : {}) };
-}
+// Shared with the Kubernetes and Substrate launchers (worker-diagnostic.ts); re-exported for existing importers.
+export { parseWorkerDiagnosticLine, SAFE_WORKER_DIAGNOSTIC, type WorkerDiagnostic } from "./worker-diagnostic.js";
 const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;

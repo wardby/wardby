@@ -1,0 +1,12 @@
+# The Claude worker image plus the Substrate bridge as entrypoint (build context: the repository root,
+# after `npm run build`). BASE is the worker image (src/claude-coding-worker/Dockerfile).
+ARG BASE
+FROM ${BASE}
+USER root
+# The paths the worker reads and writes; the bridge (PID 1, same user as the worker) creates the socket.
+RUN mkdir -p /run/wardby/input /run/wardby/output /run/wardby/tool \
+    && chown -R 10001:10001 /run/wardby
+COPY dist/substrate-bridge/ /opt/wardby/substrate-bridge/
+RUN printf '{"type":"module"}\n' > /opt/wardby/substrate-bridge/package.json
+USER 10001:10001
+ENTRYPOINT ["node", "/opt/wardby/substrate-bridge/agent.js"]

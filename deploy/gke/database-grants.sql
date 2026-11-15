@@ -145,6 +145,21 @@ DO $$ BEGIN
   IF to_regclass('public."DependencySnapshot"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'DependencySnapshot');
   END IF;
+  -- Experimental Substrate launcher: the proxy relays lines between a run's
+  -- agent and tool actors through these tables. Taking a run's row lock
+  -- (SELECT ... FOR UPDATE) and advancing its counters needs UPDATE on those
+  -- columns (and on updatedAt, which Prisma maintains); it never changes the
+  -- launcher's own columns or creates and deletes runs.
+  IF to_regclass('public."SubstrateRelayChannel"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'SubstrateRelayChannel');
+  END IF;
+  IF to_regclass('public."SubstrateRelayEvent"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON public.%I TO wardby_proxy', 'SubstrateRelayEvent');
+  END IF;
+  IF to_regclass('public."SubstrateRun"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, UPDATE (%I, %I, %I, %I) ON public.%I TO wardby_proxy',
+      'toolSeq', 'nextChannel', 'relayBytes', 'updatedAt', 'SubstrateRun');
+  END IF;
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON public.%I FROM wardby_app', '_prisma_migrations');
   END IF;

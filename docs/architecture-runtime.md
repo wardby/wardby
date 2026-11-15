@@ -76,6 +76,10 @@ credentials, still reaches only the proxy, and the proxy still owns the ledger.
 | `local`        | nowhere: no coding launcher      | native agents only; coding runs fail before starting |
 | `docker`       | a container on a per-run network | the diagram above                                    |
 | `kubernetes`   | a pod in a namespace             | per-run NetworkPolicy, attested pod, optional gVisor |
+| `substrate`    | two Agent Substrate actors       | gVisor, per-actor egress, no secret in either actor  |
+
+`substrate` is experimental and Claude Code only; see
+[substrate-backend.md](substrate-backend.md).
 
 `local` is the default. It composes no coding launcher, so a coding run ends
 with "Coding agents need a container executor"; set `docker` or `kubernetes`

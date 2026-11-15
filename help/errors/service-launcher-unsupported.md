@@ -14,7 +14,9 @@ deployment cannot start them. Services need a job launcher that starts them:
 
 - `JOB_LAUNCHER=kubernetes` and `JOB_LAUNCHER=docker` start them for Codex and
   Claude Code agents;
-- a deployment with `JOB_LAUNCHER=local` cannot start them at all.
+- a deployment with `JOB_LAUNCHER=local` cannot start them at all, and the
+  experimental `JOB_LAUNCHER=substrate` does not support them yet (see
+  `substrate_feature_unsupported`).
 
 1. Run the coding agent on a deployment that uses the Kubernetes or Docker job
    launcher, or

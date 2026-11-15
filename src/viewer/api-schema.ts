@@ -256,7 +256,7 @@ export type ViewerEvent = z.infer<typeof ViewerEventSchema>;
 
 /** How this deployment runs coding jobs, for the desktop viewer's Infrastructure view (GET /admin/api/infra). */
 export const InfraInfoSchema = z.object({
-  launcher: z.enum(["local", "docker", "kubernetes"]),
+  launcher: z.enum(["local", "docker", "kubernetes", "substrate"]),
   kubernetes: z
     .object({
       namespace: z.string(),

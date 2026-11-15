@@ -1032,7 +1032,9 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
       now: () => NOW,
     });
     const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
-    return { get, urls, store };
+    const handleWith = (subpath: string, host?: string) =>
+      registry.handle({ ...request(subpath), ecosystem: "npm", ...(host ? { host } : {}) });
+    return { get, urls, store, handleWith };
   }
 
   it("allowing JSONStream does not allow jsonstream", async () => {
@@ -1060,6 +1062,27 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
     // jsonstream is refused without any upstream call; never fetched.
     expect(urls).toEqual(["https://registry.npmjs.org/app", "https://registry.npmjs.org/JSONStream"]);
+  });
+
+  it("builds tarball URLs on the request's validated host, and on the alias without one", async () => {
+    const { handleWith } = npmService(["app"]);
+    const tarballs = async (subpath: string, host?: string) => {
+      const response = await handleWith(subpath, host);
+      if (!("body" in response)) throw new Error("expected a body");
+      return response.body;
+    };
+    const host = "coding-proxy.example.svc.cluster.local:8787";
+    expect(JSON.parse(await tarballs("app", host)).versions["1.0.0"].dist.tarball).toBe(
+      `http://${host}/registry/npm/app/-/app-1.0.0.tgz`,
+    );
+    expect(JSON.parse(await tarballs("app/1.0.0", host)).dist.tarball).toBe(
+      `http://${host}/registry/npm/app/-/app-1.0.0.tgz`,
+    );
+    const alias = await tarballs("app");
+    expect(JSON.parse(alias).versions["1.0.0"].dist.tarball).toBe(
+      "http://wardby-proxy:8787/registry/npm/app/-/app-1.0.0.tgz",
+    );
+    expect(await tarballs("app", "wardby-proxy:8787")).toBe(alias);
   });
 });
 
@@ -1212,6 +1235,26 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       ["refused", "wardby_version_filtered"],
       ["refused", "wardby_version_filtered"],
     ]);
+  });
+  it("builds the index's file URLs on the request's validated host, and on the alias without one", async () => {
+    const { registry } = pypiService();
+    const index = async (host?: string) => {
+      const response = await registry.handle({
+        ...request("simple/demo/"),
+        ecosystem: "pypi",
+        ...(host ? { host } : {}),
+      });
+      if (!("body" in response)) throw new Error("expected a body");
+      return response.body;
+    };
+    const urlsIn = (body: string) => (JSON.parse(body) as { files: { url: string }[] }).files.map((f) => f.url);
+    expect(urlsIn(await index("coding-proxy.example.svc.cluster.local:8787"))).toEqual([
+      `http://coding-proxy.example.svc.cluster.local:8787/registry/pypi/files/demo/${oldWheel}`,
+    ]);
+    const alias = await index();
+    expect(urlsIn(alias)).toEqual([`http://wardby-proxy:8787/registry/pypi/files/demo/${oldWheel}`]);
+    // The alias host gives byte-for-byte the document it always did.
+    expect(await index("wardby-proxy:8787")).toBe(alias);
   });
 });
 

@@ -1,0 +1,859 @@
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { jobLauncherContract } from "../contract-suite.js";
+import { hostTarArchive } from "../kubernetes.js";
+import { JobCapacityError, type JobSpec } from "../types.js";
+import { SubstrateUnavailableError, type WorkerInfo } from "./api.js";
+import { agentTemplate, toolTemplate } from "./specs.js";
+import {
+  CONFIG,
+  FAKE_CAP,
+  makeHarness,
+  PYTHON_TOOL_IMAGE,
+  SMALL_WORKER,
+  type Harness,
+} from "./launcher.test-support.js";
+import { BLOB, agentActorName, toolActorName } from "./names.js";
+
+const BLOB_KINDS = [
+  "input",
+  "toolSetup",
+  "seed",
+  "result",
+  "transcript",
+  "workspace",
+  "exit",
+  "done",
+  "started",
+] as const;
+
+async function blobKeys(h: Harness): Promise<string[]> {
+  const present: string[] = [];
+  for (const kind of BLOB_KINDS) if (await h.blobs.head(BLOB[kind](h.token))) present.push(kind);
+  return present;
+}
+
+/** Writes the reported result (none for `null`) and the proxy's `done` marker. */
+async function finish(h: Harness, result: unknown = h.output, workspace = "ok"): Promise<void> {
+  if (result !== null) await h.blobs.put(BLOB.result(h.token), Buffer.from(JSON.stringify(result)));
+  await h.blobs.put(BLOB.done(h.token), Buffer.from(JSON.stringify({ workspace })));
+}
+
+/** Posts these files as the tool actor's workspace tar for the run with this token. */
+async function putWorkspaceTarFor(h: Harness, token: string, files: Record<string, string>): Promise<void> {
+  const source = await mkdtemp(join(tmpdir(), "wardby-substrate-ws-"));
+  for (const [name, content] of Object.entries(files)) {
+    await mkdir(join(source, name, ".."), { recursive: true });
+    await writeFile(join(source, name), content);
+  }
+  const archive = hostTarArchive(source);
+  await h.blobs.putStream(BLOB.workspace(token), archive.stream);
+  expect(await archive.done).toBe(0);
+}
+
+async function putWorkspaceTar(h: Harness, files: Record<string, string>): Promise<void> {
+  await putWorkspaceTarFor(h, h.token, files);
+}
+
+jobLauncherContract(
+  "substrate",
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
+      // The tool actor's posted workspace: what the bridge tars from /workspace (a root .git included).
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+describe("SubstrateJobLauncher", () => {
+  it("plans the handle from the run id", async () => {
+    const h = await makeHarness();
+    expect(h.launcher.plannedHandle(h.spec)).toEqual({ backend: "substrate", id: `wardby-runs/${h.token}` });
+  });
+
+  it("launches two running actors from two templates, with policies, a Secret and staged blobs", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    expect(handle).toEqual({ backend: "substrate", id: `wardby-runs/${h.token}` });
+    expect(h.api.templates.size).toBe(2);
+    expect([...h.api.actors.keys()].sort()).toEqual(
+      [`wardby-runs/${agentActorName(h.token)}`, `wardby-runs/${toolActorName(h.token)}`].sort(),
+    );
+    expect([...h.api.actors.values()].every((actor) => actor.state === "RUNNING")).toBe(true);
+    expect(h.api.egressPolicies.size).toBe(2);
+    expect([...h.secrets.secrets.keys()]).toEqual([`${CONFIG.credentialsNamespace}/${h.token}`]);
+    expect(await blobKeys(h)).toEqual(["input", "toolSetup", "seed"]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+
+    expect((await h.blobs.get(BLOB.input(h.token))).toString()).toBe(await readFile(h.spec.inputArtifact, "utf8"));
+    const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as {
+      toolSetup: string;
+      collectExclude: { names: string[]; paths: string[] };
+    };
+    expect(JSON.parse(setup.toolSetup).schemaVersion).toBe(1);
+    // The registry settings point at the proxy host the tool actor's egress allows, not the k8s alias.
+    expect(setup.toolSetup).toContain(`http://${CONFIG.proxyHost}:${CONFIG.proxyPort}`);
+    expect(setup.toolSetup).not.toContain("wardby-proxy");
+    expect(setup.collectExclude.paths).toEqual([]);
+    expect(setup.collectExclude.names.length).toBeGreaterThan(0);
+    expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("# hello");
+  });
+
+  it("is idempotent for the same spec and refuses a different one", async () => {
+    const h = await makeHarness();
+    const first = await h.launcher.launch(h.spec);
+    const created = h.secrets.calls.length;
+    expect(await h.launcher.launch(structuredClone(h.spec))).toEqual(first);
+    expect(h.secrets.calls.length).toBe(created);
+    await expect(h.launcher.launch({ ...h.spec, timeoutSec: 601 })).rejects.toThrow("job_spec_conflict");
+  });
+
+  it("refuses for capacity, leaves nothing running, and provisions afresh on a later launch", async () => {
+    const h = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_capacity: no worker has room");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    const handle = h.launcher.plannedHandle(h.spec)!;
+    expect(await h.launcher.status(handle)).toEqual({ state: "pending", capacityRefused: true });
+
+    // Room again later: the same spec provisions afresh, with a fresh deadline.
+    h.api.options.workers = 2;
+    h.setNow(5_000_000);
+    expect(await h.launcher.launch(h.spec)).toEqual(handle);
+    expect(h.api.actors.size).toBe(2);
+    const record = await h.runs.get(h.spec.runId);
+    expect(record?.phase).toBe("running");
+    expect(record?.deadlineAt.getTime()).toBe(5_000_000 + 600_000);
+  });
+
+  it("succeeds on a reported result and collects the parsed artifact", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await expect(h.launcher.collect(handle)).rejects.toThrow("job_not_terminal");
+    await h.blobs.put(BLOB.result(h.token), Buffer.from(JSON.stringify(h.output)));
+    // A result without the tool's collect is still running.
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    await h.blobs.put(BLOB.done(h.token), Buffer.from('{"workspace":"ok"}'));
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    const result = await h.launcher.collect(handle);
+    expect(result).toEqual({ exitCode: 0, reason: "completed", resultArtifact: JSON.stringify(h.output) });
+  });
+
+  it("fails a run whose worker exited without a result, with the exit code", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":3}'));
+    // Collect still in flight.
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    await finish(h, null);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 3,
+      reason: "failed",
+      diagnostic: "substrate_result_missing",
+    });
+  });
+
+  it("fails a run without a result with the worker's own diagnostic, as the Kubernetes launcher does", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":1,"diagnostic":"coding_turn_limit"}'));
+    await finish(h, null);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_turn_limit",
+    });
+
+    const issues = await makeHarness();
+    const issuesHandle = await issues.launcher.launch(issues.spec);
+    await issues.blobs.put(
+      BLOB.exit(issues.token),
+      Buffer.from('{"code":2,"diagnostic":"coding_output_invalid","diagnosticIssues":["summary:too_big"]}'),
+    );
+    await finish(issues, null);
+    expect(await issues.launcher.collect(issuesHandle)).toEqual({
+      exitCode: 2,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+      diagnosticIssues: ["summary:too_big"],
+    });
+  });
+
+  it("re-validates the exit report's diagnostic and falls back to substrate_result_missing", async () => {
+    for (const exit of [
+      { code: 1, diagnostic: "provider said sk-SECRET" },
+      { code: 1, diagnostic: 7 },
+      { code: 1, diagnosticIssues: ["summary:too_big"] },
+    ]) {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from(JSON.stringify(exit)));
+      await finish(h, null);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "substrate_result_missing",
+      });
+    }
+    // An unsafe issues list is dropped, the safe code kept (the shared parser's rule).
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(
+      BLOB.exit(h.token),
+      Buffer.from('{"code":1,"diagnostic":"coding_output_invalid","diagnosticIssues":["sk-SECRET"]}'),
+    );
+    await finish(h, null);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+    });
+  });
+
+  it("fails a result for another run or one that does not parse", async () => {
+    for (const result of [{ ...(await makeHarness()).output, runId: "someone-else" }, { nope: true }]) {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await finish(h, result);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "substrate_result_missing",
+      });
+    }
+  });
+
+  it("fails a run whose workspace could not be collected", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h, h.output, "failed");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "substrate_collect_failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "substrate_collect_failed",
+    });
+  });
+
+  it("fails a crashed agent and keeps the outcome", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.setState("wardby-runs", agentActorName(h.token), "CRASHED");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    // Terminal: the deadline passing later does not turn it into a timeout.
+    h.setNow(10_000_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 1, reason: "failed" });
+  });
+
+  it("fails a crashed tool actor as a tool-runner failure", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.setState("wardby-runs", toolActorName(h.token), "CRASHED");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "worker_tool_runner_failed",
+    });
+  });
+
+  it("times out past the deadline, deletes the actors, and stays timed out", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    h.setNow(1_000_000 + 600_001);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(h.api.actors.size).toBe(0);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    await h.launcher.stop(handle);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+  });
+
+  describe("fails fast instead of waiting for the deadline", () => {
+    const START = 1_000_000;
+    /** The proxy's records of a started run: the agent fetched its input, the tool polled (tool setup gone). */
+    const started = async (h: Harness): Promise<void> => {
+      await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
+      await h.blobs.delete(BLOB.toolSetup(h.token));
+    };
+
+    it("fails a run whose workspace never arrives within the collect grace after the worker exited", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      h.setNow(START + 60_000);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":3}'));
+      h.setNow(START + 60_000 + 120_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 60_000 + 120_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(h.api.actors.size).toBe(0);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 3,
+        reason: "failed",
+        diagnostic: "substrate_collect_timeout",
+      });
+      // Terminal: a late `done` changes nothing.
+      await finish(h, h.output);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_collect_timeout");
+    });
+
+    it("reports the worker's own diagnostic on a collect timeout, and honours a configured grace", async () => {
+      const h = await makeHarness({ collectGraceMs: 10_000 });
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":1,"diagnostic":"coding_turn_limit"}'));
+      h.setNow(START + 10_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "coding_turn_limit",
+      });
+    });
+
+    it("fails a run whose agent never fetched its input within the startup timeout", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      h.setNow(START + 300_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 300_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(h.api.actors.size).toBe(0);
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "substrate_startup_timeout",
+      });
+      h.setNow(START + 10_000_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    });
+
+    it("fails a run whose tool never made its first events poll (tool setup still there)", async () => {
+      const h = await makeHarness({ startupTimeoutMs: 60_000 });
+      const handle = await h.launcher.launch(h.spec);
+      await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
+      h.setNow(START + 60_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_startup_timeout");
+    });
+
+    it("keeps a started run running past the startup timeout, until its deadline", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      await started(h);
+      h.setNow(START + 599_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      h.setNow(START + 600_001);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    });
+
+    it("counts the startup timeout from when the run became running, not from the launch claim", async () => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      // The row's last write is the move to running (memory store: the harness clock at that moment).
+      const record = await h.runs.get(h.spec.runId);
+      expect(record?.updatedAt).toEqual(new Date(START));
+      h.setNow(START + 200_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    });
+  });
+
+  it("removes actors, policies, Secret and blobs, keeps a tombstone and never relaunches", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.transcript(h.token), Buffer.from("{}\n"));
+    await h.blobs.put(BLOB.workspace(h.token), Buffer.from("tar"));
+    await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":0}'));
+    await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
+    await finish(h);
+    await h.launcher.remove(handle);
+    expect(h.api.actors.size).toBe(0);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("removed");
+    // Same rule as every launcher's contract: the same spec gets its handle back, nothing is created.
+    expect(await h.launcher.launch(structuredClone(h.spec))).toEqual(handle);
+    expect(h.api.actors.size).toBe(0);
+    await expect(h.launcher.status(handle)).rejects.toThrow("job_removed");
+  });
+
+  it("deletes a removed run's relay rows (tool traffic) on every path, not only after a collect", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    const channel = await h.relay.openChannel(h.token);
+    await h.relay.fromAgent(h.token, channel, 1, '{"jsonrpc":"2.0","method":"tool"}');
+    await h.relay.fromTool(h.token, channel, 1, '{"jsonrpc":"2.0","result":"output"}');
+    // Stopped mid-run: the tool bridge never posts workspace or workspace-failed.
+    await h.launcher.stop(handle, "cancelled");
+    expect(h.relay.hasRelayRows(h.token)).toBe(true);
+    await h.launcher.remove(handle);
+    expect(h.relay.hasRelayRows(h.token)).toBe(false);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("removed");
+  });
+
+  it("deletes done last on remove: a failed outcome deletion leaves done, never done without what it reports", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h);
+    const order: string[] = [];
+    const deleteBlob = h.blobs.delete.bind(h.blobs);
+    let failResult = true;
+    h.blobs.delete = async (key) => {
+      order.push(key.split("/").pop()!);
+      if (failResult && key === BLOB.result(h.token)) throw new Error("blob_down");
+      return deleteBlob(key);
+    };
+    await expect(h.launcher.remove(handle)).rejects.toThrow("blob_down");
+    expect(await blobKeys(h)).toEqual(["result", "done"]);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    failResult = false;
+    order.length = 0;
+    await h.launcher.remove(handle);
+    expect(order.at(-1)).toBe("done.json");
+    expect(order.indexOf("result.json")).toBeLessThan(order.indexOf("done.json"));
+    expect(await blobKeys(h)).toEqual([]);
+  });
+
+  it("deletes the actors and records stopped on stop", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.launcher.stop(handle, "cancelled");
+    expect(h.api.actors.size).toBe(0);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("stopped");
+  });
+
+  it("never puts the capability in a template, egress policy, seed or input", async () => {
+    const h = await makeHarness();
+    const logs: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    const writeOut = process.stdout.write.bind(process.stdout);
+    process.stderr.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    process.stdout.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    try {
+      const handle = await h.launcher.launch(h.spec);
+      await h.launcher.stop(handle);
+      await h.launcher.remove(handle);
+      const failing = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+      await failing.launcher.launch(failing.spec).catch(() => undefined);
+    } finally {
+      process.stderr.write = write;
+      process.stdout.write = writeOut;
+    }
+    expect(logs.join("")).not.toContain(FAKE_CAP);
+
+    const fresh = await makeHarness();
+    await fresh.launcher.launch(fresh.spec);
+    const shared = JSON.stringify([...fresh.api.templates.values(), ...fresh.api.egressPolicies.values()]);
+    expect(shared).not.toContain(FAKE_CAP);
+    expect(shared).not.toContain("rrg_");
+    expect((await fresh.blobs.get(BLOB.seed(fresh.token))).toString("latin1")).not.toContain(FAKE_CAP);
+    expect((await fresh.blobs.get(BLOB.input(fresh.token))).toString("latin1")).not.toContain(FAKE_CAP);
+    // The Secret is the capability's only home.
+    expect(fresh.secrets.secrets.get(`${CONFIG.credentialsNamespace}/${fresh.token}`)?.stringData).toEqual({
+      capability: FAKE_CAP,
+    });
+  });
+
+  it("keeps the capability out of a provisioning failure's error", async () => {
+    const h = await makeHarness();
+    h.api.putEgressPolicy = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    const error = (await h.launcher.launch(h.spec).then(
+      () => new Error("launched"),
+      (e: unknown) => e,
+    )) as Error;
+    expect(error).toBeInstanceOf(SubstrateUnavailableError);
+    expect(JSON.stringify({ message: error.message, stack: error.stack })).not.toContain(FAKE_CAP);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+    const handle = h.launcher.plannedHandle(h.spec)!;
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "substrate_provisioning_failed",
+    });
+  });
+
+  it("creates each actor before its egress policy (Substrate's foreign key), and both policies before any resume", async () => {
+    const h = await makeHarness();
+    const order: string[] = [];
+    for (const method of ["createActor", "putEgressPolicy", "resumeActor"] as const) {
+      const original = h.api[method].bind(h.api) as (...args: unknown[]) => Promise<void>;
+      (h.api as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+        order.push(`${method} ${String(args[1]).replace(h.token, "T")}`);
+        return original(...args);
+      };
+    }
+    await h.launcher.launch(h.spec);
+    expect(order).toEqual([
+      "createActor T-agent",
+      "createActor T-tool",
+      "putEgressPolicy T-agent",
+      "putEgressPolicy T-tool",
+      "resumeActor T-tool",
+      "resumeActor T-agent",
+    ]);
+    expect(h.callFailures).toEqual([]);
+  });
+
+  it("names the Substrate call that failed, with fixed fields only", async () => {
+    const h = await makeHarness();
+    h.api.putEgressPolicy = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect(h.callFailures).toEqual([
+      { runId: h.spec.runId, substrateCall: "putEgressPolicy", errorCode: "substrate_unavailable" },
+    ]);
+    expect(JSON.stringify(h.callFailures)).not.toContain(FAKE_CAP);
+
+    // An existing actor (a relaunch of the same run) is not a failure.
+    const r = await makeHarness();
+    await r.api.ensureActorTemplate(agentTemplate(r.spec, CONFIG));
+    await r.api.createActor(CONFIG.atespace, agentActorName(r.token), agentTemplate(r.spec, CONFIG).name);
+    await r.launcher.launch(r.spec);
+    expect(r.callFailures).toEqual([]);
+  });
+
+  it("recreates a template whose golden snapshot failed, once per launch", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    const deleted: string[] = [];
+    const deleteTemplate = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async (atespace, name) => {
+      deleted.push(name);
+      return deleteTemplate(atespace, name);
+    };
+    await h.launcher.launch(h.spec);
+    expect(deleted).toEqual([agent.name]);
+    expect(await h.api.getActorTemplate(CONFIG.atespace, agent.name)).toEqual({ goldenSnapshotFailed: false });
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+
+    // Still failed after the recreate (a broken image): no second delete in the same launch.
+    const r = await makeHarness();
+    const getTemplate = r.api.getActorTemplate.bind(r.api);
+    r.api.getActorTemplate = async (atespace, name) => ({
+      ...(await getTemplate(atespace, name))!,
+      goldenSnapshotFailed: true,
+    });
+    let deletes = 0;
+    r.api.deleteActorTemplate = async () => {
+      deletes += 1;
+    };
+    await r.launcher.launch(r.spec);
+    expect(deletes).toBe(2); // one per template (agent and tool), never repeated
+  });
+
+  it("rejects what Phase A does not support, before any side effect", async () => {
+    const h = await makeHarness();
+    const cases: [Partial<JobSpec>, string][] = [
+      [{ provider: "codex" }, "substrate_provider_unsupported"],
+      [{ provider: undefined }, "substrate_provider_unsupported"],
+      [{ image: "registry.example/agent:latest" }, "substrate_image_not_digest"],
+      [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
+      [{ services: [] }, "substrate_feature_unsupported:services"],
+      [{ mcpTools: true }, "substrate_feature_unsupported:mcpTools"],
+      [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
+      [
+        { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
+        "substrate_feature_unsupported:repositories",
+      ],
+      // An agent's custom tool image (workerImageRef) is a digest but carries no bridge.
+      [{ toolImage: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
+    ];
+    for (const [change, code] of cases) {
+      await expect(h.launcher.launch({ ...h.spec, ...change })).rejects.toThrow(code);
+      expect(h.launcher.plannedHandle({ ...h.spec, ...change })).toBeUndefined();
+    }
+    expect(await h.runs.get(h.spec.runId)).toBeUndefined();
+    expect(h.api.templates.size).toBe(0);
+    // Session resume is accepted, and so is another configured (per-toolchain) bridge tool image.
+    expect(h.launcher.plannedHandle({ ...h.spec, toolImage: PYTHON_TOOL_IMAGE })).toBeDefined();
+    await expect(h.launcher.launch({ ...h.spec, sessionResume: true })).resolves.toBeDefined();
+  });
+
+  it("fails the launch when the workspace is larger than the disk limit", async () => {
+    const h = await makeHarness();
+    await writeFile(join(h.workspaceRoot, h.spec.runId, "workspace", "big.bin"), Buffer.alloc(65 * 1024 * 1024));
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_seed_too_large");
+    expect(h.api.actors.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+  });
+
+  it("fails the launch when the input artifact is too large", async () => {
+    const h = await makeHarness();
+    await writeFile(h.spec.inputArtifact, Buffer.alloc(512 * 1024 + 1));
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_input_artifact_invalid");
+  });
+
+  it("materializes the collected workspace into the run's own folder only", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await putWorkspaceTar(h, { "README.md": "# changed\n", "src/a.ts": "export {};\n" });
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    await expect(h.launcher.materializeWorkspace(handle, destination)).rejects.toThrow("job_not_succeeded");
+    await finish(h);
+    await expect(h.launcher.materializeWorkspace(handle, join(h.workspaceRoot, "other"))).rejects.toThrow(
+      "substrate_workspace_destination_invalid",
+    );
+    await expect(h.launcher.materializeWorkspace(handle, destination, "lib")).rejects.toThrow(
+      "substrate_workspace_destination_invalid",
+    );
+    await h.launcher.materializeWorkspace(handle, destination);
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# changed\n");
+    expect(await readFile(join(destination, "src", "a.ts"), "utf8")).toBe("export {};\n");
+  });
+
+  it("refuses a nested .git with history on, and leaves no bundle behind", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await putWorkspaceTar(h, {
+      "README.md": "# changed\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "# v2 git bundle\n",
+      "vendor/lib/.git/HEAD": "ref: refs/heads/main\n",
+    });
+    await finish(h);
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    await expect(
+      h.launcher.materializeWorkspace(handle, destination, undefined, {
+        gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("docker_workspace_nested_repository");
+    await expect(lstat(bundleDestination)).rejects.toThrow(/ENOENT/);
+    // The trusted workspace is untouched.
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
+  });
+
+  it("refuses a history run's bundle over its limit (capped at the archive size) and leaves no bundle file", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await putWorkspaceTar(h, {
+      "README.md": "# changed\n",
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/wardby-result.bundle": "b".repeat(4096),
+    });
+    await finish(h);
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    await expect(
+      h.launcher.materializeWorkspace(handle, destination, undefined, {
+        gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).rejects.toThrow("vcs_result_bundle_too_large");
+    await expect(readFile(bundleDestination)).rejects.toThrow(/ENOENT/);
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
+    // A configured limit far above the archive is capped at its size, and a bundle within it is taken.
+    const taken = await h.launcher.materializeWorkspace(handle, destination, undefined, {
+      gitHistory: { bundleDestination, maxBundleBytes: Number.MAX_SAFE_INTEGER },
+    });
+    expect(taken).toEqual({ bundle: true });
+    expect((await readFile(bundleDestination)).length).toBe(4096);
+  });
+
+  it("seeds a history run's root .git with the workspace", async () => {
+    const h = await makeHarness();
+    await mkdir(join(h.workspaceRoot, h.spec.runId, "workspace", ".git"));
+    await writeFile(join(h.workspaceRoot, h.spec.runId, "workspace", ".git", "HEAD"), "ref: refs/heads/main\n");
+    await h.launcher.launch(h.spec);
+    expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("./.git/HEAD");
+  });
+
+  it("reads the transcript within its bound", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    expect(await h.launcher.readTranscript(handle, 100)).toBeUndefined();
+    await h.blobs.put(BLOB.transcript(h.token), Buffer.from('{"type":"x"}\n'));
+    expect(await h.launcher.readTranscript(handle, 100)).toBe('{"type":"x"}\n');
+    await expect(h.launcher.readTranscript(handle, 4)).rejects.toThrow("transcript_too_large");
+  });
+
+  it("checks capacity by placing both actors on the workers' free room, and says yes when in doubt", async () => {
+    const h = await makeHarness();
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+    const agent = agentTemplate(h.spec, CONFIG);
+    const tool = toolTemplate(h.spec, CONFIG);
+    const worker = (cpu: number, memory: number): WorkerInfo => ({
+      pool: "p",
+      labels: {},
+      freeCpuMillicores: cpu,
+      freeMemoryBytes: memory,
+    });
+    const check = async (list: WorkerInfo[]) => {
+      h.api.listWorkers = async () => list;
+      return h.launcher.hasCapacityFor(h.spec);
+    };
+    const both = { cpu: agent.cpuMillicores + tool.cpuMillicores, memory: agent.memoryBytes + tool.memoryBytes };
+    // One worker holds both, or each on its own worker.
+    expect(await check([worker(both.cpu, both.memory)])).toBe(true);
+    expect(
+      await check([worker(agent.cpuMillicores, agent.memoryBytes), worker(tool.cpuMillicores, tool.memoryBytes)]),
+    ).toBe(true);
+    // One short in CPU or in memory.
+    expect(await check([worker(both.cpu - 1, both.memory)])).toBe(false);
+    expect(await check([worker(both.cpu, both.memory - 1)])).toBe(false);
+    // The agent (larger) takes the roomier worker; the tool then fits nowhere.
+    expect(
+      await check([worker(agent.cpuMillicores + 10, both.memory), worker(tool.cpuMillicores - 1, both.memory)]),
+    ).toBe(false);
+    expect(await check([])).toBe(false);
+    h.api.listWorkers = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+    expect(h.launcher.supportsServicesFor("claude-code")).toBe(false);
+  });
+
+  it("agrees with the launch: one big worker fits both, one small worker fits neither run", async () => {
+    const big = await makeHarness({ workers: 1 });
+    expect(await big.launcher.hasCapacityFor(big.spec)).toBe(true);
+    await big.launcher.launch(big.spec);
+    expect([...big.api.actors.values()].every((actor) => actor.state === "RUNNING" && actor.worker === 0)).toBe(true);
+
+    const small = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    expect(await small.launcher.hasCapacityFor(small.spec)).toBe(false);
+    await expect(small.launcher.launch(small.spec)).rejects.toBeInstanceOf(JobCapacityError);
+  });
+
+  it("counts only the workers the configured selector matches", async () => {
+    const selector = { "wardby.dev/pool": "runs" };
+    const other = await makeHarness({
+      workers: 1,
+      workerLabels: { "wardby.dev/pool": "other" },
+      config: { workerSelector: selector },
+    });
+    expect(await other.launcher.hasCapacityFor(other.spec)).toBe(false);
+    const matching = await makeHarness({
+      workers: 1,
+      workerLabels: { "wardby.dev/pool": "runs", zone: "a" },
+      config: { workerSelector: selector },
+    });
+    expect(await matching.launcher.hasCapacityFor(matching.spec)).toBe(true);
+    // No selector: every worker counts.
+    const any = await makeHarness({ workers: 1, workerLabels: { "wardby.dev/pool": "other" } });
+    expect(await any.launcher.hasCapacityFor(any.spec)).toBe(true);
+  });
+
+  it("does not count a success reported after the deadline (with 5 s of skew)", async () => {
+    const late = await makeHarness();
+    const handle = await late.launcher.launch(late.spec);
+    late.setNow(1_000_000 + 600_000 + 5_001);
+    await finish(late);
+    expect(await late.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(late.api.actors.size).toBe(0);
+    expect(await late.launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+    expect((await late.runs.get(late.spec.runId))?.phase).toBe("timed_out");
+
+    const onTime = await makeHarness();
+    const second = await onTime.launcher.launch(onTime.spec);
+    onTime.setNow(1_000_000 + 600_000 + 5_000);
+    await finish(onTime);
+    onTime.setNow(1_000_000 + 900_000);
+    expect(await onTime.launcher.status(second)).toEqual({ state: "succeeded" });
+  });
+
+  it("cleans up every resource independently when one deletion fails", async () => {
+    const h = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    const deleteActor = h.api.deleteActor.bind(h.api);
+    h.api.deleteActor = async (atespace, name) => {
+      if (name === agentActorName(h.token)) throw new SubstrateUnavailableError("substrate_unavailable");
+      return deleteActor(atespace, name);
+    };
+    const deleteBlob = h.blobs.delete.bind(h.blobs);
+    h.blobs.delete = async (key) => {
+      if (key === BLOB.input(h.token)) throw new Error("blob_down");
+      return deleteBlob(key);
+    };
+    h.secrets.deleteSecret = async () => {
+      throw new Error("k8s_down");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect([...h.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(h.token)}`]);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(await blobKeys(h)).toEqual(["input"]);
+    expect(h.secrets.secrets.size).toBe(1);
+
+    // remove(): every deletion is tried, the first failure is reported, the run is not yet removed.
+    const r = await makeHarness();
+    const handle = await r.launcher.launch(r.spec);
+    await finish(r);
+    const rDeleteActor = r.api.deleteActor.bind(r.api);
+    let fail = true;
+    r.api.deleteActor = async (atespace, name) => {
+      if (fail && name === agentActorName(r.token)) throw new SubstrateUnavailableError("substrate_unavailable");
+      return rDeleteActor(atespace, name);
+    };
+    await expect(r.launcher.remove(handle)).rejects.toThrow("substrate_unavailable");
+    expect([...r.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(r.token)}`]);
+    expect(r.api.egressPolicies.size).toBe(0);
+    expect(r.secrets.secrets.size).toBe(0);
+    // The outcome is kept until every other deletion succeeds, so the run still reads as it ended.
+    expect(await blobKeys(r)).toEqual(["result", "done"]);
+    expect(await r.launcher.status(handle)).toEqual({ state: "succeeded" });
+    expect((await r.runs.get(r.spec.runId))?.phase).toBe("running");
+    fail = false;
+    await r.launcher.remove(handle);
+    expect(r.api.actors.size).toBe(0);
+    expect((await r.runs.get(r.spec.runId))?.phase).toBe("removed");
+  });
+
+  it("cleans up and records provisioning_failed when marking the run running fails", async () => {
+    const h = await makeHarness();
+    const setPhase = h.runs.setPhase.bind(h.runs);
+    h.runs.setPhase = async (runId, phase, from) => {
+      if (phase === "running") throw new Error("db_down");
+      return setPhase(runId, phase, from);
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("db_down");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await blobKeys(h)).toEqual([]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
+  });
+});

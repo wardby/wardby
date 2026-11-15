@@ -50,3 +50,6 @@ src/generated/
 # Wardby local runtime and credentials; the services declaration is committed
 .wardby/*
 !.wardby/services.yaml
+
+# Substrate API definition downloaded at build time (npm run build:substrate)
+/build/

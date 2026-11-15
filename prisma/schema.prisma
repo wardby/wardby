@@ -538,6 +538,7 @@ model CodingAgentProfile {
 /// one coding run. Policy is copied from the profile before work starts.
 model CodingRun {
   runId                 String              @id
+  substrate             SubstrateRun?
   run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  String
   /// The run's own request (the trigger's task or the agent's default task), without the agent's standing instructions. Null on older runs.
@@ -2338,4 +2339,60 @@ model ToolConnectionGrant {
   updatedAt   DateTime @updatedAt
 
   @@unique([toolId, connection])
+}
+
+/// A coding run launched on Agent Substrate (JOB_LAUNCHER=substrate): the launch fence, its phase,
+/// and the counters of its tool relay. Holds no credentials and no task content.
+model SubstrateRun {
+  runId       String                  @id
+  codingRun   CodingRun               @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// substrateRunToken(runId): names the run's actors, blobs and relay.
+  token       String                  @unique
+  specHash    String
+  /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
+  /// tool_failed | provisioning_failed | collect_timeout | startup_timeout (terminal; see
+  /// SubstratePhase in run-store.ts)
+  phase       String
+  deadlineAt  DateTime
+  /// Last seq assigned on the tool-bound queue.
+  toolSeq     Int                     @default(0)
+  nextChannel Int                     @default(1)
+  /// Undelivered relay line bytes (back-pressure).
+  relayBytes  Int                     @default(0)
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  channels    SubstrateRelayChannel[]
+  events      SubstrateRelayEvent[]
+}
+
+/// One socket connection between a run's agent and tool bridges.
+model SubstrateRelayChannel {
+  runToken  String
+  run       SubstrateRun @relation(fields: [runToken], references: [token], onDelete: Cascade)
+  channel   String
+  /// Last sendSeq accepted from each side (de-duplicates sender retries).
+  agentSeen Int          @default(0)
+  toolSeen  Int          @default(0)
+  /// Last seq assigned on this channel's agent-bound queue.
+  agentSeq  Int          @default(0)
+  createdAt DateTime     @default(now())
+
+  @@id([runToken, channel])
+}
+
+/// A queued relay message. queue = "tool" (tool-bound) or the channel id (agent-bound).
+/// line holds repository tool traffic: never logged; deleted once acknowledged, when the tool
+/// bridge reports its workspace, and in any case when the launcher removes the run.
+model SubstrateRelayEvent {
+  runToken  String
+  run       SubstrateRun @relation(fields: [runToken], references: [token], onDelete: Cascade)
+  queue     String
+  seq       Int
+  /// open | line | close | collect
+  type      String
+  channel   String?
+  line      String?      @db.Text
+  createdAt DateTime     @default(now())
+
+  @@id([runToken, queue, seq])
 }

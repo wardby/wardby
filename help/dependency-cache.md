@@ -141,3 +141,9 @@ unbuilt; the agent can run `npm rebuild`.
 
 The full reference, with every limit, is
 [`docs/coding-packages.md`](../docs/coding-packages.md#dependency-cache).
+
+## Substrate launcher
+
+The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
+run that needs it fails with `substrate_feature_unsupported`. Use the Docker or
+Kubernetes launcher. See the `job-launcher-substrate` help article.

@@ -8,6 +8,7 @@ import {
   loadContainerExecutorConfig,
   loadGitHubVcsConfig,
   loadKubernetesJobConfig,
+  loadSubstrateJobConfig,
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
@@ -34,6 +35,11 @@ import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platfo
 import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
+import { createSubstrateApi } from "../jobs/substrate/client.js";
+import type { SubstrateApi } from "../jobs/substrate/api.js";
+import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
+import { PrismaSubstrateRunStore } from "../jobs/substrate/run-store.js";
+import { PrismaRelayStore } from "../coding-proxy/substrate/prisma-relay-store.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
 import {
@@ -111,6 +117,8 @@ export interface ConfiguredExecutorOptions {
   providerConfig?: ProviderConfig;
   /** Tests only: replaces the kubeconfig-backed client when JOB_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
+  /** Tests only: replaces the gRPC client when JOB_LAUNCHER=substrate. */
+  substrateApi?: SubstrateApi;
   /** Repository authorization for coding runs; built from the configured review hosts when absent. */
   repoAccess?: RepoAccessGate;
   /**
@@ -123,13 +131,97 @@ export interface ConfiguredExecutorOptions {
 }
 
 /**
+ * Every Claude tool-runner image the deployment configures (the default and the per-toolchain ones):
+ * on Substrate, the images that carry the tool bridge. An agent's workerImageRef is not among them.
+ */
+export function configuredClaudeToolImages(
+  config: Pick<ReturnType<typeof loadContainerExecutorConfig>, "claudeToolRunnerImage" | "claudeToolRunnerImages">,
+): string[] {
+  return [
+    ...(config.claudeToolRunnerImage !== undefined ? [config.claudeToolRunnerImage] : []),
+    ...Object.values(config.claudeToolRunnerImages).flatMap((versions) => Object.values(versions)),
+  ];
+}
+
+/** The worker images a registry-pulling launcher (Kubernetes, Substrate) will run must be digests. */
+function assertDigestImages(
+  config: Pick<
+    ReturnType<typeof loadContainerExecutorConfig>,
+    "workerImage" | "claudeWorkerImage" | "claudeToolRunnerImage" | "claudeToolRunnerImages"
+  >,
+  launcher: "kubernetes" | "substrate",
+): void {
+  if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
+    throw new Error(`CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`);
+  }
+  for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
+    if (image !== undefined && !isRegistryDigest(image)) {
+      throw new Error(
+        `CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
+      );
+    }
+  }
+  const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
+  if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
+    throw new Error(
+      `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
+    );
+  }
+}
+
+/**
+ * The experimental Substrate launcher: the gRPC client, the per-run Secret in the credentials
+ * namespace, the run table, and the blob store shared with the coding proxy (BLOB_STORE).
+ */
+export function buildSubstrateJobLauncher(options: {
+  env: NodeJS.ProcessEnv;
+  db: PrismaClient;
+  workspaceRoot: string;
+  resolveCapability: (runId: string) => Promise<string>;
+  substrateApi?: SubstrateApi;
+  kubernetesApi?: KubernetesApi;
+  /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
+  bridgeToolImages: readonly string[];
+}): SubstrateJobLauncher {
+  const substrate = loadSubstrateJobConfig(options.env);
+  const blobStoreConfig = loadBlobStoreConfig(options.env);
+  if (!blobStoreConfig) throw new Error("BLOB_STORE is required when JOB_LAUNCHER=substrate.");
+  return new SubstrateJobLauncher({
+    api:
+      options.substrateApi ??
+      createSubstrateApi({
+        baseUrl: substrate.apiUrl,
+        tokenFile: substrate.tokenFile,
+        ...(substrate.caFile ? { caFile: substrate.caFile } : {}),
+        ...(substrate.serverName ? { serverName: substrate.serverName } : {}),
+      }),
+    runs: new PrismaSubstrateRunStore(options.db),
+    relay: new PrismaRelayStore(options.db),
+    bridgeToolImages: options.bridgeToolImages,
+    blobs: createBlobStore(blobStoreConfig),
+    secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
+    config: {
+      atespace: substrate.atespace,
+      credentialsNamespace: substrate.credentialsNamespace,
+      proxyHost: substrate.proxyHost,
+      proxyPort: substrate.proxyPort,
+      ...(substrate.workerSelector ? { workerSelector: substrate.workerSelector } : {}),
+    },
+    workspaceRoot: options.workspaceRoot,
+    resolveCapability: options.resolveCapability,
+    ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
+    ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
+  });
+}
+
+/**
  * Builds container execution only when Docker or Kubernetes is explicitly
  * selected, and native sandbox routing whenever a sandbox executor is given.
  */
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
-  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") {
+  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes" && providerConfig.jobs !== "substrate") {
     if (!options.nativeSandbox) return options.native;
     // No coding launcher: coding runs reach the native executor, whose runner fails them with
     // the "needs a container executor" explanation, exactly as without this wrapper.
@@ -166,22 +258,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const onServiceState = prismaServiceStateReporter(options.db);
   let jobs: WorkspaceJobLauncher;
   if (providerConfig.jobs === "kubernetes") {
-    if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
-      throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
-    }
-    for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
-      if (image !== undefined && !isRegistryDigest(image)) {
-        throw new Error(
-          "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
-        );
-      }
-    }
-    const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
-    if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
-      throw new Error(
-        "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
-      );
-    }
+    assertDigestImages(config, "kubernetes");
     const kubernetes = loadKubernetesJobConfig(env);
     // The preflight only runs on the first launch; a configuration that cannot work should
     // fail the process at start-up, not the first coding run an hour later.
@@ -213,6 +290,17 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         return { proxyIp };
       },
       onWarning: (message) => compositionLog.warn(message),
+    });
+  } else if (providerConfig.jobs === "substrate") {
+    assertDigestImages(config, "substrate");
+    jobs = buildSubstrateJobLauncher({
+      env,
+      db: options.db,
+      workspaceRoot,
+      resolveCapability: (runId) => capabilities.get(runId),
+      substrateApi: options.substrateApi,
+      kubernetesApi: options.kubernetesApi,
+      bridgeToolImages: configuredClaudeToolImages(config),
     });
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));

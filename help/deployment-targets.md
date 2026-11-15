@@ -31,6 +31,10 @@ remaining controls and verification before accepting production work.
   availability, test recovery, and configure alerts and retention. See
   [Deploy on GKE](deploy-gke.md).
 
+An experimental Agent Substrate backend for coding agents
+(`JOB_LAUNCHER=substrate`) is described in the `job-launcher-substrate` help
+article.
+
 AWS can run the portable runtime and has a Bedrock Claude adapter, but a native
 AWS deployment module is planned and has not shipped. Other cloud providers
 can run the production container image with equivalent database, ingress,

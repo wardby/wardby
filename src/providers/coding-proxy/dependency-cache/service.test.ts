@@ -57,7 +57,7 @@ async function setup(
     now?: () => Date;
     lockHashes?: string[];
     requestMs?: number;
-    expectedHost?: string;
+    expectedHosts?: string[];
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "dep-cache-"));
@@ -90,7 +90,7 @@ async function setup(
       host: "127.0.0.1",
       port: 0,
       requestMs: options.requestMs,
-      ...(options.expectedHost ? { expectedHost: options.expectedHost } : {}),
+      ...(options.expectedHosts ? { expectedHosts: options.expectedHosts } : {}),
       ...(options.configured === false ? {} : { dependencyCache: cache }),
     });
     servers.push(server);
@@ -765,7 +765,7 @@ describe("the per-request body timer before an upload is admitted", () => {
 
   it("cuts an upload-shaped request with a bad host or bad token at the normal limit", async () => {
     const host = "wardby-proxy:8787";
-    const { base } = await setup({ requestMs: 300, expectedHost: host });
+    const { base } = await setup({ requestMs: 300, expectedHosts: [host] });
     const badHost = await trickle(base, { host: "elsewhere:1", authorization: `Bearer ${TOKEN}` });
     expect(badHost.status).toBe(403);
     expect(badHost.closedAfterMs).toBeLessThan(2_000);

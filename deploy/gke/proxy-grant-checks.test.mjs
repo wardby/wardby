@@ -16,6 +16,16 @@ describe("proxyGrantChecks", () => {
     expect(checks).toContainEqual({ table: "CodingRun", privilege: "SELECT", column: "packageAllowlist" });
     expect(checks).toContainEqual({ table: "Run", privilege: "UPDATE", column: "costUsd" });
     expect(checks).toContainEqual({ table: "Run", privilege: "SELECT", column: "id" });
+    expect(checks).toContainEqual({ table: "SubstrateRelayEvent", privilege: "DELETE" });
+    // The store never updates a relay event, so UPDATE is not granted.
+    expect(checks).not.toContainEqual({ table: "SubstrateRelayEvent", privilege: "UPDATE" });
+    expect(checks).toContainEqual({ table: "SubstrateRelayChannel", privilege: "UPDATE" });
+    expect(checks).toContainEqual({ table: "SubstrateRun", privilege: "SELECT" });
+    expect(checks).toContainEqual({ table: "SubstrateRun", privilege: "UPDATE", column: "toolSeq" });
+    expect(checks).toContainEqual({ table: "SubstrateRun", privilege: "UPDATE", column: "relayBytes" });
+    // No table-wide change to a run row: the proxy may only advance its relay counters.
+    expect(checks).not.toContainEqual({ table: "SubstrateRun", privilege: "UPDATE" });
+    expect(checks).not.toContainEqual({ table: "SubstrateRun", privilege: "DELETE" });
   });
 
   it("ignores grants to other roles", () => {

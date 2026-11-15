@@ -40,10 +40,18 @@ export interface ClaudeToolSetup {
   commandTimeouts?: { defaultMs: number; maxMs: number };
 }
 
-export function claudeToolSetup(spec: JobSpec, capability: string): string {
+export interface ClaudeToolSetupOptions {
+  /**
+   * The coding proxy as the tool runner reaches it. Default: the Docker/Kubernetes host alias
+   * (`http://wardby-proxy:8787`); the Substrate launcher passes its configured proxy host and port.
+   */
+  proxyBaseUrl?: string;
+}
+
+export function claudeToolSetup(spec: JobSpec, capability: string, options: ClaudeToolSetupOptions = {}): string {
   if (spec.provider !== "claude-code") throw new Error("claude_tool_setup_provider");
   const registry = registryWorkerSetup({
-    proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    proxyBaseUrl: options.proxyBaseUrl ?? `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
     capability,
     cacheRoot: `${TOOL_WORKSPACE}/.cache`,
   });

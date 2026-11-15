@@ -384,6 +384,10 @@ export interface RegistryRequest {
   subpath: string;
   token: string;
   signal: AbortSignal;
+  /** The request's `Host`, passed only once the server's Host guard has
+   *  matched it exactly against its fixed list: rewritten URLs point back at
+   *  the host the client reached. Absent means the configured `proxyBase`. */
+  host?: string;
 }
 export interface RegistryRefusalsRequest {
   token: string;
@@ -404,6 +408,8 @@ export interface RegistryPlanRequest {
    *  (413 or 400) for a body it cannot read. */
   readBody(): Promise<string>;
   signal: AbortSignal;
+  /** As RegistryRequest.host: a guard-validated `Host`, or absent. */
+  host?: string;
 }
 
 function contentTypeOf(route: DownloadRoute | FileMetadataRoute): string {
@@ -710,7 +716,7 @@ export class RegistryService {
         const lockHash = context.dependencyCache && adapter.id === DEPENDENCY_CACHE_ECOSYSTEM ? sha256Hex(body) : null;
         const parseOptions = {
           maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
-          proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
+          proxyRegistryUrl: `${this.proxyBase(request.host)}${adapter.id}/`,
         };
         // A YAML or yarn lockfile is read in a worker thread with a time
         // bound (lockfile-parse.ts); npm's JSON stays on the event loop.
@@ -844,6 +850,13 @@ export class RegistryService {
     }
   }
 
+  /** The base of the registry URLs written into documents and matched in
+   *  lockfiles: on `host` when the server passed one (it has already matched
+   *  the request's Host exactly against its fixed list), else `proxyBase`. */
+  private proxyBase(host: string | undefined): string {
+    return host ? `http://${host}/registry/` : this.options.proxyBase;
+  }
+
   async handle(request: RegistryRequest): Promise<RegistryResponse> {
     try {
       return await this.dispatch(request);
@@ -967,7 +980,8 @@ export class RegistryService {
       // One version's document: the same checks as the whole package's,
       // narrowed to that version.
       const document = keep.has(route.version)
-        ? (adapter.renderVersion?.(meta, route.version, keptFiles, `${this.options.proxyBase}${adapter.id}/`) ?? null)
+        ? (adapter.renderVersion?.(meta, route.version, keptFiles, `${this.proxyBase(request.host)}${adapter.id}/`) ??
+          null)
         : null;
       if (!document) {
         await this.refuse(context, adapter, name, "wardby_version_filtered", {
@@ -1001,7 +1015,7 @@ export class RegistryService {
       // LISTING_REFUSAL_FILENAME for how it counts).
       const unservable = unservableReason(meta, keep, keptFiles);
       if (unservable) await this.refuse(context, adapter, name, unservable, { filename: LISTING_REFUSAL_FILENAME });
-      const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
+      const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.proxyBase(request.host)}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
 
