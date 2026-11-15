@@ -35,6 +35,7 @@ import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
+import { agentsAttachedToServer, removeRetainedRounds, removeRetainedRoundsOf } from "./retained-rounds.js";
 
 const serversLog = logger.child({ module: "mcp-servers" });
 
@@ -301,6 +302,10 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
         data: { url, secretNames, ...snapshotData(snapshot) },
       });
       audit(ctx, "update", server);
+      // Warm rounds: a kept round of an attached agent holds the old set's values.
+      if (!sameNames(current.secretNames, secretNames)) {
+        await removeRetainedRoundsOf(ctx, await agentsAttachedToServer(ctx, current.id));
+      }
       return textResult({ ...serverView(server), diff: diffSnapshots(snapshotOf(current), snapshot.tools) });
     },
   });
@@ -403,12 +408,15 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       gate(ctx, "cleanup");
       const { id } = parse(IdSchema, "delete_mcp_server arguments", rawArgs);
       const server = await requireOwnedServer(ctx, id);
+      const attached = server.secretNames.length > 0 ? await agentsAttachedToServer(ctx, id) : [];
       await ctx.db.$transaction(async (tx) => {
         await tx.mcpServer.delete({ where: { id } });
         // Grants have no foreign key to the server.
         await deleteGrantsFor(tx, "mcp_server", id);
       });
       audit(ctx, "delete", server);
+      // Warm rounds: its secrets are no longer delivered to the agents it was attached to.
+      await removeRetainedRoundsOf(ctx, attached);
       return textResult({ deleted: id });
     },
   });
@@ -445,7 +453,8 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       const duplicates = input.allowedTools.filter((t, i) => input.allowedTools.indexOf(t) !== i);
       if (duplicates.length > 0) throw new McpError(400, `allowedTools lists "${duplicates[0]}" more than once.`);
       // Bounded retry: a concurrent grant change or make_owner on the same rows aborts one side.
-      await withSerializableRetry(() =>
+      // Resolves true when a new attachment brings the server's secrets to the agent.
+      const addsSecrets = await withSerializableRetry(() =>
         ctx.db.$transaction(
           async (tx) => {
             await preferIndexScans(tx);
@@ -487,15 +496,22 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
             const exposed = await mapped(async () => input.allowedTools.map((t) => exposedToolName(server.name, t)));
             await assertNoClash(tx, agent.id, server.id, exposed);
             const fields = { allowedTools: input.allowedTools, callTimeoutMs: input.callTimeoutMs ?? null };
+            const existing = await tx.agentMcpServer.findUnique({
+              where: { agentId_serverId: { agentId: agent.id, serverId: server.id } },
+              select: { agentId: true },
+            });
             await tx.agentMcpServer.upsert({
               where: { agentId_serverId: { agentId: agent.id, serverId: server.id } },
               create: { agentId: agent.id, serverId: server.id, attachedById: ctx.principal.id, ...fields },
               update: { attachedById: ctx.principal.id, ...fields },
             });
+            return existing === null && server.secretNames.length > 0;
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         ),
       );
+      // Warm rounds: a kept round would resume a session whose redaction set lacked these secrets.
+      if (addsSecrets) await removeRetainedRounds(ctx, input.agentId);
       return textResult({ attached: true });
     },
   });
@@ -518,6 +534,8 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       const { count } = await ctx.db.agentMcpServer.deleteMany({
         where: { agentId: input.agentId, serverId: input.serverId },
       });
+      // Warm rounds: a kept round's session holds the detached server's secret values.
+      if (count > 0) await removeRetainedRounds(ctx, input.agentId);
       return textResult({ detached: count > 0 });
     },
   });
@@ -554,4 +572,11 @@ export async function assertNoClash(
       if (seen.has(name)) throw clash(name, `a tool of MCP server "${other.server.name}"`);
     }
   }
+}
+
+/** True when both lists hold the same names, in any order. */
+function sameNames(a: readonly string[], b: readonly string[]): boolean {
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  return left.length === right.length && left.every((name, i) => name === right[i]);
 }

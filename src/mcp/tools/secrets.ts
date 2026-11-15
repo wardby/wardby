@@ -39,7 +39,12 @@ import {
 } from "./secret-elicitation.js";
 import { allowedSecretNames, brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 import { textResult } from "./text-result.js";
-import { removeRetainedRounds, removeRetainedRoundsForSecret } from "./retained-rounds.js";
+import {
+  agentsReachedBySecret,
+  removeRetainedRounds,
+  removeRetainedRoundsForSecret,
+  removeRetainedRoundsOf,
+} from "./retained-rounds.js";
 import { describeOAuthSecretError } from "./oauth-secret-errors.js";
 import {
   mintOAuthLoopbackLink,
@@ -605,12 +610,15 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           `Secret "${secret!.name}" is used by MCP server(s) ${servers.join(", ")}; update or delete them first.`,
         );
       }
+      // Warm rounds: found before the delete, removed after it (a kept session holds the value).
+      const reached = secret ? await agentsReachedBySecret(ctx, ctx.principal.id, secret.name) : [];
       await deleteSecret(args.id, ctx.db, {
         cipher: ctx.providers.secrets,
         options: ctx.providers.sandboxFetchOptions,
         fetchImpl: ctx.providers.sandboxFetch,
         actorId: ctx.principal.id,
       });
+      await removeRetainedRoundsOf(ctx, reached);
       return textResult({ deleted: args.id });
     },
   });

@@ -837,6 +837,24 @@ describe("secrets tools", () => {
       }
     });
 
+    it("delete_secret removes the kept rounds of the agents it was delivered to, after the delete", async () => {
+      const { client, removed } = await withExecutor();
+      try {
+        const created = await client.callTool({
+          name: "create_secret",
+          arguments: { name: "API_KEY", value: "sk-fake-value-000001" },
+        });
+        const { id } = parseText(created as never) as { id: string };
+        await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
+        removed.length = 0;
+        const deleted = await client.callTool({ name: "delete_secret", arguments: { id } });
+        expect(deleted.isError).toBeFalsy();
+        expect(removed).toEqual(["a1"]);
+      } finally {
+        await client.close();
+      }
+    });
+
     it("a failed removal never fails the tool, and logs no secret value", async () => {
       const lines: string[] = [];
       setLogLineFilter((line) => (lines.push(line), ""));

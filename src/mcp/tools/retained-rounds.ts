@@ -24,6 +24,57 @@ export async function removeRetainedRounds(ctx: RoundsContext, agentId: string):
 }
 
 /**
+ * The agents the owner's secret `secretName` is delivered to, attached directly or through an
+ * attached MCP server; undefined when they can't be read (logged, ids and error class only).
+ */
+export async function agentsReachedBySecret(
+  ctx: RoundsContext,
+  ownerId: string,
+  secretName: string,
+): Promise<string[] | undefined> {
+  if (!ctx.providers.executor?.removeRetainedRounds) return [];
+  try {
+    const [attached, viaServers] = await Promise.all([
+      ctx.db.agentSecret.findMany({ where: { secret: { ownerId, name: secretName } }, select: { agentId: true } }),
+      ctx.db.agentMcpServer.findMany({
+        where: { server: { ownerId, secretNames: { has: secretName } } },
+        select: { agentId: true },
+      }),
+    ]);
+    return [...new Set([...attached, ...viaServers].map((row) => row.agentId))];
+  } catch (err) {
+    roundsLog.warn(
+      { event: "coding.warm_remove_failed", errorName: err instanceof Error ? err.name : typeof err },
+      "could not find the agents a changed secret is delivered to; their retained rounds start fresh",
+    );
+    return undefined;
+  }
+}
+
+/**
+ * The agents MCP server `serverId` is attached to; undefined when they can't be read (logged, ids
+ * and error class only).
+ */
+export async function agentsAttachedToServer(ctx: RoundsContext, serverId: string): Promise<string[] | undefined> {
+  if (!ctx.providers.executor?.removeRetainedRounds) return [];
+  try {
+    const rows = await ctx.db.agentMcpServer.findMany({ where: { serverId }, select: { agentId: true } });
+    return [...new Set(rows.map((row) => row.agentId))];
+  } catch (err) {
+    roundsLog.warn(
+      { serverId, event: "coding.warm_remove_failed", errorName: err instanceof Error ? err.name : typeof err },
+      "could not find the agents an MCP server is attached to; their retained rounds start fresh",
+    );
+    return undefined;
+  }
+}
+
+/** Removes the retained rounds of each of `agentIds` (none when undefined). Never throws. */
+export async function removeRetainedRoundsOf(ctx: RoundsContext, agentIds: readonly string[] | undefined) {
+  for (const agentId of agentIds ?? []) await removeRetainedRounds(ctx, agentId);
+}
+
+/**
  * After the owner's secret `secretName` changed (a new value, a broker change, an OAuth connect):
  * removes the retained rounds of every agent it is delivered to, attached directly or through an
  * attached MCP server. A kept round's session holds the old value, which the next round's
@@ -34,23 +85,5 @@ export async function removeRetainedRoundsForSecret(
   ownerId: string,
   secretName: string,
 ): Promise<void> {
-  if (!ctx.providers.executor?.removeRetainedRounds) return;
-  let agentIds: string[];
-  try {
-    const [attached, viaServers] = await Promise.all([
-      ctx.db.agentSecret.findMany({ where: { secret: { ownerId, name: secretName } }, select: { agentId: true } }),
-      ctx.db.agentMcpServer.findMany({
-        where: { server: { ownerId, secretNames: { has: secretName } } },
-        select: { agentId: true },
-      }),
-    ]);
-    agentIds = [...new Set([...attached, ...viaServers].map((row) => row.agentId))];
-  } catch (err) {
-    roundsLog.warn(
-      { event: "coding.warm_remove_failed", errorName: err instanceof Error ? err.name : typeof err },
-      "could not find the agents a changed secret is delivered to; their retained rounds start fresh",
-    );
-    return;
-  }
-  for (const agentId of agentIds) await removeRetainedRounds(ctx, agentId);
+  await removeRetainedRoundsOf(ctx, await agentsReachedBySecret(ctx, ownerId, secretName));
 }

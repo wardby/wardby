@@ -69,6 +69,9 @@ with no step line.
 - `attach_secret`, `detach_secret`, `create_secret` with a new value (or a
   confirmed OAuth sign-in) and `set_secret_broker` remove the kept rounds of
   every agent the secret reaches, including through an attached MCP server.
+  So do `delete_secret`, `detach_mcp_server`, `delete_mcp_server`,
+  `attach_mcp_server` (a new attachment of a server with secrets) and
+  `update_mcp_server` when it changes `secretNames`, for the agents concerned.
   Any rotated or refreshed secret also makes the next round start fresh ("the
   agent's settings changed"), because a kept session holds the old value.
   Secrets are compared by identity and last change time, never by value.
