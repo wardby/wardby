@@ -44,7 +44,9 @@
  * any body is read. An extra's upload is capped at the workspace limit, refused after `done` (409)
  * and for another round (409), and never writes `done`, drops the relay or touches the setup state:
  * the default `workspace` upload, which the bridge sends last, still ends the run. Nothing of a body
- * is logged; the route line's `repository` field is the validated link name only.
+ * is logged; the route line's `repository` field is the validated link name, set only once the caller
+ * authenticated and the row lists that name. An upload that finishes after `done` was written is
+ * refused (409) and its blob deleted.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -172,6 +174,8 @@ const DEFAULT_LAYOUT: SubstrateRunLayout = { shape: "pair" };
 const RUN_PATH = /^\/substrate\/runs\/(wr-[0-9a-f]{20})\/(.+)$/;
 const CHANNEL_PATH = /^channels\/(c[0-9]{1,9})\/(lines|from-tool)$/;
 const REPO_PATH = /^repos\/([^/]+)\/(seed|workspace)$/;
+/** A `.` or `..` segment, plain or percent-encoded, in the raw request path: URL parsing would resolve it. */
+const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
 
 function match(method: string, rest: string): Matched | undefined {
   const repo = REPO_PATH.exec(rest);
@@ -545,7 +549,8 @@ export function createSubstrateRoutes(
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
-    const found = RUN_PATH.exec(url.pathname);
+    // A raw dot segment would be resolved away (`repos/%2e%2e/workspace` → `workspace`): unmatched instead.
+    const found = DOT_SEGMENT.test((request.url ?? "/").split("?")[0]) ? null : RUN_PATH.exec(url.pathname);
     const matched = found ? match(request.method ?? "", found[2]) : undefined;
     const token = found?.[1] ?? "unknown";
     const route = matched?.name ?? "unmatched";
@@ -553,6 +558,8 @@ export function createSubstrateRoutes(
     let errorKind: string | undefined;
     /** A single-shape input: whether this request deleted the run's setup (fixed true/false). */
     let inputDeletedSetup: boolean | undefined;
+    /** repos.*: the repository name, set only once the caller authenticated and the row lists it. */
+    let loggedRepository: string | undefined;
     response.once("close", () => {
       log.info(
         {
@@ -564,7 +571,7 @@ export function createSubstrateRoutes(
           durationMs: Math.round(performance.now() - startedAt),
           ...(errorKind ? { errorKind } : {}),
           ...(inputDeletedSetup !== undefined ? { setupDeleted: inputDeletedSetup } : {}),
-          ...(matched?.repository ? { repository: matched.repository } : {}),
+          ...(loggedRepository ? { repository: loggedRepository } : {}),
         },
         "coding proxy substrate route",
       );
@@ -586,6 +593,9 @@ export function createSubstrateRoutes(
       if (side === "agent") session = await agentSession(request, token);
       const allowed = side === "agent" ? session !== undefined : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
+      if (matched.repository !== undefined && listed(layout, matched.repository, false)) {
+        loggedRepository = matched.repository;
+      }
       const { relay, blobs, limits } = options;
       const channel = matched.channel ?? "";
       switch (matched.name) {
@@ -784,6 +794,12 @@ export function createSubstrateRoutes(
             limits.workspaceBytes,
             clearBodyTimer,
           );
+          // `done` may have been written while the body streamed: the outcome is fixed, so the late
+          // upload is refused and its blob removed (the collector never reads an extra after `done`).
+          if (await blobs.head(BLOB.done(token, round))) {
+            await blobs.delete(REPO_BLOB.workspace(token, name, round));
+            throw new RouteError(409, "substrate_run_collected");
+          }
           sendJson(response, 200, {});
           return;
         }

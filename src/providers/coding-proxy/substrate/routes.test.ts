@@ -1295,6 +1295,10 @@ describe("substrate routes", () => {
       ["GET", "repos/extra-alpha/other"],
       ["GET", "repos/extra-alpha/workspace"],
       ["POST", "repos/extra-alpha/seed"],
+      ["GET", "repos/a%2Fb/seed"],
+      ["POST", "repos/a%2Fb/workspace"],
+      ["GET", `repos/${"a".repeat(64)}/seed`],
+      ["POST", `repos/${"a".repeat(64)}/workspace`],
     ])("%s %s is unmatched", async (method, path) => {
       const lookup = vi.fn(async () => LAYOUT);
       overrides = { runLayoutForToken: lookup };
@@ -1306,6 +1310,128 @@ describe("substrate routes", () => {
       expect(routeLines()).toEqual([expect.objectContaining({ route: "unmatched", status: 404 })]);
       expect(routeLines()[0]).not.toHaveProperty("repository");
       expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it("a_b is a valid link name: matched, but 404 and unlogged when the row does not list it", async () => {
+      await start();
+      expect((await fetch(`${base}/repos/a_b/seed`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/repos/a_b/workspace`, tool(upload("tar")))).status).toBe(404);
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "a_b"))).toBeNull();
+      await settle();
+      expect(routeLines()).toEqual([
+        expect.objectContaining({ route: "repos.seed", status: 404 }),
+        expect.objectContaining({ route: "repos.workspace", status: 404 }),
+      ]);
+      for (const line of routeLines()) expect(line).not.toHaveProperty("repository");
+    });
+
+    /** A request sent with its path exactly as given (fetch and URL parsing would resolve dot segments). */
+    const raw = (
+      method: string,
+      path: string,
+      headers: Record<string, string>,
+      body?: string,
+    ): Promise<{ status: number; body: string }> =>
+      new Promise((resolve, reject) => {
+        const { hostname, port, pathname } = new URL(base);
+        const req = httpRequest({ hostname, port, method, path: `${pathname}/${path}`, headers }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+        });
+        req.on("error", reject);
+        if (body !== undefined) req.write(body);
+        req.end();
+      });
+
+    it.each([
+      ["GET", "repos/%2e%2e/seed"],
+      ["GET", "repos/%2E%2e/seed"],
+      ["POST", "repos/%2e%2e/workspace"],
+      ["POST", "repos/../workspace"],
+      ["GET", "repos/./seed"],
+    ])("%s %s (a dot segment) is unmatched and never reaches the default routes", async (method, path) => {
+      const lookup = vi.fn(async () => LAYOUT);
+      overrides = { runLayoutForToken: lookup };
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("default-seed"));
+      await start();
+      const body = method === "POST" ? "tar" : undefined;
+      const headers = { ...AUTH, ...(body !== undefined ? { "content-length": String(body.length) } : {}) };
+      const answer = await raw(method, path, headers, body);
+      expect(answer.status).toBe(404);
+      expect(JSON.parse(answer.body)).toEqual({ error: { type: "not_found" } });
+      expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      await settle();
+      expect(routeLines()).toEqual([expect.objectContaining({ route: "unmatched", status: 404 })]);
+      expect(routeLines()[0]).not.toHaveProperty("repository");
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it.each(["extra-beta", "extra-gamma"])(
+      "refuses an upload to %s before its body is read",
+      async (name) => {
+        await start();
+        // Content-Length declared, body never sent: an answer proves the route did not wait to read it.
+        const status = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            `${base}/repos/${name}/workspace`,
+            { method: "POST", headers: { ...AUTH, "content-length": "40" } },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.flushHeaders();
+        });
+        expect(status).toBe(404);
+        expect(await blobs.head(REPO_BLOB.workspace(TOKEN, name))).toBeNull();
+      },
+      2_000,
+    );
+
+    it("refuses an upload that finishes after done was written, and deletes its blob", async () => {
+      await start();
+      const putStream = blobs.putStream.bind(blobs);
+      vi.spyOn(blobs, "putStream").mockImplementation(async (key, body, options) => {
+        const stored = await putStream(key, body, options);
+        // The default workspace upload lands while this extra's body was streaming.
+        if (key === REPO_BLOB.workspace(TOKEN, "extra-alpha")) {
+          await blobs.put(BLOB.done(TOKEN), Buffer.from(JSON.stringify({ workspace: "ok" })));
+        }
+        return stored;
+      });
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+    });
+
+    it("logs the repository only after auth, and only a name on the row", async () => {
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), Buffer.from("seed-beta"));
+      await start();
+      // Unauthenticated (bad actor JWT, then no credential at all): no repository on the line.
+      const bad = { headers: { "x-wardby-actor-jwt": "Bearer bad" } };
+      expect((await fetch(`${base}/repos/extra-beta/seed`, bad)).status).toBe(401);
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, { ...upload("tar"), ...bad })).status).toBe(401);
+      expect((await fetch(`${base}/repos/extra-beta/seed`)).status).toBe(401);
+      // Authenticated but not on the row: 404, no repository.
+      expect((await fetch(`${base}/repos/extra-gamma/seed`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/repos/extra-gamma/workspace`, tool(upload("tar")))).status).toBe(404);
+      await settle();
+      const refused = routeLines();
+      expect(refused).toHaveLength(5);
+      for (const line of refused) expect(line).not.toHaveProperty("repository");
+      // Authenticated and on the row (a read one refused for upload included): the name is logged.
+      expect((await fetch(`${base}/repos/extra-beta/seed`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/repos/extra-beta/workspace`, tool(upload("tar")))).status).toBe(404);
+      await settle();
+      expect(routeLines().slice(5)).toEqual([
+        expect.objectContaining({ route: "repos.seed", status: 200, repository: "extra-beta" }),
+        expect.objectContaining({ route: "repos.workspace", status: 404, repository: "extra-beta" }),
+      ]);
     });
 
     it("single shape: the agent actor is the holder", async () => {
