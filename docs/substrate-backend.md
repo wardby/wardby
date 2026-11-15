@@ -424,8 +424,8 @@ park or adoption last used it.
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a new template that never starts an actor within
   `SUBSTRATE_TEMPLATE_READY_SEC` while the workers have room. A run that finds
-  another launch rebuilding its template goes back to the queue, like a
-  capacity refusal (reason `substrate_capacity: template rebuilding`).
+  another launch rebuilding its template goes back to the queue and waits, as
+  for a capacity refusal; no error is recorded on the run.
 - **Log events**, each with the template's name and role and never an image's
   content or Substrate's message: `substrate_template_golden_failed`,
   `substrate_template_unready`, `substrate_template_record_failed` (the
