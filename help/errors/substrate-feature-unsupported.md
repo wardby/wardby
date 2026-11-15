@@ -1,7 +1,7 @@
 ---
 id: errors/substrate-feature-unsupported
 title: The Substrate launcher does not support this run (substrate_feature_unsupported)
-summary: A coding run needs coding services, the dependency cache or a custom worker image, which the experimental Substrate launcher does not support; use the Docker or Kubernetes launcher.
+summary: A coding run needs coding services or a custom worker image, which the experimental Substrate launcher does not support; use the Docker or Kubernetes launcher.
 audience: operator
 tags: [error, substrate, substrate_feature_unsupported, job launcher, coding-agents, workerImageRef]
 appliesTo: ">=0.9.15"
@@ -11,14 +11,13 @@ appliesTo: ">=0.9.15"
 
 `substrate_feature_unsupported` means the run asked for something the
 experimental Substrate launcher cannot do. The run fails at launch, before any
-actor is created. The control plane log names the feature (`services`,
-`dependencyCache` or `workerImage`).
+actor is created. The control plane log names the feature (`services` or
+`workerImage`).
 
-| Trigger                                                                     | Feature           |
-| --------------------------------------------------------------------------- | ----------------- |
-| A repository with `.wardby/services.yaml` and an agent that allows services | `services`        |
-| The run dependency cache                                                    | `dependencyCache` |
-| A custom worker image (`codingProfile.workerImageRef`)                      | `workerImage`     |
+| Trigger                                                                     | Feature       |
+| --------------------------------------------------------------------------- | ------------- |
+| A repository with `.wardby/services.yaml` and an agent that allows services | `services`    |
+| A custom worker image (`codingProfile.workerImageRef`)                      | `workerImage` |
 
 What to do:
 

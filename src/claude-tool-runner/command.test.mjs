@@ -258,3 +258,20 @@ test("stops a command at the setup's longest per-command timeout, whatever the c
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test("parses workspaceReused only with the dependency cache flag", () => {
+  const withExtra = (extra) => JSON.stringify({ ...JSON.parse(setupFor("/workspace")), ...extra });
+  assert.equal(parseToolSetup(withExtra({ dependencyCache: true, workspaceReused: true })).workspaceReused, true);
+  assert.equal(parseToolSetup(withExtra({ dependencyCache: true, workspaceReused: false })).workspaceReused, undefined);
+  assert.equal(parseToolSetup(withExtra({ dependencyCache: true })).workspaceReused, undefined);
+  const bad = [
+    { workspaceReused: true },
+    { dependencyCache: false, workspaceReused: true },
+    { dependencyCache: true, workspaceReused: "true" },
+    { dependencyCache: true, workspaceReused: 1 },
+    { dependencyCache: true, workspaceReused: null },
+  ];
+  for (const extra of bad) {
+    assert.throws(() => parseToolSetup(withExtra(extra)), /tool_setup_invalid/, JSON.stringify(extra));
+  }
+});

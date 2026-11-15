@@ -64,7 +64,7 @@ import http from "node:http";
 import https from "node:https";
 import { basename, join, posix, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createGunzip } from "node:zlib";
 
@@ -256,8 +256,13 @@ function parsePax(data) {
  * linkname, mode })` returns an optional data sink (an async function taking
  * each chunk) for a regular file. Supports ustar, GNU long names (L/K) and pax
  * extended headers (x); every other meta entry is refused.
+ *
+ * `rawHash` (a crypto Hash), when given, is fed every byte of the file as read.
+ * The walk stops at the end-of-archive marker, which can come before the
+ * file's end (tar padding, the gzip trailer, anything after), so it then reads
+ * the rest of the file into the hash too; a read error or abort still rejects.
  */
-async function walkTar(file, { signal, maxStreamBytes }, onEntry) {
+async function walkTar(file, { signal, maxStreamBytes, rawHash }, onEntry) {
   let seen = 0;
   const counter = new Transform({
     transform(chunk, _encoding, callback) {
@@ -267,6 +272,7 @@ async function walkTar(file, { signal, maxStreamBytes }, onEntry) {
     },
   });
   const source = createReadStream(file);
+  if (rawHash) source.on("data", (chunk) => rawHash.update(chunk));
   const gunzip = createGunzip();
   source.on("error", (error) => gunzip.destroy(error));
   const decompressed = source
@@ -280,7 +286,11 @@ async function walkTar(file, { signal, maxStreamBytes }, onEntry) {
       signal?.throwIfAborted();
       const block = await reader.read(512);
       if (!block) throw new Skip("unsafe_archive"); // no end-of-archive marker
-      if (block.every((byte) => byte === 0)) return; // end of archive
+      if (block.every((byte) => byte === 0)) {
+        // End of archive. The hash covers the whole file: read what is left of it.
+        if (rawHash) await drainInto(source, gunzip, signal);
+        return;
+      }
       if (!checksumOk(block)) throw new Skip("unsafe_archive");
       const type = String.fromCharCode(block[156] || 0x30);
       let size = octal(block, 124, 12);
@@ -314,6 +324,20 @@ async function walkTar(file, { signal, maxStreamBytes }, onEntry) {
   } finally {
     await reader.close().catch(() => undefined);
     source.destroy();
+  }
+}
+
+/** Reads the rest of `source` (its "data" listener hashes it) without decompressing it further. */
+async function drainInto(source, gunzip, signal) {
+  signal?.throwIfAborted();
+  const onAbort = () => source.destroy(signal.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    source.unpipe(gunzip);
+    source.resume();
+    await finished(source);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -424,14 +448,23 @@ function insideRoot(normalized) {
   return normalized === ROOT || normalized.startsWith(`${ROOT}/`);
 }
 
-/** Checks every entry of the archive without writing anything. */
-export async function scanArchive(file, { budgetBytes, maxEntries = MAX_ARCHIVE_ENTRIES, signal } = {}) {
+/**
+ * Checks every entry of the archive without writing anything. With `digest`,
+ * the result's `sha256` is the hex SHA-256 of every byte of the file (bytes
+ * after the end-of-archive marker included), from the same read.
+ */
+export async function scanArchive(file, { budgetBytes, maxEntries = MAX_ARCHIVE_ENTRIES, signal, digest } = {}) {
   const rules = new EntryRules(budgetBytes, maxEntries);
-  await walkTar(file, { signal, maxStreamBytes: streamCap(budgetBytes, maxEntries) }, (entry) => {
+  const rawHash = digest ? createHash("sha256") : undefined;
+  await walkTar(file, { signal, maxStreamBytes: streamCap(budgetBytes, maxEntries), rawHash }, (entry) => {
     rules.check(entry);
     return undefined;
   });
-  return { entries: rules.entries, unpackedBytes: rules.unpackedBytes };
+  return {
+    entries: rules.entries,
+    unpackedBytes: rules.unpackedBytes,
+    ...(rawHash ? { sha256: rawHash.digest("hex") } : {}),
+  };
 }
 
 // The decompressed stream is file bytes plus headers and padding; bound it too.
@@ -1206,7 +1239,7 @@ async function snapshot(context, project, maxBytes) {
     stage = "scan";
     bound = undefined;
     try {
-      validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER, signal });
+      validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER, signal, digest: true });
     } catch (error) {
       return skip(asSkip(error, "unsafe_archive").reason);
     }
@@ -1228,6 +1261,8 @@ async function snapshot(context, project, maxBytes) {
           "x-wardby-archive-scan-version": "1",
           "x-wardby-archive-entries": String(validation.entries),
           "x-wardby-archive-unpacked-bytes": String(validation.unpackedBytes),
+          // The file's own digest: the proxy refuses (digest_mismatch) bytes that differ from what was scanned.
+          "x-wardby-archive-sha256": validation.sha256,
         },
         body: createReadStream(archive),
         signal,

@@ -271,6 +271,51 @@ describe("dependency cache lookup", () => {
   });
 });
 
+describe("end-to-end upload digest", () => {
+  const digest = (value: string) => ({ "x-wardby-archive-sha256": value });
+  const cacheFiles = async (dir: string) =>
+    (await storedFiles(dir)).filter((file) => file.includes("dependency-cache"));
+
+  it("stores an upload whose bytes match the worker's digest", async () => {
+    const { upload, store } = await setup();
+    expect((await upload(archive, { lock: LOCK }, undefined, digest(hex(archive)))).status).toBe(201);
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+  });
+
+  it("refuses an upload whose bytes differ from the worker's digest, and keeps nothing of it", async () => {
+    const { upload, store, dir } = await setup();
+    expect(await upload(archive, { lock: LOCK }, undefined, digest(hex("other bytes")))).toEqual({
+      status: 400,
+      body: { error: "digest_mismatch" },
+    });
+    expect(store.rows).toEqual([]);
+    expect(await cacheFiles(dir)).toEqual([]);
+    // The run's one upload for the project was not used up.
+    expect((await upload(archive, { lock: LOCK }, undefined, digest(hex(archive)))).status).toBe(201);
+    expect(store.rows).toHaveLength(1);
+  });
+
+  it.each(["Z".repeat(64), "a".repeat(63), "A".repeat(64), ""])(
+    "refuses a malformed digest header unread: %s",
+    async (value) => {
+      const { upload, store, dir } = await setup();
+      expect(await upload(archive, { lock: LOCK }, undefined, digest(value))).toEqual({
+        status: 400,
+        body: { error: "bad_request" },
+      });
+      expect(store.rows).toEqual([]);
+      expect(await cacheFiles(dir)).toEqual([]);
+    },
+  );
+
+  it("accepts an upload without the header (an older worker)", async () => {
+    const { upload, store } = await setup();
+    expect((await upload(archive)).status).toBe(201);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+  });
+});
+
 describe("dependency cache upload and download", () => {
   it("stores the upload under the derived key with its sha256, then serves it", async () => {
     const { upload, lookup, download, store, blobs, derived } = await setup();
@@ -365,8 +410,8 @@ describe("dependency cache upload and download", () => {
       "x-wardby-archive-scan-version": "1",
       "x-wardby-archive-entries": "3",
       "x-wardby-archive-unpacked-bytes": "10",
-      // Not part of the protocol: a client cannot choose the digest.
-      "x-wardby-archive-sha256": "0".repeat(64),
+      // Not part of the upload protocol: a client cannot choose the digest. (A wrong
+      // x-wardby-archive-sha256 is refused digest_mismatch: see "end-to-end upload digest".)
       "x-wardby-sha256": "0".repeat(64),
     };
     expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
@@ -602,6 +647,45 @@ describe("the agent's package policy is not part of the key", () => {
     addSecondAgent(registry, []);
     expect(await lookup({ lock: LOCK }, THIRD_TOKEN)).toEqual({ status: 409, body: { error: "plan_required" } });
     expect((await download(derived().keyId, { lock: LOCK }, THIRD_TOKEN)).status).toBe(409);
+  });
+});
+
+describe("an adopted round (reused workspace)", () => {
+  it("refuses lookup, download and upload with 409 reused_workspace, and still seals", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    expect(await s.lookup()).toEqual({ status: 409, body: { error: "reused_workspace" } });
+    const response = await s.download(s.derived().keyId);
+    expect([response.status, await response.json()]).toEqual([409, { error: "reused_workspace" }]);
+    expect(await s.upload(archive)).toEqual({ status: 409, body: { error: "reused_workspace" } });
+    expect(s.store.rows).toEqual([]);
+    expect(await storedFiles(s.dir)).toEqual([]);
+    expect(await s.seal()).toEqual({ status: 200, body: { sealed: true } });
+  });
+
+  it("answers reused_workspace, not sealed, after the seal", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    await s.seal();
+    expect(await s.lookup()).toEqual({ status: 409, body: { error: "reused_workspace" } });
+  });
+
+  it("leaves another run alone", async () => {
+    const s = await setup();
+    s.store.reusedRuns.add("run-1");
+    const result = await s.lookup({ lock: LOCK }, OTHER_TOKEN);
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ hit: false });
+  });
+
+  it("answers 500 and writes nothing when the store cannot tell", async () => {
+    const s = await setup();
+    vi.spyOn(s.store, "workspaceReused").mockRejectedValue(new Error("db unavailable"));
+    expect(await s.lookup()).toEqual({ status: 500, body: { error: "internal_error" } });
+    expect((await s.upload(archive)).status).toBe(500);
+    expect(s.store.rows).toEqual([]);
+    expect(await storedFiles(s.dir)).toEqual([]);
+    expect((await s.seal()).status).toBe(200);
   });
 });
 

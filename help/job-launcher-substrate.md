@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp, repositories, multi repository]
+tags: [substrate, job launcher, dependency-cache, JOB_LAUNCHER, experimental, codex, repositories, multi repository]
 appliesTo: ">=0.9.15"
 ---
 
@@ -22,9 +22,8 @@ reach is the coding proxy.
 
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
-- your coding agents are Claude Code or Codex, without coding services, the
-  dependency cache or a custom worker image
-  (`workerImageRef`).
+- your coding agents are Claude Code or Codex, without coding services or a
+  custom worker image (`workerImageRef`).
 
 Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
 run that needs a feature the Substrate backend lacks fails with
@@ -99,6 +98,12 @@ Codex to the bridge images by digest (step 2 above).
 Every variable, default and limit is in the
 [Substrate backend guide](../docs/substrate-backend.md).
 
+## Dependency cache
+
+The dependency cache works as on Kubernetes; an adopted warm round skips it
+(`reused_workspace`). See [dependency-cache](dependency-cache.md) and the
+[Substrate backend guide](../docs/substrate-backend.md#dependency-cache).
+
 ## Warm rounds
 
 With `SUBSTRATE_WARM_ROUNDS=true` a finished round is kept suspended and the
@@ -124,7 +129,7 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs services, the dependency cache or a custom worker image.
+  run needs services or a custom worker image.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and

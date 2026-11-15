@@ -33,6 +33,11 @@
  *   seed (REPO_BLOB.seed) and one upload (REPO_BLOB.workspace) per extra, under the run's one diskMb
  *   budget. Only the workspace holder (the tool actor, or a Codex run's one actor) gets the /repos
  *   volume, and its setup lists the extras; Claude's agent never sees a repository.
+ * - The dependency cache (JobSpec.dependencyCache) is supported on both shapes with no launcher code
+ *   beyond the adopt flag: the cache lives behind the coding proxy, and an adopted round's tool
+ *   setup says workspaceReused, so the tool runner skips it. Its snapshots live under
+ *   `dependency-cache/` in the same blob store; the launcher never deletes them (it removes only the
+ *   run's own `substrate/runs/<token>/` keys).
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -333,7 +338,7 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-const UNSUPPORTED_FEATURES = ["services", "dependencyCache"] as const;
+const UNSUPPORTED_FEATURES = ["services"] as const;
 
 function refuseUnsupportedFeatures(spec: JobSpec): void {
   for (const feature of UNSUPPORTED_FEATURES) {
@@ -348,7 +353,9 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
  * are supported: the run's MCP token is a key of the per-run Secret, injected by the agent's egress
  * rule (never in a template, an env or a blob). Extra repositories are supported on both shapes: the
  * list must be well formed (jobRepositoriesValid, so every name is a link name before the claim);
- * each host path is checked against the workspace root in launch (checkRepositoryPaths).
+ * each host path is checked against the workspace root in launch (checkRepositoryPaths). The
+ * dependency cache is supported on both shapes: the cache lives behind the coding proxy and the blob
+ * store, keyed by the run's recorded image; an adopted round skips it (`workspaceReused`).
  */
 function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: readonly string[] }): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
@@ -757,7 +764,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       } catch (error) {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
       }
-      // The fence already serialized launches of this run, so an existing actor is our own.
+      // A launch here is always cold (round 1), so it never takes over an actor it did not just
+      // create from the template: one already under this name was left by an earlier attempt whose
+      // cleanup failed (a refused adopter's may hold a used workspace). It is deleted, with its
+      // egress policy, and created again. If it cannot be deleted, or is still there after, the
+      // launch fails (substrate_already_exists) and nothing ever resumes it.
       const templateOf = (name: string) =>
         name !== agent && templates.shape === "pair" ? templates.tool.name : templates.agent.name;
       for (const name of actorNamesFor(token, shape)) {
@@ -767,6 +778,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
             await this.api.createActor(atespace, name, template);
           } catch (error) {
             if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
+            try {
+              await this.api.deleteEgressPolicy(atespace, name);
+              await this.api.deleteActor(atespace, name);
+            } catch {
+              throw error;
+            }
+            await this.api.createActor(atespace, name, template);
           }
         });
       }
@@ -831,7 +849,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * the holder's workspace upload then carries, from the root `.git`, only the result bundle
    * (materializeWorkspace takes it); set only then, so a bridge without history uploads as before.
    * `repositories` (a run with extras only): each extra's name and access, and a result bundle for a
-   * write extra in the input's history (`historyPaths`); never a host path.
+   * write extra in the input's history (`historyPaths`); never a host path. `workspaceReused` (the
+   * adopt path only): the tool setup says so on a dependency-cache run, and the tool runner skips
+   * the cache.
    */
   private async stageSetup(
     spec: JobSpec,
@@ -839,6 +859,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     token: string,
     collectResultBundle: boolean,
     historyPaths: ReadonlySet<string>,
+    workspaceReused = false,
   ): Promise<void> {
     // Bounded before any launch: validateSpec's jobRepositoriesValid allows at most 16 (MAX_RUN_REPOSITORIES_IN_INPUT) valid, distinct names.
     const repositories = holderSetupRepositories(spec, historyPaths);
@@ -848,6 +869,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         : JSON.stringify({
             toolSetup: claudeToolSetup(spec, capability, {
               proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
+              ...(workspaceReused ? { workspaceReused: true } : {}),
             }),
             // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
             collectExclude: spec.collectExclude ?? collectExclusions([]),
@@ -1507,7 +1529,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await timed("stage", async () => {
         const input = await this.stageInput(spec.inputArtifact, token, round);
         const history = inputGitHistory(input);
-        await this.stageSetup(spec, capability, token, history.requested, history.paths);
+        await this.stageSetup(spec, capability, token, history.requested, history.paths, true);
         await this.blobs.put(roundBlob(token), Buffer.from(JSON.stringify({ round })), {
           contentType: "application/json",
         });

@@ -21,6 +21,8 @@ export interface ToolSetup {
   readonly dependencyCache?: true;
   /** With dependencyCache only: the workspace volume size in MiB. */
   readonly diskMb?: number;
+  /** With dependencyCache only: an adopted warm round; prepare answers reused_workspace. */
+  readonly workspaceReused?: true;
   /** The run's run_command time limits, from the launcher; absent from an older one. */
   readonly commandTimeouts?: Readonly<{ defaultMs: number; maxMs: number }>;
 }

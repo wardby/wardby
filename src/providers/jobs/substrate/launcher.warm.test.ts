@@ -18,6 +18,7 @@ import {
 import type { Room } from "./placement.js";
 import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
+import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cache/key.js";
 import {
   BLOB,
   REPO_BLOB,
@@ -699,6 +700,77 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
+  describe("a refused adopter whose cleanup could not delete the parked actors", () => {
+    /** run-1 parked, run-2 refused for capacity while resuming, its cleanup's actor and round-record deletes failing. */
+    async function refusedWithLeftovers(h: Harness, failingDeletes: number) {
+      await parkedRoundOne(h);
+      const spec2 = await followUp(h, "run-2");
+      const toolKey = `wardby-runs/${toolActorName(h.token)}`;
+      const agentKey = `wardby-runs/${agentActorName(h.token)}`;
+      const parkedTool = h.api.actors.get(toolKey)!;
+      const parkedAgent = h.api.actors.get(agentKey)!;
+      const deleteActor = h.api.deleteActor.bind(h.api);
+      let failures = 0;
+      h.api.deleteActor = async (atespace, name) => {
+        if (failures < failingDeletes) {
+          failures += 1;
+          throw new Error("delete failed");
+        }
+        return deleteActor(atespace, name);
+      };
+      const deleteBlob = h.blobs.delete.bind(h.blobs);
+      h.blobs.delete = async (key) => {
+        if (key === roundBlob(h.token)) throw new Error("delete failed");
+        return deleteBlob(key);
+      };
+      h.api.options.workers = 0;
+      await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
+      expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "requeued" });
+      // Both deletes failed: the parked actors (and the round record) are still there.
+      expect(h.api.actors.get(toolKey)).toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).toBe(parkedAgent);
+      expect(await h.blobs.head(roundBlob(h.token))).not.toBeNull();
+      h.api.options.workers = 2;
+      return { spec2, toolKey, agentKey, parkedTool, parkedAgent };
+    }
+
+    it("the relaunch deletes them and creates fresh actors from the template, never reusing them", async () => {
+      const h = await warmHarness();
+      h.spec = { ...h.spec, dependencyCache: true };
+      // Cleanup tries each actor once: those are the two failed deletes.
+      const { spec2, toolKey, agentKey, parkedTool, parkedAgent } = await refusedWithLeftovers(h, 2);
+      const handle = await h.launcher.launch(spec2);
+      expect(await h.runs.get("run-2")).toMatchObject({ phase: "running", round: 1, coldReason: "capacity" });
+      expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "capacity" });
+      expect(h.api.actors.get(toolKey)).not.toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).not.toBe(parkedAgent);
+      expect(h.api.actors.get(toolKey)).toMatchObject({ state: "RUNNING" });
+      const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as { toolSetup: string };
+      const toolSetup = JSON.parse(setup.toolSetup) as Record<string, unknown>;
+      expect(toolSetup.dependencyCache).toBe(true);
+      expect(toolSetup).not.toHaveProperty("workspaceReused");
+    });
+
+    it("fails the relaunch (substrate_already_exists) when they still cannot be deleted, resuming neither", async () => {
+      const h = await warmHarness();
+      const { spec2, toolKey, agentKey, parkedTool, parkedAgent } = await refusedWithLeftovers(h, 1_000);
+      await expect(h.launcher.launch(spec2)).rejects.toThrow();
+      expect((await h.runs.get("run-2"))!.phase).toBe("provisioning_failed");
+      expect(h.callFailures).toContainEqual(
+        expect.objectContaining({
+          runId: "run-2",
+          substrateCall: "createActor",
+          errorCode: "substrate_already_exists",
+        }),
+      );
+      // Never resumed: the old actors stay suspended, whatever the cleanup could not delete.
+      expect(h.api.actors.get(toolKey)).toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).toBe(parkedAgent);
+      expect(parkedTool.state).toBe("SUSPENDED");
+      expect(parkedAgent.state).toBe("SUSPENDED");
+    });
+  });
+
   it("times out an adoption whose control plane stopped between the adoption and the phase write", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
@@ -1177,13 +1249,22 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       await logged.launch({ ...(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 })), mcpTools: true });
       // A run with extra repositories (cold, never adopting), whose setup and seeds are blobs too.
       await logged.launch(await withExtras(h, await otherRun(h, "run-4")));
+      // A dependency-cache chain: run-5 parks, and run-6 adopts it (its tool setup says workspaceReused).
+      const cacheFirst = await logged.launch({ ...(await otherRun(h, "run-5")), dependencyCache: true });
+      await finishRound(h, substrateRunToken("run-5"), "run-5", 1);
+      expect(await logged.retain(cacheFirst, RETAIN)).toBe(true);
+      const cacheSecond = await logged.launch({
+        ...(await followUp(h, "run-6", { from: "run-5" })),
+        dependencyCache: true,
+      });
+      expect(await logged.warmOutcome(cacheSecond)).toEqual({ adopted: true });
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
       setLogLineFilter((line) => line);
     }
     const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_", FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3, "rmt_"];
-    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4"].map((id) => h.runs.get(id)));
+    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"].map((id) => h.runs.get(id)));
     expect(rows[3]?.repositories).toEqual(EXTRAS);
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),
@@ -1206,6 +1287,76 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.stringify(h.warmEvents)).not.toContain(SHA_1);
     // The logged events reached the log (so the check above saw them).
     if (logger.isLevelEnabled("info")) expect(stdout.join("")).toContain("substrate_warm_not_adopted");
+  });
+});
+
+describe("warm rounds and the dependency cache", () => {
+  const CACHE_KEY = newBlobKey(
+    deriveSnapshotKey({
+      repository: "owner/repo",
+      projectPath: ".",
+      lockHash: "c".repeat(64),
+      workerImage: TOOL_IMAGE,
+    }),
+  );
+
+  async function toolSetupOf(h: Harness): Promise<Record<string, unknown>> {
+    const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as { toolSetup: string };
+    return JSON.parse(setup.toolSetup) as Record<string, unknown>;
+  }
+
+  /** Round 1 of a cache run, parked; its tool setup read before the park deletes it. */
+  async function parkedCacheRoundOne(h: Harness): Promise<Record<string, unknown>> {
+    const handle = await h.launcher.launch(h.spec);
+    const setup = await toolSetupOf(h);
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    return setup;
+  }
+
+  it("an adopted round's tool setup says workspaceReused; round 1's does not", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    const first = await parkedCacheRoundOne(h);
+    expect(first.dependencyCache).toBe(true);
+    expect(first).not.toHaveProperty("workspaceReused");
+    const spec2 = { ...(await followUp(h, "run-2")), dependencyCache: true as const };
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: true });
+    expect((await h.runs.get("run-2"))!.round).toBe(2);
+    const setup = await toolSetupOf(h);
+    expect(setup.workspaceReused).toBe(true);
+    expect(setup.dependencyCache).toBe(true);
+    expect(setup.diskMb).toBe(64);
+  });
+
+  it("a cold fallback (branch_moved) gets a normal cache setup", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    await parkedCacheRoundOne(h);
+    const spec2 = { ...(await followUp(h, "run-2", { headSha: SHA_2 })), dependencyCache: true as const };
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "branch_moved" });
+    const row = await h.runs.get("run-2");
+    expect(row).toMatchObject({ round: 1, coldReason: "branch_moved" });
+    const setup = JSON.parse(
+      JSON.parse((await h.blobs.get(BLOB.toolSetup(row!.token))).toString()).toolSetup as string,
+    ) as Record<string, unknown>;
+    expect(setup.dependencyCache).toBe(true);
+    expect(setup).not.toHaveProperty("workspaceReused");
+  });
+
+  it("park and the parked run's removal never delete a dependency-cache object", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true, agentId: "agent-1" };
+    await h.blobs.put(CACHE_KEY, Buffer.from("snapshot"));
+    await parkedCacheRoundOne(h);
+    expect((await h.blobs.get(CACHE_KEY)).toString()).toBe("snapshot");
+    expect(await h.launcher.removeParked({ agentId: "agent-1" })).toBe(1);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect((await h.blobs.get(CACHE_KEY)).toString()).toBe("snapshot");
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
   });
 });
 

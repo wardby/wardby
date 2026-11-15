@@ -178,6 +178,8 @@ must arrive within ten minutes of being authenticated.
   [MCP tools](#mcp-tools)).
 - Coding runs with extra repositories, for Claude Code and Codex (see
   [Extra repositories](#extra-repositories)).
+- Coding runs with the dependency cache (`codingProfile.dependencyCache`), for
+  Claude Code and Codex (see [Dependency cache](#dependency-cache)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -288,6 +290,36 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
   timeout plus `SUBSTRATE_PARK_TTL_SEC` (at most a day), because that prefix
   also holds live and kept runs' blobs: for example 7 days.
 
+### Dependency cache
+
+The dependency cache (see [Dependency cache](coding-packages.md#dependency-cache))
+works on Substrate for Claude Code and Codex as it does on Docker and
+Kubernetes. It needs the same switch on the coding proxy,
+`WARDBY_DEPENDENCY_CACHE=true`, and uses the proxy's `BLOB_STORE`, which the
+Substrate routes already need. Snapshots are stored under `dependency-cache/`
+in that store, next to the run files under `substrate/runs/`.
+
+- **Lifecycle rules.** The proxy evicts snapshots by age
+  (`WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`). If you add a bucket lifecycle rule
+  for Substrate's run files, scope it to `substrate/runs/`; a bucket-wide rule
+  would also delete snapshots the proxy still lists.
+- **Disk.** Actors have no workspace disk limit of their own, so the cache's
+  budget is the run's disk (`workspaceDiskMb`, else `CODING_DISK_MB`), as for
+  the seed.
+- **Keys.** Snapshots are keyed by the run's image, here the Substrate bridge
+  images, so a deployment that moves from Kubernetes starts cold.
+- **Warm rounds.** An adopted warm round skips the cache and reports
+  `reused_workspace`: its workspace already has the previous round's
+  `node_modules`, and the proxy answers cache restore and upload with
+  `409 reused_workspace` (sealing still works). The reason is trust: a reused
+  workspace was controlled by the previous round's agent, so a snapshot taken
+  from it can't be trusted for other runs.
+- **Upload digest.** Uploads carry an end-to-end SHA-256 on every launcher; see
+  [the trust model](coding-packages.md#the-trust-model).
+- **Upgrade together.** The coding proxy, the tool runner images and the worker
+  images must all be this release or later. An older tool runner on an adopted
+  round still gets `reused_workspace`, from the proxy.
+
 ## Warm rounds
 
 Warm rounds apply to Claude Code only; Codex rounds always start fresh.
@@ -360,7 +392,8 @@ records no start reason for it).
 ### What is kept and what is removed
 
 - **Kept:** the workspace, including installed packages, and the Claude
-  session.
+  session (a resumed round skips the dependency cache and reports
+  `reused_workspace`).
 - **Not kept:** background processes (the tool runner restarts for each round,
   so a dev server or watcher started by one round is gone in the next) and
   credentials (the round's run capability is revoked when it ends; the next
@@ -428,7 +461,6 @@ A run that needs one of these fails at launch with
 Use the Docker or Kubernetes launcher for them.
 
 - Coding services (`.wardby/services.yaml`).
-- The run dependency cache.
 - A custom worker image (`codingProfile.workerImageRef`), for Claude Code and
   Codex alike: it has no Substrate bridge. Only the configured worker and
   tool-runner images run, so a run dispatched with a tool-runner image you have

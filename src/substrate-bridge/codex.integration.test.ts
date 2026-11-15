@@ -74,6 +74,8 @@ interface Recorded {
   method: string;
   path: string;
   apiKey: string | undefined;
+  /** The request's Authorization header, as sent (a cache request's registry token). */
+  authorization?: string;
   body: Buffer;
 }
 
@@ -113,9 +115,23 @@ describe("Codex bridge, end to end without Substrate", () => {
         const method = request.method ?? "";
         const key = request.headers["x-api-key"];
         const body = await readAll(request);
-        requests.push({ method, path, apiKey: typeof key === "string" ? key : undefined, body });
+        const authorization = request.headers.authorization;
+        requests.push({
+          method,
+          path,
+          apiKey: typeof key === "string" ? key : undefined,
+          ...(typeof authorization === "string" ? { authorization } : {}),
+          body,
+        });
         await onRequest?.(method, path);
         if (RELAY.test(`/${path}`)) return response.writeHead(404).end('{"error":"not_found"}');
+        // The cache's seal is checked by its own key, as the proxy does (dependency-cache/service.ts):
+        // the worker's registry token in Authorization, which the agent's egress rule leaves as sent
+        // (it replaces only X-Api-Key and the MCP header). Any other credential is refused.
+        if (method === "POST" && path === "/cache/npm/seal") {
+          if (authorization !== `Bearer ${REGISTRY_TOKEN}`) return response.writeHead(401).end();
+          return response.writeHead(200, { "content-type": "application/json" }).end('{"sealed":true}');
+        }
         if (key !== PLACEHOLDER_CAPABILITY) return response.writeHead(401).end();
         // An extra repository's seed (`files` key `repos/<name>/seed`) and its upload, as the proxy routes them.
         if (method === "GET" && /^repos\/[^/]+\/seed$/.test(path)) {
@@ -338,6 +354,34 @@ describe("Codex bridge, end to end without Substrate", () => {
     expect(entries).toContain("./made-by-worker.txt");
     // No warm rounds for Codex, whatever the template's env says.
     expect(requests.filter((r) => r.path.startsWith("input"))).toHaveLength(1);
+    for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
+  });
+
+  it("passes a cache run's input and registry token through unchanged", async () => {
+    await stage(codexWorkerSetup({ ...spec, dependencyCache: true }, FAKE_CAP, { collectResultBundle: false }));
+    files.set("input", Buffer.from(JSON.stringify({ task: "do the thing", dependencyCache: true, diskMb: 2048 })));
+    let workerInput: unknown;
+    let sealStatus = 0;
+    handle = await start((env) => ({
+      exited: (async () => {
+        workerInput = JSON.parse(await readFile(join(dir, "in", "input.json"), "utf8"));
+        const sealed = await fetch(new URL("/cache/npm/seal", env.WARDBY_PROXY_URL), {
+          method: "POST",
+          headers: { authorization: `Bearer ${env.WARDBY_REGISTRY_TOKEN}` },
+        });
+        sealStatus = sealed.status;
+        await sealed.arrayBuffer();
+        await writeFile(resultPath(), JSON.stringify({ summary: "done" }));
+        return 0;
+      })(),
+    }));
+    expect(await handle.collected).toBe("ok");
+    expect(await handle.workerExited).toBe(0);
+    expect(workerInput).toEqual({ task: "do the thing", dependencyCache: true, diskMb: 2048 });
+    expect(sealStatus).toBe(200);
+    const seals = requests.filter((r) => r.method === "POST" && r.path === "/cache/npm/seal");
+    expect(seals).toHaveLength(1);
+    expect(seals[0].authorization).toBe(`Bearer ${REGISTRY_TOKEN}`);
     for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
   });
 

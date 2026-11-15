@@ -97,6 +97,11 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     if (value.dependencyCache !== true) throw invalid();
     if (!Number.isSafeInteger(value.diskMb) || value.diskMb < 64 || value.diskMb > 32_768) throw invalid();
   }
+  // An adopted warm round (claude-tool-setup.ts): only with the dependency cache flag.
+  if (value.workspaceReused !== undefined) {
+    if (typeof value.workspaceReused !== "boolean") throw invalid();
+    if (value.workspaceReused && value.dependencyCache !== true) throw invalid();
+  }
   // The run's per-command time limits (claude-tool-setup.ts); absent from an older launcher.
   let commandTimeouts;
   if (value.commandTimeouts !== undefined) {
@@ -120,6 +125,7 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     ...(value.dependencyCache === true ? { dependencyCache: true } : {}),
     ...(value.diskMb !== undefined ? { diskMb: value.diskMb } : {}),
     ...(commandTimeouts ? { commandTimeouts } : {}),
+    ...(value.workspaceReused === true ? { workspaceReused: true } : {}),
   });
 }
 
