@@ -53,7 +53,8 @@
  *   a fixed code.
  * - Templates: each one wardby ensures has a SubstrateTemplate row (its name, role and image; when
  *   it was last used by a launch, park or adoption; its golden-snapshot failures in the current
- *   window; when an actor from it first reached running). A first golden-snapshot failure rebuilds
+ *   window; when it was first seen ready: Substrate reported its golden snapshot tagged, or an
+ *   actor from it reached running). A first golden-snapshot failure rebuilds
  *   the template; a second in SUBSTRATE_TEMPLATE_RETRY_SEC, or a never-ready template past
  *   SUBSTRATE_TEMPLATE_READY_SEC of resumes refused while the workers had room, fails the run as
  *   substrate_image_unready instead of requeueing it.
@@ -177,8 +178,9 @@ export interface SubstrateJobLauncherOptions {
   /** The launcher's record of the templates it created (readiness, cleanup). */
   templates: SubstrateTemplateStore;
   /**
-   * SUBSTRATE_TEMPLATE_READY_SEC: how long a template that never started an actor may build before a
-   * run on it fails as substrate_image_unready (default 900 s).
+   * SUBSTRATE_TEMPLATE_READY_SEC: how long a template that is not ready (Substrate reports no golden
+   * snapshot tag, or, without that status, no actor from it ever started) may build before a run on
+   * it fails as substrate_image_unready (default 900 s).
    */
   templateReadyMs?: number;
   /**
@@ -196,6 +198,7 @@ export interface SubstrateJobLauncherOptions {
 export interface TemplateEvent {
   event:
     | "substrate_template_golden_failed"
+    | "substrate_template_status_read_failed"
     | "substrate_template_unready"
     | "substrate_template_record_failed"
     | "substrate_template_removed"
@@ -1007,8 +1010,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /**
    * Whether a refused resume is an image that never becomes ready rather than a full cluster: the
    * workers are known to have room for the run (a worker list that cannot be read is not room), and
-   * the refused actor's template has never started an actor (no readyAt) and has been refused with
-   * room for longer than templateReadyMs: since this control plane first saw it refused with room
+   * the refused actor's template is not ready and has been refused with room for longer than
+   * templateReadyMs. A template that has started an actor (readyAt) is never failed here, whatever
+   * Substrate's status says. Otherwise not ready is Substrate's golden-snapshot status when it
+   * reports one (no tag yet; a tag marks the template ready), or no status at all. The time is counted since this control plane first saw it refused with room
    * (refusedWithRoomSince), or since its window's first golden-snapshot failure when that is later.
    * Time a new template spent waiting for real capacity never counts, and neither does its
    * createdAt. Reports that template. Any store error: false (the run requeues, as before).
@@ -1018,7 +1023,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const free = await this.freeRoom();
       if (free === undefined || !placeable(free, templates)) return false;
       const row = await this.templates.get(refused.name);
-      if (!row || row.readyAt !== undefined) return false;
+      if (!row) return false;
+      // An actor from it reached running once: proven, whatever Substrate's status says now.
+      if (row.readyAt !== undefined) return false;
+      const ready = await this.goldenSnapshotReady(refused, row.role);
+      if (ready === true) {
+        await this.markTemplateReady(refused.name);
+        return false;
+      }
       const now = this.now();
       let seen = this.refusedWithRoomSince.get(refused.name);
       if (seen === undefined) {
@@ -1041,6 +1053,31 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Substrate's golden-snapshot ready signal for the template (TemplateInfo.goldenSnapshotReady), or
+   * undefined when it is not known: no status reported, a status that cannot be read, or a failed
+   * golden build (a failure always wins over a tag; ensureTemplate handles it on the next launch).
+   */
+  private async goldenSnapshotReady(
+    template: ActorTemplateSpec,
+    role: SubstrateTemplateRole,
+  ): Promise<boolean | undefined> {
+    try {
+      const info = await this.api.getActorTemplate(template.atespace, template.name);
+      if (!info || info.goldenSnapshotFailed) return undefined;
+      return info.goldenSnapshotReady;
+    } catch {
+      this.templateEvent({ event: "substrate_template_status_read_failed", name: template.name, role });
+      return undefined;
+    }
+  }
+
+  /** Marks the template ready (readyAt) and drops its never-ready clock; best effort. */
+  private async markTemplateReady(name: string): Promise<void> {
+    this.refusedWithRoomSince.delete(name);
+    await this.templates.markReady([name], new Date(this.now())).catch(() => undefined);
   }
 
   /**
@@ -1069,7 +1106,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     await this.templates.touch({ name, atespace, role, image: template.containers[0].image }, new Date(this.now()));
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
     const info = await call("getActorTemplate", () => this.api.getActorTemplate(atespace, name));
-    if (!info?.goldenSnapshotFailed) return;
+    if (!info?.goldenSnapshotFailed) {
+      // Substrate says its golden snapshot is built: the template is ready (best effort).
+      if (info?.goldenSnapshotReady === true) await this.markTemplateReady(name);
+      return;
+    }
     let count: GoldenFailureCount | undefined;
     try {
       count = await this.templates.recordGoldenFailure(

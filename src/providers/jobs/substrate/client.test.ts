@@ -69,14 +69,44 @@ describe("createSubstrateApi (Connect adapter)", () => {
       },
     });
     const failed = await api.getActorTemplate("s", "t");
-    expect(failed).toEqual({ goldenSnapshotFailed: true });
+    expect(failed).toEqual({ goldenSnapshotFailed: true, goldenSnapshotReady: false });
     expect(JSON.stringify(failed)).not.toContain(SECRET);
     expect(asked?.actorTemplate).toMatchObject({ atespace: "s", name: "t" });
     reply = status("");
-    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
     reply = create(ActorTemplateSchema, {});
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
     expect(await api.getActorTemplate("s", "gone")).toBeUndefined();
+  });
+
+  it("reports whether a template's golden snapshot is tagged, without the tag", async () => {
+    const TAG = "golden-tag-fake-value-000001";
+    let reply = create(ActorTemplateSchema, {});
+    const api = control({ getActorTemplate: () => reply });
+    const golden = (fields: Parameters<typeof create<typeof GoldenSnapshotStatusSchema>>[1]) =>
+      create(ActorTemplateSchema, {
+        status: create(ActorTemplateStatusSchema, { goldenSnapshotStatus: create(GoldenSnapshotStatusSchema, fields) }),
+      });
+    // Tagged: ready.
+    reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: TAG }), snapshotTime: { seconds: 1n } });
+    const ready = await api.getActorTemplate("s", "t");
+    expect(ready).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: true });
+    expect(JSON.stringify(ready)).not.toContain(TAG);
+    // A status without a tag yet (or an empty one): not ready.
+    reply = golden({ snapshotTime: { seconds: 1n } });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: "" }) });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    // No golden-snapshot status at all: unknown.
+    for (const none of [
+      create(ActorTemplateSchema, {}),
+      create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) }),
+    ]) {
+      reply = none;
+      const info = await api.getActorTemplate("s", "t");
+      expect(info).toEqual({ goldenSnapshotFailed: false });
+      expect(info).not.toHaveProperty("goldenSnapshotReady");
+    }
   });
 
   it("deletes a template by name; a missing one is success", async () => {

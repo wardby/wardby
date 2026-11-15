@@ -1,7 +1,7 @@
 ---
 id: errors/substrate-image-unready
 title: A Substrate run's image never became ready (substrate_image_unready)
-summary: A coding run on the experimental Substrate launcher failed because Substrate could not build its template's golden snapshot twice in a row, or no actor ever started from the template; usually a custom image without the Substrate bridge.
+summary: A coding run on the experimental Substrate launcher failed because Substrate could not build its template's golden snapshot twice in a row, or the template never became ready; usually a custom image without the Substrate bridge.
 audience: operator
 tags: [error, substrate, substrate_image_unready, workerImageRef, golden snapshot, job launcher]
 appliesTo: ">=0.9.15"
@@ -14,10 +14,18 @@ actor, so the run fails instead of waiting in the queue. One of these happened:
 
 - Substrate could not build the template's golden snapshot, rebuilt it, and the
   build failed again within `SUBSTRATE_TEMPLATE_RETRY_SEC` (default 600 s); or
-- a new template never started an actor within `SUBSTRATE_TEMPLATE_READY_SEC`
+- the template never became ready within `SUBSTRATE_TEMPLATE_READY_SEC`
   (default 900 s) while the workers had room for the run. The time counts from
   the first start Substrate refused while the workers had room; time spent
   waiting for capacity does not count.
+
+Wardby uses Substrate's template status to judge ready when Substrate reports
+it: a template whose golden snapshot is tagged is ready and never fails this
+way, and one with a golden-snapshot status but no tag yet is not ready. A
+template an actor has already started from is always ready and never fails this
+way, whatever its status says later. When Substrate reports no such status, a
+template counts as ready once an actor from it has started. A failed
+golden-snapshot build always counts as a failure.
 
 The control plane logs `substrate_template_unready` (with the template's name,
 its role and the reason `golden_failed` or `never_ready`) and, for each failed

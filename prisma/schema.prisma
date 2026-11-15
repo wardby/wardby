@@ -2422,7 +2422,8 @@ model SubstrateTemplate {
   goldenFailures Int       @default(0)
   /// When the current failure window began (the window's first failure); null before any failure.
   lastFailureAt  DateTime?
-  /// When an actor from the template first reached running; null until then and after a rebuild.
+  /// When the template was first seen ready (Substrate reported its golden snapshot tagged, or an
+  /// actor from it reached running); null until then and after a rebuild.
   readyAt        DateTime?
 
   @@index([lastUsedAt])
