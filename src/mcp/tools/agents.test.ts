@@ -13,6 +13,7 @@ import {
   DEPENDENCY_CACHE_IMAGE_WARNING,
   SESSION_RESUME_IMAGE_WARNING,
   SESSION_RESUME_NO_STORE_WARNING,
+  SUBSTRATE_IMAGE_WARNING,
   registerAgentTools,
 } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
@@ -1981,6 +1982,90 @@ describe("agent CRUD tools", () => {
     } finally {
       if (saved !== undefined) process.env.BLOB_STORE = saved;
     }
+  });
+
+  describe("Substrate image warning", () => {
+    const agentArgs = (workerImageRef: string | null) => ({
+      name: "byo-coder",
+      systemPrompt: "Make the requested change.",
+      model: "gpt-5.6-luna",
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { repository: "openai/example", workerImageRef },
+    });
+    const setup = async (scopes: string[]) => {
+      const seed = codingAgentSeed();
+      const db = fakeDb([{ ...seed, codingProfile: { ...seed.codingProfile, provider: "claude-code" as const } }]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", scopes, ["admin"]));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    };
+    const warnings = (result: { content: unknown }) =>
+      (JSON.parse((result.content as { text: string }[])[0].text) as { warnings?: string[] }).warnings;
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("warns on a Substrate deployment that a custom image needs the bridge", async () => {
+      vi.stubEnv("JOB_LAUNCHER", "substrate");
+      const client = await setup(["agents:write", "agents:read", "agents:admin"]);
+      const updated = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
+      });
+      expect(updated.isError).toBeFalsy();
+      expect(warnings(updated)).toEqual([SUBSTRATE_IMAGE_WARNING]);
+      expect(warnings(await client.callTool({ name: "get_agent", arguments: { id: "a1" } }))).toEqual([
+        SUBSTRATE_IMAGE_WARNING,
+      ]);
+      const created = await client.callTool({ name: "create_agent", arguments: agentArgs(VALID_WORKER_IMAGE_REF) });
+      expect(created.isError).toBeFalsy();
+      expect(warnings(created)).toEqual([SUBSTRATE_IMAGE_WARNING]);
+      await client.close();
+    });
+
+    it("says nothing on other launchers or without a custom image", async () => {
+      const client = await setup(["agents:write", "agents:read", "agents:admin"]);
+      const patch = {
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
+      };
+      vi.stubEnv("JOB_LAUNCHER", "kubernetes");
+      expect(warnings(await client.callTool(patch))).toBeUndefined();
+      vi.stubEnv("JOB_LAUNCHER", "");
+      delete process.env.JOB_LAUNCHER;
+      expect(warnings(await client.callTool(patch))).toBeUndefined();
+      vi.stubEnv("JOB_LAUNCHER", "substrate");
+      const cleared = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { workerImageRef: null } },
+      });
+      expect(cleared.isError).toBeFalsy();
+      expect(warnings(cleared)).toBeUndefined();
+      await client.close();
+    });
+
+    it("does not change who may set it", async () => {
+      vi.stubEnv("JOB_LAUNCHER", "substrate");
+      const client = await setup(["agents:write", "agents:read"]);
+      const result = await client.callTool({ name: "create_agent", arguments: agentArgs(VALID_WORKER_IMAGE_REF) });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
+      await client.close();
+    });
+
+    it("keeps the warning order", async () => {
+      vi.stubEnv("JOB_LAUNCHER", "substrate");
+      const client = await setup(["agents:write", "agents:read", "agents:admin"]);
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF, dependencyCache: true } },
+      });
+      expect(warnings(result)).toEqual([DEPENDENCY_CACHE_IMAGE_WARNING, SUBSTRATE_IMAGE_WARNING]);
+      await client.close();
+    });
   });
 
   it("a half-set BLOB_STORE counts as no blob store for the warning and never breaks get_agent or update_agent", async () => {
