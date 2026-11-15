@@ -28,7 +28,7 @@ Only verdicts on the **current version** count, so publishing a new version whil
 - **Reviewers**: the people the owner names: members, or guests of this document's comment share links who gave a name. Naming a member gives them comment access if they lack it. The owner is a reviewer only if listed.
 - **Owner**: submits, changes the reviewer list, names the final approver, archives, and can always force approve.
 - **Final approver** (optional, one person): can force approve; gives verdicts only if also listed as a reviewer.
-- **Writers** (write access) reopen an approved document for review: that creates a new version, a copy of the approved one, and puts it in review.
+- **Writers** (write access) reopen an approved document for review: that creates a new version, a copy of the approved one, and puts it in review. Anyone else, a guest included, is told in the Review tab to ask someone who can edit it.
 
 Reviewers act only with live access: a member needs at least comment access, and a guest needs a comment share link that is not revoked or expired. A reviewer who loses access cannot act; they stay listed until the owner removes them, and a force approval covers them.
 
@@ -77,7 +77,7 @@ Every document and design page shows a banner with the state and the approval co
 ## Errors
 
 - [`document_locked`](errors/document-locked.md) (409): approved or archived.
-- [`document_review_forbidden`](errors/document-review-forbidden.md) (403): not a reviewer, not the owner or final approver.
+- [`document_review_forbidden`](errors/document-review-forbidden.md) (403): not a reviewer, not the owner or final approver, or a reopen without write access.
 - [`document_review_state_invalid`](errors/document-review-state-invalid.md) (409): the action does not fit the current state or its input.
 - [`document_version_conflict`](errors/document-version-conflict.md) (409): a newer version was published before the verdict.
 

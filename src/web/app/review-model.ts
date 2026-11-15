@@ -29,13 +29,14 @@ export function bannerText(r: ReviewPayload): string {
   return `${head} · ${r.progress.approved} of ${r.progress.total} approved`;
 }
 
-export function reviewerChip(r: ReviewerPayload, current: number): string {
+/** Shown on an approved document to anyone who can't reopen it (a guest, or a member without write access). */
+export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who can edit it to reopen it.";
+
+export function reviewerChip(r: ReviewerPayload): string {
   if (r.verdict === "none" || r.versionNumber === null) return "Waiting";
   const label = r.verdict === "approved" ? "Approved" : "Changes requested";
   if (r.current) return `${label} v${r.versionNumber}`;
-  return r.versionNumber === current
-    ? `${label} v${r.versionNumber} · before reopening`
-    : `${label} v${r.versionNumber} · older version`;
+  return `${label} v${r.versionNumber} · older version`;
 }
 
 /**
@@ -58,7 +59,7 @@ export const verdictLabels = (read: number, raced: boolean) =>
 
 type MyVerdict = ReviewerPayload["verdict"];
 
-/** The viewer's own verdict while it counts (on the current version, since the last reopen), else "none". */
+/** The viewer's own verdict while it counts (on the current version), else "none". */
 export const myCurrentVerdict = (r: ReviewPayload): MyVerdict =>
   r.reviewers.find((x) => x.me && x.current)?.verdict ?? "none";
 

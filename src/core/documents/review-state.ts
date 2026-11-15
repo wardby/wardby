@@ -6,9 +6,8 @@
  *   2. any reviewer's current changes_requested → changes_requested;
  *   3. every reviewer's current verdict is approved → approved;
  *   4. else in_review.
- * A verdict or force on the current version given before the latest reopen of that version does not count.
- * A reopen now starts a new version (a copy of the approved one) and its event names that version, so nothing
- * on it can predate the reopen; the rule still guards reopens recorded on the approved version itself.
+ * Reopening an approved document starts a new version (a copy of the approved one), so nothing given before a
+ * reopen is on the current version and none of it counts.
  */
 export const REVIEW_STATES = ["draft", "in_review", "changes_requested", "approved", "archived"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
@@ -56,15 +55,11 @@ export interface RuleInput {
   reviewers: RuleReviewer[];
   /** The latest force_approved event, or null. */
   force: Mark | null;
-  /** The latest reopened event, or null. */
-  reopen: Mark | null;
 }
 
-/** A verdict or force counts when it is on the current version and not before a reopen of that version. */
-export function countsNow(mark: Mark | null, input: Pick<RuleInput, "currentVersion" | "reopen">): boolean {
-  if (!mark || mark.versionNumber !== input.currentVersion) return false;
-  const { reopen } = input;
-  return !(reopen && reopen.versionNumber === input.currentVersion && mark.at.getTime() <= reopen.at.getTime());
+/** A verdict or force counts when it is on the current version. */
+export function countsNow(mark: Mark | null, input: Pick<RuleInput, "currentVersion">): boolean {
+  return mark !== null && mark.versionNumber === input.currentVersion;
 }
 
 export function reviewerCounts(r: RuleReviewer, input: RuleInput): boolean {

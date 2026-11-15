@@ -438,9 +438,17 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       "document_review_state_invalid",
     );
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    // A reviewer without write access, and a guest, are told to ask a writer: a review refusal, not "no access".
     await expect(reopenDocument(db, cipher, { documentId: id, viewer: as(ann) })).rejects.toThrow(
-      "document_access_denied",
+      "document_review_forbidden",
     );
+    const link = await createShareLink(db, { documentId: id, viewer: as(owner), permission: "comment" });
+    const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: "Gail" });
+    const guest: Viewer = { kind: "guest", guestId, shareLinkId: link.id, permission: "comment" };
+    await expect(reopenDocument(db, cipher, { documentId: id, viewer: guest })).rejects.toThrow(
+      "document_review_forbidden",
+    );
+    expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(1);
     const reopened = await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     expect([reopened.state, reopened.currentVersion]).toEqual(["in_review", 2]);
     // The approval of v1 is on an older version now.

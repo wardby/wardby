@@ -74,14 +74,11 @@ describe("review model", () => {
   });
 
   it("words each reviewer's chip", () => {
-    expect(reviewerChip(rv({ verdict: "approved", versionNumber: 4, current: true }), 4)).toBe("Approved v4");
-    expect(reviewerChip(rv({ verdict: "changes_requested", versionNumber: 3 }), 4)).toBe(
+    expect(reviewerChip(rv({ verdict: "approved", versionNumber: 4, current: true }))).toBe("Approved v4");
+    expect(reviewerChip(rv({ verdict: "changes_requested", versionNumber: 3 }))).toBe(
       "Changes requested v3 · older version",
     );
-    expect(reviewerChip(rv({}), 4)).toBe("Waiting");
-    expect(reviewerChip(rv({ verdict: "approved", versionNumber: 4, current: false }), 4)).toBe(
-      "Approved v4 · before reopening",
-    );
+    expect(reviewerChip(rv({}))).toBe("Waiting");
   });
 
   it("words the newer-version flow", () => {

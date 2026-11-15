@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   approvedCount,
   computeReviewState,
+  forceCounts,
   isLocked,
   overriddenReviewerIds,
   overrideSentence,
@@ -20,7 +21,6 @@ const input = (over: Partial<RuleInput>): RuleInput => ({
   currentVersion: 4,
   reviewers: [],
   force: null,
-  reopen: null,
   ...over,
 });
 
@@ -69,15 +69,15 @@ describe("review state rule", () => {
     expect(computeReviewState(input({ reviewers: [] }))).toBe("in_review");
   });
 
-  it("after a reopen on the same version, earlier verdicts and an earlier force stop counting", () => {
-    const reopen = { versionNumber: 4, at: t(10) };
-    const before = input({ reviewers: [r("a", "approved", 4, 2), r("b", "approved", 4, 3)], reopen });
-    expect(computeReviewState(before)).toBe("in_review");
-    expect(computeReviewState({ ...before, force: { versionNumber: 4, at: t(5) } })).toBe("in_review");
-    const after = input({ reviewers: [r("a", "approved", 4, 11), r("b", "approved", 4, 12)], reopen });
-    expect(computeReviewState(after)).toBe("approved");
-    // A reopen on an older version changes nothing on the current one.
-    expect(computeReviewState({ ...before, reopen: { versionNumber: 3, at: t(10) } })).toBe("approved");
+  it("after a reopen (a new version), the approvals and force on the approved version stop counting", () => {
+    const approved = input({
+      reviewers: [r("a", "approved", 4), r("b", "approved", 4)],
+      force: { versionNumber: 4, at: t(5) },
+    });
+    expect(computeReviewState(approved)).toBe("approved");
+    const reopened = { ...approved, currentVersion: 5 };
+    expect(computeReviewState(reopened)).toBe("in_review");
+    expect(forceCounts(reopened)).toBe(false);
   });
 
   it("lists who a force overrides: missing, older and changes-requested verdicts", () => {

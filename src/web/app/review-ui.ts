@@ -11,6 +11,7 @@ import { append, clear, h } from "./dom.js";
 import {
   bannerText,
   EVENT_LABEL,
+  ASK_TO_REOPEN,
   isLockedState,
   isReopenCopy,
   myCurrentVerdict,
@@ -150,11 +151,7 @@ export class ReviewPanel {
           "li",
           {},
           h("span", { class: "rv-name" }, x.name),
-          h(
-            "span",
-            { class: `chip verdict-${x.verdict}${x.current ? "" : " older"}` },
-            reviewerChip(x, r.currentVersion),
-          ),
+          h("span", { class: `chip verdict-${x.verdict}${x.current ? "" : " older"}` }, reviewerChip(x)),
           x.note ? h("div", { class: "rv-note" }, x.note) : null,
         ),
       );
@@ -237,6 +234,7 @@ export class ReviewPanel {
         ),
       );
     if (can.reopen) bar.append(btn("Reopen for review", () => void this.act({ action: "reopen" }), "primary"));
+    else if (state === "approved") bar.append(h("div", { class: "rv-mine", role: "note" }, ASK_TO_REOPEN));
     if (can.archive) bar.append(btn("Archive", () => void this.act({ action: "archive", archived: true })));
     if (can.unarchive)
       bar.append(btn("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary"));

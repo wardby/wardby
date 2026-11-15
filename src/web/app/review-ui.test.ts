@@ -123,3 +123,26 @@ describe("ReviewPanel: the verdicts offered", () => {
     expect(panel.querySelector(".rv-verdict")?.textContent).toContain("You requested changes on v2");
   });
 });
+
+describe("ReviewPanel: reopening", () => {
+  const can = payload(2).can;
+  const bar = (el: HTMLElement) => el.querySelector(".rv-actions");
+
+  it("on an approved document, someone who can't reopen it is told to ask an editor", () => {
+    const { host, panel } = setup(null);
+    new ReviewPanel(host, { ...payload(2), state: "approved" }, 2);
+    expect(bar(panel)?.textContent).toContain("ask someone who can edit it to reopen it");
+    expect([...panel.querySelectorAll(".rv-actions button")].map((b) => b.textContent)).not.toContain(
+      "Reopen for review",
+    );
+  });
+
+  it("a writer gets the Reopen button and no hint; nothing shows before approval", () => {
+    const { host, panel } = setup(null);
+    const p = new ReviewPanel(host, { ...payload(2), state: "approved", can: { ...can, reopen: true } }, 2);
+    expect([...panel.querySelectorAll(".rv-actions button")].map((b) => b.textContent)).toContain("Reopen for review");
+    expect(bar(panel)?.textContent).not.toContain("ask someone");
+    p.apply(payload(2));
+    expect(panel.textContent).not.toContain("ask someone");
+  });
+});

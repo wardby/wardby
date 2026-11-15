@@ -1,15 +1,15 @@
 /**
  * Document review actions (spec "States", "Roles", "Concurrency"). Every action runs in one
  * Serializable transaction (withSerializableRetry + preferIndexScans, as publishVersion) that reads
- * the document row, the current version number, the reviewers and the latest force and reopen
- * events, checks the action, writes, recomputes the state with the pure rule (review-state.ts) and
+ * the document row, the current version number, the reviewers and the latest force event,
+ * checks the action, writes, recomputes the state with the pure rule (review-state.ts) and
  * appends one event. Live pages are told after the commit (`review`; a reopen, which also writes a version,
  * sends `version` too).
  *
- * Time: the state rule orders verdicts and forces against the latest reopen by timestamp, so one
- * action takes its verdict time and its event time from one clock, the database's, read inside the
- * transaction after its reads, and always later than the document's newest review event. An action
- * that saw an earlier one in its snapshot is therefore always stamped after it.
+ * Time: the events are the document's history, read in timestamp order, so one action takes its verdict
+ * time and its event time from one clock, the database's, read inside the transaction after its reads, and
+ * always later than the document's newest review event. An action that saw an earlier one in its snapshot is
+ * therefore always stamped after it.
  *
  * Access: each action checks access once early (to fail fast and to find the agent for redaction) and again
  * inside its transaction, so a grant or share link revoked in between is seen.
@@ -67,7 +67,7 @@ export interface ReviewerView {
   versionNumber: number | null;
   note: string | null;
   verdictAt: Date | null;
-  /** The verdict counts now (on the current version and not before its latest reopen). */
+  /** The verdict counts now (it is on the current version). */
   current: boolean;
   me: boolean;
 }
@@ -164,7 +164,6 @@ async function readReview(tx: Tx, documentId: string) {
       verdictAt: r.verdictAt,
     })),
     force: await latest("force_approved"),
-    reopen: await latest("reopened"),
   };
   return { doc, reviewers, rule, lastEventAt: (await latest())?.at ?? null };
 }
@@ -432,8 +431,13 @@ export async function reopenDocument(
   cipher: Cipher,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ReviewView> {
-  await requireDocumentAccess(db, input.documentId, input.viewer, "write");
-  if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
+  // Anyone who can open the document but not write it (a guest included) is refused as a review action, so
+  // they are told to ask someone who can edit it to reopen it.
+  const access = await documentAccess(db, input.documentId, input.viewer);
+  if (access === "none") throw new Error("document_not_found");
+  if (input.viewer.kind !== "principal" || !atLeast("document", access, "write")) {
+    throw new Error("document_review_forbidden");
+  }
   const principalId = input.viewer.principalId;
   for (let attempt = 1; ; attempt++) {
     // Staged before the transaction, as a publish is (re-anchoring a design parses it).
@@ -612,7 +616,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
           notes: ((forceEvent.overridden as string[] | null) ?? []).map((id) => {
             const row = reviewers.find((r) => r.id === id);
             if (!row) return overrideSentence(null, null, forceEvent.versionNumber);
-            // A verdict that no longer counts (e.g. changes requested before a reopen) is reported as no review.
+            // A verdict that no longer counts (given on an older version) is reported as no review.
             const verdict: Verdict = counts.get(row.id) ? (row.verdict as Verdict) : "none";
             return overrideSentence(
               nameOf(row.principalId, row.guestId),
