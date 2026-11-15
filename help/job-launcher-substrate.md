@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp]
 appliesTo: ">=0.9.15"
 ---
 
@@ -22,8 +22,8 @@ reach is the coding proxy.
 
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
-- your coding agents are Claude Code or Codex, without coding services, MCP
-  tools, the dependency cache, extra repositories or a custom worker image
+- your coding agents are Claude Code or Codex, without coding services, the
+  dependency cache, extra repositories or a custom worker image
   (`workerImageRef`).
 
 Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
@@ -66,6 +66,15 @@ Run the coding proxy of the same release before sending Codex runs, and apply
 the `20261121000000_substrate_codex_shape` migration (`prisma migrate deploy`)
 before the new control plane and proxy start.
 
+## MCP tools
+
+Coding agents with attached [remote MCP server](mcp-servers.md) tools run on
+Substrate, for Claude Code and Codex. The worker holds only a placeholder:
+Substrate's egress gateway adds the run's MCP token in the `X-Wardby-Mcp-Token`
+header of `/mcp` requests. Run this release's coding proxy before sending MCP
+runs, and set `WARDBY_MCP_GATEWAY_URL` on it. See
+[MCP tools on Substrate](../docs/substrate-backend.md#mcp-tools).
+
 ## Worker images
 
 The agent actor runs a Substrate bridge image, not the plain worker image: set
@@ -100,8 +109,8 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs services, MCP tools, the dependency cache, extra repositories or a
-  custom worker image.
+  run needs services, the dependency cache, extra repositories or a custom
+  worker image.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and
