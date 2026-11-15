@@ -211,6 +211,20 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
     ).toEqual([ids.R0, ids.R3, ids.R2, ids.R1].sort());
   });
 
+  it("shows a run started from document comment threads as a comment trigger", async () => {
+    const rid = id("comment-run");
+    await db.run.create({
+      data: { id: rid, agentId: ids.C, trigger: "comment", status: "running", startedAt: ago(1 * MIN) },
+    });
+    try {
+      const snap = await loadGraph(db, { since: ago(60 * MIN), limit: 500, now });
+      expect(snap.runs.find((r) => r.id === rid)?.trigger).toEqual({ kind: "comment" });
+      expect(() => GraphSnapshotSchema.parse(snap)).not.toThrow();
+    } finally {
+      await db.run.deleteMany({ where: { id: rid } });
+    }
+  });
+
   it("parses since values", () => {
     expect(parseSince("15m", now)).toEqual(ago(15 * MIN));
     expect(parseSince("7d", now)).toEqual(new Date(now.getTime() - 7 * 86_400_000));

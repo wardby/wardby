@@ -75,8 +75,14 @@ export interface ToolSpec<Args = Record<string, unknown>> {
   handler: (
     args: Args,
     ctx: McpRequestContext,
-  ) => Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown } | InputRequiredResult>;
+  ) => Promise<{ content: ToolContent[]; structuredContent?: unknown } | InputRequiredResult>;
 }
+
+/** One item of a tool result: text, an image (base64) or an embedded resource (base64 blob). */
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
 
 export interface McpServerConfig {
   canonicalUri: string;

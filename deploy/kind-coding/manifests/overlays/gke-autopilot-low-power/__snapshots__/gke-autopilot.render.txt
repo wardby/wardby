@@ -12,12 +12,12 @@ metadata:
   namespace: wardby-coding
 spec:
   hard:
-    limits.cpu: "11"
-    limits.memory: 20Gi
-    pods: "26"
-    requests.cpu: "11"
+    limits.cpu: "11.5"
+    limits.memory: 22Gi
+    pods: "27"
+    requests.cpu: "11.5"
     requests.ephemeral-storage: 64Gi
-    requests.memory: 20Gi
+    requests.memory: 22Gi
 ---
 apiVersion: v1
 automountServiceAccountToken: false

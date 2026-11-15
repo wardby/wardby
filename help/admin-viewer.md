@@ -31,6 +31,7 @@ Endpoints, all `GET`:
   From 0.9.6 it also returns `request`, what the run was asked to do (untrusted
   text, secrets masked, at most 8,000 characters, with `requestTruncated`).
 - `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
+- `/admin/api/documents?limit=200&agent=&repository=`: the documents and designs the caller owns or was granted (Wardby 0.10.0 and later); metadata only, and not widened by the `admin` role. See the `documents` help article.
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 
 The stream has no replay: open the event stream first, then load the graph,

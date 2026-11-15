@@ -20,6 +20,7 @@ import {
   normalizeGitRef,
   truncateText,
 } from "../../coding/protocol.js";
+import { isSafeFilePath } from "../../coding/file-path.js";
 import {
   LATEST_RUN_MARKER_PREFIX,
   RELATED_SECTION_END,
@@ -221,8 +222,6 @@ export interface ContinuationCheckRunCompleteInput {
    */
   headRef?: string;
 }
-
-const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
@@ -894,7 +893,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
    * a 404, means there's no file text to return.
    */
   async readFileAtRef(input: RepositoryFileInput): Promise<string | null> {
-    if (!SAFE_FILE_PATH.test(input.path) || input.path.split("/").some((part) => part === "." || part === "..")) {
+    if (!isSafeFilePath(input.path)) {
       throw new Error("github_file_path_invalid");
     }
     const repository = normalizeGitHubRepository(input.repository);

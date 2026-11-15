@@ -23,6 +23,7 @@ import {
   SHAREABLE_TYPES,
   accessRank,
   atLeast,
+  effectiveAccess,
   isLevel,
   isResourceType,
   principalGranteeKey,
@@ -83,7 +84,7 @@ async function resolveGrantee(db: GrantTx, grantee: Grantee): Promise<Principal 
   return principal;
 }
 
-/** Grant management is the owner's (or the stdio operator's). Agents and MCP servers. */
+/** Grant management is the owner's (or the stdio operator's). Agents, MCP servers and documents. */
 async function requireOwnedResource(
   ctx: McpRequestContext,
   db: GrantTx,
@@ -98,6 +99,20 @@ async function requireOwnedResource(
     }
     return server;
   }
+  if (type === "document") {
+    const doc = await db.document.findUnique({ where: { id }, select: { id: true, ownerId: true } });
+    // Missing and invisible look the same; a reader who isn't the owner gets 403.
+    const access = doc
+      ? await effectiveAccess(db, "document", doc, ctx.principal.id, { operator: ctx.operator })
+      : "none";
+    if (!doc || !atLeast("document", access, "read")) {
+      throw new McpError(404, `Document "${id}" not found.`);
+    }
+    if (access !== "owner") {
+      throw new McpError(403, `Document "${id}": only its owner can manage who it is shared with.`);
+    }
+    return doc;
+  }
   // Only "agent" and "mcp_server" reach here (shareableType).
   const row = await db.agent.findUnique({ where: { id } });
   return (await assertAgentAccess(ctx, row, id, "owner", db)).agent;
@@ -107,6 +122,7 @@ type GrantTx = Pick<
   PrismaClient,
   | "agent"
   | "mcpServer"
+  | "document"
   | "principal"
   | "resourceGrant"
   | "agentSecret"
@@ -143,7 +159,10 @@ function isAdmin(ctx: McpRequestContext): boolean {
 
 const TYPE_PROPERTIES = {
   // No enum: another type gets a clear "not shareable yet" from the handler.
-  resourceType: { type: "string", description: 'Agents and MCP servers are shareable: "agent" or "mcp_server".' },
+  resourceType: {
+    type: "string",
+    description: 'Agents, MCP servers and documents are shareable: "agent", "mcp_server" or "document".',
+  },
   resourceId: { type: "string" },
 };
 const GRANTEE_PROPERTY = {
@@ -178,6 +197,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
       "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. Lowering a grant to read (including everyone from use to read) detaches the server from every agent whose owner can no longer use it, and their runs' next call to it is refused. " +
+      "Documents (resourceType document): read < comment < write; everyone may get at most comment. Only the owner manages grants. " +
       "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers or tool capabilities. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
@@ -185,7 +205,11 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       properties: {
         ...TYPE_PROPERTIES,
         grantee: GRANTEE_PROPERTY,
-        level: { type: "string", description: "Agents: read < execute < write. MCP servers: read < use < write." },
+        level: {
+          type: "string",
+          description:
+            "Agents: read < execute < write. MCP servers: read < use < write. Documents: read < comment < write.",
+        },
       },
       required: ["resourceType", "resourceId", "grantee", "level"],
     },
@@ -258,7 +282,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "revoke_access",
     scope: "agents:write",
     description:
-      "Removes a grant on an agent or MCP server you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. For an MCP server the check is every tool call: the server is detached from every agent whose owner can no longer use it (your own agents are untouched), and a run's next call to it is refused with mcp_tool_not_allowed.",
+      "Removes a grant on an agent, MCP server or document you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. For an MCP server the check is every tool call: the server is detached from every agent whose owner can no longer use it (your own agents are untouched), and a run's next call to it is refused with mcp_tool_not_allowed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -289,7 +313,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "list_access",
     scope: "agents:read",
     description:
-      "Lists who an agent or MCP server is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
+      "Lists who an agent, MCP server or document is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -307,6 +331,16 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           throw new McpError(404, `MCP server "${args.resourceId}" not found.`);
         }
         resource = server;
+      } else if (type === "document") {
+        const doc = await ctx.db.document.findUnique({
+          where: { id: args.resourceId },
+          select: { id: true, ownerId: true },
+        });
+        // Owner, stdio operator or admin; anyone else sees a missing document.
+        if (!doc || (!ctx.operator && !isAdmin(ctx) && doc.ownerId !== ctx.principal.id)) {
+          throw new McpError(404, `Document "${args.resourceId}" not found.`);
+        }
+        resource = doc;
       } else {
         const agent = await ctx.db.agent.findUnique({ where: { id: args.resourceId } });
         if (!agent) throw agentNotFound(args.resourceId);

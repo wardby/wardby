@@ -14,6 +14,7 @@ fn main() {
             "fetch_graph",
             "fetch_run",
             "fetch_infra",
+            "fetch_documents",
             "kube_contexts",
             "set_kube_context",
             "kube_connect",

@@ -7,7 +7,7 @@
  * exchangeCode/refresh) belong to the external IdP, not to wardby, so they
  * throw rather than half-implement a flow this adapter doesn't own.
  */
-import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTVerifyGetKey } from "jose";
+import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { AudienceError, NotSupportedError } from "./types.js";
 import { requireSubject } from "./subject.js";
@@ -117,6 +117,35 @@ function scopesFromClaim(claim: unknown): string[] {
   return [];
 }
 
+/** The IdP's signing keys, fetched (and cached by jose) from its JWKS endpoint. */
+export function remoteJwks(jwksUri: string): JWTVerifyGetKey {
+  return createRemoteJWKSet(new URL(jwksUri));
+}
+
+/**
+ * Verifies a JWT the operator's IdP signed: signature against its JWKS, then
+ * `iss`, `aud` (any of `audience`) and `exp`, with `sub` required. Shared by
+ * bearer access tokens and the browser sign-in's ID tokens, so both read the
+ * IdP the same way.
+ */
+export async function verifyIdpJwt(
+  token: string,
+  jwks: JWTVerifyGetKey,
+  expected: { issuer: string; audience: string | string[] },
+): Promise<JWTPayload> {
+  const { payload } = await jwtVerify(token, jwks, {
+    issuer: expected.issuer,
+    audience: expected.audience,
+    requiredClaims: ["sub", "exp", "iss", "aud"],
+  });
+  return payload;
+}
+
+/** The Wardby principal subject for a verified IdP token: its `sub`, unchanged (resolvePrincipal finds or creates it). */
+export function subjectFromClaims(payload: JWTPayload): string {
+  return requireSubject(payload.sub);
+}
+
 export class DelegatingAuthProvider implements AuthProvider {
   private readonly config: DelegatingAuthConfig;
   private readonly audiences: string[];
@@ -138,19 +167,18 @@ export class DelegatingAuthProvider implements AuthProvider {
       if (!config.jwksUri) {
         throw new Error("AUTH_JWKS_URI is not set — required by the delegating AuthProvider adapter.");
       }
-      this.jwks = createRemoteJWKSet(new URL(config.jwksUri));
+      this.jwks = remoteJwks(config.jwksUri);
     }
   }
 
   async verifyBearer(token: string): Promise<VerifiedToken> {
     try {
-      const { payload } = await jwtVerify(token, this.jwks, {
-        issuer: this.config.issuer,
+      const payload = await verifyIdpJwt(token, this.jwks, {
+        issuer: this.config.issuer as string,
         audience: this.audiences,
-        requiredClaims: ["sub", "exp", "iss", "aud"],
       });
       return {
-        subject: requireSubject(payload.sub),
+        subject: subjectFromClaims(payload),
         email: typeof payload.email === "string" ? payload.email : undefined,
         roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
         scopes: scopesFromClaim(payload.scope ?? payload.scp),

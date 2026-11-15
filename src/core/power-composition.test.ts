@@ -9,6 +9,9 @@ vi.mock("../providers/jobs/kubernetes-client.js", () => ({
     constructor(opts: unknown) {
       apiCtor(opts);
     }
+    async readEndpoints() {
+      return undefined;
+    }
     async readDeployment() {
       return undefined;
     }
@@ -64,5 +67,15 @@ describe("lowPowerActive", () => {
     expect(() => lowPowerActive({ WARDBY_LOW_POWER: "yes", JOB_LAUNCHER: "kubernetes" })).toThrow(
       /WARDBY_LOW_POWER must be 0 or 1/,
     );
+  });
+
+  it("makes the renderer a target only when WARDBY_RENDERER_URL is set", async () => {
+    const base = { WARDBY_LOW_POWER: "1", JOB_LAUNCHER: "kubernetes" };
+    // readDeployment is mocked to return undefined: a target with a Deployment name does not throw
+    // low_power_disabled, and one without does.
+    const withRenderer = buildPower({ env: { ...base, WARDBY_RENDERER_URL: "http://wardby-renderer:8796" }, db });
+    await expect(withRenderer.isAsleep("renderer")).resolves.toBe(false);
+    const without = buildPower({ env: base, db });
+    await expect(without.isAsleep("renderer")).rejects.toThrow(/^low_power_disabled: renderer is not deployed here/);
   });
 });

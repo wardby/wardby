@@ -72,9 +72,11 @@ Create these scopes in the provider:
 | `models:admin`        | Add, override, disable and reset model catalog entries.                         |
 | `power:manage`        | Read low-power state and sleep the proxy/gateway now; admins only.              |
 | `hosts:admin`         | Register host providers and approve their tools; admins and host managers only. |
+| `documents:read`      | Read and list documents and comment threads, and list share links.              |
+| `documents:write`     | Create documents, publish versions, reply, resolve, share and send to an agent. |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
-may request every advertised scope. Define all sixteen in the provider even when
+may request every advertised scope. Define all eighteen in the provider even when
 policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
@@ -97,6 +99,10 @@ every advertised scope fail with `invalid_scope`.
 `power:manage` was added after `models:admin`. When you upgrade an existing
 deployment, define it in the provider too and map it like `agents:admin`;
 otherwise clients that request every advertised scope fail with `invalid_scope`.
+
+`documents:read` and `documents:write` were added after `hosts:admin`. When you upgrade an
+existing deployment, define both in the provider too; no Wardby role is needed. Otherwise
+clients that request every advertised scope fail with `invalid_scope`. See [documents.md](documents.md).
 
 `hosts:admin` was added after `power:manage`. When you upgrade an existing
 deployment, define it in the provider too and map it like `agents:admin`;
@@ -121,7 +127,17 @@ Wardby roles:
 ```dotenv
 AUTH_ROLE_CLAIM=groups   # claim name or dotted path
 AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
+# Optional: browser sign-in for document pages (OIDC authorization code + PKCE).
+WEB_OIDC_CLIENT_ID=your-web-client-id
+# WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
+# WEB_OIDC_SCOPES=openid profile email  (the default)
 ```
+
+For browser sign-in, register a web client at the provider with the redirect
+URI `https://wardby.example.com/web/callback` (the origin of
+`MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
+access tokens MCP clients receive, so both sign-ins map to the same Wardby
+principal.
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
 
@@ -243,7 +259,17 @@ AUTH_AUDIENCE=https://wardby.example.com/mcp
 # Optional: Wardby roles (see "Wardby roles" above).
 AUTH_ROLE_CLAIM=groups
 AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager,wardby-hosts=host-manager
+# Optional: browser sign-in for document pages (OIDC authorization code + PKCE).
+WEB_OIDC_CLIENT_ID=your-web-client-id
+# WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
+# WEB_OIDC_SCOPES=openid profile email  (the default)
 ```
+
+For browser sign-in, register a web client at the provider with the redirect
+URI `https://wardby.example.com/web/callback` (the origin of
+`MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
+access tokens MCP clients receive, so both sign-ins map to the same Wardby
+principal.
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's
 metadata. Copy `AUTH_JWKS_URI` from the provider's metadata rather than
@@ -278,7 +304,7 @@ Confirm that:
 
 - `resource` is the canonical MCP URI;
 - `authorization_servers` contains the external issuer; and
-- `scopes_supported` contains all sixteen Wardby scopes.
+- `scopes_supported` contains all eighteen Wardby scopes.
 
 An unauthenticated MCP request must return `401` with a `WWW-Authenticate`
 challenge pointing back to that metadata document.

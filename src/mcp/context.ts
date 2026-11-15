@@ -14,6 +14,7 @@ import type { RepoAccessGate } from "../core/repo-access.js";
 import type { RunStepSink } from "../core/run-steps/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { ExportDeps } from "../core/documents/exports.js";
 import type { Power } from "../core/power.js";
 import type { ChatProviderRegistry } from "../providers/chat/types.js";
 import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
@@ -35,6 +36,8 @@ export type McpProviders = Pick<
    * only admin approvals still work.
    */
   repoAccess?: RepoAccessGate;
+  /** PNG/PDF design exports (export_document); absent = those formats answer export_renderer_unavailable. */
+  exports?: ExportDeps;
   /** Low-power mode (scale idle proxy/gateway to zero); absent = DISABLED_POWER. */
   power?: Power;
   /** Overrides the outbound call to remote MCP servers (register/update/refresh_mcp_server) — tests only. */
@@ -69,6 +72,12 @@ export interface McpRequestContext {
    * Passed to requireScope the same way WardbyMcpServer does centrally.
    */
   canonicalUri: string;
+  /**
+   * stdio only: the http(s) origin of MCP_CANONICAL_URI when the operator set
+   * one, for links to Wardby's pages (documents, share links). Over HTTP the
+   * canonical URI's own origin is used. Absent = links are given as paths.
+   */
+  publicOrigin?: string;
   providers: McpProviders;
   db: PrismaClient;
   /**

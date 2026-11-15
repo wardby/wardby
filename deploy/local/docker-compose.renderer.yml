@@ -1,0 +1,13 @@
+# Optional local PNG/PDF export renderer. Build the image first: npm run renderer:image:local
+# Then: docker compose -f deploy/local/docker-compose.renderer.yml up -d
+# and start the control plane with WARDBY_RENDERER_URL=http://127.0.0.1:8796.
+services:
+  renderer:
+    image: wardby-renderer:local
+    ports: ["127.0.0.1:8796:8796"]
+    read_only: true
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=512m"]
+    environment: { HOME: /tmp, PORT: "8796" }
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"

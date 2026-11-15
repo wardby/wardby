@@ -5,6 +5,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import { DEFAULT_NATIVE_GATEWAY_SERVICE, loadKubernetesJobConfig } from "../config/providers.js";
+import { loadRendererConfig } from "../config/renderer.js";
 import { loadLowPowerConfig } from "../config/low-power.js";
 import { ClientNodeKubernetesApi } from "../providers/jobs/kubernetes-client.js";
 import { logger } from "./logger.js";
@@ -32,6 +33,7 @@ export function buildPower({ env = process.env, db }: { env?: NodeJS.ProcessEnv;
     return DISABLED_POWER;
   }
   const kubernetes = loadKubernetesJobConfig(env);
+  const renderer = loadRendererConfig(env);
   return createPower({
     config,
     api: new ClientNodeKubernetesApi({ context: kubernetes.context }),
@@ -39,6 +41,8 @@ export function buildPower({ env = process.env, db }: { env?: NodeJS.ProcessEnv;
     deployments: {
       proxy: kubernetes.proxyService,
       gateway: env.NATIVE_GATEWAY_SERVICE?.trim() || DEFAULT_NATIVE_GATEWAY_SERVICE,
+      // A target only when the renderer is configured (WARDBY_RENDERER_URL).
+      ...(renderer.url ? { renderer: renderer.deployment } : {}),
     },
     busy: powerBusy(db),
     blockers: (target) => powerBlockers(db, target),

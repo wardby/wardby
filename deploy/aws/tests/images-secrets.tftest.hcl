@@ -70,7 +70,7 @@ run "images_and_secrets" {
   }
 
   assert {
-    condition     = length(aws_ecr_repository.images) == 8 && aws_ecr_repository.images["runtime"].name == "wardby/runtime"
+    condition     = length(aws_ecr_repository.images) == 9 && aws_ecr_repository.images["runtime"].name == "wardby/runtime"
     error_message = "One repository per bake target, named <prefix>/<target>."
   }
   assert {

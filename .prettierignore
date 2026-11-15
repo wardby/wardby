@@ -7,3 +7,4 @@ coverage
 package-lock.json
 apps/
 src/coding/registry/fixtures/lockfiles
+src/core/documents/boards/fixtures

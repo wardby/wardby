@@ -22,6 +22,8 @@ import { prismaServiceStateReporter } from "../../core/coding-service-status.js"
 import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
+import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
+import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { syncMergeOrderChecks } from "../../core/merge-order-check.js";
 import { changeHasExtraPullRequest, updateRelatedPullRequests } from "../../core/related-pull-requests.js";
@@ -96,6 +98,35 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
         })
         .catch((err: unknown) =>
           compositionLog.warn({ err, runId }, "could not update the related pull requests of this run"),
+        );
+    });
+}
+
+/**
+ * The document send-to-agent completion, outside the finishing run's async context. Never throws.
+ * Answering a run can start a reconcile run, so the self-defect sink is required: its start
+ * failure is filed as a send's is.
+ */
+export function documentRunFinishedHook(
+  deps: () => {
+    db: PrismaClient;
+    executor: Executor;
+    cipher: Parameters<typeof loadAgentSecretValues>[1];
+    selfDefects: SelfDefectSink;
+  },
+): (runId: string) => void {
+  return (runId) =>
+    outsideRunContext(() => {
+      void Promise.resolve()
+        .then(() => {
+          const { db, ...rest } = deps();
+          return onDocumentRunFinished(db, rest, runId);
+        })
+        .catch((err: unknown) =>
+          compositionLog.warn(
+            { runId, errorName: err instanceof Error ? err.name : typeof err },
+            "document hook failed",
+          ),
         );
     });
 }
@@ -395,6 +426,18 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       maxConcurrent: concurrency.maxConcurrent,
       issueTrackers,
       warmRounds: jobs.warmRounds === true,
+      // Threads sent from a document: publish the run's edit and post its replies (never throws).
+      // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
+      ...(cipher
+        ? {
+            onTerminal: documentRunFinishedHook(() => ({
+              db: options.db,
+              executor: composed,
+              cipher,
+              selfDefects: { db: options.db, issueTrackers },
+            })),
+          }
+        : {}),
     }),
     jobs,
     vcs,

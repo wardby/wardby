@@ -3,14 +3,16 @@ import type { PrismaClient } from "#prisma";
 import { IdentityService } from "./credentials.js";
 
 const USAGE =
-  "Use auth user create --subject <s> [--role <role>]... | user list | " +
+  "Use auth user create --subject <s> [--role <role>]... [--name <display name>] | user list | " +
+  "user name --subject <s> --name <display name> | " +
   "user grant --subject <s> [--role <role>]... [--revoke-role <role>]... | user disable --subject <s> | " +
   "key create|list --subject <s> | key revoke <key-id>.";
 
-type Flag = "subject" | "role" | "revoke-role";
+type Flag = "subject" | "role" | "revoke-role" | "name";
 /** The flags each command accepts. Anything else is rejected, never silently ignored. */
 const COMMANDS: Record<string, readonly Flag[]> = {
-  "user create": ["subject", "role"],
+  "user create": ["subject", "role", "name"],
+  "user name": ["subject", "name"],
   "user list": [],
   "user grant": ["subject", "role", "revoke-role"],
   "user disable": ["subject"],
@@ -21,6 +23,7 @@ const FLAG_OPTIONS = {
   subject: { type: "string" },
   role: { type: "string", multiple: true },
   "revoke-role": { type: "string", multiple: true },
+  name: { type: "string" },
 } as const;
 
 export async function authCommand(
@@ -52,14 +55,18 @@ export async function authCommand(
     strict: true,
     allowPositionals: false,
     options: Object.fromEntries(allowed.map((flag) => [flag, FLAG_OPTIONS[flag]])),
-  }) as { values: { subject?: string; role?: string[]; "revoke-role"?: string[] } };
+  }) as { values: { subject?: string; role?: string[]; "revoke-role"?: string[]; name?: string } };
   if (command === "user list") {
     output(JSON.stringify(await service.listUsers(), null, 2));
     return;
   }
   if (!values.subject) throw new Error(`auth ${command} requires --subject.`);
   if (command === "user create") {
-    output(JSON.stringify(await service.createUser(values.subject, values.role ?? [])));
+    output(JSON.stringify(await service.createUser(values.subject, values.role ?? [], values.name)));
+    return;
+  }
+  if (command === "user name") {
+    output(JSON.stringify(await service.setDisplayName(values.subject, values.name ?? "")));
     return;
   }
   if (command === "user grant") {

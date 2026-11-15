@@ -8,7 +8,8 @@
  * - Every MCP tool is named in docs/ or help/.
  * - Every environment variable the code reads is named in docs/, help/, README.md or a deploy/
  *   guide, unless it is internal plumbing (INTERNAL_ENV, each with its reason).
- * - Help frontmatter `tags:` stays on one line of at most 120 characters.
+ * - Help frontmatter `tags:` stays on one line of at most 120 characters, or is the multi-line list
+ *   Prettier wraps a longer one into (`tags:`, `  [`, one item per line, `  ]`), which the catalog reads.
  *
  * Gaps found when this suite was written are listed in KNOWN_*: the main tests check everything
  * else and that each listed gap is still a gap (so a fixed one is taken off the list); the
@@ -80,6 +81,21 @@ function errorCodes(): Map<string, string> {
     for (const match of read(join(ROOT, file)).matchAll(/\berror:\s*"([a-z][a-z0-9_]*_[a-z0-9_]*)"/g)) {
       add(match[1], file);
     }
+  }
+  // Documents: the codes the documents core, the web surface and the MCP tools throw or answer
+  // (`throw new Error("code")` / `throw new McpError(status, "code")`, the web route status table).
+  for (const file of sourceFiles.filter((f) =>
+    /src[/\\](core[/\\]documents(?:[/\\]boards)?|web|renderer)[/\\][^/\\]+\.ts$|src[/\\]mcp[/\\]tools[/\\]documents\.ts$/.test(
+      f,
+    ),
+  )) {
+    const form =
+      /\b(?:Error|McpError)\((?:\d+,\s*)?"((?:document|comment|share|guest|web|board|export)_[a-z_]+)"|^\s+((?:document|comment|share|guest|web|board|export)_[a-z_]+):\s*\d{3},/gm;
+    for (const match of read(file).matchAll(form)) add(match[1] ?? match[2], relative(ROOT, file));
+  }
+  // The web page API's generic codes (src/web/context.ts, src/web/api.ts, src/web/routes.ts).
+  for (const code of ["invalid_request", "expected_json_object", "not_found", "internal_error"]) {
+    add(code, "src/web/context.ts");
   }
   // repo_pr_read's `patch_cursor_${reason}` (PatchCursorError's reasons).
   for (const reason of ["malformed", "stale"]) add(`patch_cursor_${reason}`, "src/core/review-host-tools.ts");
@@ -214,11 +230,15 @@ const KNOWN_LONG_TAGS = new Set<string>([
   ...["help/troubleshooting/coding-workers.md"],
 ]);
 
-/** Help articles whose frontmatter tags are not one `tags: [ ... ]` line of at most 120 characters. */
+/**
+ * Help articles whose frontmatter tags are not one `tags: [ ... ]` line of at most 120 characters,
+ * nor the list Prettier wraps a longer one into (the catalog reads both).
+ */
 function tagProblems(): { file: string; problem: string }[] {
   const problems: { file: string; problem: string }[] = [];
   for (const path of helpArticles) {
     const frontmatter = /^---\n([\s\S]*?)\n---/.exec(read(path))?.[1];
+    if (frontmatter && /^tags:\n {2}\[\n(?: {4}[^\n]+,\n)+ {2}\]$/m.test(frontmatter)) continue;
     const line = frontmatter?.split("\n").find((l) => l.startsWith("tags:"));
     if (!line) continue;
     const file = relative(ROOT, path);

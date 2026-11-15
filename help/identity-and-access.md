@@ -34,6 +34,8 @@ models. Seven sensitive permissions have an additional role requirement:
 - `hosts:admin` requires the `admin` or `host-manager` role. It registers host
   providers, approves their tools and, with `secrets:write`, replaces their secrets; see
   [Host providers](../docs/host-providers.md).
+- `documents:read` and `documents:write` need no role; access is per document
+  (`grant_access` with `resourceType: "document"`). Search help for "documents".
 - `power:manage` requires the `admin` role. It reads low-power state and
   sleeps the coding proxy and native gateway now (`power_status`,
   `power_sleep`); see

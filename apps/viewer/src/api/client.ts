@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ClusterPayload, InfraEvent } from "../infra/types";
-import type { GraphSnapshot, InfraInfo, RunDetail, ViewerEvent } from "./types";
+import type { DocumentList, GraphSnapshot, InfraInfo, RunDetail, ViewerEvent } from "./types";
 
 export const FRAME_EVENT = "viewer://frame";
 export const CLUSTER_EVENT = "viewer://cluster";
@@ -88,6 +88,9 @@ export const fetchGraph = (url: string, since: string, limit: number) =>
 export const fetchRun = (url: string, id: string) => invoke<RunDetail>("fetch_run", { url, id });
 
 export const fetchInfra = (url: string) => invoke<InfraInfo>("fetch_infra", { url });
+
+/** The documents and designs the signed-in admin owns or was granted read access to. */
+export const fetchDocuments = (url: string, limit: number) => invoke<DocumentList>("fetch_documents", { url, limit });
 
 /** The contexts in the user's kubeconfig (names only). */
 export const kubeContexts = () => invoke<{ current: string | null; contexts: string[] }>("kube_contexts");

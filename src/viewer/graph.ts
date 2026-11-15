@@ -75,6 +75,8 @@ function triggerFor(row: RunRow, sites: IssueSites): RunTriggerInfo {
       return { kind: "subagent" };
     case "manual":
       return { kind: "manual" };
+    case "comment":
+      return { kind: "comment" };
     case "host_event":
       if (row.issueStatus) {
         return {

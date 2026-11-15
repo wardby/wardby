@@ -68,7 +68,21 @@ function parseFrontmatter(sourcePath: string, markdown: string): { fields: Map<s
   if (!match) throw failure(sourcePath, "expected YAML frontmatter delimited by ---");
 
   const fields = new Map<string, string>();
-  for (const line of match[1].split(/\r?\n/)) {
+  const lines = match[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    // An inline list Prettier wrapped past the print width: "key:", then "  [", one item per
+    // indented line, and "  ]". Joined back into the one-line form before it is read.
+    if (/^[A-Za-z][A-Za-z0-9]*:$/.test(line) && /^\s+\[$/.test(lines[i + 1] ?? "")) {
+      const close = lines.findIndex((l, j) => j > i + 1 && /^\s+\]$/.test(l));
+      if (close < 0) throw failure(sourcePath, `unclosed list for frontmatter field ${line}`);
+      const items = lines.slice(i + 2, close).map((l) => {
+        if (!/^\s+\S/.test(l)) throw failure(sourcePath, `unsupported frontmatter line: ${l}`);
+        return l.trim().replace(/,$/, "");
+      });
+      line = `${line} [${items.join(", ")}]`;
+      i = close;
+    }
     const field = /^([A-Za-z][A-Za-z0-9]*):\s*(.+)$/.exec(line);
     if (!field) throw failure(sourcePath, `unsupported frontmatter line: ${line}`);
     const [, key, value] = field;

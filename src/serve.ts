@@ -94,6 +94,14 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     executor: providers.executor,
     reviewHosts,
     issueTrackers: providers.issueTrackers,
+    // Comment threads sent to runs that ended unanswered (lost, failed to start, missed hook).
+    documentRuns: {
+      db: prisma,
+      cipher: providers.secrets,
+      executor: providers.executor,
+      // A reconcile run started from the sweep files its start failure as a send's is.
+      selfDefects: { db: prisma, issueTrackers: providers.issueTrackers },
+    },
     ...(reviewHosts
       ? {
           deferredReviews: {

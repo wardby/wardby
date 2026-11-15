@@ -3,7 +3,7 @@ openapi: 3.1.0
 info:
   title: wardby admin viewer API
   version: 0.9.14
-  description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
+  description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info, your documents and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
 servers:
   - url: https://{host}
     variables:
@@ -229,6 +229,116 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/infra-info"
+        "401":
+          description: No valid bearer token.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
+          headers:
+            WWW-Authenticate:
+              $ref: "#/components/headers/WWWAuthenticate"
+        "403":
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
+          headers:
+            WWW-Authenticate:
+              $ref: "#/components/headers/WWWAuthenticate"
+        "405":
+          description: Only GET is allowed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - method_not_allowed
+          x-error-codes:
+            - method_not_allowed
+          headers:
+            Allow:
+              description: "Allowed methods: GET."
+              schema:
+                type: string
+                enum:
+                  - GET
+        default:
+          description: Unexpected server error (HTTP 500). `id` identifies the failure in the server log.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewerInternalError"
+  /admin/api/documents:
+    get:
+      operationId: getDocuments
+      summary: Documents and designs you can open
+      description: |-
+        The documents and designs the authenticated caller owns or was granted read access to, newest first. Metadata only (titles, ids, agent, repository, path, timestamps); never content or comments. The role-based access an admin has to every document is not applied here. `pagePath` is the page that opens one, relative to the server's origin.
+
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+      security:
+        - bearer: []
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          description: Only documents linked to this agent id.
+          schema:
+            type: string
+        - name: repository
+          in: query
+          required: false
+          description: Only documents linked to this repository (exact match).
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of documents, 1 to 500. Default 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        "200":
+          description: The documents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/document-list"
+        "400":
+          description: The limit parameter is invalid.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_limit
+          x-error-codes:
+            - invalid_limit
         "401":
           description: No valid bearer token.
           content:
@@ -532,6 +642,14 @@ components:
                       kind:
                         type: string
                         const: host_event
+                    required:
+                      - kind
+                    additionalProperties: false
+                  - type: object
+                    properties:
+                      kind:
+                        type: string
+                        const: comment
                     required:
                       - kind
                     additionalProperties: false
@@ -912,6 +1030,14 @@ components:
                 kind:
                   type: string
                   const: host_event
+              required:
+                - kind
+              additionalProperties: false
+            - type: object
+              properties:
+                kind:
+                  type: string
+                  const: comment
               required:
                 - kind
               additionalProperties: false
@@ -1519,6 +1645,79 @@ components:
         - launcher
         - kubernetes
         - native
+      additionalProperties: false
+    document-list:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              kind:
+                type: string
+                enum:
+                  - document
+                  - design
+              mine:
+                type: boolean
+              agent:
+                anyOf:
+                  - type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                      - id
+                      - name
+                    additionalProperties: false
+                  - type: "null"
+              repository:
+                type:
+                  - string
+                  - "null"
+              path:
+                type:
+                  - string
+                  - "null"
+              updatedAt:
+                type: string
+              latestVersion:
+                type: integer
+              reviewState:
+                type: string
+                enum:
+                  - draft
+                  - in_review
+                  - changes_requested
+                  - approved
+                  - archived
+              pagePath:
+                type: string
+            required:
+              - id
+              - title
+              - kind
+              - mine
+              - agent
+              - repository
+              - path
+              - updatedAt
+              - latestVersion
+              - reviewState
+              - pagePath
+            additionalProperties: false
+        truncated:
+          type: boolean
+      required:
+        - documents
+        - truncated
       additionalProperties: false
     ViewerError:
       type: object

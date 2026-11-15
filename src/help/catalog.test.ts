@@ -78,6 +78,35 @@ describe("buildHelpCatalog", () => {
     await expect(buildHelpCatalog(missingField)).rejects.toThrow('missing frontmatter field "appliesTo"');
   });
 
+  it("reads tags in the inline form and in the multi-line form Prettier wraps a long list into", async () => {
+    const wrapped = (tags: string) =>
+      `---\nid: getting-started\ntitle: Getting started\nsummary: Start Wardby safely.\naudience: operator\n${tags}\nappliesTo: ">=0.2.1"\n---\n# Heading\n`;
+    const root = await corpus({
+      "getting-started.md": wrapped("tags:\n  [\n    setup,\n    comment trigger,\n    merge,\n  ]"),
+    });
+    const [p] = (await buildHelpCatalog(root)).pages;
+    expect(p.tags).toEqual(["setup", "comment trigger", "merge"]);
+    expect(p.appliesTo).toBe(">=0.2.1");
+
+    // Still one list: an unclosed list, a list with nothing in it, or a stray indented line is refused.
+    for (const bad of ["tags:\n  [\n    setup,", "tags:\n  [\n  ]", "tags: [setup]\n  [\n    merge,\n  ]"]) {
+      const broken = await corpus({ "getting-started.md": wrapped(bad) });
+      await expect(buildHelpCatalog(broken)).rejects.toThrow(/frontmatter|tags/);
+    }
+  });
+
+  it.each(["pins", "comment trigger", "merge comment threads"])(
+    "finds the comment threads and agents article for %s",
+    async (query) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(
+        searchHelp(catalog, query)
+          .slice(0, 5)
+          .map((r) => r.page.id),
+      ).toContain("comment-threads-and-agents");
+    },
+  );
+
   it("includes only articles available in the target release and normalizes quoted versions", async () => {
     const root = await corpus({
       "current.md": versionedPage("current", ">=0.5.3"),
@@ -263,4 +292,28 @@ describe("buildHelpCatalog", () => {
         .map((r) => r.page.id),
     ).toContain("claude-code-run-pane");
   });
+
+  it.each([
+    "wait_for_review",
+    "submit_for_review",
+    "review_document",
+    "force approve",
+    "review states",
+    "approved document locked",
+  ])("finds the document review article for %s", async (query) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("document-review");
+  });
+
+  it.each(["document_locked", "document_review_forbidden", "document_review_state_invalid"])(
+    "ranks the error article for %s first",
+    async (code) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(searchHelp(catalog, code)[0]?.page.id).toBe(`errors/${code.replaceAll("_", "-")}`);
+    },
+  );
 });

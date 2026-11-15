@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hostile</title>
+<base href="https://evil.example/">
+<meta http-equiv="refresh" content="0;url=https://evil.example/">
+<style>body{background-color:#fff}</style>
+<script>alert(1)</script>
+</head>
+<body onload="alert(2)">
+<h1 onclick="alert(3)">Title</h1>
+<a href="javascript:alert(4)">bad link</a>
+<a href="#board:menu">menu</a>
+<a href="https://example.com/ok">ok external link</a>
+<svg><a href="javascript:alert(5)"><text>x</text></a><animate attributeName="href" to="javascript:alert(6)"/></svg>
+<iframe src="https://evil.example/"></iframe>
+<form action="https://evil.example/"><input name="q"></form>
+<noscript><p title="</noscript><img src=x onerror=alert(7)>"></p></noscript>
+<math><mi><style><img src=x onerror=alert(8)></style></mi></math>
+</body></html>

@@ -222,6 +222,22 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     await expect(provider.sessions.get(fresh)).rejects.toThrow();
     await expect(identities.createKey(f.subject)).rejects.toThrow();
   });
+  it("revoking a login key deletes that user's page sessions", async () => {
+    const f = await setup();
+    const user = await db.authUser.findUniqueOrThrow({ where: { id: f.user.userId }, select: { principalId: true } });
+    const stamp = randomUUID();
+    await db.webSession.create({
+      data: {
+        tokenHash: `t-${stamp}`,
+        csrfHash: `c-${stamp}`,
+        principalId: user.principalId,
+        expiresAt: new Date(Date.now() + DAY),
+      },
+    });
+    expect(await db.webSession.count({ where: { principalId: user.principalId } })).toBe(1);
+    await identities.revokeKey(provider.credentials.id(f.user.loginKey, "rvk")!);
+    expect(await db.webSession.count({ where: { principalId: user.principalId } })).toBe(0);
+  });
   it("rejects tampered, idle, and expired sessions; logout invalidates before reuse", async () => {
     const f = await setup();
     await expect(provider.sessions.get(f.session + "x")).rejects.toThrow();

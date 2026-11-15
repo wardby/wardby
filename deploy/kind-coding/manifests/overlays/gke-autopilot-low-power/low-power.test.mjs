@@ -31,19 +31,19 @@ describe("low-power manifest sources", () => {
   const power = role.find((o) => o.kind === "Role");
   const binding = role.find((o) => o.kind === "RoleBinding");
 
-  it("grants get and patch on exactly the proxy and gateway Deployments, and get on their Endpoints", () => {
+  it("grants get and patch on exactly the proxy, gateway and renderer Deployments, and get on their Endpoints", () => {
     expect(power.metadata.name).toBe("wardby-power");
     expect(power.rules).toEqual([
       {
         apiGroups: ["apps"],
         resources: ["deployments"],
-        resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"],
+        resourceNames: ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"],
         verbs: ["get", "patch"],
       },
       {
         apiGroups: [""],
         resources: ["endpoints"],
-        resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"],
+        resourceNames: ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"],
         verbs: ["get"],
       },
     ]);
@@ -57,7 +57,10 @@ describe("low-power manifest sources", () => {
   });
 
   it("names Deployments that exist in the base, and the proxy the control plane is pointed at", () => {
-    const base = ["proxy.yaml", "native-gateway.yaml"].flatMap((f) => loadAt(`base/${f}`));
+    const base = [
+      ...["proxy.yaml", "native-gateway.yaml"].flatMap((f) => loadAt(`base/${f}`)),
+      ...loadAt("renderer/base/renderer.yaml"),
+    ];
     const deployments = base.filter((o) => o.kind === "Deployment").map((o) => o.metadata.name);
     const services = base.filter((o) => o.kind === "Service").map((o) => o.metadata.name);
     expect(power.rules[1].resourceNames).toEqual(power.rules[0].resourceNames);
@@ -101,11 +104,11 @@ describe("low-power manifest sources", () => {
   it("raises CPU and memory by the net +0.5 CPU / +1Gi and keeps the pod limit", () => {
     const quota = load("quota.yaml")[0].spec.hard;
     expect(quota).toEqual({
-      pods: "26",
-      "requests.cpu": "12",
-      "limits.cpu": "12",
-      "requests.memory": "21Gi",
-      "limits.memory": "21Gi",
+      pods: "27",
+      "requests.cpu": "12.5",
+      "limits.cpu": "12.5",
+      "requests.memory": "23Gi",
+      "limits.memory": "23Gi",
     });
     const gke = loadAt("overlays/gke-autopilot/quota.yaml")[0].spec.hard;
     expect(quota.pods).toBe(gke.pods);
@@ -124,8 +127,8 @@ describe.skipIf(!hasKubectl)("low-power rendered overlays (kubectl)", () => {
     const docs = loadAllYaml(render("gke-autopilot-low-power"));
     const powerRole = find(docs, "Role", "wardby-power");
     expect(powerRole.rules.map((r) => [r.resources, r.resourceNames, r.verbs])).toEqual([
-      [["deployments"], ["wardby-coding-proxy", "wardby-native-gateway"], ["get", "patch"]],
-      [["endpoints"], ["wardby-coding-proxy", "wardby-native-gateway"], ["get"]],
+      [["deployments"], ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"], ["get", "patch"]],
+      [["endpoints"], ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"], ["get"]],
     ]);
     expect(find(docs, "RoleBinding", "wardby-power").subjects[0].name).toBe("wardby-control-plane");
     const hpa = find(docs, "HorizontalPodAutoscaler", "wardby-control-plane");
@@ -138,9 +141,9 @@ describe.skipIf(!hasKubectl)("low-power rendered overlays (kubectl)", () => {
     expect(env.LOW_POWER_IDLE_MINUTES).toBe("30");
     expect(env.EXECUTOR).toBe("dbos");
     const hard = find(docs, "ResourceQuota", "wardby-coding").spec.hard;
-    expect(hard["requests.cpu"]).toBe("12");
-    expect(hard["requests.memory"]).toBe("21Gi");
-    expect(hard.pods).toBe("26");
+    expect(hard["requests.cpu"]).toBe("12.5");
+    expect(hard["requests.memory"]).toBe("23Gi");
+    expect(hard.pods).toBe("27");
   });
 
   it("leaves the control-plane replica count to the HPA, so a re-apply never resets it", () => {
