@@ -1,8 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { spawnRunner } from "./tool.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { signalRunnerGroup, spawnRunner } from "./tool.js";
 
 describe("spawnRunner", () => {
   let dir: string;
@@ -101,5 +101,73 @@ setInterval(() => {}, 1000);
     const handle = spawnRunner("x", {}, entry);
     await expect(handle.ready).rejects.toMatchObject({ code: "substrate_bridge_runner_exited" });
     expect(await handle.exited).toBe(3);
+  });
+
+  describe("signalRunnerGroup", () => {
+    const errno = (code: string) => Object.assign(new Error(code), { code });
+    const target = (over: Partial<Parameters<typeof signalRunnerGroup>[0]> = {}) => ({
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => true),
+      ...over,
+    });
+
+    it("treats ESRCH as an empty group", () => {
+      const log = vi.fn();
+      const child = target();
+      signalRunnerGroup(
+        child,
+        "SIGTERM",
+        () => {
+          throw errno("ESRCH");
+        },
+        log,
+      );
+      expect(log).not.toHaveBeenCalled();
+      expect(child.kill).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the runner itself on EPERM", () => {
+      const child = target();
+      signalRunnerGroup(
+        child,
+        "SIGTERM",
+        () => {
+          throw errno("EPERM");
+        },
+        vi.fn(),
+      );
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    });
+
+    it("logs an unexpected error as a fixed-field event", () => {
+      const log = vi.fn();
+      signalRunnerGroup(
+        target(),
+        "SIGTERM",
+        () => {
+          throw errno("EINVAL");
+        },
+        log,
+      );
+      expect(log).toHaveBeenCalledWith("substrate_bridge_runner_signal_failed", { signal: "SIGTERM", errno: "EINVAL" });
+    });
+
+    it("skips the final SIGKILL when the runner exited and its group is gone", () => {
+      const killFn = vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
+        if (signal === 0) throw errno("ESRCH");
+        return true;
+      });
+      signalRunnerGroup(target({ exitCode: 0 }), "SIGKILL", killFn, vi.fn());
+      expect(killFn).toHaveBeenCalledTimes(1);
+      expect(killFn).toHaveBeenCalledWith(-4242, 0);
+    });
+
+    it("still kills the group when the runner exited but processes remain", () => {
+      const killFn = vi.fn(() => true);
+      signalRunnerGroup(target({ exitCode: 0 }), "SIGKILL", killFn, vi.fn());
+      expect(killFn).toHaveBeenCalledWith(-4242, "SIGKILL");
+    });
   });
 });

@@ -411,9 +411,10 @@ interface CodingBranch {
 }
 
 /**
- * Why a continuation is refused. Dispatch itself gives the first five; a caller that names the run
- * directly (trigger_agent's continuePriorRun, see checkContinuePriorRun in mcp/tools/trigger.ts)
- * also gives the last three, before any run exists. Every code has a help article under
+ * Why a continuation is refused. Dispatch itself gives all but other_agent_run and not_a_coding_run;
+ * a caller that names the run directly (trigger_agent's continuePriorRun, see checkContinuePriorRun
+ * in mcp/tools/trigger.ts) gives every code, before any run exists, and checks run_not_finished
+ * with the same isRunUnfinished rule. Every code has a help article under
  * help/errors/.
  */
 export type ContinuationRefusal =
@@ -494,6 +495,8 @@ export async function checkContinuation(
     repository,
     ...(pullRequest?.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
     ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
+    // A run that is still going has no final branch or pull request to continue, whoever asks.
+    requireFinished: true,
   });
   if (!resolved.ok) return resolved;
   const { root, repo } = resolved;

@@ -29,7 +29,7 @@
  * gets 404, not another principal's final text/cost.
  */
 import { ContinuationRefusedError, dispatchRun, type ContinuationRefusal } from "../../core/dispatch.js";
-import { sameRepository } from "../../core/run-pull-request.js";
+import { isRunUnfinished, sameRepository } from "../../core/run-pull-request.js";
 import { atLeast } from "../../core/grants.js";
 import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
@@ -233,7 +233,7 @@ async function checkContinuePriorRun(
     return refuse(readable ? "other_agent_run" : "unknown_run");
   }
   if (!prior.codingRun) return refuse("not_a_coding_run");
-  if (prior.status === "pending" || prior.status === "running") return refuse("run_not_finished");
+  if (isRunUnfinished(prior.status)) return refuse("run_not_finished");
   if (args.repository !== undefined) {
     const root = prior.codingRun.rootCodingRunId
       ? await ctx.db.codingRun.findUnique({

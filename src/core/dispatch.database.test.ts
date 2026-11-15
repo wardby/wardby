@@ -224,6 +224,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     const { agentId } = await codingAgent();
     const { executor } = fakeExecutor();
     const root = await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+    await db.run.update({ where: { id: root!.run.id }, data: { status: "succeeded" } });
     await db.codingRun.update({
       where: { runId: root!.run.id },
       data: {
@@ -272,6 +273,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
   async function rootWithTools(agentId: string, defaultResult: "opened" | "no_changes", toolsPr = 3) {
     const root = await dispatchRun({ db, executor: fakeExecutor().executor, agentId, codingTask: "sync" });
     const runId = root!.run.id;
+    await db.run.update({ where: { id: runId }, data: { status: "succeeded" } });
     const opened = (repository: string, number: number) => ({
       schemaVersion: 1,
       outcome: "pull_request_opened",
@@ -362,6 +364,33 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await checkContinuation(db, runId, "acme/elsewhere")).toEqual({ ok: false, reason: "other_repository" });
   });
 
+  it.each(["pending", "running"] as const)(
+    "refuses to continue a run that is still %s (run_not_finished)",
+    async (status) => {
+      const { agentId } = await codingAgent();
+      const { runId } = await rootWithTools(agentId, "opened");
+      await db.run.update({ where: { id: runId }, data: { status } });
+      expect(await checkContinuation(db, runId, "acme/fork", owner)).toEqual({ ok: false, reason: "run_not_finished" });
+      // Dispatch, which a delegation's continuePriorRun reaches, refuses the same way and starts nothing.
+      const before = await db.run.count({ where: { agentId } });
+      await expect(
+        dispatchRun({
+          db,
+          executor: fakeExecutor().executor,
+          agentId,
+          codingTask: "again",
+          continuesCodingRunId: runId,
+        }),
+      ).rejects.toEqual(new ContinuationRefusedError("run_not_finished"));
+      expect(await db.run.count({ where: { agentId } })).toBe(before);
+      // A different owner still learns nothing about its state.
+      expect(await checkContinuation(db, runId, "acme/fork", "someone-else")).toEqual({
+        ok: false,
+        reason: "other_owner",
+      });
+    },
+  );
+
   it("matches an extra's replacement pull request by its own number, not the oldest row of that repository", async () => {
     const { agentId } = await codingAgent();
     const { runId, tools } = await rootWithTools(agentId, "opened");
@@ -374,6 +403,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       continuesCodingRunId: runId,
     });
     const contId = continuation!.run.id;
+    await db.run.update({ where: { id: contId }, data: { status: "succeeded" } });
     await db.codingRunRepository.update({
       where: { runId_name: { runId: contId, name: "tools" } },
       data: { pullRequestNumber: 4 },

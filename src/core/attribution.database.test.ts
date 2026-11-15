@@ -188,6 +188,7 @@ describe.skipIf(!process.env.DATABASE_URL)("attribution (database)", () => {
     const root = await dispatch(agentId, { attribution: intent(key) });
     const rootCoding = await db.codingRun.findUniqueOrThrow({ where: { runId: root } });
     expect(rootCoding).toMatchObject({ issueProvider: "jira", issueKey: key });
+    await db.run.update({ where: { id: root }, data: { status: "succeeded" } });
     await db.codingRun.update({
       where: { runId: root },
       data: {
@@ -263,6 +264,7 @@ describe.skipIf(!process.env.DATABASE_URL)("attribution (database)", () => {
     });
     const legacy = await dispatch(agentId);
     const legacyCoding = await db.codingRun.findUniqueOrThrow({ where: { runId: legacy } });
+    await db.run.update({ where: { id: legacy }, data: { status: "succeeded" } });
     await db.codingRun.update({
       where: { runId: legacy },
       data: { issueProvider: "jira", issueKey: key, result: prOpened(legacyCoding) },

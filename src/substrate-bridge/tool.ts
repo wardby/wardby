@@ -113,6 +113,54 @@ export interface ToolHandle {
   close(): Promise<void>;
 }
 
+/** The part of a child process the group signalling needs (a seam for tests). */
+export interface GroupSignalTarget {
+  pid?: number | undefined;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+const errnoOf = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
+
+/**
+ * Signals a runner's process group. ESRCH means nothing is left in the group; EPERM falls back to
+ * the runner process alone; anything else is logged as a fixed-field event, never thrown. A SIGKILL
+ * after the runner already exited is skipped once the group is gone, so a recycled pid is never hit.
+ */
+export function signalRunnerGroup(
+  child: GroupSignalTarget,
+  signal: NodeJS.Signals,
+  killFn: (pid: number, signal: NodeJS.Signals | 0) => unknown = (pid, sig) => process.kill(pid, sig),
+  log: Logger = stderrLogger,
+): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  const runnerExited = child.exitCode !== null || child.signalCode !== null;
+  if (signal === "SIGKILL" && runnerExited) {
+    try {
+      killFn(-pid, 0);
+    } catch (err) {
+      if (errnoOf(err) === "ESRCH") return;
+    }
+  }
+  try {
+    killFn(-pid, signal);
+  } catch (err) {
+    const code = errnoOf(err);
+    if (code === "ESRCH") return;
+    if (code === "EPERM") {
+      try {
+        child.kill(signal);
+      } catch {
+        // The runner itself is gone or not ours; nothing more to signal.
+      }
+      return;
+    }
+    log("substrate_bridge_runner_signal_failed", { signal, errno: code ?? "unknown" });
+  }
+}
+
 export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: string = RUNNER_ENTRY): RunnerHandle => {
   const child = spawn(process.execPath, [entry], {
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
@@ -120,14 +168,8 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     // Its own process group, so stop and kill reach every process the runner's tools started.
     detached: true,
   });
-  /** Signals the runner's process group; a group whose processes are all gone is not an error. */
   const signalGroup = (signal: NodeJS.Signals): void => {
-    if (child.pid === undefined) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch {
-      // ESRCH: nothing left in the group.
-    }
+    signalRunnerGroup(child, signal);
   };
   // Passed on unchanged to the actor's log.
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
