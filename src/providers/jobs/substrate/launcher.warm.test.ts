@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
+import { warmFingerprint } from "../warm-fingerprint.js";
 import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } from "../types.js";
 import {
   CONFIG,
@@ -561,6 +562,40 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       });
     });
   }
+
+  it("launches cold, recording fingerprint_changed, when only the MCP tool pins differ (fingerprints built by warmFingerprint)", async () => {
+    // The launcher compares the two fingerprints it is given; the executor builds them with warmFingerprint.
+    const base = {
+      agentId: "agent-1",
+      provider: "claude-code",
+      model: MODEL,
+      workerImage: "worker:1",
+      toolImage: TOOL_IMAGE,
+      cpu: 1,
+      memoryMb: 1024,
+      diskMb: 1024,
+      systemPromptSha256: "c".repeat(64),
+      repository: "your-org/your-repo",
+      secrets: [],
+    };
+    const parkedWith = warmFingerprint({ ...base, mcpTools: [{ serverId: "s1", exposedName: "search" }] });
+    const nextWith = warmFingerprint({
+      ...base,
+      mcpTools: [
+        { serverId: "s1", exposedName: "search" },
+        { serverId: "s1", exposedName: "fetch" },
+      ],
+    });
+    expect(nextWith).not.toBe(parkedWith);
+    const h = await warmHarness({ warmRounds: { ...WARM, parkTtlMs: 10_000 } });
+    await parkedRoundOne(h, { headSha: SHA_1, fingerprint: parkedWith });
+    const spec2 = await followUp(h, "run-2", { fingerprint: nextWith });
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    expect(await h.runs.get("run-2")).toMatchObject({ round: 1, phase: "running", coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
+  });
 
   it("cleans up and requeues when a resume finds no room; the relaunch is cold, for capacity", async () => {
     const h = await warmHarness();

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { logger, setLogLineFilter } from "../../../core/logger.js";
 import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
 import { createSubstrateRoutes } from "../../coding-proxy/substrate/routes.js";
@@ -1440,11 +1441,9 @@ describe("MCP tools", () => {
   });
 
   it("keeps the MCP token out of templates, policies, blobs, failure reports, events and logs", async () => {
+    // Every server log line, as written (the logger writes to fd 2 directly, so process.stderr is not seen).
     const logs: string[] = [];
-    const write = process.stderr.write.bind(process.stderr);
-    const writeOut = process.stdout.write.bind(process.stdout);
-    process.stderr.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
-    process.stdout.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    setLogLineFilter((line) => (logs.push(line), line));
     const outputs: string[] = [];
     try {
       for (const provider of ["claude-code", "codex"] as const) {
@@ -1461,6 +1460,14 @@ describe("MCP tools", () => {
         };
         await expect(failing.launcher.launch({ ...failing.spec, mcpTools: true })).rejects.toThrow();
         expect(failing.callFailures.length).toBeGreaterThan(0);
+        // The same failure on a launcher without a sink goes to the server log: captured too.
+        const logged = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+        (logged.launcher as unknown as { options: { onSubstrateCallFailed?: unknown } }).options.onSubstrateCallFailed =
+          undefined;
+        logged.api.resumeActor = async () => {
+          throw new SubstrateUnavailableError("substrate_unavailable");
+        };
+        await expect(logged.launcher.launch({ ...logged.spec, mcpTools: true })).rejects.toThrow();
         outputs.push(
           JSON.stringify(calls),
           JSON.stringify(failingCalls),
@@ -1476,11 +1483,15 @@ describe("MCP tools", () => {
         expect(JSON.stringify(secretOf(h))).toContain(FAKE_MCP);
       }
     } finally {
-      process.stderr.write = write;
-      process.stdout.write = writeOut;
+      setLogLineFilter((line) => line);
     }
     outputs.push(logs.join(""));
-    for (const output of outputs) expect(output).not.toContain(FAKE_MCP);
+    for (const output of outputs) {
+      expect(output).not.toContain(FAKE_MCP);
+      expect(output).not.toContain(FAKE_CAP);
+    }
+    // The log capture is live: the failure was logged (when warn is enabled).
+    if (logger.isLevelEnabled("warn")) expect(logs.join("")).toContain("substrate_call_failed");
   });
 
   it("remove() deletes the Secret, MCP token included", async () => {
