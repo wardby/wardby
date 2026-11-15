@@ -198,6 +198,22 @@ const ACTIVE_PHASES: readonly SubstratePhase[] = ["provisioning", "running", "re
 const LIVE_PHASES: SubstratePhase[] = ["provisioning", "running"];
 
 /** The round a row's actors are on (the row records it; round.json is the bridges' and the proxy's copy). */
+/**
+ * Whether the worker input asks for git history (CodingTaskInput.gitHistory, written only on such a
+ * run). An input that does not parse counts as none: the bridge then uploads the whole workspace, as
+ * before, and the worker refuses the input itself.
+ */
+export function inputHasGitHistory(input: Buffer): boolean {
+  try {
+    const parsed: unknown = JSON.parse(input.toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null) return false;
+    const history = (parsed as { gitHistory?: unknown }).gitHistory;
+    return typeof history === "object" && history !== null;
+  } catch {
+    return false;
+  }
+}
+
 function roundOf(record: SubstrateRunRecord): number {
   return record.round ?? 1;
 }
@@ -601,8 +617,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
       await this.ensureTemplate(templates.agent, call);
       await this.ensureTemplate(templates.tool, call);
-      await this.stageInput(spec.inputArtifact, token);
-      await this.stageToolSetup(spec, capability, token);
+      const input = await this.stageInput(spec.inputArtifact, token);
+      await this.stageToolSetup(spec, capability, token, inputHasGitHistory(input));
       await this.stageSeed(spec, token);
       try {
         await this.options.secrets.createSecret(
@@ -673,14 +689,25 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
   }
 
-  /** The tool setup blob: the run's registry-only token lives here (and in the tool runner) only. */
-  private async stageToolSetup(spec: JobSpec, capability: string, token: string): Promise<void> {
+  /**
+   * The tool setup blob: the run's registry-only token lives here (and in the tool runner) only.
+   * `collectResultBundle` (a run with git history, #536): the tool bridge's workspace upload then
+   * carries, from the root `.git`, only the result bundle (materializeWorkspace takes it); set only
+   * then, so a bridge without history uploads as before.
+   */
+  private async stageToolSetup(
+    spec: JobSpec,
+    capability: string,
+    token: string,
+    collectResultBundle: boolean,
+  ): Promise<void> {
     const setup = {
       toolSetup: claudeToolSetup(spec, capability, {
         proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
       }),
       // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
       collectExclude: spec.collectExclude ?? collectExclusions([]),
+      ...(collectResultBundle ? { collectResultBundle: true } : {}),
     };
     await this.blobs.put(BLOB.toolSetup(token), Buffer.from(JSON.stringify(setup)), {
       contentType: "application/json",
@@ -696,7 +723,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async stageInput(inputArtifact: string, token: string, round = 1): Promise<void> {
+  /** Stages the worker input and returns what was staged (stageToolSetup reads its git history). */
+  private async stageInput(inputArtifact: string, token: string, round = 1): Promise<Buffer> {
     let body: Buffer;
     // One descriptor for the check and the read (never a symlink), so the file checked is the file read.
     const source = await open(inputArtifact, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch((error: unknown) => {
@@ -715,6 +743,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // Re-check what was read: the file could have grown after the stat.
     if (body.length > MAX_CODING_INPUT_BYTES) throw new Error("substrate_input_artifact_invalid");
     await this.blobs.put(BLOB.input(token, round), body, { contentType: "application/json" });
+    return body;
   }
 
   /** Streams the run's prepared workspace, as a tar, into the seed blob, bounded by limits.diskMb. */
@@ -1304,8 +1333,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
       await timed("stage", async () => {
-        await this.stageInput(spec.inputArtifact, token, round);
-        await this.stageToolSetup(spec, capability, token);
+        const input = await this.stageInput(spec.inputArtifact, token, round);
+        await this.stageToolSetup(spec, capability, token, inputHasGitHistory(input));
         await this.blobs.put(roundBlob(token), Buffer.from(JSON.stringify({ round })), {
           contentType: "application/json",
         });

@@ -64,11 +64,37 @@ Docker and Kubernetes ones.
   (and the per-toolchain tool-runner images), each as a registry digest
   (`repo@sha256:<64 hex>`), as for the Kubernetes launcher. For Substrate these
   must be the worker and tool-runner images with the bridge added as the
-  entrypoint: build `src/substrate-bridge/Dockerfile.agent` on the Claude Code
-  worker image and `src/substrate-bridge/Dockerfile.tool` on the tool-runner
-  image (`--build-arg BASE=<image>`, build context the repository root, after
-  `npm run build`), push both, and pin the resulting digests. `CODING_WORKER_IMAGE`
-  (Codex) is not used by this backend.
+  entrypoint. `CODING_WORKER_IMAGE` (Codex) is not used by this backend. See
+  [Images](#images).
+
+### Images
+
+Releases publish the bridge images to the GitHub Container Registry, each built
+on that release's Claude Code worker or tool-runner image. The digest-pinned
+reference for the installed version is listed in `dist/quickstart-images.json`
+inside the npm package; use each one as-is:
+
+| Variable                                           | Key in `dist/quickstart-images.json` | Image                               |
+| -------------------------------------------------- | ------------------------------------ | ----------------------------------- |
+| `CODING_CLAUDE_WORKER_IMAGE`                       | `substrateAgent`                     | `wardby-substrate-agent`            |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE`                  | `substrateTool`                      | `wardby-substrate-tool`             |
+| `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` | `substrateToolNodePython`            | `wardby-substrate-tool-node-python` |
+
+```dotenv
+CODING_CLAUDE_WORKER_IMAGE=ghcr.io/your-org/wardby-substrate-agent@sha256:replace-with-digest
+CODING_CLAUDE_TOOL_RUNNER_IMAGE=ghcr.io/your-org/wardby-substrate-tool@sha256:replace-with-digest
+```
+
+Use the bridge images from the same release as the control plane and coding
+proxy, so the bridge and the proxy's Substrate routes match. A release before
+these images existed has none of the keys; build your own as below.
+
+To use your own worker or tool-runner image, or a build from a checkout, add
+the bridge yourself: build `src/substrate-bridge/Dockerfile.agent` on the
+Claude Code worker image and `src/substrate-bridge/Dockerfile.tool` on each
+tool-runner image (`--build-arg BASE=<repo>@sha256:<digest>`, build context the
+repository root, after `npm run build`), push them to a registry the cluster
+can pull from, and pin the resulting digests.
 
 ## Configure
 
@@ -111,7 +137,7 @@ The digest requirement for the worker and tool-runner images is the same as for
 | `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                                                                                                                   |
 | `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
 | `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
-| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload. See [Git history](#git-history).                                                                                                                              |
+| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload.                                                                                                                                                               |
 | `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
 The proxy refuses to start when `SUBSTRATE_ATESPACE` is set and a required
@@ -129,13 +155,18 @@ must arrive within ten minutes of being authenticated.
 
 ### Git history
 
-A `gitHistory` run is supported. The run's whole `.git` is uploaded with the
-workspace when the run ends, so `SUBSTRATE_WORKSPACE_MAX_MB` on the proxy must be
-large enough for the repository's history as well as its files. The proxy
-refuses a workspace upload over the limit, and the run fails with
-[`substrate_collect_failed`](../help/errors/substrate-collect-failed.md). The
-collected archive's entries count toward the extraction limit of 100,000
-entries, the `.git` ones included. See
+A `gitHistory` run is supported. When the run ends the tool side uploads the
+workspace and, from `.git`, only the run's result bundle
+(`.git/wardby-result.bundle`), never the rest of the repository's history, so
+the history's size does not count toward `SUBSTRATE_WORKSPACE_MAX_MB` or the
+extraction limit of 100,000 entries. Before that upload the tool side ends
+every process the run's tools started. A bundle that is not a regular file, or
+that comes from a `.git` that was swapped while it was read, fails the run
+(`substrate_collect_failed`). A bundle over the run's limit
+(`CODING_MAX_RESULT_BUNDLE_MB`) fails it with `vcs_result_bundle_too_large`,
+and the whole workspace upload, bundle included, must fit
+`SUBSTRATE_WORKSPACE_MAX_MB`. A run with no `.git` or no bundle behaves as on
+Docker and Kubernetes. See
 [Git history in coding runs](../help/git-history.md).
 
 ## Warm rounds

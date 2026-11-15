@@ -51,3 +51,8 @@ export const WORKER_CONTEXT_ROOT = "/tmp/wardby-context";
 export const MAX_ROUND = 1000;
 /** How long a bridge waits between asks for the next round's file. */
 export const NEXT_ROUND_POLL_MS = 1_000;
+/**
+ * The result bundle a git-history run's worker leaves in the workspace's root `.git`
+ * (providers/jobs/workspace-swap.ts RESULT_BUNDLE_FILE): the only `.git` file the tool bridge uploads.
+ */
+export const RESULT_BUNDLE_FILE = "wardby-result.bundle";

@@ -17,13 +17,18 @@ worker's, when the worker reported one.
 The tool actor reports this when:
 
 - **the workspace is over the proxy's limit.** The proxy refuses a workspace
-  upload larger than `SUBSTRATE_WORKSPACE_MAX_MB` (1024 by default). A
-  `gitHistory` run uploads the repository's whole `.git` with its files, so a
-  long history can exceed the limit. Raise it on the coding proxy, or keep large
-  build output out of the workspace with the agent's collect exclusions;
+  upload larger than `SUBSTRATE_WORKSPACE_MAX_MB` (1024 by default). Raise it
+  on the coding proxy, or keep large build output out of the workspace with the
+  agent's collect exclusions. A `gitHistory` run uploads only its result bundle
+  from `.git`, never the repository's history, so history size is not the
+  cause;
 - **the upload failed** after its retries, or the proxy refused it for another
   reason (check the proxy is healthy and the blob store is writable);
 - **archiving the workspace failed** (`tar` exited with an error);
+- **a `gitHistory` run's result bundle could not be trusted:** it is not a
+  regular file (a symlink, a FIFO), or the root `.git` was swapped while the
+  bundle was read. The agent's commits are not collected. A bundle over the
+  run's limit fails with `vcs_result_bundle_too_large` instead;
 - **the tool side never started:** it could not fetch its setup or the workspace
   seed, the seed was refused as unsafe, or the tool runner did not start. The
   run then fails at once instead of waiting for
