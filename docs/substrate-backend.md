@@ -160,10 +160,13 @@ workspace and, from `.git`, only the run's result bundle
 (`.git/wardby-result.bundle`), never the rest of the repository's history, so
 the history's size does not count toward `SUBSTRATE_WORKSPACE_MAX_MB` or the
 extraction limit of 100,000 entries. Before that upload the tool side ends
-every process the run's tools started. A bundle that is not a regular file
-inside a real `.git` folder (a symlink, a FIFO, a swapped `.git`), or that is
-larger than 1 GiB, is left out, and the run then fails with
-`vcs_result_bundle_invalid`. See
+every process the run's tools started. A bundle that is not a regular file, or
+that comes from a `.git` that was swapped while it was read, fails the run
+(`substrate_collect_failed`). A bundle over the run's limit
+(`CODING_MAX_RESULT_BUNDLE_MB`) fails it with `vcs_result_bundle_too_large`,
+and the whole workspace upload, bundle included, must fit
+`SUBSTRATE_WORKSPACE_MAX_MB`. A run with no `.git` or no bundle behaves as on
+Docker and Kubernetes. See
 [Git history in coding runs](../help/git-history.md).
 
 ## Warm rounds

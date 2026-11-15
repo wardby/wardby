@@ -37,7 +37,6 @@ import {
   DEFAULT_TOOL_SOCKET,
   ACTOR_JWT_HEADER,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
-  MAX_RESULT_BUNDLE_BYTES,
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
   RESULT_BUNDLE_FILE,
@@ -102,8 +101,6 @@ export interface ToolOptions {
   onRoundCollected?: (round: number, outcome: "ok" | "rejected" | "failed") => void;
   /** Warm rounds: called once a later round's tool runner is ready. */
   onRoundStarted?: (round: number) => void;
-  /** The largest result bundle a git-history run's upload carries (default MAX_RESULT_BUNDLE_BYTES). */
-  maxResultBundleBytes?: number;
   /** Tests only: runs after the result bundle is opened and checked, before `.git` is checked again. */
   beforeResultBundleRecheck?: () => Promise<void> | void;
 }
@@ -214,13 +211,17 @@ interface SetupFile {
 
 /** Why a git-history run's upload carries no result bundle (a fixed value, logged as is). */
 type BundleSkip =
-  | "git_not_directory"
-  | "absent_or_symlink"
-  | "not_regular_file"
-  | "too_large"
-  | "git_changed"
-  | "short_read"
-  | "copy_failed";
+  "git_not_directory" | "absent_or_symlink" | "not_regular_file" | "git_changed" | "short_read" | "copy_failed";
+
+/**
+ * The skips that mean something changed the workspace's `.git` or the bundle under the bridge: the run
+ * fails (workspace-failed) instead of carrying on without the agent's commits. A missing `.git` or
+ * bundle is not one of them: it is the same outcome as on Docker and Kubernetes.
+ */
+const TAMPERING_SKIPS: ReadonlySet<BundleSkip> = new Set(["git_not_directory", "not_regular_file", "git_changed"]);
+
+/** The collect code for a tampering skip (no real exit status of tar or the shell). */
+const TAMPERED_CODE = -1;
 
 const BUNDLE_COPY_CHUNK = 1024 * 1024;
 
@@ -228,26 +229,25 @@ const BUNDLE_COPY_CHUNK = 1024 * 1024;
  * Copies the workspace's result bundle into `staging/.git/` through one file descriptor, so what is
  * uploaded is a file the bridge read itself, never a path a tool process could still swap: `.git`
  * must be a real directory (lstat), the bundle is opened without following a symlink and without
- * blocking (a FIFO), must be a regular file within `maxBytes`, and `.git` must still be the same
+ * blocking (a FIFO), must be a regular file, and `.git` must still be the same
  * directory (dev/ino) afterwards. Only the size fstat reported is copied. Returns the reason when
  * there is no bundle; nothing it reads is logged.
  */
 async function stageResultBundle(
   workspace: string,
   staging: string,
-  maxBytes: number,
   beforeRecheck?: () => Promise<void> | void,
 ): Promise<BundleSkip | undefined> {
   const gitPath = join(workspace, ".git");
   const git = await lstat(gitPath).catch(() => undefined);
-  if (!git?.isDirectory()) return "git_not_directory";
+  if (!git) return "absent_or_symlink";
+  if (!git.isDirectory()) return "git_not_directory";
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
   const source = await open(join(gitPath, RESULT_BUNDLE_FILE), flags).catch(() => undefined);
   if (!source) return "absent_or_symlink";
   try {
     const metadata = await source.stat();
     if (!metadata.isFile()) return "not_regular_file";
-    if (metadata.size > maxBytes) return "too_large";
     await beforeRecheck?.();
     const again = await lstat(gitPath).catch(() => undefined);
     if (!again?.isDirectory() || again.dev !== git.dev || again.ino !== git.ino) return "git_changed";
@@ -528,14 +528,11 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     if ((code === 0 || code === 1) && collectResultBundle) {
       const bundleStage = await mkdtemp(join(stage, "bundle-"));
       try {
-        const skipped = await stageResultBundle(
-          workspace,
-          bundleStage,
-          options.maxResultBundleBytes ?? MAX_RESULT_BUNDLE_BYTES,
-          options.beforeResultBundleRecheck,
-        );
-        if (skipped) log("substrate_bridge_result_bundle_skipped", { runToken: token, round, reason: skipped });
-        else {
+        const skipped = await stageResultBundle(workspace, bundleStage, options.beforeResultBundleRecheck);
+        if (skipped) {
+          log("substrate_bridge_result_bundle_skipped", { runToken: token, round, reason: skipped });
+          if (TAMPERING_SKIPS.has(skipped)) code = TAMPERED_CODE;
+        } else {
           const appended = await exec(tar, [
             "-r",
             "-f",
@@ -553,7 +550,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     }
     // 1: some files changed while being read; the tar is still usable.
     if (code !== 0 && code !== 1) {
-      log("substrate_bridge_collect_failed", { code });
+      log("substrate_bridge_collect_failed", { code: code === TAMPERED_CODE ? "result_bundle_tampered" : code });
       await rm(tarPath, { force: true }).catch(() => undefined);
       await postCapped(
         withRound(`${base}/workspace-failed`, round),

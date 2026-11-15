@@ -25,6 +25,10 @@ The tool actor reports this when:
 - **the upload failed** after its retries, or the proxy refused it for another
   reason (check the proxy is healthy and the blob store is writable);
 - **archiving the workspace failed** (`tar` exited with an error);
+- **a `gitHistory` run's result bundle could not be trusted:** it is not a
+  regular file (a symlink, a FIFO), or the root `.git` was swapped while the
+  bundle was read. The agent's commits are not collected. A bundle over the
+  run's limit fails with `vcs_result_bundle_too_large` instead;
 - **the tool side never started:** it could not fetch its setup or the workspace
   seed, the seed was refused as unsafe, or the tool runner did not start. The
   run then fails at once instead of waiting for
