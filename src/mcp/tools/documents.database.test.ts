@@ -105,7 +105,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     ).id;
   });
   const linkRepo = (agentId: string, repository: string, provider = "github", authorizedVia: string | null = "admin") =>
-    db.agentRepository.create({ data: { agentId, provider, repository, access: "write", authorizedVia } });
+    db.agentRepository.create({
+      data: { agentId, provider, repository, name: `${provider}:${repository}`, access: "write", authorizedVia },
+    });
   afterAll(async () => {
     await db.document.deleteMany({ where: { ownerId: owner.id } });
     const agents = [codingAgentId, nativeAgentId, profiledAgentId];
