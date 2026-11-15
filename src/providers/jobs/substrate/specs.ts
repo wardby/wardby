@@ -8,7 +8,7 @@ import type { V1Secret } from "@kubernetes/client-node";
 import { claudeToolLimits } from "../docker-isolation.js";
 import type { JobSpec } from "../types.js";
 import type { ActorTemplateSpec, EgressRule } from "./api.js";
-import { TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
+import { MCP_TOKEN_EGRESS_HEADER, TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
 
 export interface SubstrateLaunchConfig {
   atespace: string;
@@ -158,18 +158,26 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
   };
 }
 
-/** The agent's one rule: the proxy, its X-Api-Key filled from the per-run Secret (named after the token). */
-export function agentEgress(token: string, config: SubstrateLaunchConfig): EgressRule[] {
+/** The per-run Secret's key for the run's MCP token (runSecret; agentEgress with `mcp`). */
+export const RUN_SECRET_MCP_TOKEN_KEY = "mcpToken";
+
+/**
+ * The agent's one rule: the proxy, its X-Api-Key filled from the per-run Secret (named after the
+ * token). With `mcp`, the same rule also fills X-Wardby-Mcp-Token from the Secret's mcpToken key;
+ * the gateway replaces a header only when the request carries it, so non-MCP requests are unchanged.
+ */
+export function agentEgress(token: string, config: SubstrateLaunchConfig, options?: { mcp?: boolean }): EgressRule[] {
+  const secretUri = (key: string) => `ate-secret://k8s.io/default/${config.credentialsNamespace}/${token}/${key}`;
   return [
     {
       kind: "http",
       hostnames: [config.proxyHost],
       ports: [config.proxyPort],
       replaceHeaders: [
-        {
-          header: "X-Api-Key",
-          credentialUri: `ate-secret://k8s.io/default/${config.credentialsNamespace}/${token}/capability`,
-        },
+        { header: "X-Api-Key", credentialUri: secretUri("capability") },
+        ...(options?.mcp
+          ? [{ header: MCP_TOKEN_EGRESS_HEADER, credentialUri: secretUri(RUN_SECRET_MCP_TOKEN_KEY) }]
+          : []),
       ],
     },
   ];
@@ -192,8 +200,13 @@ export function toolEgress(config: SubstrateLaunchConfig): EgressRule[] {
   ];
 }
 
-/** The only place the capability appears. Never log or serialize this object. */
-export function runSecret(token: string, capability: string, config: SubstrateLaunchConfig): V1Secret {
+/** The only place the capability and the MCP token appear. Never log or serialize this object. */
+export function runSecret(
+  token: string,
+  capability: string,
+  config: SubstrateLaunchConfig,
+  mcpToken?: string,
+): V1Secret {
   return {
     apiVersion: "v1",
     kind: "Secret",
@@ -202,6 +215,6 @@ export function runSecret(token: string, capability: string, config: SubstrateLa
       namespace: config.credentialsNamespace,
       labels: { "wardby.dev/substrate-run": token },
     },
-    stringData: { capability },
+    stringData: mcpToken === undefined ? { capability } : { capability, [RUN_SECRET_MCP_TOKEN_KEY]: mcpToken },
   };
 }

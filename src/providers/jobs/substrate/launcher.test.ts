@@ -14,11 +14,12 @@ import type { CodexWorkerSetup } from "../codex-worker-setup.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
 import { inputHasGitHistory } from "./launcher.js";
-import { agentEgress, agentTemplate, codexTemplate, toolTemplate } from "./specs.js";
+import { agentEgress, agentTemplate, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   CODEX_IMAGE,
   CONFIG,
   FAKE_CAP,
+  FAKE_MCP,
   makeHarness,
   PYTHON_TOOL_IMAGE,
   SMALL_WORKER,
@@ -153,6 +154,38 @@ jobLauncherContract(
       destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
       finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       // The tool actor's posted workspace: what the bridge tars from /workspace (a root .git included).
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+jobLauncherContract(
+  "substrate with MCP tools",
+  async () => {
+    const h = await makeHarness({ mcpTokenFor: () => FAKE_MCP });
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, mcpTools: true },
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness({ mcpTokenFor: () => FAKE_MCP });
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, mcpTools: true },
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
     };
   },
@@ -663,7 +696,6 @@ describe("SubstrateJobLauncher", () => {
       [{ image: "registry.example/agent:latest" }, "substrate_image_not_digest"],
       [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
-      [{ mcpTools: true }, "substrate_feature_unsupported:mcpTools"],
       [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
       [
         { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
@@ -1228,7 +1260,6 @@ describe("Codex (single actor)", () => {
       // An agent's custom Codex image (workerImageRef) is a digest but carries no bridge.
       [{ image: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
-      [{ mcpTools: true }, "substrate_feature_unsupported:mcpTools"],
       [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
       [
         { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
@@ -1328,6 +1359,124 @@ describe("Codex (single actor)", () => {
       expect(h.warmEvents).toEqual([]);
       expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
       expect([...h.api.actors.keys()]).toEqual([`wardby-runs/${agentActorName(h.token)}`]);
+    }
+  });
+});
+
+/** Every file the blob store holds, with its contents. */
+async function allBlobs(h: Harness): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path, `${prefix}${entry.name}/`);
+      else out.set(`${prefix}${entry.name}`, await readFile(path, "utf8"));
+    }
+  };
+  await walk(join(h.root, "blobs"), "");
+  return out;
+}
+
+describe("MCP tools", () => {
+  const agentPolicy = (h: Harness) => h.api.egressPolicies.get(`${CONFIG.atespace}/${agentActorName(h.token)}`);
+  const secretOf = (h: Harness) => h.secrets.secrets.get(`${CONFIG.credentialsNamespace}/${h.token}`);
+
+  it("Claude Code: the agent's rule injects the MCP token, the tool's does not, and the Secret holds it", async () => {
+    const h = await makeHarness({ mcpTokenFor: () => FAKE_MCP });
+    await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(agentPolicy(h)).toEqual(agentEgress(h.token, CONFIG, { mcp: true }));
+    expect(h.api.egressPolicies.get(`${CONFIG.atespace}/${toolActorName(h.token)}`)).toEqual(toolEgress(CONFIG));
+    expect(secretOf(h)!.stringData).toEqual({ capability: FAKE_CAP, mcpToken: FAKE_MCP });
+    // The templates are the same as without MCP tools: nothing per run, nothing MCP.
+    const plain = await makeHarness();
+    await plain.launcher.launch(plain.spec);
+    expect([...h.api.templates.keys()].sort()).toEqual([...plain.api.templates.keys()].sort());
+    expect(h.api.templates.size).toBe(2);
+  });
+
+  it("Codex (single): the one actor's rule injects it", async () => {
+    const h = await makeHarness({ provider: "codex", mcpTokenFor: () => FAKE_MCP });
+    await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(h.api.egressPolicies.size).toBe(1);
+    expect(agentPolicy(h)).toEqual(agentEgress(h.token, CONFIG, { mcp: true }));
+    expect(secretOf(h)!.stringData).toEqual({ capability: FAKE_CAP, mcpToken: FAKE_MCP });
+    const plain = await makeHarness({ provider: "codex" });
+    await plain.launcher.launch(plain.spec);
+    expect([...h.api.templates.keys()]).toEqual([...plain.api.templates.keys()]);
+  });
+
+  it("without mcpTools the token is never asked for and nothing changes", async () => {
+    for (const provider of ["claude-code", "codex"] as const) {
+      const asked: string[] = [];
+      const h = await makeHarness({ provider, mcpTokenFor: (id) => (asked.push(id), FAKE_MCP) });
+      await h.launcher.launch(h.spec);
+      expect(asked).toEqual([]);
+      expect(secretOf(h)!.stringData).toEqual({ capability: FAKE_CAP });
+      expect(secretOf(h)!.stringData).not.toHaveProperty("mcpToken");
+      expect(agentPolicy(h)).toEqual(agentEgress(h.token, CONFIG));
+    }
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["not an MCP token", "rmt_short"],
+    ["a capability", FAKE_CAP],
+  ])("refuses an MCP token that is %s before any actor exists", async (_label, value) => {
+    for (const provider of ["claude-code", "codex"] as const) {
+      const h = await makeHarness({ provider, mcpTokenFor: () => value });
+      const error = await h.launcher.launch({ ...h.spec, mcpTools: true }).then(
+        () => undefined,
+        (e: unknown) => e as Error,
+      );
+      expect(error?.message).toBe("substrate_mcp_token_invalid");
+      if (value !== undefined) expect(error!.message).not.toContain(value);
+      expect(h.api.actors.size).toBe(0);
+      expect(h.api.templates.size).toBe(0);
+      expect(h.api.egressPolicies.size).toBe(0);
+      expect(h.secrets.secrets.size).toBe(0);
+      expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
+      expect(h.callFailures).toEqual([]);
+    }
+  });
+
+  it("keeps the MCP token out of templates, policies, blobs, failure reports and events", async () => {
+    for (const provider of ["claude-code", "codex"] as const) {
+      const h = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+      const calls = recordCalls(h);
+      const spec = { ...h.spec, mcpTools: true as const };
+      const handle = await h.launcher.launch(spec);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      // A failing Substrate call is reported too: its record carries no token.
+      const failing = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+      const failingCalls = recordCalls(failing);
+      failing.api.resumeActor = async () => {
+        throw new SubstrateUnavailableError("substrate_unavailable");
+      };
+      await expect(failing.launcher.launch({ ...failing.spec, mcpTools: true })).rejects.toThrow();
+      expect(failing.callFailures.length).toBeGreaterThan(0);
+      const outputs = [
+        JSON.stringify(calls),
+        JSON.stringify(failingCalls),
+        JSON.stringify(h.callFailures),
+        JSON.stringify(failing.callFailures),
+        JSON.stringify([...h.api.templates.values(), ...h.api.egressPolicies.values()]),
+        JSON.stringify(await h.runs.get(h.spec.runId)),
+      ];
+      for (const harness of [h, failing]) for (const body of (await allBlobs(harness)).values()) outputs.push(body);
+      for (const output of outputs) expect(output).not.toContain(FAKE_MCP);
+      // It is in the Secret (the only place).
+      expect(JSON.stringify(secretOf(h))).toContain(FAKE_MCP);
+    }
+  });
+
+  it("remove() deletes the Secret, MCP token included", async () => {
+    for (const provider of ["claude-code", "codex"] as const) {
+      const h = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+      const handle = await h.launcher.launch({ ...h.spec, mcpTools: true });
+      expect(h.secrets.secrets.size).toBe(1);
+      await finish(h);
+      await h.launcher.remove(handle);
+      expect(h.secrets.secrets.size).toBe(0);
     }
   });
 });

@@ -150,6 +150,26 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
   });
 
+  it("passes the MCP token resolver to the launcher, and nothing without one", () => {
+    const build = (resolveMcpToken?: (runId: string) => Promise<string | undefined>) =>
+      (
+        buildSubstrateJobLauncher({
+          env,
+          db,
+          workspaceRoot: join(dir, "ws"),
+          resolveCapability: async () => "cap",
+          ...(resolveMcpToken ? { resolveMcpToken } : {}),
+          substrateApi: new FakeSubstrateApi({ workers: 1 }),
+          kubernetesApi: new FakeKubernetesApi(),
+          bridgeToolImages: [],
+          bridgeCodexImages: [],
+        }) as unknown as { options: { resolveMcpToken?: unknown } }
+      ).options.resolveMcpToken;
+    const resolveMcpToken = async () => undefined;
+    expect(build(resolveMcpToken)).toBe(resolveMcpToken);
+    expect(build()).toBeUndefined();
+  });
+
   it("passes the collect grace and startup timeout to the launcher, in milliseconds", () => {
     const launcher = buildSubstrateJobLauncher({
       env: { ...env, SUBSTRATE_COLLECT_GRACE_SEC: "45", SUBSTRATE_STARTUP_TIMEOUT_SEC: "900" },

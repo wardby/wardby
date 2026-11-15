@@ -15,6 +15,9 @@ import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js"
 import type { SubstrateLaunchConfig } from "./specs.js";
 
 export const FAKE_CAP = "rrp_fake_capability_value_000001";
+/** Fake MCP tokens, isMcpToken-shaped (`rmt_` + 43 characters). */
+export const FAKE_MCP = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "1".repeat(19);
+export const FAKE_MCP_2 = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "2".repeat(19);
 /** The configured bridge tool images (the default toolchain's and a per-toolchain one). */
 export const TOOL_IMAGE = `registry.example/tool@sha256:${"b".repeat(64)}`;
 export const PYTHON_TOOL_IMAGE = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
@@ -120,6 +123,8 @@ export async function makeHarness(
     warmRounds?: WarmRoundsOptions;
     /** The capability per run (default FAKE_CAP for every run). */
     capabilityFor?: (runId: string) => string;
+    /** The MCP token per run (the launcher's resolveMcpToken); default none. */
+    mcpTokenFor?: (runId: string) => string | undefined;
     /** "codex": the spec is a Codex run (one actor) on CODEX_IMAGE, with no tool image. */
     provider?: "claude-code" | "codex";
   } = {},
@@ -156,6 +161,7 @@ export async function makeHarness(
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async (id) => options.capabilityFor?.(id) ?? FAKE_CAP,
+    resolveMcpToken: async (id) => options.mcpTokenFor?.(id),
     now: () => now,
     onSubstrateCallFailed: (failure) => callFailures.push(failure),
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
