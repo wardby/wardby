@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   endGroup,
+  hardenRepositoriesRoot,
   makeReadOnly,
   parseProcStat,
   parseSetupRepositories,
@@ -250,5 +251,30 @@ describe.skipIf(process.getuid?.() === 0)("makeReadOnly", () => {
     const root = await tree();
     await expect(makeReadOnly(root, 2)).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
     expect((await stat(root)).mode & 0o777).not.toBe(0o555);
+  });
+});
+
+describe("hardenRepositoriesRoot", () => {
+  it("makes an owned world-writable root 0755", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-repos-root-"));
+    try {
+      await chmod(root, 0o777);
+      const events: string[] = [];
+      await hardenRepositoriesRoot(root, (event) => events.push(event));
+      expect((await stat(root)).mode & 0o7777).toBe(0o755);
+      expect(events).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a fixed event, and does not throw, when the root cannot be changed", async () => {
+    const events: [string, unknown][] = [];
+    await expect(
+      hardenRepositoriesRoot(join(tmpdir(), "wardby-no-such-repos-root"), (event, fields) =>
+        events.push([event, fields]),
+      ),
+    ).resolves.toBeUndefined();
+    expect(events).toEqual([["substrate_bridge_repos_root_not_hardened", {}]]);
   });
 });

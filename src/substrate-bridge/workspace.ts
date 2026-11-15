@@ -442,7 +442,26 @@ export async function extractRepositorySeeds(o: {
     folders.set(name, { dev: metadata.dev, ino: metadata.ino });
     o.log("substrate_bridge_repository_seed_extracted", { runToken: token, repository: name, entries });
   }
+  await hardenRepositoriesRoot(o.reposRoot, o.log);
   return folders;
+}
+
+/**
+ * After every extra is seeded, closes the repositories root to other users: 0755 (owner-only writes),
+ * else the sticky bit (01777: entries removable or renamable only by their owner). chmod needs the
+ * directory's owner (or root), so on a root-owned mount the bridge (uid 10001) gets EPERM on both and
+ * the root stays as it was; that is logged as a fixed event and never fails the run.
+ */
+export async function hardenRepositoriesRoot(root: string, log: Logger): Promise<void> {
+  for (const mode of [0o755, 0o1777]) {
+    try {
+      await chmod(root, mode);
+      return;
+    } catch {
+      // Try the next mode.
+    }
+  }
+  log("substrate_bridge_repos_root_not_hardened", {});
 }
 
 /**
