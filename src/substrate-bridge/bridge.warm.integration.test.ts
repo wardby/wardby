@@ -111,6 +111,8 @@ describe("substrate bridges, warm rounds", () => {
   let requests: string[];
   /** The run the gateway's capability belongs to: the launcher's Secret update moves it to run-2. */
   let currentRun: string;
+  /** The current run's session's MCP tools (harness parameter): pinned tools turn that round's input flag on. */
+  let currentPins: ProxySession["mcpTools"] | undefined;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-warm-"));
@@ -121,6 +123,7 @@ describe("substrate bridges, warm rounds", () => {
     routeLogs = [];
     requests = [];
     currentRun = "run-1";
+    currentPins = undefined;
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -128,7 +131,12 @@ describe("substrate bridges, warm rounds", () => {
       ledger: {
         findSessionByCapabilityHash: async (hash) =>
           hash === capabilityHash(PLACEHOLDER_CAPABILITY)
-            ? ({ runId: currentRun, deadlineAt: new Date(Date.now() + 60_000), status: "active" } as ProxySession)
+            ? ({
+                runId: currentRun,
+                deadlineAt: new Date(Date.now() + 60_000),
+                status: "active",
+                ...(currentPins !== undefined ? { mcpTools: currentPins } : {}),
+              } as ProxySession)
             : null,
       },
       verifyActor: async (actorJwt, subject) =>
@@ -209,6 +217,8 @@ describe("substrate bridges, warm rounds", () => {
     kills: number[];
     /** Ends the n-th runner with a code, as if it exited on its own. */
     exits: Array<(code: number) => void>;
+    /** Each round's worker environment, in order. */
+    envs: NodeJS.ProcessEnv[];
   }> {
     options.beforeStage?.();
     const workspace = await stageRoundOne();
@@ -261,6 +271,7 @@ describe("substrate bridges, warm rounds", () => {
     const transcriptPath = join(dir, "out", "session.jsonl");
     const inputs: unknown[] = [];
     const toolLists: string[][] = [];
+    const envs: NodeJS.ProcessEnv[] = [];
     agent = await runAgent({
       proxyUrl,
       env,
@@ -274,7 +285,8 @@ describe("substrate bridges, warm rounds", () => {
       log,
       contextRoot: join(dir, "context"),
       nextRoundPollMs: 20,
-      launchWorker: () => {
+      launchWorker: (workerEnv) => {
+        envs.push(workerEnv);
         const stderr = new PassThrough();
         return {
           stderr,
@@ -331,7 +343,7 @@ describe("substrate bridges, warm rounds", () => {
         };
       },
     });
-    return { workspace, inputs, setups, toolLists, stops, kills, exits };
+    return { workspace, inputs, setups, toolLists, stops, kills, exits, envs };
   }
 
   it("runs round 2 on the same bridges: next input, resumed session, fresh tool runner, same workspace", async () => {
@@ -373,6 +385,48 @@ describe("substrate bridges, warm rounds", () => {
     // No secret value in any bridge log or route log line.
     const logged = JSON.stringify([logs, routeLogs]);
     for (const secret of [CAPABILITY, REGISTRY_TOKEN_1, REGISTRY_TOKEN_2]) expect(logged).not.toContain(secret);
+  });
+
+  it("each round's worker env follows that round's input answer", async () => {
+    const PIN = {
+      exposedName: "docs__search",
+      toolName: "search",
+      serverId: "server-1",
+      serverName: "docs",
+      definition: { description: "d", inputSchema: { type: "object" } },
+    };
+    const mcp = (env: NodeJS.ProcessEnv | undefined) => ({
+      token: env?.WARDBY_MCP_TOKEN,
+      header: env?.WARDBY_MCP_TOKEN_HEADER,
+    });
+    const on = { token: "rmt_placeholder_injected_by_gateway", header: "x-wardby-mcp-token" };
+    const off = { token: undefined, header: undefined };
+    currentPins = [PIN];
+    const { envs } = await startBridges(true);
+    await agent!.uploaded;
+    expect(await tool!.collected).toBe("ok");
+    expect(mcp(envs[0])).toEqual(on);
+    // Round 2's run has no MCP tools.
+    await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
+    currentPins = null;
+    await stageRoundTwo();
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));
+    expect(envs).toHaveLength(2);
+    expect(envs[1]).not.toHaveProperty("WARDBY_MCP_TOKEN");
+    expect(envs[1]).not.toHaveProperty("WARDBY_MCP_TOKEN_HEADER");
+    expect(mcp(envs[1])).toEqual(off);
+    // Round 3's run has them again.
+    await waitFor(() => (requests.some((r) => r.includes("/input?round=3")) ? true : undefined));
+    currentPins = [PIN];
+    currentRun = "run-3";
+    await blobs.put(BLOB.input(TOKEN, 3), Buffer.from(JSON.stringify({ runId: "run-3", task: "round three" })));
+    await blobs.put(BLOB.toolSetup(TOKEN), toolSetupBlob(REGISTRY_TOKEN_2));
+    await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":3}'));
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 3))) ? true : undefined));
+    expect(envs).toHaveLength(3);
+    expect(mcp(envs[2])).toEqual(on);
+    // No MCP field in any bridge or route log line.
+    expect(JSON.stringify([logs, routeLogs])).not.toContain("rmt_placeholder_injected_by_gateway");
   });
 
   it("without the warm-rounds env, both bridges idle after round 1 exactly as before", async () => {

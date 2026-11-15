@@ -17,8 +17,8 @@ import { MemoryRelayStore } from "../providers/coding-proxy/substrate/memory-rel
 import { createSubstrateRoutes } from "../providers/coding-proxy/substrate/routes.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
 import type { ProxySession } from "../providers/coding-proxy/types.js";
-import { run as runAgent, type AgentHandle } from "./agent.js";
-import { PLACEHOLDER_CAPABILITY } from "./constants.js";
+import { run as runAgent, spawnWorker, type AgentHandle } from "./agent.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
 import { run as runTool, type ToolHandle } from "./tool.js";
 
@@ -88,6 +88,8 @@ describe("substrate bridges, end to end without Substrate", () => {
   let routeWarns: unknown[][];
   let proxyOverride: ((url: string) => number | undefined) | undefined;
   let proxyDelay: ((url: string) => number) | undefined;
+  /** The session's MCP tools (harness parameter): pinned tools turn the input's MCP flag on. */
+  let mcpTools: ProxySession["mcpTools"] | undefined;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-it-"));
@@ -100,6 +102,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     routeWarns = [];
     proxyOverride = undefined;
     proxyDelay = undefined;
+    mcpTools = undefined;
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -107,7 +110,12 @@ describe("substrate bridges, end to end without Substrate", () => {
       ledger: {
         findSessionByCapabilityHash: async (hash) =>
           hash === capabilityHash(PLACEHOLDER_CAPABILITY)
-            ? ({ runId: "run-1", deadlineAt: new Date(Date.now() + 60_000), status: "active" } as ProxySession)
+            ? ({
+                runId: "run-1",
+                deadlineAt: new Date(Date.now() + 60_000),
+                status: "active",
+                ...(mcpTools !== undefined ? { mcpTools } : {}),
+              } as ProxySession)
             : null,
       },
       verifyActor: async (actorJwt, subject) =>
@@ -749,6 +757,84 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(JSON.stringify(routeLogs)).not.toContain("worker says boom");
     expect(diagnosticsTail("tool")).toBeUndefined();
     expect(await tool.collected).toBe("ok");
+  });
+
+  describe("MCP tools", () => {
+    const PIN = {
+      exposedName: "docs__search",
+      toolName: "search",
+      serverId: "server-1",
+      serverName: "docs",
+      definition: { description: "d", inputSchema: { type: "object" } },
+    };
+    /** Starts the agent with a worker that records its env and exits without a result. */
+    async function capturedEnv(env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+      const { workspace, toolSetup } = await stage();
+      tool = await startTool(workspace, toolSetup);
+      let workerEnv: NodeJS.ProcessEnv | undefined;
+      agent = await runAgent(
+        await workerOptions({
+          env,
+          launchWorker: (launched) => {
+            workerEnv = launched;
+            return { exited: Promise.resolve(2) };
+          },
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      return workerEnv!;
+    }
+
+    it("starts the Claude worker in MCP header mode when the run has MCP tools", async () => {
+      mcpTools = [PIN];
+      const env = await capturedEnv({ PATH: "/usr/bin" });
+      expect(env.WARDBY_MCP_TOKEN).toBe("rmt_placeholder_injected_by_gateway");
+      expect(env.WARDBY_MCP_TOKEN_HEADER).toBe("x-wardby-mcp-token");
+      expect(env.WARDBY_RUN_CAPABILITY).toBe(PLACEHOLDER_CAPABILITY);
+    });
+
+    it("without MCP tools the worker gets neither variable, even one inherited", async () => {
+      mcpTools = [];
+      const env = await capturedEnv({
+        ...process.env,
+        WARDBY_MCP_TOKEN: "rmt_STALE_FAKE_NOT_REAL",
+        WARDBY_MCP_TOKEN_HEADER: "x-wardby-mcp-token",
+      });
+      expect(env).not.toHaveProperty("WARDBY_MCP_TOKEN");
+      expect(env).not.toHaveProperty("WARDBY_MCP_TOKEN_HEADER");
+      expect(JSON.stringify(env)).not.toContain("rmt_STALE_FAKE_NOT_REAL");
+    });
+
+    it("redacts the MCP placeholder from the tail and the passed-on output", async () => {
+      mcpTools = [PIN];
+      const { workspace, toolSetup } = await stage();
+      tool = await startTool(workspace, toolSetup);
+      const entry = join(dir, "mcp-worker.mjs");
+      await writeFile(
+        entry,
+        `process.stderr.write("mcp header " + process.env.WARDBY_MCP_TOKEN + "\\n");\nsetTimeout(() => process.exit(1), 20);\n`,
+      );
+      let passedOn = "";
+      const sink = { write: (text: string) => void (passedOn += text) };
+      agent = await runAgent(
+        await workerOptions({
+          env: { PATH: process.env.PATH },
+          // The default secrets: the bridge's own placeholders.
+          launchWorker: (env) => spawnWorker(env, undefined, entry, { stdout: sink, stderr: sink }),
+        }),
+      );
+      expect(await agent.workerExited).toBe(1);
+      await agent.uploaded;
+      const tail = await waitFor(() => diagnosticsTail("agent"));
+      expect(tail).toContain("mcp header [redacted]");
+      expect(tail).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      await waitFor(() => (passedOn.includes("mcp header") ? true : undefined));
+      expect(passedOn).toContain("mcp header [redacted]");
+      expect(passedOn).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      expect(JSON.stringify([routeLogs, routeWarns])).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      expect(await tool.collected).toBe("ok");
+    });
   });
 
   it("sends no diagnostics when the worker succeeded", async () => {

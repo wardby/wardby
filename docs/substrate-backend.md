@@ -152,6 +152,7 @@ The digest requirement for the worker and tool-runner images is the same as for
 | `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
 | `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
 | `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload.                                                                                                                                                               |
+| `WARDBY_MCP_GATEWAY_URL`      |                | unset                     | For MCP tools: see [Remote MCP servers](security-deployment.md#remote-mcp-servers).                                                                                                                         |
 | `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
 The proxy refuses to start when `SUBSTRATE_ATESPACE` is set and a required
@@ -167,6 +168,8 @@ must arrive within ten minutes of being authenticated.
   stop, run deadlines, the budget stop, `codingProfile.gitHistory` runs and
   capacity requeue. See [Codex runs](#codex-runs).
 - `codingProfile.gitHistory` runs (see [Git history](#git-history)).
+- Coding runs with remote MCP tools, for Claude Code and Codex (see
+  [MCP tools](#mcp-tools)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -180,6 +183,29 @@ adds the real one to its requests to the coding proxy (see the
 Its commands run inside the same actor, under the same proxy allowlist and
 budget as on the other launchers. When the run ends, the bridge ends any
 process the run's commands left behind.
+
+### MCP tools
+
+A coding agent's attached [remote MCP server](mcp-servers.md#coding-agents)
+tools work on this launcher, for Claude Code and Codex.
+
+- The coding proxy needs `WARDBY_MCP_GATEWAY_URL` and a network path to the
+  native gateway, as for the other launchers (see
+  [Remote MCP servers](security-deployment.md#remote-mcp-servers)).
+- The actor holds only a placeholder for the run's MCP token. The real token is
+  kept in the run's Kubernetes Secret under the `mcpToken` key, and Substrate's
+  egress gateway puts it in the `X-Wardby-Mcp-Token` header of the agent
+  actor's requests to the proxy's `/mcp` route. The token never enters an
+  actor, and a Claude Code tool actor never receives it.
+- Codex runs still get only read-only tools. Their commands can use the injected
+  token through the proxy's `/mcp` route, but cannot read it.
+- MCP runs need this release's coding proxy, Claude worker image, Codex driver
+  image and Substrate bridge images. With an older proxy a run's MCP calls are
+  refused (401) and the agent has no MCP tools. Upgrade the proxy before you
+  send MCP runs to Substrate.
+- If the run's MCP token is missing or malformed, the run fails at launch with
+  the reason `substrate_mcp_token_invalid` in the control plane log, under the
+  run's diagnostic id (see [Troubleshooting](#troubleshooting)).
 
 ### Git history
 
@@ -295,10 +321,15 @@ workspace lacks that merge; it writes no step line.
   launches with matches the kept round: the agent, provider, model, system
   prompt, repository, worker and tool images, CPU, memory and disk limits, and
   the secrets delivered to the run (which secrets, and the version of each, so
-  a rotated or refreshed value counts as a change). Otherwise it starts fresh
+  a rotated or refreshed value counts as a change), and the agent's MCP tools
+  (which tools of which servers). Otherwise it starts fresh
   with "the agent's settings changed". Wardby compares secrets by identity and
   last change time only, never by value. A kept round's session holds the
   values it saw, so a round after a secret change always starts fresh.
+- The MCP changes that remove kept rounds are listed above. Any other change
+  to an agent's MCP tools (`attach_mcp_server` with another `allowedTools` or
+  for a server without secrets, or `refresh_mcp_server` dropping a tool) is
+  caught by the check above, and the next round starts fresh.
 - A kept round is removed when `SUBSTRATE_PARK_TTL_SEC` passes.
 - When more than `SUBSTRATE_PARK_MAX` rounds are kept, the oldest is removed.
 - When the WorkerPool is short of room, kept rounds are removed oldest first,
@@ -321,6 +352,7 @@ after the first, so a tail can be matched to its round. The Codex actor sends a
 tail of its worker's output the same way. The bridge redacts the worker's
 output by exact value (the capability and its placeholder) before it reaches
 the actor's own log, and the proxy redacts the tail again before logging it.
+The bridges also redact the placeholder for the run's MCP token.
 
 ## What is not supported
 
@@ -329,7 +361,6 @@ A run that needs one of these fails at launch with
 Use the Docker or Kubernetes launcher for them.
 
 - Coding services (`.wardby/services.yaml`).
-- MCP tools attached to the coding agent.
 - The run dependency cache.
 - Extra repositories (multi-repository runs).
 - A custom worker image (`codingProfile.workerImageRef`), for Claude Code and

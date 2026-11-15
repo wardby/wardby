@@ -370,6 +370,23 @@ describe("Substrate Codex help", () => {
   });
 });
 
+describe("Substrate MCP help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const query of ["substrate mcp", "mcp tools substrate"]) {
+      expect(top3(query), query).toContain("job-launcher-substrate");
+    }
+    expect(top3("X-Wardby-Mcp-Token")).toContain("mcp-servers");
+    expect(top3("mcp server")).toContain("mcp-servers");
+  });
+});
+
 describe("pnpm and yarn help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

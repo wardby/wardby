@@ -1,7 +1,17 @@
 /** Pieces both bridges share: identity, logging, the readiness server, uploads. */
 import { access, readFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
-import { AGENT_SUFFIX, DIAGNOSTICS_TAIL, RUN_TOKEN_PATTERN, TOOL_SUFFIX } from "./constants.js";
+import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import {
+  AGENT_SUFFIX,
+  DIAGNOSTICS_TAIL,
+  INJECTED_MCP_TOKEN_PLACEHOLDER,
+  MCP_TOKEN_ENV,
+  MCP_TOKEN_HEADER,
+  MCP_TOKEN_HEADER_ENV,
+  MCP_TOOLS_INPUT_HEADER,
+  RUN_TOKEN_PATTERN,
+  TOOL_SUFFIX,
+} from "./constants.js";
 import { LineTail, redactExact, type LineFeed } from "./diagnostics.js";
 import { abortableSleep, BridgeError, send, withRetry, type HttpResult, type RetryPolicy } from "./http.js";
 
@@ -238,6 +248,24 @@ export class DiagnosticsTail {
       log("substrate_bridge_post_failed", { what: "diagnostics" });
     }
   }
+}
+
+/**
+ * The worker's MCP env for one round, from that round's input answer: header mode iff
+ * x-wardby-mcp-tools is exactly "1". The worker then holds only the MCP placeholder, which the egress
+ * gateway replaces with the run's MCP token on the wire.
+ */
+export function mcpWorkerEnv(headers: IncomingHttpHeaders): Record<string, string> {
+  if (headers[MCP_TOOLS_INPUT_HEADER] !== "1") return {};
+  return { [MCP_TOKEN_ENV]: INJECTED_MCP_TOKEN_PLACEHOLDER, [MCP_TOKEN_HEADER_ENV]: MCP_TOKEN_HEADER };
+}
+
+/** `env` without WARDBY_MCP_TOKEN and WARDBY_MCP_TOKEN_HEADER: only mcpWorkerEnv may set them. */
+export function withoutMcpEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const rest = { ...env };
+  delete rest[MCP_TOKEN_ENV];
+  delete rest[MCP_TOKEN_HEADER_ENV];
+  return rest;
 }
 
 /** Appends a round to a URL that may already carry a query. */

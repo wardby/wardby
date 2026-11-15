@@ -34,6 +34,7 @@ import { lstat, open, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
+import { isMcpToken } from "../../../coding/mcp-token.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -119,6 +120,8 @@ export interface SubstrateJobLauncherOptions {
   /** Same root the VCS provider prepares workspaces under (as the Kubernetes launcher's). */
   workspaceRoot: string;
   resolveCapability: (runId: string) => Promise<string>;
+  /** The run's MCP token from the capability vault (composition: capabilities.mcpToken), asked only for a spec with mcpTools. */
+  resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   now?: () => number;
   /** Where a failed Substrate call during a launch is reported (default: the server log, as a warning). */
   onSubstrateCallFailed?: (failure: SubstrateCallFailure) => void;
@@ -308,7 +311,7 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-const UNSUPPORTED_FEATURES = ["services", "mcpTools", "dependencyCache", "repositories"] as const;
+const UNSUPPORTED_FEATURES = ["services", "dependencyCache", "repositories"] as const;
 
 function refuseUnsupportedFeatures(spec: JobSpec): void {
   for (const feature of UNSUPPORTED_FEATURES) {
@@ -319,7 +322,9 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
 /**
  * Substrate runs Claude Code (two actors) and Codex (one), without the features that need more
  * actors or extra secrets, and only on the configured bridge images (a custom image has no bridge):
- * Claude Code's tool image among the tool images, Codex's image among the Codex images.
+ * Claude Code's tool image among the tool images, Codex's image among the Codex images. MCP tools
+ * are supported: the run's MCP token is a key of the per-run Secret, injected by the agent's egress
+ * rule (never in a template, an env or a blob).
  */
 function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: readonly string[] }): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
@@ -648,6 +653,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     };
   }
 
+  /** The run's MCP token for a spec with mcpTools (refused unless well formed); undefined otherwise, unasked. */
+  private async mcpTokenFor(spec: JobSpec): Promise<string | undefined> {
+    if (!spec.mcpTools) return undefined;
+    const token = await this.options.resolveMcpToken?.(spec.runId);
+    if (!isMcpToken(token)) throw new Error("substrate_mcp_token_invalid");
+    return token;
+  }
+
   private async provision(spec: JobSpec, token: string, templates: RunTemplates): Promise<void> {
     const { atespace } = this.config;
     const { shape } = templates;
@@ -665,6 +678,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
+      const mcpToken = await this.mcpTokenFor(spec);
       for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
       const input = await this.stageInput(spec.inputArtifact, token);
       await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
@@ -672,7 +686,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       try {
         await this.options.secrets.createSecret(
           this.config.credentialsNamespace,
-          runSecret(token, capability, this.config),
+          runSecret(token, capability, this.config, mcpToken),
         );
       } catch (error) {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
@@ -692,8 +706,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       }
       // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Every
       // policy is in place before any actor resumes, so none ever runs without one. A single-shape
-      // run's one actor gets the agent's rule only (no tool rule, no actor JWT).
-      await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, agent, agentEgress(token, this.config)));
+      // run's one actor gets the agent's rule only (no tool rule, no actor JWT). With MCP tools the
+      // agent's rule also fills the MCP token header; the tool's never does.
+      await call("putEgressPolicy", () =>
+        this.api.putEgressPolicy(atespace, agent, agentEgress(token, this.config, { mcp: mcpToken !== undefined })),
+      );
       if (shape === "pair") {
         await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
         // The tool first: the agent's first tool call needs it.
@@ -1393,6 +1410,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
+      const mcpToken = await this.mcpTokenFor(spec);
       await timed("stage", async () => {
         const input = await this.stageInput(spec.inputArtifact, token, round);
         await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
@@ -1400,13 +1418,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
           contentType: "application/json",
         });
       });
-      // Fresh, with the new run's capability: the park deleted the last round's (any left from before
-      // that rule is deleted first).
+      // Fresh, with the new run's capability (and MCP token): the park deleted the last round's (any
+      // left from before that rule is deleted first). The parked agent's egress policy is not re-put:
+      // the warm fingerprint guarantees the parked round and the adopter agree on whether MCP tools
+      // exist, and the park already deleted the Secret, so no live MCP token is at rest while parked.
       await timed("secret", async () => {
         await this.deleteSecret(token);
         await this.options.secrets.createSecret(
           this.config.credentialsNamespace,
-          runSecret(token, capability, this.config),
+          runSecret(token, capability, this.config, mcpToken),
         );
       });
       await timed("resumeTool", () => call("resumeActor", () => this.api.resumeActor(atespace, tool)));

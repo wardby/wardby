@@ -409,6 +409,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     // repository's code.
     ...(options.mcpToken ? { mcpToken: options.mcpToken } : {}),
     ...(options.capabilityHeader ? { capabilityHeader: options.capabilityHeader } : {}),
+    ...(options.mcpTokenHeader ? { mcpTokenHeader: options.mcpTokenHeader } : {}),
   });
   const thread = client.startThread({
     model: options.input.model,

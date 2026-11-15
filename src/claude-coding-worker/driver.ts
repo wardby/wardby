@@ -15,7 +15,12 @@ import {
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { workerTaskNote } from "../coding-worker/task-note.js";
-import { WARDBY_MCP_INSTRUCTIONS, wardbyMcpUrl } from "../coding-worker/mcp-config.js";
+import {
+  assertMcpHeaderPlaceholder,
+  type MCP_TOKEN_HEADER,
+  WARDBY_MCP_INSTRUCTIONS,
+  wardbyMcpUrl,
+} from "../coding-worker/mcp-config.js";
 import { safeWorkerErrorCode, streamFailureCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 
@@ -165,8 +170,11 @@ export interface ClaudeQueryOptions {
   resumeSessionId?: string;
   /** Set only on a traced run: receives Claude Code's own stderr output. */
   stderr?: (data: string) => void;
-  /** Set only on a run with MCP tools: the proxy's /mcp route and the run's MCP token (sdk.ts adds wardby_mcp). */
-  mcp?: { url: string; token: string };
+  /**
+   * Set only on a run with MCP tools: the proxy's /mcp route and the run's MCP token (sdk.ts adds
+   * wardby_mcp). With `header` (Substrate), the token is the gateway's placeholder, sent in that header.
+   */
+  mcp?: { url: string; token: string; header?: typeof MCP_TOKEN_HEADER };
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -192,6 +200,8 @@ export interface ClaudeWorkerRunOptions {
   prepareDependencies?: () => Promise<unknown>;
   /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
   mcpToken?: string;
+  /** Substrate: send the (placeholder) MCP token in this header (WARDBY_MCP_TOKEN_HEADER), never Authorization. */
+  mcpTokenHeader?: typeof MCP_TOKEN_HEADER;
   /**
    * On a run with git history (CodingTaskInput.gitHistory, #536): asks the tool runner whether it has
    * git (callGitCheck, tool-socket.ts) before anything else, and resolves with its unchecked JSON.
@@ -413,6 +423,9 @@ function resultRefusedForBudget(message: { result?: unknown; errors?: unknown })
 }
 
 export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingWorkerOutput> {
+  // Header mode with no token (or not the gateway's placeholder) is a launcher fault: fail with a
+  // fixed code before anything runs, rather than quietly starting without MCP tools.
+  assertMcpHeaderPlaceholder(options.mcpToken, options.mcpTokenHeader);
   // A run with git history (#536) needs git in the tool runner: fail before anything else without it.
   const gitHistory = options.input.gitHistory !== undefined;
   if (gitHistory) await checkGit(options);
@@ -446,7 +459,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   const injected = bareMode ? bareModeContextPrompt(files) : "";
   // Only on a run with MCP tools; the token goes into the wardby_mcp server's header (sdk.ts), never
   // into an environment.
-  const mcp = options.mcpToken ? { url: wardbyMcpUrl(options.proxyBaseUrl), token: options.mcpToken } : undefined;
+  const mcp = options.mcpToken
+    ? {
+        url: wardbyMcpUrl(options.proxyBaseUrl),
+        token: options.mcpToken,
+        ...(options.mcpTokenHeader ? { header: options.mcpTokenHeader } : {}),
+      }
+    : undefined;
   const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
   const stream = options.createQuery({

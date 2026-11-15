@@ -3,12 +3,21 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
+import { warmFingerprint } from "../warm-fingerprint.js";
 import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } from "../types.js";
-import { CONFIG, FAKE_CAP, makeHarness, TOOL_IMAGE, type Harness } from "./launcher.test-support.js";
+import {
+  CONFIG,
+  FAKE_CAP,
+  FAKE_MCP,
+  FAKE_MCP_2,
+  makeHarness,
+  TOOL_IMAGE,
+  type Harness,
+} from "./launcher.test-support.js";
 import type { Room } from "./placement.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
 import { BLOB, agentActorName, retiredRunToken, roundBlob, substrateRunToken, toolActorName } from "./names.js";
-import { agentTemplate, toolTemplate, WARM_ROUNDS_ENV } from "./specs.js";
+import { agentEgress, agentTemplate, toolTemplate, WARM_ROUNDS_ENV } from "./specs.js";
 
 const WARM: WarmRoundsOptions = { parkTtlMs: 3_600_000, parkMax: 10 };
 const SHA_1 = "1".repeat(40);
@@ -19,10 +28,19 @@ const RETAIN: JobRetention = { headSha: SHA_1, fingerprint: FP };
 const CAP_2 = "rrp_fake_capability_value_000002";
 const CAP_3 = "rrp_fake_capability_value_000003";
 const CAPS: Record<string, string> = { "run-1": FAKE_CAP, "run-2": CAP_2, "run-3": CAP_3 };
+const FAKE_MCP_3 = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "3".repeat(19);
+/** Each run's MCP token (asked only for a spec with mcpTools). */
+const MCPS: Record<string, string | undefined> = { "run-1": FAKE_MCP, "run-2": FAKE_MCP_2, "run-3": FAKE_MCP_3 };
 const MODEL = "claude-sonnet-5";
 
 async function warmHarness(
-  options: { warmRounds?: WarmRoundsOptions; workers?: number; workerSize?: Room; suspendedHoldRoom?: boolean } = {},
+  options: {
+    warmRounds?: WarmRoundsOptions;
+    workers?: number;
+    workerSize?: Room;
+    suspendedHoldRoom?: boolean;
+    mcpTokenFor?: (runId: string) => string | undefined;
+  } = {},
 ): Promise<Harness> {
   const h = await makeHarness({
     warmRounds: options.warmRounds ?? WARM,
@@ -30,6 +48,7 @@ async function warmHarness(
     ...(options.workerSize ? { workerSize: options.workerSize } : {}),
     ...(options.suspendedHoldRoom ? { suspendedHoldRoom: true } : {}),
     capabilityFor: (runId) => CAPS[runId] ?? FAKE_CAP,
+    mcpTokenFor: options.mcpTokenFor ?? ((runId) => MCPS[runId]),
   });
   await writeFile(h.spec.inputArtifact, JSON.stringify({ schemaVersion: 1, runId: "run-1", model: MODEL, task: "1" }));
   return h;
@@ -116,6 +135,7 @@ function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null = WA
     config: CONFIG,
     workspaceRoot: h.workspaceRoot,
     resolveCapability: async (runId) => CAPS[runId] ?? FAKE_CAP,
+    resolveMcpToken: async (runId) => MCPS[runId],
     now: () => 1_000_000,
     ...(warmRounds ? { warmRounds, onWarmEvent: (event) => h.warmEvents.push(event) } : {}),
   });
@@ -364,6 +384,53 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: true });
   });
 
+  it("adopts with MCP tools: the fresh Secret holds the new run's MCP token; no policy is re-put", async () => {
+    const h = await warmHarness();
+    const puts: string[] = [];
+    const put = h.api.putEgressPolicy.bind(h.api);
+    h.api.putEgressPolicy = async (atespace, actor, rules) => {
+      puts.push(actor);
+      return put(atespace, actor, rules);
+    };
+    const handle = await h.launcher.launch({ ...h.spec, mcpTools: true });
+    expect(h.secrets.secrets.get(secretKey(h))!.stringData).toEqual({ capability: FAKE_CAP, mcpToken: FAKE_MCP });
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    // Parked: the Secret, MCP token included, is gone.
+    expect(h.secrets.secrets.get(secretKey(h))).toBeUndefined();
+    const putsBefore = puts.length;
+    const spec2 = await followUp(h, "run-2");
+    const before = h.secrets.calls.length;
+    const second = await h.launcher.launch({ ...spec2, mcpTools: true });
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(h.secrets.secrets.get(secretKey(h))!.stringData).toEqual({ capability: CAP_2, mcpToken: FAKE_MCP_2 });
+    expect(h.secrets.calls.slice(before)).toEqual([`delete ${secretKey(h)}`, `create ${secretKey(h)}`]);
+    expect(puts.length).toBe(putsBefore);
+    // The parked agent's rule, from round 1, still injects the MCP token (from the fresh Secret).
+    expect(h.api.egressPolicies.get(`${CONFIG.atespace}/${agentActorName(h.token)}`)).toEqual(
+      agentEgress(h.token, CONFIG, { mcp: true }),
+    );
+    expect(Object.keys(h.warmEvents.at(-1)!.steps!)).toEqual(["stage", "secret", "resumeTool", "resumeAgent"]);
+  });
+
+  it("an adopter whose MCP token is invalid fails as on a cold launch", async () => {
+    const h = await warmHarness({ mcpTokenFor: (runId) => (runId === "run-2" ? undefined : MCPS[runId]) });
+    const handle = await h.launcher.launch({ ...h.spec, mcpTools: true });
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    const spec2 = await followUp(h, "run-2");
+    const error = (await h.launcher.launch({ ...spec2, mcpTools: true }).catch((e: unknown) => e)) as Error;
+    expect(error.message).toBe("substrate_mcp_token_invalid");
+    expect((await h.runs.get("run-2"))!.phase).toBe("provisioning_failed");
+    // Every round's resources of the token are gone (the warm state is lost), the Secret included.
+    expect(h.api.actors.size).toBe(0);
+    expect(h.api.egressPolicies.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+  });
+
   it("chains by the continued run: round 2 parks and round 3 adopts it, then a removal deletes every round", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
@@ -495,6 +562,40 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       });
     });
   }
+
+  it("launches cold, recording fingerprint_changed, when only the MCP tool pins differ (fingerprints built by warmFingerprint)", async () => {
+    // The launcher compares the two fingerprints it is given; the executor builds them with warmFingerprint.
+    const base = {
+      agentId: "agent-1",
+      provider: "claude-code",
+      model: MODEL,
+      workerImage: "worker:1",
+      toolImage: TOOL_IMAGE,
+      cpu: 1,
+      memoryMb: 1024,
+      diskMb: 1024,
+      systemPromptSha256: "c".repeat(64),
+      repository: "your-org/your-repo",
+      secrets: [],
+    };
+    const parkedWith = warmFingerprint({ ...base, mcpTools: [{ serverId: "s1", exposedName: "search" }] });
+    const nextWith = warmFingerprint({
+      ...base,
+      mcpTools: [
+        { serverId: "s1", exposedName: "search" },
+        { serverId: "s1", exposedName: "fetch" },
+      ],
+    });
+    expect(nextWith).not.toBe(parkedWith);
+    const h = await warmHarness({ warmRounds: { ...WARM, parkTtlMs: 10_000 } });
+    await parkedRoundOne(h, { headSha: SHA_1, fingerprint: parkedWith });
+    const spec2 = await followUp(h, "run-2", { fingerprint: nextWith });
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    expect(await h.runs.get("run-2")).toMatchObject({ round: 1, phase: "running", coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
+  });
 
   it("cleans up and requeues when a resume finds no room; the relaunch is cold, for capacity", async () => {
     const h = await warmHarness();
@@ -988,19 +1089,25 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     const logged = restartedLauncher(h, WARM);
     (logged as unknown as { options: { onWarmEvent?: unknown } }).options.onWarmEvent = undefined;
     try {
-      await parkedRoundOne(h);
-      // While parked, nothing anywhere holds round 1's capability (the Secret is gone).
+      // MCP runs, so their MCP tokens are checked too.
+      const first = await h.launcher.launch({ ...h.spec, mcpTools: true });
+      await finishRound(h, h.token, "run-1", 1);
+      expect((await h.launcher.status(first)).state).toBe("succeeded");
+      expect(await h.launcher.retain(first, RETAIN)).toBe(true);
+      // While parked, nothing anywhere holds round 1's capability or MCP token (the Secret is gone).
       expect(JSON.stringify([...h.secrets.secrets.values()])).not.toContain(FAKE_CAP);
-      const second = await logged.launch(await followUp(h, "run-2"));
+      expect(JSON.stringify([...h.secrets.secrets.values()])).not.toContain(FAKE_MCP);
+      const second = await logged.launch({ ...(await followUp(h, "run-2")), mcpTools: true });
+      expect(await logged.warmOutcome(second)).toEqual({ adopted: true });
       await finishRound(h, h.token, "run-2", 2);
       await logged.retain(second, RETAIN);
-      await logged.launch(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 }));
+      await logged.launch({ ...(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 })), mcpTools: true });
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
       setLogLineFilter((line) => line);
     }
-    const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_"];
+    const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_", FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3, "rmt_"];
     const rows = await Promise.all(["run-1", "run-2", "run-3"].map((id) => h.runs.get(id)));
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),
@@ -1012,6 +1119,8 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     ];
     for (const [key, body] of await allBlobs(h)) {
       if (!key.endsWith("tool-setup.json")) outputs.push(body);
+      // The tool setup holds the registry token (derived from the capability), never an MCP token.
+      else for (const mcp of [FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3]) expect(body).not.toContain(mcp);
     }
     for (const output of outputs) for (const shape of shapes) expect(output).not.toContain(shape);
     // Warm events carry fixed fields only: never the commit or the fingerprint either.

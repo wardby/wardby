@@ -1,5 +1,6 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
 import type { DebugTracer } from "./debug-trace.js";
+import type { MCP_TOKEN_HEADER } from "./mcp-config.js";
 import type {
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
@@ -66,6 +67,8 @@ export interface WorkerClientConfig {
   mcpToken?: string;
   /** Substrate: the capability is a placeholder the egress gateway replaces; it goes in this header, never Authorization. */
   capabilityHeader?: "x-api-key";
+  /** Substrate: the MCP token is a placeholder the egress gateway replaces; it goes in this header, never Authorization. */
+  mcpTokenHeader?: typeof MCP_TOKEN_HEADER;
 }
 
 export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentClient;
@@ -96,4 +99,6 @@ export interface WorkerRunOptions {
   registryToken?: string;
   /** Substrate: send the (placeholder) capability in this header (WARDBY_CAPABILITY_HEADER); forwarded to createClient. */
   capabilityHeader?: "x-api-key";
+  /** Substrate: send the (placeholder) MCP token in this header (WARDBY_MCP_TOKEN_HEADER); forwarded to createClient. */
+  mcpTokenHeader?: typeof MCP_TOKEN_HEADER;
 }

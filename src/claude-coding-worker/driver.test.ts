@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER } from "../coding-worker/mcp-config.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
   claudeOutputJsonSchema,
@@ -689,6 +690,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   async function capture(
     mcpToken: string | undefined,
     servers: Array<{ name: string; status: string }> = [{ name: "wardby_tools", status: "connected" }],
+    mcpTokenHeader?: "x-wardby-mcp-token",
   ) {
     let captured: ClaudeQueryOptions | undefined;
     const progress = vi.fn();
@@ -698,6 +700,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
       capability: "rrp_worker_capability",
       signal: new AbortController().signal,
       ...(mcpToken !== undefined ? { mcpToken } : {}),
+      ...(mcpTokenHeader !== undefined ? { mcpTokenHeader } : {}),
       onProgress: progress,
       createQuery: (options) => {
         captured = options;
@@ -714,6 +717,27 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   it("gives the query the proxy's /mcp route and the token", async () => {
     const { config } = await capture(TOKEN);
     expect(config.mcp).toEqual({ url: "http://wardby-proxy:8787/mcp", token: TOKEN });
+  });
+
+  it("gives the query the MCP header mode when it is set", async () => {
+    const { config } = await capture(INJECTED_MCP_TOKEN_PLACEHOLDER, undefined, "x-wardby-mcp-token");
+    expect(config.mcp).toStrictEqual({
+      url: "http://wardby-proxy:8787/mcp",
+      token: INJECTED_MCP_TOKEN_PLACEHOLDER,
+      header: "x-wardby-mcp-token",
+    });
+  });
+
+  it.each([
+    ["no token", undefined],
+    ["a real token", TOKEN],
+  ])("fails with a fixed code on header mode with %s, naming no value", async (_label, token) => {
+    const error = await capture(token, undefined, "x-wardby-mcp-token").then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+    expect(String(error)).not.toContain(TOKEN);
   });
 
   it("keeps the token out of every environment and every progress event", async () => {

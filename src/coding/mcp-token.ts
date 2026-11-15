@@ -9,6 +9,11 @@ import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
 
 export const MCP_TOKEN_ENV = "WARDBY_MCP_TOKEN";
 
+/** The header a worker in MCP header mode sends its (placeholder) MCP token in: Substrate's egress gateway fills it. */
+export const MCP_TOKEN_HEADER = "x-wardby-mcp-token";
+/** The worker's value for MCP_TOKEN_HEADER on Substrate. Deliberately not isMcpToken-shaped: a failed injection is a clean 401. */
+export const INJECTED_MCP_TOKEN_PLACEHOLDER = "rmt_placeholder_injected_by_gateway";
+
 /** The worker's MCP server key; Claude Code names its tools `mcp__<key>__<exposed name>`. */
 export const WORKER_MCP_SERVER_KEY = "wardby_mcp";
 export const CLAUDE_MCP_TOOL_PREFIX = `mcp__${WORKER_MCP_SERVER_KEY}__`;

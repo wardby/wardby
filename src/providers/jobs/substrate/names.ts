@@ -32,6 +32,9 @@ export function actorNamesFor(token: string, shape: SubstrateActorShape): string
  */
 export const TOOL_ACTOR_JWT_HEADER = "X-Wardby-Actor-Jwt";
 
+/** The header the agent actor sends its MCP token placeholder in; the egress gateway fills it (specs.ts agentEgress). */
+export const MCP_TOKEN_EGRESS_HEADER = "X-Wardby-Mcp-Token";
+
 export function toolActorSubject(atespace: string, token: string): string {
   return `actor/${atespace}/${toolActorName(token)}`;
 }

@@ -7036,6 +7036,43 @@ describe("ContainerExecutor warm rounds", () => {
       });
     });
 
+    describe("MCP tool pins", () => {
+      const PIN: McpToolPin = {
+        exposedName: "docs__search",
+        toolName: "search",
+        serverId: "server-1",
+        serverName: "docs",
+        definition: { description: "Search docs", inputSchema: { type: "object" } },
+      };
+      const PINNED = fingerprintFor({ mcpTools: [{ serverId: "server-1", exposedName: "docs__search" }] });
+
+      it("puts the run's MCP pins in the launch fingerprint", async () => {
+        const created = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        await created.executor.start("run-1");
+        expect(created.jobs.specs[0].warm?.fingerprint).toBe(PINNED);
+        expect(created.fingerprints[0][1]).toBe(PINNED);
+        expect(PINNED).not.toBe(fingerprintFor());
+      });
+
+      it("takes the fingerprint's pins and the spec's mcpTools from the same list", async () => {
+        const pinned = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        await pinned.executor.start("run-1");
+        expect(pinned.jobs.specs[0].mcpTools).toBe(true);
+        expect(pinned.jobs.specs[0].warm?.fingerprint).toBe(PINNED);
+        const none = await warmHarness(continuation, { extra: { mcpToolPins: async () => [] } });
+        await none.executor.start("run-1");
+        expect(none.jobs.specs[0].mcpTools).toBeUndefined();
+        expect(none.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor());
+      });
+
+      it("the capacity probe still names the round it continues", async () => {
+        const created = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        created.jobs.capacity = true;
+        await created.executor.start("run-1");
+        expect(created.jobs.capacityChecks[0].warm?.fromRunId).toBe("run-0");
+      });
+    });
+
     it("probes without warm when the previous round pushed nothing", async () => {
       const created = await warmHarness(continuation, { previous: { runId: "run-0", commitSha: null } });
       created.jobs.capacity = true;

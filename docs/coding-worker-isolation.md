@@ -252,7 +252,10 @@ attached. The worker still reaches only the proxy:
    `/mcp` route, and only while the session is active and before its deadline.
    It is not the run capability, and it is not accepted by the model routes.
 2. The worker (Claude Code or Codex, over HTTP) calls `POST /mcp` on the proxy
-   with `Authorization: Bearer <token>`. The proxy checks the token and
+   with `Authorization: Bearer <token>`, or, on the Substrate launcher, the
+   egress gateway adds the token in an `X-Wardby-Mcp-Token` header. The proxy
+   accepts that header only when `Authorization` is absent, and refuses a
+   request that has both (401). The proxy checks the token and
    forwards the request to the native gateway's `/coding-mcp` route
    (`WARDBY_MCP_GATEWAY_URL`). The proxy never sees an MCP server's URL or
    secrets. Without `WARDBY_MCP_GATEWAY_URL`, `/mcp` answers `503`
@@ -283,6 +286,12 @@ Where the token is exposed:
   server's own claim, which Wardby can't verify, so the allowlist remains the
   owner's control. A leaked token is limited to this run's allowed tools, the
   call limit and the run's deadline.
+
+On the Substrate launcher the worker holds a fixed placeholder and never the
+token: the egress gateway injects the real token on `/mcp` requests (see
+[MCP tools on Substrate](substrate-backend.md#mcp-tools)). Repository code in a
+Codex run can use the run's read-only tools through `/mcp`, but cannot read the
+token.
 
 A repository's own MCP configuration is never loaded. MCP tools need this
 release's Claude worker image and a new Codex driver image; an older image

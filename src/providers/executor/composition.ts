@@ -211,6 +211,8 @@ export function buildSubstrateJobLauncher(options: {
   db: PrismaClient;
   workspaceRoot: string;
   resolveCapability: (runId: string) => Promise<string>;
+  /** The run's MCP token (capabilities.mcpToken), asked only for a spec with mcpTools. */
+  resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   substrateApi?: SubstrateApi;
   kubernetesApi?: KubernetesApi;
   /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
@@ -245,6 +247,7 @@ export function buildSubstrateJobLauncher(options: {
     },
     workspaceRoot: options.workspaceRoot,
     resolveCapability: options.resolveCapability,
+    ...(options.resolveMcpToken ? { resolveMcpToken: options.resolveMcpToken } : {}),
     ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
     ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
     ...(substrate.warmRounds
@@ -338,6 +341,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       db: options.db,
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
+      resolveMcpToken: (runId) => capabilities.mcpToken(runId),
       substrateApi: options.substrateApi,
       kubernetesApi: options.kubernetesApi,
       bridgeToolImages: configuredClaudeToolImages(config),

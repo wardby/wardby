@@ -11,7 +11,7 @@ import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
 import { MemoryRelayStore } from "./memory-relay-store.js";
 import { RelayBusyError, RelayUnknownError, type RelayStore } from "./relay-store.js";
-import { createSubstrateRoutes, type SubstrateRouteOptions } from "./routes.js";
+import { createSubstrateRoutes, MCP_TOOLS_INPUT_HEADER, type SubstrateRouteOptions } from "./routes.js";
 
 const ATESPACE = "wardby-runs";
 const CAPABILITY = "rrp_fake_capability_value_000001";
@@ -22,6 +22,18 @@ const AUTH = { "x-wardby-actor-jwt": "Bearer good" };
 
 const sessionFor = (runId: string): ProxySession =>
   ({ runId, deadlineAt: new Date(Date.now() + 60_000), status: "active" }) as ProxySession;
+const PIN = {
+  exposedName: "docs__search",
+  toolName: "search",
+  serverId: "server-1",
+  serverName: "docs",
+  definition: { description: "d", inputSchema: { type: "object" } },
+};
+/** A session with `mcpTools` set as given (`undefined`: the field left out). */
+const sessionWithPins = (runId: string, mcpTools: unknown): ProxySession =>
+  (mcpTools === undefined ? sessionFor(runId) : { ...sessionFor(runId), mcpTools }) as ProxySession;
+/** The answer's x-wardby-* header names. */
+const wardbyHeaders = (res: Response): string[] => [...res.headers.keys()].filter((k) => k.startsWith("x-wardby-"));
 
 describe("substrate routes", () => {
   let dir: string;
@@ -445,6 +457,37 @@ describe("substrate routes", () => {
       expect(await allFiles()).toEqual([]);
     });
 
+    it("refuses a tail with an MCP token shape or the unredacted MCP placeholder, and logs no tail", async () => {
+      await start();
+      const mcpShaped = "rmt_" + "A".repeat(43);
+      for (const body of [`mcp ${mcpShaped}\n`, "header rmt_placeholder_injected_by_gateway\n"]) {
+        const answer = await fetch(`${base}/diagnostics`, agent(text(body)));
+        expect(answer.status).toBe(400);
+        expect(await answer.json()).toEqual({ error: { type: "bad_request" } });
+      }
+      expect(warnCalls).toHaveLength(2);
+      for (const [fields] of warnCalls) {
+        expect(fields).toEqual({ event: "substrate.diagnostics_rejected", runToken: TOKEN, side: "agent" });
+        expect(fields).not.toHaveProperty("tail");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const serialized = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [mcpShaped, "rmt_placeholder_injected_by_gateway"]) expect(serialized).not.toContain(secret);
+      expect(await allFiles()).toEqual([]);
+    });
+
+    it("accepts a tail whose MCP placeholder the bridge already redacted", async () => {
+      await start();
+      const answer = await fetch(`${base}/diagnostics`, agent(text("header [redacted]\n")));
+      expect(answer.status).toBe(200);
+      expect(warnCalls).toEqual([
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "agent", tail: "header [redacted]\n" },
+          "substrate actor diagnostics",
+        ],
+      ]);
+    });
+
     it("with warm rounds: logs each round's tail once (the seen key includes the round), and refuses another round's", async () => {
       overrides = { warmRounds: true, tokenForRun: async () => TOKEN };
       await start();
@@ -848,9 +891,126 @@ describe("substrate routes", () => {
     });
   });
 
+  describe("MCP tools on the input answer", () => {
+    const pinned = (mcpTools: unknown): void => {
+      overrides = {
+        ...overrides,
+        ledger: {
+          findSessionByCapabilityHash: async (hash) =>
+            hash === capabilityHash(CAPABILITY) ? sessionWithPins("run-1", mcpTools) : null,
+        },
+      };
+    };
+
+    it("names the header the bridges read", () => {
+      expect(MCP_TOOLS_INPUT_HEADER).toBe("x-wardby-mcp-tools");
+    });
+
+    it("marks the input answer when the session has MCP tools, and only then", async () => {
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      for (const [mcpTools, expected] of [
+        [[PIN], "1"],
+        [undefined, null],
+        [[], null],
+        [null, null],
+      ] as const) {
+        pinned(mcpTools);
+        await start();
+        const res = await fetch(`${base}/input`, agent());
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe('{"task":"x"}');
+        expect(res.headers.get("x-wardby-mcp-tools")).toBe(expected);
+        expect(wardbyHeaders(res)).toEqual(expected === null ? [] : ["x-wardby-mcp-tools"]);
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      }
+    });
+
+    it("a 404 input (not staged) carries no MCP header", async () => {
+      pinned([PIN]);
+      await start();
+      const res = await fetch(`${base}/input`, agent());
+      expect(res.status).toBe(404);
+      expect(res.headers.get("x-wardby-mcp-tools")).toBeNull();
+      expect(wardbyHeaders(res)).toEqual([]);
+    });
+
+    it("no other route's answer carries it", async () => {
+      pinned([PIN]);
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("tar-bytes"));
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from("{}"));
+      await start();
+      for (const res of [
+        await fetch(`${base}/seed`, tool()),
+        await fetch(`${base}/tool-setup`, tool()),
+        await fetch(`${base}/channels`, agent({ method: "POST" })),
+        await fetch(`${base}/result`, agent({ method: "POST", body: "{}" })),
+      ]) {
+        expect(res.status).toBe(200);
+        expect(wardbyHeaders(res)).toEqual([]);
+      }
+    });
+
+    it("marks a single-shape run's input the same way", async () => {
+      pinned([PIN]);
+      overrides = { ...overrides, actorShapeForToken: async () => "single" };
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      await start();
+      const res = await fetch(`${base}/input`, agent());
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-wardby-mcp-tools")).toBe("1");
+    });
+
+    it("logs the input route with exactly today's keys, no MCP field", async () => {
+      pinned([PIN]);
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      await start();
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const lines = logCalls.map((call) => call[0] as Record<string, unknown>).filter((l) => l.route === "input");
+      expect(lines).toHaveLength(1);
+      expect(Object.keys(lines[0]).sort()).toEqual(
+        ["bytes", "durationMs", "event", "route", "runToken", "status"].sort(),
+      );
+      expect(JSON.stringify(logCalls)).not.toContain("docs__search");
+    });
+  });
+
   describe("warm rounds", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });
+
+    it("each round's input answer follows that round's own session's MCP tools", async () => {
+      for (const [run2Pins, expected] of [
+        [[PIN], "1"],
+        [null, null],
+      ] as const) {
+        overrides = {
+          warmRounds: true,
+          ledger: {
+            findSessionByCapabilityHash: async (hash) =>
+              hash === capabilityHash(CAPABILITY)
+                ? sessionWithPins("run-1", null)
+                : hash === capabilityHash(OTHER_CAPABILITY)
+                  ? sessionWithPins("run-2", run2Pins)
+                  : null,
+          },
+          tokenForRun: async (runId) => (runId === "run-2" ? TOKEN : "wa-retired"),
+        };
+        await start();
+        await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+        await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
+        const res = await fetch(`${base}/input?round=2`, { headers: { "x-api-key": OTHER_CAPABILITY } });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("x-wardby-mcp-tools")).toBe(expected);
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      }
+    });
 
     it("without warm rounds: round 1 as before; a round above 1 is refused (input 404, uploads 409), nothing read or written", async () => {
       await start();

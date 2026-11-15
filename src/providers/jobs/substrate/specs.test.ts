@@ -14,6 +14,7 @@ import {
 } from "./specs.js";
 
 const FAKE_CAP = "rrp_fake_capability_value_000001";
+const FAKE_MCP = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "1".repeat(19);
 const TOKEN = "wr-00000000000000000000";
 const DIGEST = "a".repeat(64);
 const CONFIG: SubstrateLaunchConfig = {
@@ -44,10 +45,12 @@ describe("substrate spec builders", () => {
       agentTemplate(spec, CONFIG),
       toolTemplate(spec, CONFIG),
       agentEgress(TOKEN, CONFIG),
+      agentEgress(TOKEN, CONFIG, { mcp: true }),
       toolEgress(CONFIG),
       workerEnv(CONFIG),
     ]);
     expect(all).not.toContain(FAKE_CAP);
+    expect(all).not.toContain("rmt_");
     expect(all).not.toContain("rrg_");
     expect(all).not.toContain("rrp_");
     expect(all).not.toContain("WARDBY_TOOL_SETUP");
@@ -66,6 +69,37 @@ describe("substrate spec builders", () => {
     expect(JSON.stringify(agentEgress(TOKEN, CONFIG))).toContain(
       `ate-secret://k8s.io/default/${CONFIG.credentialsNamespace}/${TOKEN}/capability`,
     );
+  });
+
+  it("puts the MCP token only in the per-run Secret, under its own key", () => {
+    expect(runSecret(TOKEN, FAKE_CAP, CONFIG, FAKE_MCP).stringData).toEqual({
+      capability: FAKE_CAP,
+      mcpToken: FAKE_MCP,
+    });
+    const plain = runSecret(TOKEN, FAKE_CAP, CONFIG);
+    expect(plain.stringData).toEqual({ capability: FAKE_CAP });
+    expect(plain.stringData).not.toHaveProperty("mcpToken");
+  });
+
+  it("adds the MCP token header to the agent's rule only with mcp", () => {
+    expect(agentEgress(TOKEN, CONFIG, { mcp: false })).toEqual(agentEgress(TOKEN, CONFIG));
+    expect(agentEgress(TOKEN, CONFIG, { mcp: true })).toEqual([
+      {
+        kind: "http",
+        hostnames: ["coding-proxy.wardby.svc.cluster.local"],
+        ports: [8787],
+        replaceHeaders: [
+          {
+            header: "X-Api-Key",
+            credentialUri: `ate-secret://k8s.io/default/wardby-run-credentials/${TOKEN}/capability`,
+          },
+          {
+            header: "X-Wardby-Mcp-Token",
+            credentialUri: `ate-secret://k8s.io/default/wardby-run-credentials/${TOKEN}/mcpToken`,
+          },
+        ],
+      },
+    ]);
   });
 
   it("allows the proxy only", () => {

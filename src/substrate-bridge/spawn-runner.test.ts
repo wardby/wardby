@@ -51,6 +51,23 @@ setTimeout(() => process.exit(7), 100);
     expect([...written, ...errors].join("")).not.toContain("SETUP-VALUE-123");
   });
 
+  it("never passes the MCP env to the tool runner", async () => {
+    const entry = await script(`
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.PROOF_FILE, JSON.stringify([process.env.WARDBY_MCP_TOKEN ?? null, process.env.WARDBY_MCP_TOKEN_HEADER ?? null]));
+console.log("wardby_tool_runner_ready");
+setTimeout(() => process.exit(0), 20);
+`);
+    const handle = spawnRunner(
+      "x",
+      { PROOF_FILE: join(dir, "proof"), WARDBY_MCP_TOKEN: "rmt_fake", WARDBY_MCP_TOKEN_HEADER: "x-wardby-mcp-token" },
+      entry,
+    );
+    await handle.ready;
+    await handle.exited;
+    expect(JSON.parse(await readFile(join(dir, "proof"), "utf8"))).toEqual([null, null]);
+  });
+
   it("stop and kill reach the runner's whole process group, even a runner and child that ignore SIGTERM", async () => {
     const childPidFile = join(dir, "child.pid");
     const entry = await script(`

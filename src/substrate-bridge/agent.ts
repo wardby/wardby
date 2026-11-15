@@ -15,12 +15,14 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   DiagnosticsTail,
+  mcpWorkerEnv,
   postBestEffort,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
   waitForRound,
   waitForRunToken,
+  withoutMcpEnv,
   withRound,
   type Logger,
 } from "./common.js";
@@ -33,6 +35,7 @@ import {
   PLACEHOLDER_CAPABILITY,
   WARM_ROUNDS_ENV,
   WORKER_CONTEXT_ROOT,
+  WORKER_PLACEHOLDERS,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
@@ -96,11 +99,11 @@ export interface AgentHandle {
 /**
  * The worker, with its stdout and stderr piped through the bridge so the bridge can read their last
  * lines, and passed on to the bridge's own (the actor's log) line by line, redacted by exact value
- * against `secrets` (the placeholder: the only secret value this actor holds).
+ * against `secrets` (the placeholders: this actor holds no other secret-shaped value).
  */
 export const spawnWorker = (
   env: NodeJS.ProcessEnv,
-  secrets: () => readonly string[] = () => [PLACEHOLDER_CAPABILITY],
+  secrets: () => readonly string[] = () => WORKER_PLACEHOLDERS,
   entry: string = WORKER_ENTRY,
   out: { stdout: LineSink; stderr: LineSink } = process,
 ): WorkerHandle => {
@@ -156,9 +159,10 @@ async function writeRoundInput(path: string, body: Buffer, resumeSessionId: stri
 
 export async function run(options: AgentOptions): Promise<AgentHandle> {
   // The operator-diagnostics tail: the worker's stderr and this bridge's events. The worker holds no
-  // real secret (the gateway injects the capability on the wire), only the placeholder. Warm rounds:
-  // each round gets a fresh tail, so a round's post carries only that round's worker and events.
-  const newTail = (): DiagnosticsTail => new DiagnosticsTail(() => [PLACEHOLDER_CAPABILITY]);
+  // real secret (the gateway injects the capability and the MCP token on the wire), only the
+  // placeholders. Warm rounds: each round gets a fresh tail, so a round's post carries only that
+  // round's worker and events.
+  const newTail = (): DiagnosticsTail => new DiagnosticsTail(() => WORKER_PLACEHOLDERS);
   const baseLog = options.log ?? stderrLogger;
   let diagnostics = newTail();
   let roundLog = diagnostics.logger(baseLog);
@@ -188,14 +192,16 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   const shutdown = new AbortController();
   const sockets = new Set<Socket>();
 
-  // 1. The input.
+  // 1. The input, and from its answer whether round 1's worker gets MCP tools.
   await mkdir(dirname(inputPath), { recursive: true });
+  let firstMcpEnv: Record<string, string>;
   try {
     const input = await withRetry(
       () => send(`${base}/input`, { method: "GET", headers, downloadTo: inputPath, timeoutMs: 5 * 60_000 }),
       { policy, deadlineMs: INPUT_DEADLINE_MS, signal: shutdown.signal },
     );
     if (input.status !== 200) throw new BridgeError("substrate_bridge_input_failed");
+    firstMcpEnv = mcpWorkerEnv(input.headers);
   } catch (error) {
     ready.server.close();
     throw error instanceof BridgeError && error.code === "substrate_bridge_input_failed"
@@ -362,12 +368,17 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
 
   // 3. The worker, and 4. its transcript and result once it has exited (per round).
   const transcriptDeadlineMs = options.transcriptDeadlineMs ?? TRANSCRIPT_DEADLINE_MS;
-  const startRound = (round: number): { exited: Promise<number>; uploaded: Promise<void> } => {
+  // Each round's MCP env comes from that round's own input answer; an inherited one never reaches the worker.
+  const startRound = (
+    round: number,
+    mcpEnv: Record<string, string>,
+  ): { exited: Promise<number>; uploaded: Promise<void> } => {
     const tail = diagnostics;
     const worker = (options.launchWorker ?? spawnWorker)({
-      ...env,
+      ...withoutMcpEnv(env),
       WARDBY_PROXY_URL: options.proxyUrl,
       WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
+      ...mcpEnv,
     });
     log("substrate_bridge_worker_started", { runToken: token, ...(round > 1 ? { round } : {}) });
     return superviseWorker(worker, {
@@ -384,7 +395,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       signal: shutdown.signal,
     });
   };
-  const first = startRound(1);
+  const first = startRound(1, firstMcpEnv);
 
   /**
    * Warm rounds: after a round's uploads, wait (across the launcher's suspend and resume) for the next
@@ -418,7 +429,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       await writeRoundInput(inputPath, answer.body, sessionId);
       log("substrate_bridge_input_ready", { runToken: token, round, resumed: sessionId ? 1 : 0 });
       options.onRoundStarted?.(round, sessionId);
-      uploaded = startRound(round).uploaded;
+      uploaded = startRound(round, mcpWorkerEnv(answer.headers)).uploaded;
     }
   };
   if (warmRounds) {

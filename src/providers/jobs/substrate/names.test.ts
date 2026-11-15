@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { MCP_TOKEN_HEADER } from "../../../coding/mcp-token.js";
 import { assertValidBlobKey } from "../../storage/types.js";
 import {
   BLOB,
+  MCP_TOKEN_EGRESS_HEADER,
   actorNamesFor,
   agentActorName,
   substrateRunToken,
@@ -36,6 +38,9 @@ describe("substrate names", () => {
     const t = substrateRunToken("x");
     expect(actorNamesFor(t, "pair")).toEqual([agentActorName(t), toolActorName(t)]);
     expect(actorNamesFor(t, "single")).toEqual([agentActorName(t)]);
+  });
+  it("names the MCP egress header the proxy reads", () => {
+    expect(MCP_TOKEN_EGRESS_HEADER.toLowerCase()).toBe(MCP_TOKEN_HEADER);
   });
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");
