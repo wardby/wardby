@@ -2033,13 +2033,15 @@ describe("dependency cache", () => {
 
   it("launches a Codex cache run: setup and input unchanged", async () => {
     const h = await makeHarness({ provider: "codex" });
+    const withoutCache = h.spec;
     h.spec = { ...h.spec, dependencyCache: true };
     const input = JSON.stringify({ schemaVersion: 1, task: "say hello", dependencyCache: true, diskMb: 64 });
     await writeFile(h.spec.inputArtifact, input);
     await h.launcher.launch(h.spec);
     expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    expect(withoutCache).not.toHaveProperty("dependencyCache");
     expect((await h.blobs.get(BLOB.toolSetup(h.token))).toString()).toBe(
-      codexWorkerSetup(h.spec, FAKE_CAP, { collectResultBundle: false }),
+      codexWorkerSetup(withoutCache, FAKE_CAP, { collectResultBundle: false }),
     );
     expect((await h.blobs.get(BLOB.input(h.token))).toString()).toBe(await readFile(h.spec.inputArtifact, "utf8"));
     expect((await h.blobs.get(BLOB.input(h.token))).toString()).toBe(input);

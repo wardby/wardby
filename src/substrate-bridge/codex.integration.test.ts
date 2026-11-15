@@ -125,9 +125,11 @@ describe("Codex bridge, end to end without Substrate", () => {
         });
         await onRequest?.(method, path);
         if (RELAY.test(`/${path}`)) return response.writeHead(404).end('{"error":"not_found"}');
-        // The cache's seal: the worker's own registry token (Authorization), which the agent's
-        // egress rule leaves as sent (it replaces only X-Api-Key and the MCP header).
+        // The cache's seal is checked by its own key, as the proxy does (dependency-cache/service.ts):
+        // the worker's registry token in Authorization, which the agent's egress rule leaves as sent
+        // (it replaces only X-Api-Key and the MCP header). Any other credential is refused.
         if (method === "POST" && path === "/cache/npm/seal") {
+          if (authorization !== `Bearer ${REGISTRY_TOKEN}`) return response.writeHead(401).end();
           return response.writeHead(200, { "content-type": "application/json" }).end('{"sealed":true}');
         }
         if (key !== PLACEHOLDER_CAPABILITY) return response.writeHead(401).end();

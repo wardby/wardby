@@ -502,26 +502,45 @@ describe("substrate bridges, end to end without Substrate", () => {
     return (await exec("tar", ["-t", "-f", tarPath])).stdout.split("\n").filter(Boolean);
   }
 
-  /** A fake dependency cache module: prepare restores node_modules/alpha after `delayMs`; seals are counted. */
+  /**
+   * A fake dependency cache module: prepare restores node_modules/alpha after `delayMs`; seals are
+   * counted. Both calls read the run's registry token from the command environment they are given
+   * (the setup's YARN_NPM_AUTH_TOKEN, the same token as its npmrc's, and FAKE_REGISTRY_TOKEN), as
+   * the real module does, so the tokens are in use while the logs are checked for them.
+   */
   function fakeCacheModule({ delayMs = 0 }: { delayMs?: number } = {}) {
     const counts = { seals: 0 };
+    const tokensSeen: string[] = [];
     const report = { projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 1, restoreMs: 1 }] };
+    const useTokens = (env: Record<string, string | undefined>) => {
+      const derived = env.YARN_NPM_AUTH_TOKEN;
+      if (derived === undefined || env.FAKE_REGISTRY_TOKEN === undefined) throw new Error("no registry token");
+      tokensSeen.push(derived, env.FAKE_REGISTRY_TOKEN);
+    };
     const module = {
       BUDGET_MEASURE_TIMEOUT_MS: 1_000,
       dependencyCacheTimeLimit: () => 60_000,
       dependencyCacheBudget: async () => ({ budgetBytes: 1024 * 1024 * 1024, usedBytes: 0 }),
-      prepareDependencies: async ({ workspace }: { workspace: string }) => {
+      prepareDependencies: async ({
+        workspace,
+        env,
+      }: {
+        workspace: string;
+        env: Record<string, string | undefined>;
+      }) => {
+        useTokens(env);
         await delay(delayMs);
         await mkdir(join(workspace, "node_modules", "alpha"), { recursive: true });
         await writeFile(join(workspace, "node_modules", "alpha", "index.js"), "x\n");
         return report;
       },
-      sealUploadWindow: async () => {
+      sealUploadWindow: async ({ env }: { env: Record<string, string | undefined> }) => {
+        useTokens(env);
         counts.seals += 1;
         return { status: 200, confirmed: true };
       },
     };
-    return { module, counts, report };
+    return { module, counts, report, tokensSeen };
   }
 
   /**
@@ -601,8 +620,11 @@ describe("substrate bridges, end to end without Substrate", () => {
     const entries = await collectedEntries();
     expect(entries.some((entry) => entry.includes("node_modules"))).toBe(false);
     expect(entries.some((entry) => entry.includes("src/hello.txt"))).toBe(true);
+    // Both calls used the run's registry token (the npmrc's, derived from the capability).
+    const derived = deriveRegistryToken(CAPABILITY);
+    expect(cache.tokensSeen).toEqual([derived, REGISTRY_TOKEN, derived, REGISTRY_TOKEN]);
     const logged = [...logs, ...routeLogs.map((line) => JSON.stringify(line))].join("\n");
-    for (const secret of [REGISTRY_TOKEN, CAPABILITY, toolSetup]) expect(logged).not.toContain(secret);
+    for (const secret of [REGISTRY_TOKEN, derived, CAPABILITY, toolSetup]) expect(logged).not.toContain(secret);
   });
 
   it("a prepare call that takes longer than several relay polls still answers", async () => {
