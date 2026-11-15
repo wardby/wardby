@@ -444,18 +444,25 @@ describe("substrate bridges, end to end without Substrate", () => {
     );
   });
 
-  it.each(["none", "symlink"] as const)(
-    "uploads no .git at all on a git-history run whose bundle is %s",
-    async (bundle) => {
-      const { workspace, toolSetup } = await stage({ collectResultBundle: true });
-      tool = await startTool(workspace, toolSetup);
-      agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, bundle) }));
-      await agent.uploaded;
-      const entries = await collectedEntries();
-      expect(entries.filter((entry) => entry.includes(".git"))).toEqual([]);
-      expect(entries).toContain("./src/hello.txt");
-    },
-  );
+  it("uploads no .git at all on a git-history run that wrote no bundle", async () => {
+    const { workspace, toolSetup } = await stage({ collectResultBundle: true });
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, "none") }));
+    await agent.uploaded;
+    const entries = await collectedEntries();
+    expect(entries.filter((entry) => entry.includes(".git"))).toEqual([]);
+    expect(entries).toContain("./src/hello.txt");
+  });
+
+  it("fails the run when the bundle is a symlink", async () => {
+    const result = await historyCollect(async (workspace) => {
+      await mkdir(join(workspace, ".git"), { recursive: true });
+      await writeFile(join(dir, "outside.bundle"), "not the run's bundle\n");
+      await symlink(join(dir, "outside.bundle"), join(workspace, ".git", "wardby-result.bundle"));
+    });
+    expect(result.skipped).toEqual(["bundle_symlink"]);
+    await expectFailedCollect(result);
+  });
 
   it("ends the runner's process group before a git-history run's workspace is read", async () => {
     const { workspace, toolSetup } = await stage({ collectResultBundle: true });

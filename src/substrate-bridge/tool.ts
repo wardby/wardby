@@ -211,14 +211,19 @@ interface SetupFile {
 
 /** Why a git-history run's upload carries no result bundle (a fixed value, logged as is). */
 type BundleSkip =
-  "git_not_directory" | "absent_or_symlink" | "not_regular_file" | "git_changed" | "short_read" | "copy_failed";
+  "git_not_directory" | "absent" | "bundle_symlink" | "not_regular_file" | "git_changed" | "short_read" | "copy_failed";
 
 /**
  * The skips that mean something changed the workspace's `.git` or the bundle under the bridge: the run
  * fails (workspace-failed) instead of carrying on without the agent's commits. A missing `.git` or
  * bundle is not one of them: it is the same outcome as on Docker and Kubernetes.
  */
-const TAMPERING_SKIPS: ReadonlySet<BundleSkip> = new Set(["git_not_directory", "not_regular_file", "git_changed"]);
+const TAMPERING_SKIPS: ReadonlySet<BundleSkip> = new Set([
+  "git_not_directory",
+  "bundle_symlink",
+  "not_regular_file",
+  "git_changed",
+]);
 
 /** The collect code for a tampering skip (no real exit status of tar or the shell). */
 const TAMPERED_CODE = -1;
@@ -240,11 +245,16 @@ async function stageResultBundle(
 ): Promise<BundleSkip | undefined> {
   const gitPath = join(workspace, ".git");
   const git = await lstat(gitPath).catch(() => undefined);
-  if (!git) return "absent_or_symlink";
+  if (!git) return "absent";
   if (!git.isDirectory()) return "git_not_directory";
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
-  const source = await open(join(gitPath, RESULT_BUNDLE_FILE), flags).catch(() => undefined);
-  if (!source) return "absent_or_symlink";
+  let openError: unknown;
+  const source = await open(join(gitPath, RESULT_BUNDLE_FILE), flags).catch((error: unknown) => {
+    openError = error;
+    return undefined;
+  });
+  // O_NOFOLLOW on a symlinked bundle fails with ELOOP: something replaced the agent's bundle.
+  if (!source) return (openError as NodeJS.ErrnoException | undefined)?.code === "ELOOP" ? "bundle_symlink" : "absent";
   try {
     const metadata = await source.stat();
     if (!metadata.isFile()) return "not_regular_file";
