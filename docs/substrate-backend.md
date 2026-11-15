@@ -159,7 +159,11 @@ A `gitHistory` run is supported. When the run ends the tool side uploads the
 workspace and, from `.git`, only the run's result bundle
 (`.git/wardby-result.bundle`), never the rest of the repository's history, so
 the history's size does not count toward `SUBSTRATE_WORKSPACE_MAX_MB` or the
-extraction limit of 100,000 entries. See
+extraction limit of 100,000 entries. Before that upload the tool side ends
+every process the run's tools started. A bundle that is not a regular file
+inside a real `.git` folder (a symlink, a FIFO, a swapped `.git`), or that is
+larger than 1 GiB, is left out, and the run then fails with
+`vcs_result_bundle_invalid`. See
 [Git history in coding runs](../help/git-history.md).
 
 ## Warm rounds

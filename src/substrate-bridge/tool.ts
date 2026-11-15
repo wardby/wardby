@@ -12,7 +12,8 @@
  * (the proxy refuses a tool-side one; see routes.ts). Its children's stderr goes to the actor's log.
  */
 import { spawn } from "node:child_process";
-import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +37,7 @@ import {
   DEFAULT_TOOL_SOCKET,
   ACTOR_JWT_HEADER,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
+  MAX_RESULT_BUNDLE_BYTES,
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
   RESULT_BUNDLE_FILE,
@@ -100,6 +102,10 @@ export interface ToolOptions {
   onRoundCollected?: (round: number, outcome: "ok" | "rejected" | "failed") => void;
   /** Warm rounds: called once a later round's tool runner is ready. */
   onRoundStarted?: (round: number) => void;
+  /** The largest result bundle a git-history run's upload carries (default MAX_RESULT_BUNDLE_BYTES). */
+  maxResultBundleBytes?: number;
+  /** Tests only: runs after the result bundle is opened and checked, before `.git` is checked again. */
+  beforeResultBundleRecheck?: () => Promise<void> | void;
 }
 
 export interface ToolHandle {
@@ -206,12 +212,67 @@ interface SetupFile {
   collectResultBundle?: unknown;
 }
 
-/** True when the workspace's root .git is a directory holding the result bundle as a regular file. */
-async function resultBundleIsFile(workspace: string): Promise<boolean> {
-  const git = await lstat(join(workspace, ".git")).catch(() => undefined);
-  if (!git?.isDirectory()) return false;
-  const bundle = await lstat(join(workspace, ".git", RESULT_BUNDLE_FILE)).catch(() => undefined);
-  return bundle?.isFile() ?? false;
+/** Why a git-history run's upload carries no result bundle (a fixed value, logged as is). */
+type BundleSkip =
+  | "git_not_directory"
+  | "absent_or_symlink"
+  | "not_regular_file"
+  | "too_large"
+  | "git_changed"
+  | "short_read"
+  | "copy_failed";
+
+const BUNDLE_COPY_CHUNK = 1024 * 1024;
+
+/**
+ * Copies the workspace's result bundle into `staging/.git/` through one file descriptor, so what is
+ * uploaded is a file the bridge read itself, never a path a tool process could still swap: `.git`
+ * must be a real directory (lstat), the bundle is opened without following a symlink and without
+ * blocking (a FIFO), must be a regular file within `maxBytes`, and `.git` must still be the same
+ * directory (dev/ino) afterwards. Only the size fstat reported is copied. Returns the reason when
+ * there is no bundle; nothing it reads is logged.
+ */
+async function stageResultBundle(
+  workspace: string,
+  staging: string,
+  maxBytes: number,
+  beforeRecheck?: () => Promise<void> | void,
+): Promise<BundleSkip | undefined> {
+  const gitPath = join(workspace, ".git");
+  const git = await lstat(gitPath).catch(() => undefined);
+  if (!git?.isDirectory()) return "git_not_directory";
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+  const source = await open(join(gitPath, RESULT_BUNDLE_FILE), flags).catch(() => undefined);
+  if (!source) return "absent_or_symlink";
+  try {
+    const metadata = await source.stat();
+    if (!metadata.isFile()) return "not_regular_file";
+    if (metadata.size > maxBytes) return "too_large";
+    await beforeRecheck?.();
+    const again = await lstat(gitPath).catch(() => undefined);
+    if (!again?.isDirectory() || again.dev !== git.dev || again.ino !== git.ino) return "git_changed";
+    try {
+      await mkdir(join(staging, ".git"), { mode: 0o700 });
+      const target = await open(join(staging, ".git", RESULT_BUNDLE_FILE), "wx", 0o600);
+      try {
+        const buffer = Buffer.alloc(Math.min(BUNDLE_COPY_CHUNK, Math.max(metadata.size, 1)));
+        let copied = 0;
+        while (copied < metadata.size) {
+          const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, metadata.size - copied), copied);
+          if (bytesRead === 0) return "short_read";
+          await target.write(buffer, 0, bytesRead);
+          copied += bytesRead;
+        }
+      } finally {
+        await target.close();
+      }
+    } catch {
+      return "copy_failed";
+    }
+    return undefined;
+  } finally {
+    await source.close();
+  }
 }
 
 const exec = (command: string, args: string[]): Promise<number> =>
@@ -366,9 +427,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       return false;
     }
     // A runner that exits mid-run is a failure; its stderr is in the actor's log. Without warm rounds,
-    // every exit resolves runnerExited (main() then ends the actor), as before rounds existed.
+    // every exit resolves runnerExited (main() then ends the actor), as before rounds existed, except
+    // a runner the bridge itself ended (between rounds, or before a git-history run's collect).
     void runner.exited.then((code) => {
-      if (warmRounds && (stopped || entry.retiring)) return;
+      if (entry.retiring || (warmRounds && stopped)) return;
       if (!stopped) log("substrate_bridge_runner_exited", { runToken: token, code });
       resolveRunnerExited(code);
     });
@@ -455,23 +517,39 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   let round = 1;
   const collect = async (): Promise<"ok" | "rejected" | "failed"> => {
     const tarPath = join(stage, "workspace.tar");
-    // A history run leaves the root .git out, then adds back only its result bundle when that is a
-    // regular file in a real .git directory (lstat: a symlinked .git or bundle is never followed).
+    // A history run first ends the runner's whole process group, so no tool process is left to change
+    // the workspace while it is read. It leaves the root .git out, then adds back only its result
+    // bundle, copied through one file descriptor into a private staging folder (stageResultBundle).
+    if (collectResultBundle) await retireRunner();
     const createExclusions = collectResultBundle
       ? { names: exclusions.names, paths: [...exclusions.paths, ".git"] }
       : exclusions;
     let code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(createExclusions), "-f", tarPath, "."]);
-    if ((code === 0 || code === 1) && collectResultBundle && (await resultBundleIsFile(workspace))) {
-      const appended = await exec(tar, [
-        "-r",
-        "-f",
-        tarPath,
-        "-C",
-        workspace,
-        "--no-recursion",
-        `./.git/${RESULT_BUNDLE_FILE}`,
-      ]);
-      if (appended !== 0 && appended !== 1) code = appended;
+    if ((code === 0 || code === 1) && collectResultBundle) {
+      const bundleStage = await mkdtemp(join(stage, "bundle-"));
+      try {
+        const skipped = await stageResultBundle(
+          workspace,
+          bundleStage,
+          options.maxResultBundleBytes ?? MAX_RESULT_BUNDLE_BYTES,
+          options.beforeResultBundleRecheck,
+        );
+        if (skipped) log("substrate_bridge_result_bundle_skipped", { runToken: token, round, reason: skipped });
+        else {
+          const appended = await exec(tar, [
+            "-r",
+            "-f",
+            tarPath,
+            "-C",
+            bundleStage,
+            "--no-recursion",
+            `./.git/${RESULT_BUNDLE_FILE}`,
+          ]);
+          if (appended !== 0 && appended !== 1) code = appended;
+        }
+      } finally {
+        await rm(bundleStage, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
     // 1: some files changed while being read; the tar is still usable.
     if (code !== 0 && code !== 1) {
@@ -582,12 +660,16 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     current = undefined;
     if (!retired) return;
     retired.retiring = true;
-    retired.runner.stop?.();
-    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    if (retired.runner.stop) {
+      retired.runner.stop();
+      await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    }
     // Whatever is left of the runner's process group after the grace period (the runner itself if it
     // ignored SIGTERM, or a process one of its tools started) holds round n's environment: end it.
-    retired.runner.kill?.();
-    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    if (retired.runner.kill) {
+      retired.runner.kill();
+      await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    }
   };
 
   /**

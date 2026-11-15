@@ -160,4 +160,7 @@ Operator guide:
 With the experimental `JOB_LAUNCHER=substrate`, a history run uploads the
 workspace and, from `.git`, only the run's result bundle, so the repository's
 history does not count toward the coding proxy's `SUBSTRATE_WORKSPACE_MAX_MB`.
+Before the upload, the tool side ends every process the run's tools started.
+A bundle that is not a regular file inside a real `.git` folder, or is larger
+than 1 GiB, is left out, and the run fails with `vcs_result_bundle_invalid`.
 See the `job-launcher-substrate` help article.

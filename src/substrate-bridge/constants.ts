@@ -56,3 +56,9 @@ export const NEXT_ROUND_POLL_MS = 1_000;
  * (providers/jobs/workspace-swap.ts RESULT_BUNDLE_FILE): the only `.git` file the tool bridge uploads.
  */
 export const RESULT_BUNDLE_FILE = "wardby-result.bundle";
+/**
+ * The largest result bundle the tool bridge copies into a git-history run's upload: the proxy's
+ * default workspace upload limit (SUBSTRATE_WORKSPACE_MAX_MB, 1024). The launcher applies the run's
+ * own, usually smaller, bundle limit when it takes the bundle.
+ */
+export const MAX_RESULT_BUNDLE_BYTES = 1024 * 1024 * 1024;

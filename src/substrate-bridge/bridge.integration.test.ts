@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -187,7 +187,12 @@ describe("substrate bridges, end to end without Substrate", () => {
     return metadata;
   };
 
-  async function startTool(workspace: string, toolSetup: string): Promise<ToolHandle> {
+  async function startTool(
+    workspace: string,
+    toolSetup: string,
+    extra: Partial<Parameters<typeof runTool>[0]> & { onStop?: (signal: "stop" | "kill") => void } = {},
+  ): Promise<ToolHandle> {
+    const { onStop, ...overrides } = extra;
     const socketPath = join(dir, "tool", "runner.sock");
     sockets.push(socketPath);
     const runnerUrl = new URL("../claude-tool-runner/main.mjs", import.meta.url).href;
@@ -214,8 +219,10 @@ describe("substrate bridges, end to end without Substrate", () => {
         return {
           ready: server.then(() => undefined),
           exited: new Promise<number>(() => undefined),
+          ...(onStop ? { stop: () => onStop("stop"), kill: () => onStop("kill") } : {}),
         };
       },
+      ...overrides,
     });
   }
 
@@ -449,6 +456,98 @@ describe("substrate bridges, end to end without Substrate", () => {
       expect(entries).toContain("./src/hello.txt");
     },
   );
+
+  it("ends the runner's process group before a git-history run's workspace is read", async () => {
+    const { workspace, toolSetup } = await stage({ collectResultBundle: true });
+    const signals: string[] = [];
+    tool = await startTool(workspace, toolSetup, {
+      onStop: (signal) => void signals.push(signal),
+      beforeResultBundleRecheck: () => void signals.push("bundle_read"),
+    });
+    agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, "file") }));
+    await agent.uploaded;
+    const entries = await collectedEntries();
+    expect(signals).toEqual(["stop", "kill", "bundle_read"]);
+    expect(entries.filter((entry) => entry.includes(".git"))).toEqual(["./.git/wardby-result.bundle"]);
+  }, 20_000);
+
+  /** Runs a git-history collect after `prepare` changes the workspace's .git; returns its .git entries and logs. */
+  async function historyCollect(
+    prepare: (workspace: string) => Promise<void>,
+    extra: Partial<Parameters<typeof runTool>[0]> = {},
+  ): Promise<{ gitEntries: string[]; entries: string[]; skipped: string[] }> {
+    const { workspace, toolSetup } = await stage({ collectResultBundle: true });
+    tool = await startTool(workspace, toolSetup, extra);
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            await prepare(workspace);
+            return 2;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    const entries = await collectedEntries();
+    const skipped = logs
+      .map((line) => JSON.parse(line) as { event: string; reason?: string })
+      .filter((entry) => entry.event === "substrate_bridge_result_bundle_skipped")
+      .map((entry) => entry.reason ?? "");
+    return { gitEntries: entries.filter((entry) => entry.includes(".git")), entries, skipped };
+  }
+
+  it("uploads no bundle when .git itself is a symlink to a folder holding one", async () => {
+    const result = await historyCollect(async (workspace) => {
+      const elsewhere = join(dir, "elsewhere-git");
+      await mkdir(elsewhere, { recursive: true });
+      await writeFile(join(elsewhere, "wardby-result.bundle"), "not the run's bundle\n");
+      await symlink(elsewhere, join(workspace, ".git"));
+    });
+    expect(result.gitEntries).toEqual([]);
+    expect(result.entries).toContain("./src/hello.txt");
+    expect(result.skipped).toEqual(["git_not_directory"]);
+  });
+
+  it("uploads no bundle, without hanging, when the bundle is a FIFO", async () => {
+    const result = await historyCollect(async (workspace) => {
+      await mkdir(join(workspace, ".git"), { recursive: true });
+      await exec("mkfifo", [join(workspace, ".git", "wardby-result.bundle")]);
+    });
+    expect(result.gitEntries).toEqual([]);
+    expect(result.skipped).toEqual(["not_regular_file"]);
+  });
+
+  it("uploads no bundle when .git is swapped for another folder between the checks", async () => {
+    const result = await historyCollect(
+      async (workspace) => {
+        await mkdir(join(workspace, ".git"), { recursive: true });
+        await writeFile(join(workspace, ".git", "wardby-result.bundle"), "the result bundle\n");
+      },
+      {
+        beforeResultBundleRecheck: async () => {
+          const workspace = join(dir, "workspace");
+          await rename(join(workspace, ".git"), join(dir, "old-git"));
+          await mkdir(join(workspace, ".git"));
+          await writeFile(join(workspace, ".git", "wardby-result.bundle"), "a swapped bundle\n");
+        },
+      },
+    );
+    expect(result.gitEntries).toEqual([]);
+    expect(result.skipped).toEqual(["git_changed"]);
+  });
+
+  it("uploads no bundle over the size limit", async () => {
+    const result = await historyCollect(
+      async (workspace) => {
+        await mkdir(join(workspace, ".git"), { recursive: true });
+        await writeFile(join(workspace, ".git", "wardby-result.bundle"), "the result bundle\n");
+      },
+      { maxResultBundleBytes: 4 },
+    );
+    expect(result.gitEntries).toEqual([]);
+    expect(result.skipped).toEqual(["too_large"]);
+  });
 
   it("uploads the workspace's .git unchanged on a run without git history", async () => {
     const { workspace, toolSetup } = await stage();
