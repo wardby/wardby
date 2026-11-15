@@ -103,6 +103,18 @@ after a push lists one digest per registry the image is in: take the one in
 the registry your cluster pulls from, not simply the first. Or read it straight
 from `docker buildx build --push`'s output.
 
+On Kubernetes and Substrate, `workerImageRef` must be a registry digest; Wardby
+never uses a local image ID there.
+
+### Substrate launcher
+
+On the Substrate launcher (`JOB_LAUNCHER=substrate`), also add the Substrate
+bridge layer from your release's `wardby-substrate-codex` image: see
+[`Dockerfile.custom-codex-example`](../src/substrate-bridge/Dockerfile.custom-codex-example)
+and [Custom images](substrate-backend.md#custom-images). The layer does nothing
+on Docker and Kubernetes, so one image serves every launcher. Rebuild it on
+each release's bridge.
+
 ## Pointing an agent at it
 
 Set `CodingAgentProfile.workerImageRef` to your image's digest (a mutable
@@ -127,12 +139,13 @@ Code agent uses two containers: one runs Claude Code and holds its API key; the
 other runs the agent's commands and has your repository. `workerImageRef` always
 replaces the container that runs commands.
 
-|                                | Codex agent                                                       | Claude Code agent                                                                                               |
-| ------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| What `workerImageRef` replaces | the agent's only container                                        | the container that runs commands                                                                                |
-| Build your image `FROM`        | [the coding-worker driver image](#the-driver-image) (`driver-vN`) | the `wardby-claude-tool-runner` image from the same wardby release (or `wardby-claude-tool-runner-node-python`) |
-| Rebuild when                   | the driver image changes                                          | you upgrade wardby                                                                                              |
-| Claude Code itself runs on     | —                                                                 | wardby's standard image, never yours                                                                            |
+|                                     | Codex agent                                                       | Claude Code agent                                                                                               |
+| ----------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| What `workerImageRef` replaces      | the agent's only container                                        | the container that runs commands                                                                                |
+| Build your image `FROM`             | [the coding-worker driver image](#the-driver-image) (`driver-vN`) | the `wardby-claude-tool-runner` image from the same wardby release (or `wardby-claude-tool-runner-node-python`) |
+| Rebuild when                        | the driver image changes                                          | you upgrade wardby                                                                                              |
+| Claude Code itself runs on          | —                                                                 | wardby's standard image, never yours                                                                            |
+| On the Substrate launcher, also add | the bridge layer from `wardby-substrate-codex`                    | the bridge layer from `wardby-substrate-tool`, or build `FROM` `wardby-substrate-tool`                          |
 
 The driver image sections above are for Codex. The subsections below are for
 Claude Code. In them, "tool runner" means the container that runs a Claude Code
@@ -211,6 +224,17 @@ agent's commands.
 
 To undo it, set `codingProfile.workerImageRef` to `null`. The agent then uses
 the standard tool runner for its `toolchain`.
+
+#### Substrate launcher
+
+On the Substrate launcher (`JOB_LAUNCHER=substrate`), also add the Substrate
+bridge layer from your release's `wardby-substrate-tool` image, or build `FROM`
+`wardby-substrate-tool` (or `wardby-substrate-tool-node-python`) instead of the
+tool runner: see
+[`Dockerfile.custom-tool-example`](../src/substrate-bridge/Dockerfile.custom-tool-example)
+and [Custom images](substrate-backend.md#custom-images). The layer does nothing
+on Docker and Kubernetes, so one image serves every launcher. Rebuild it on
+each release's bridge.
 
 ### Languages other than Node and Python
 

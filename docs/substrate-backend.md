@@ -64,8 +64,9 @@ Docker and Kubernetes ones.
   `CODING_CLAUDE_WORKER_IMAGE` and the tool actor `CODING_CLAUDE_TOOL_RUNNER_IMAGE`
   (and the per-toolchain tool-runner images), each as a registry digest
   (`repo@sha256:<64 hex>`), as for the Kubernetes launcher. For Substrate these
-  must be the worker and tool-runner images with the bridge added as the
-  entrypoint. For Codex agents, `CODING_WORKER_IMAGE` (and
+  must be the worker and tool-runner images with the bridge added. Every actor
+  template sets the bridge's command itself, so an image's own `ENTRYPOINT` and
+  `CMD` are not used. For Codex agents, `CODING_WORKER_IMAGE` (and
   `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` for the Node + Python toolchain) must
   be the Substrate Codex bridge images, by digest. See [Images](#images).
 - **A coding proxy of this release or later** before Codex runs are sent: the
@@ -75,12 +76,29 @@ Docker and Kubernetes ones.
 - **This release's migrations**, applied with `prisma migrate deploy`
   (`npm run prisma:migrate`) before the new coding proxy and control plane
   start. Upgrade in this order:
-  1. Apply `20261121000000_substrate_codex_shape` and
-     `20261122000000_substrate_repositories`. The new proxy reads the
+  1. Apply `20261121000000_substrate_codex_shape`,
+     `20261122000000_substrate_repositories` and
+     `20261123000000_substrate_templates`. The new proxy reads the
      `repositories` column on every Substrate request, with or without extra
      repositories, so a proxy started before it exists fails every run.
   2. Start the new coding proxy.
   3. Start the new control plane.
+- **Bridge images, custom images and the proxy from the same release.** Every
+  bridge request names its protocol, and the coding proxy refuses a bridge of
+  another protocol, failing the run with
+  [`substrate_bridge_incompatible`](../help/errors/substrate-bridge-incompatible.md).
+  So:
+  - upgrade with no Substrate run in flight: a run that started on the older
+    bridge images fails that way once the new proxy serves it;
+  - update the bridge-image variables (see [Images](#images)) at the same time,
+    and rebuild every [custom image](#custom-images) on the new release's
+    bridge.
+- **The first run of each kind after this upgrade starts slowly.** Every
+  template name changes with this release, because the templates now set the
+  bridge's command. The first run on each template waits in the queue while
+  Substrate builds its golden snapshot; later runs reuse it. Templates made by
+  an earlier release are not used again (see
+  [Templates and snapshots](#templates-and-snapshots)).
 
 ### Images
 
@@ -114,7 +132,8 @@ repository root, after `npm run build`). For Codex, build
 `src/substrate-bridge/Dockerfile.codex` on the Codex worker image the same way
 (`docker build -f src/substrate-bridge/Dockerfile.codex --build-arg BASE=<worker>@sha256:… .`).
 Push them to a registry the cluster
-can pull from, and pin the resulting digests.
+can pull from, and pin the resulting digests. For an agent's custom image
+(`workerImageRef`), see [Custom images](#custom-images).
 
 ## Configure
 
@@ -125,22 +144,25 @@ coding proxy; the proxy serves the Substrate routes only when
 
 ### Control plane
 
-| Variable                          | Required | Default              | Purpose                                                                                                                             |
-| --------------------------------- | -------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `JOB_LAUNCHER`                    | Yes      | `local`              | Set to `substrate`.                                                                                                                 |
-| `SUBSTRATE_API_URL`               | Yes      |                      | Substrate Control API URL (a valid URL).                                                                                            |
-| `SUBSTRATE_TOKEN_FILE`            | Yes      |                      | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.         |
-| `SUBSTRATE_ATESPACE`              | Yes      |                      | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                         |
-| `SUBSTRATE_PROXY_HOST`            | Yes      |                      | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                      |
-| `SUBSTRATE_PROXY_PORT`            |          | `8787`               | Port of the coding proxy as the actors reach it (1 to 65535). Set the same value on the proxy.                                      |
-| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets` | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace.      |
-| `SUBSTRATE_KUBE_CONTEXT`          |          | default context      | Kubernetes context used to create and delete the per-run Secrets.                                                                   |
-| `SUBSTRATE_CA_FILE`               |          | system trust         | CA bundle that verifies the Substrate API's certificate.                                                                            |
-| `SUBSTRATE_SERVER_NAME`           |          | from the URL         | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                                    |
-| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker           | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                                |
-| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                           |
-| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                | After the worker exits without a result, how long the tool side may take to report the workspace before the run fails (10 to 3600). |
-| `BLOB_STORE` and its settings     | Yes      |                      | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                        |
+| Variable                          | Required | Default              | Purpose                                                                                                                                                                   |
+| --------------------------------- | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JOB_LAUNCHER`                    | Yes      | `local`              | Set to `substrate`.                                                                                                                                                       |
+| `SUBSTRATE_API_URL`               | Yes      |                      | Substrate Control API URL (a valid URL).                                                                                                                                  |
+| `SUBSTRATE_TOKEN_FILE`            | Yes      |                      | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.                                               |
+| `SUBSTRATE_ATESPACE`              | Yes      |                      | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                                                               |
+| `SUBSTRATE_PROXY_HOST`            | Yes      |                      | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                                                            |
+| `SUBSTRATE_PROXY_PORT`            |          | `8787`               | Port of the coding proxy as the actors reach it (1 to 65535). Set the same value on the proxy.                                                                            |
+| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets` | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace.                                            |
+| `SUBSTRATE_KUBE_CONTEXT`          |          | default context      | Kubernetes context used to create and delete the per-run Secrets.                                                                                                         |
+| `SUBSTRATE_CA_FILE`               |          | system trust         | CA bundle that verifies the Substrate API's certificate.                                                                                                                  |
+| `SUBSTRATE_SERVER_NAME`           |          | from the URL         | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                                                                          |
+| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker           | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                                                                      |
+| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                                                                 |
+| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                | After the worker exits without a result, how long the tool side may take to report the workspace before the run fails (10 to 3600).                                       |
+| `SUBSTRATE_TEMPLATE_TTL_SEC`      |          | `604800` (7 days)    | Templates no run used for this long are removed (3600 to 7776000). Never less than 27 hours, whatever the value; see [Templates and snapshots](#templates-and-snapshots). |
+| `SUBSTRATE_TEMPLATE_READY_SEC`    |          | `900`                | How long a new template may build without ever starting an actor, while the workers have room, before its runs fail with `substrate_image_unready` (60 to 7200).          |
+| `SUBSTRATE_TEMPLATE_RETRY_SEC`    |          | `600`                | After a template's golden snapshot fails, the window in which a second failure fails the run with `substrate_image_unready` instead of rebuilding (120 to 86400).         |
+| `BLOB_STORE` and its settings     | Yes      |                      | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                                                              |
 
 The digest requirement for the worker and tool-runner images is the same as for
 `JOB_LAUNCHER=kubernetes`; the control plane refuses to start without digests.
@@ -180,6 +202,8 @@ must arrive within ten minutes of being authenticated.
   [Extra repositories](#extra-repositories)).
 - Coding runs with the dependency cache (`codingProfile.dependencyCache`), for
   Claude Code and Codex (see [Dependency cache](#dependency-cache)).
+- Custom worker images (`codingProfile.workerImageRef`), for Claude Code and
+  Codex (see [Custom images](#custom-images)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -314,6 +338,103 @@ in that store, next to the run files under `substrate/runs/`.
 - **Upgrade together.** The coding proxy, the tool runner images and the worker
   images must all be this release or later. An older tool runner on an adopted
   round still gets `reused_workspace`, from the proxy.
+
+### Custom images
+
+An agent's custom image (`codingProfile.workerImageRef`, see
+[Bring-your-own coding-worker images](coding-worker-byo-images.md)) runs on
+Substrate as on the other launchers. It replaces the same thing:
+
+- **Claude Code:** the tool actor. Claude Code itself always runs on
+  `CODING_CLAUDE_WORKER_IMAGE`, never on a custom image.
+- **Codex:** the run's one actor.
+
+The image must contain **this release's Substrate bridge**. Add it on top of
+your image, with the digest from the `substrateTool` key (Claude Code) or the
+`substrateCodex` key (Codex) of `dist/quickstart-images.json` in the npm
+package of the same release as your control plane and proxy:
+
+```dockerfile
+USER root
+COPY --from=ghcr.io/your-org/wardby-substrate-tool@sha256:<digest> /opt/wardby/substrate-bridge/ /opt/wardby/substrate-bridge/
+RUN mkdir -p /run/wardby/input /run/wardby/output /run/wardby/tool /workspace \
+    && chown -R 10001:10001 /run/wardby /workspace
+USER 10001:10001
+```
+
+For Codex, copy from `wardby-substrate-codex` instead. For Claude Code you can
+instead build `FROM` the release's `wardby-substrate-tool` (or
+`wardby-substrate-tool-node-python`) image rather than
+`wardby-claude-tool-runner`: it already has the bridge. Two complete examples,
+which take both bases as digest-pinned build arguments, are
+[`Dockerfile.custom-tool-example`](../src/substrate-bridge/Dockerfile.custom-tool-example)
+(Claude Code) and
+[`Dockerfile.custom-codex-example`](../src/substrate-bridge/Dockerfile.custom-codex-example)
+(Codex).
+
+- **No `ENTRYPOINT` or `CMD` needed.** The launcher sets the command, as the
+  Kubernetes and Docker launchers do, and the bridge layer does nothing on
+  those launchers. So one image runs on all three.
+- **A registry digest only.** `workerImageRef` must be `repo@sha256:<digest>`;
+  a tag or a local image ID fails the run with
+  [`substrate_image_not_digest`](../help/errors/substrate-image-not-digest.md).
+- **The first run is slow.** The first run after you change `workerImageRef`
+  waits in the queue while Substrate builds the template's golden snapshot;
+  later runs reuse it. Each distinct image and size is its own template (see
+  [Templates and snapshots](#templates-and-snapshots)), so keep the number of
+  images small.
+- **Pull access.** The Substrate workers pull the image themselves; Wardby
+  passes no pull credential. For a private registry, configure pull access for
+  the Substrate worker nodes.
+- **Architecture and disk.** The image's architecture must match the workers',
+  and its size counts against the worker nodes' disk.
+- **Rebuild on every upgrade**, on the new release's bridge. A bridge from
+  another release fails the run with
+  [`substrate_bridge_incompatible`](../help/errors/substrate-bridge-incompatible.md).
+
+Before it starts the run, the bridge checks the image and fails the run with
+[`substrate_image_incomplete:<item>`](../help/errors/substrate-image-incomplete.md)
+if the runner, GNU tar, a writable `/workspace` or a writable `/run/wardby`
+directory is missing. It does not check `/tmp`: an image whose only fault is an
+unwritable `/tmp` fails with
+[`substrate_startup_timeout`](../help/errors/substrate-startup-timeout.md)
+instead.
+
+### Templates and snapshots
+
+Wardby creates one Substrate actor template, and Substrate one golden snapshot,
+per role (agent, tool or Codex), image and size. It records every template it
+creates in the database (the `SubstrateTemplate` table), with when a launch,
+park or adoption last used it.
+
+- **Cleanup.** At most once an hour, a launch removes up to 50 templates no
+  run used for `SUBSTRATE_TEMPLATE_TTL_SEC` (default 7 days): first the record,
+  then the Substrate template. Each removal logs `substrate_template_removed`
+  (info). If Substrate refuses the delete, the record is put back, the warning
+  `substrate_template_remove_failed` is logged, and the next sweep tries again.
+  The removal age is never less than 27 hours, whatever the setting: the
+  longest coding run (2 hours) plus the longest `SUBSTRATE_PARK_TTL_SEC`
+  (1 day) plus an hour, so a template is never removed under a running or kept
+  round.
+- **Storage.** Golden snapshots cost storage in Substrate, as kept rounds do
+  (see [Storage cost](#storage-cost)). `SUBSTRATE_TEMPLATE_TTL_SEC` bounds how
+  long an unused one stays.
+- **A golden snapshot that fails.** The first failure rebuilds the template.
+  A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
+  [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
+  instead, and so does a new template that never starts an actor within
+  `SUBSTRATE_TEMPLATE_READY_SEC` while the workers have room. A run that finds
+  another launch rebuilding its template goes back to the queue, like a
+  capacity refusal (reason `substrate_capacity: template rebuilding`).
+- **Log events**, each with the template's name and role and never an image's
+  content or Substrate's message: `substrate_template_golden_failed`,
+  `substrate_template_unready`, `substrate_template_record_failed` (the
+  failure count could not be written; the template is rebuilt),
+  `substrate_template_remove_failed` (all warn) and `substrate_template_removed`
+  (info).
+- **Templates made before this release** are not in the table, and because
+  every template name changed with this release, none of them is used again.
+  The cleanup never sees them: remove them once with Substrate's own tooling.
 
 ## Warm rounds
 
@@ -456,10 +577,6 @@ A run that needs one of these fails at launch with
 Use the Docker or Kubernetes launcher for them.
 
 - Coding services (`.wardby/services.yaml`).
-- A custom worker image (`codingProfile.workerImageRef`), for Claude Code and
-  Codex alike: it has no Substrate bridge. Only the configured worker and
-  tool-runner images run, so a run dispatched with a tool-runner image you have
-  since replaced is refused the same way.
 - Suspend and resume between rounds is off by default: every round starts new
   actors, as on the other launchers. Turn it on with
   [warm rounds](#warm-rounds).
@@ -504,6 +621,20 @@ Known recovery steps:
   `SUBSTRATE_PARK_MAX` is above 0, and the step line's reason.
 - **Every actor request answers `invalid_host`.** `SUBSTRATE_PROXY_HOST` or
   `SUBSTRATE_PROXY_PORT` differs between the control plane and the proxy.
+- **A custom image's runs fail with `substrate_image_unready`.** Substrate could
+  not build the template's golden snapshot, or no actor ever started from it.
+  Usually the image has no bridge, is built for another architecture, cannot
+  be pulled by the workers, or already uses port 8080 (the bridge's readiness
+  probe). See
+  [`substrate_image_unready`](../help/errors/substrate-image-unready.md).
+- **`substrate_bridge_incompatible`.** The image's bridge is from another
+  release than the coding proxy. Rebuild the image on this release's bridge,
+  and use the bridge images of the same release as the proxy.
+- **`substrate_image_incomplete:<item>`.** The bridge found the image lacks
+  something it runs: `runner` (the tool runner or Codex worker), `tar` (GNU
+  tar), `workspace` (a `/workspace` that user 10001 can write) or `run_dir` (a
+  `/run/wardby` directory that user 10001 can write). See
+  [`substrate_image_incomplete`](../help/errors/substrate-image-incomplete.md).
 
 Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.md),
 [`substrate_capacity`](../help/errors/substrate-capacity.md),
@@ -515,4 +646,7 @@ Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.m
 [`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md),
 [`substrate_image_not_digest`](../help/errors/substrate-image-not-digest.md),
 [`substrate_seed_too_large`](../help/errors/substrate-seed-too-large.md),
-[`substrate_limits_too_small`](../help/errors/substrate-limits-too-small.md).
+[`substrate_limits_too_small`](../help/errors/substrate-limits-too-small.md),
+[`substrate_image_unready`](../help/errors/substrate-image-unready.md),
+[`substrate_bridge_incompatible`](../help/errors/substrate-bridge-incompatible.md),
+[`substrate_image_incomplete`](../help/errors/substrate-image-incomplete.md).

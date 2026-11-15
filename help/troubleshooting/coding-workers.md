@@ -26,8 +26,9 @@ article and its error articles (`substrate_unavailable`, `substrate_capacity`,
 `substrate_provisioning_failed`, `substrate_startup_timeout`,
 `substrate_collect_timeout`, `substrate_collect_failed`,
 `substrate_result_missing`, `substrate_feature_unsupported`,
-`substrate_image_not_digest`, `substrate_seed_too_large` and
-`substrate_limits_too_small`).
+`substrate_image_not_digest`, `substrate_seed_too_large`,
+`substrate_limits_too_small`, `substrate_image_unready`,
+`substrate_bridge_incompatible` and `substrate_image_incomplete`).
 
 For the specific isolation refusal, read [Coding-worker isolation unavailable](../errors/docker-isolation-unsupported.md).
 
