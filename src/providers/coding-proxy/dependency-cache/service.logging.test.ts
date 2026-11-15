@@ -47,8 +47,8 @@ async function setup() {
   const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port: 0, dependencyCache: cache });
   servers.push(server);
   const base = `http://127.0.0.1:${server.port}/cache/npm`;
-  const call = (path: string, init: RequestInit = {}, token = TOKEN) =>
-    fetch(`${base}/${path}`, { ...init, headers: { authorization: `Bearer ${token}` } }).then(
+  const call = (path: string, init: RequestInit & { headers?: Record<string, string> } = {}, token = TOKEN) =>
+    fetch(`${base}/${path}`, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } }).then(
       (response) => response.status,
     );
   const keyId = deriveSnapshotKey({
@@ -96,6 +96,26 @@ describe("dependency cache logging", () => {
     expect(logged).not.toContain(TOKEN);
     expect(logged).not.toContain("lock=");
     expect(logged).not.toContain(LOCK);
+  });
+
+  it("logs a digest mismatch as one fixed line", async () => {
+    const { call } = await setup();
+    expect(
+      await call(`blob?lock=${LOCK}`, {
+        method: "PUT",
+        body: "bytes",
+        headers: { "x-wardby-archive-sha256": "0".repeat(64) },
+      }),
+    ).toBe(400);
+    expect(refusals().at(-1)).toEqual({
+      event: "dependency_cache.refused",
+      runId: "run-1",
+      route: "upload",
+      status: 400,
+      code: "digest_mismatch",
+    });
+    const logged = JSON.stringify(Object.values(log).map((fn) => fn.mock.calls));
+    expect(logged).not.toContain(TOKEN);
   });
 
   it("logs a row dropped for its missing blob", async () => {

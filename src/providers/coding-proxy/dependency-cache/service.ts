@@ -23,6 +23,8 @@
  *   an upload that does not end in its own row deletes its own object.
  * - The sha256 is computed while the upload streams and stored in Postgres;
  *   downloads carry it so the worker verifies before extracting.
+ * - The worker sends the archive's SHA-256; an upload whose bytes differ is
+ *   refused `digest_mismatch` and its object deleted.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
@@ -102,6 +104,9 @@ function send(response: ServerResponse, status: number, body: unknown, close = f
  * `nearest.manifest`) with the sha256 this proxy computed and recorded for the
  * row, so a worker trusts them only for bytes that verify against that digest.
  * Optional so workers deployed before validation metadata remain compatible.
+ * A fourth header, `x-wardby-archive-sha256` (archiveDigestHeader), carries the
+ * SHA-256 of the file the worker scanned; it is independent of these three, and
+ * an upload whose bytes differ from it is refused `digest_mismatch`.
  */
 function verifiedArchiveHeaders(headers: IncomingMessage["headers"]): VerifiedArchive | null {
   const version = headers["x-wardby-archive-scan-version"];
@@ -123,6 +128,17 @@ function verifiedArchiveHeaders(headers: IncomingMessage["headers"]): VerifiedAr
   )
     throw new CacheRefusal(400, "bad_request");
   return { archiveScanVersion: parsedVersion, archiveEntries: parsedEntries, unpackedBytes: parsedUnpackedBytes };
+}
+
+const ARCHIVE_SHA256 = /^[0-9a-f]{64}$/;
+
+/** The worker's SHA-256 of the archive it scanned (x-wardby-archive-sha256): null when absent (an
+ *  older worker); 64 lowercase hex, else 400 bad_request. */
+function archiveDigestHeader(headers: IncomingMessage["headers"]): string | null {
+  const value = headers["x-wardby-archive-sha256"];
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !ARCHIVE_SHA256.test(value)) throw new CacheRefusal(400, "bad_request");
+  return value;
 }
 
 function lookupManifest(
@@ -379,6 +395,7 @@ export class DependencyCacheService {
     if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > this.options.maxSnapshotBytes))
       throw new CacheRefusal(413, "too_large");
     const verifiedArchive = verifiedArchiveHeaders(request.headers);
+    const expectedSha256 = archiveDigestHeader(request.headers);
     const projectSlot = `${context.runId}\0${key.projectPath}`;
     if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
       throw new CacheRefusal(409, "upload_in_progress");
@@ -398,7 +415,7 @@ export class DependencyCacheService {
     this.activeUploads += 1;
     releaseBodyTimer();
     try {
-      await this.storeUpload(context, deadline, key, request, response, verifiedArchive);
+      await this.storeUpload(context, deadline, key, request, response, verifiedArchive, expectedSha256);
     } finally {
       this.uploading.delete(projectSlot);
       this.uploading.delete(key.keyId);
@@ -413,6 +430,7 @@ export class DependencyCacheService {
     request: IncomingMessage,
     response: ServerResponse,
     verifiedArchive: VerifiedArchive | null,
+    expectedSha256: string | null,
   ): Promise<void> {
     const blobKey = newBlobKey(key);
     let expired = false;
@@ -437,6 +455,11 @@ export class DependencyCacheService {
       throw error;
     } finally {
       clearTimeout(timer);
+    }
+    // The bytes that arrived are not the archive the worker scanned: keep nothing of them.
+    if (expectedSha256 !== null && stored.sha256 !== expectedSha256) {
+      await this.discard(blobKey);
+      throw new CacheRefusal(400, "digest_mismatch");
     }
     // Checked only now, after the last byte arrived: every byte of an
     // accepted upload was sent before the seal (so before the agent ran).

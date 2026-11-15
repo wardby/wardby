@@ -206,10 +206,11 @@ export interface PrepareProjectOptions {
 
 export declare function prepareProject(options: PrepareProjectOptions): Promise<PrepareResult>;
 
+/** With `digest: true`, `sha256` is the lowercase hex SHA-256 of every byte of the file. */
 export declare function scanArchive(
   file: string,
-  options: { budgetBytes: number; maxEntries?: number; signal?: AbortSignal },
-): Promise<{ entries: number; unpackedBytes: number }>;
+  options: { budgetBytes: number; maxEntries?: number; signal?: AbortSignal; digest?: boolean },
+): Promise<{ entries: number; unpackedBytes: number; sha256?: string }>;
 
 export declare function extractArchive(
   file: string,

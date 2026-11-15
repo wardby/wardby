@@ -271,6 +271,51 @@ describe("dependency cache lookup", () => {
   });
 });
 
+describe("end-to-end upload digest", () => {
+  const digest = (value: string) => ({ "x-wardby-archive-sha256": value });
+  const cacheFiles = async (dir: string) =>
+    (await storedFiles(dir)).filter((file) => file.includes("dependency-cache"));
+
+  it("stores an upload whose bytes match the worker's digest", async () => {
+    const { upload, store } = await setup();
+    expect((await upload(archive, { lock: LOCK }, undefined, digest(hex(archive)))).status).toBe(201);
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+  });
+
+  it("refuses an upload whose bytes differ from the worker's digest, and keeps nothing of it", async () => {
+    const { upload, store, dir } = await setup();
+    expect(await upload(archive, { lock: LOCK }, undefined, digest(hex("other bytes")))).toEqual({
+      status: 400,
+      body: { error: "digest_mismatch" },
+    });
+    expect(store.rows).toEqual([]);
+    expect(await cacheFiles(dir)).toEqual([]);
+    // The run's one upload for the project was not used up.
+    expect((await upload(archive, { lock: LOCK }, undefined, digest(hex(archive)))).status).toBe(201);
+    expect(store.rows).toHaveLength(1);
+  });
+
+  it.each(["Z".repeat(64), "a".repeat(63), "A".repeat(64), ""])(
+    "refuses a malformed digest header unread: %s",
+    async (value) => {
+      const { upload, store, dir } = await setup();
+      expect(await upload(archive, { lock: LOCK }, undefined, digest(value))).toEqual({
+        status: 400,
+        body: { error: "bad_request" },
+      });
+      expect(store.rows).toEqual([]);
+      expect(await cacheFiles(dir)).toEqual([]);
+    },
+  );
+
+  it("accepts an upload without the header (an older worker)", async () => {
+    const { upload, store } = await setup();
+    expect((await upload(archive)).status).toBe(201);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+  });
+});
+
 describe("dependency cache upload and download", () => {
   it("stores the upload under the derived key with its sha256, then serves it", async () => {
     const { upload, lookup, download, store, blobs, derived } = await setup();
@@ -365,8 +410,8 @@ describe("dependency cache upload and download", () => {
       "x-wardby-archive-scan-version": "1",
       "x-wardby-archive-entries": "3",
       "x-wardby-archive-unpacked-bytes": "10",
-      // Not part of the protocol: a client cannot choose the digest.
-      "x-wardby-archive-sha256": "0".repeat(64),
+      // Not part of the upload protocol: a client cannot choose the digest. (A wrong
+      // x-wardby-archive-sha256 is refused digest_mismatch: see "end-to-end upload digest".)
       "x-wardby-sha256": "0".repeat(64),
     };
     expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
