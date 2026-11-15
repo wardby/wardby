@@ -214,12 +214,15 @@ workspace lacks that merge; it writes no step line.
 - When the WorkerPool is short of room, kept rounds are removed oldest first,
   stopping once a removal frees no room, and never the one being continued.
 
-### Memory cost
+### Storage cost
 
-A suspended actor may still hold worker capacity (memory) until it expires or
-is removed, so size `SUBSTRATE_PARK_MAX` and `SUBSTRATE_PARK_TTL_SEC` against
-your WorkerPool. Keep the TTL short if rounds rarely follow each other, and
-use `SUBSTRATE_PARK_MAX=0` to turn keeping off without turning warm rounds off.
+A kept round costs snapshot storage in Substrate until it expires or is
+removed. It does not reserve worker capacity. Size `SUBSTRATE_PARK_MAX` and
+`SUBSTRATE_PARK_TTL_SEC` against your storage budget: keep the TTL short if
+rounds rarely follow each other, and use `SUBSTRATE_PARK_MAX=0` to turn keeping
+off without turning warm rounds off. If your Substrate deployment counts
+suspended actors against worker capacity, kept rounds are removed oldest first
+when the WorkerPool is short of room (see above).
 
 ### Diagnostics
 
