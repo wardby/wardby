@@ -72,9 +72,15 @@ Docker and Kubernetes ones.
   proxy accepts the `x-api-key` header on the Responses route only when no
   `Authorization` header is present, and serves the routes the Codex actor
   uses to hold the workspace. An older proxy refuses those requests.
-- **The `20261121000000_substrate_codex_shape` migration**, applied with
-  `prisma migrate deploy` (`npm run prisma:migrate`) before the new control
-  plane and proxy start, as for any upgrade that ships a migration.
+- **This release's migrations**, applied with `prisma migrate deploy`
+  (`npm run prisma:migrate`) before the new coding proxy and control plane
+  start. Upgrade in this order:
+  1. Apply `20261121000000_substrate_codex_shape` and
+     `20261122000000_substrate_repositories`. The new proxy reads the
+     `repositories` column on every Substrate request, with or without extra
+     repositories, so a proxy started before it exists fails every run.
+  2. Start the new coding proxy.
+  3. Start the new control plane.
 
 ### Images
 
@@ -151,7 +157,7 @@ The digest requirement for the worker and tool-runner images is the same as for
 | `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                                                                                                                   |
 | `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
 | `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
-| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload.                                                                                                                                                               |
+| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload, per repository (the default one and each writable extra).                                                                                                     |
 | `WARDBY_MCP_GATEWAY_URL`      |                | unset                     | For MCP tools: see [Remote MCP servers](security-deployment.md#remote-mcp-servers).                                                                                                                         |
 | `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
@@ -170,6 +176,8 @@ must arrive within ten minutes of being authenticated.
 - `codingProfile.gitHistory` runs (see [Git history](#git-history)).
 - Coding runs with remote MCP tools, for Claude Code and Codex (see
   [MCP tools](#mcp-tools)).
+- Coding runs with extra repositories, for Claude Code and Codex (see
+  [Extra repositories](#extra-repositories)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -222,6 +230,63 @@ and the whole workspace upload, bundle included, must fit
 `SUBSTRATE_WORKSPACE_MAX_MB`. A run with no `.git` or no bundle behaves as on
 Docker and Kubernetes. See
 [Git history in coding runs](../help/git-history.md).
+
+### Extra repositories
+
+A run with extra repositories (see
+[Several repositories in one run](coding-agent-setup.md#several-repositories-in-one-run))
+works for Claude Code and Codex. Each extra is at `/repos/<name>` in the tool
+actor (Claude Code) or the Codex actor, never in Claude's agent actor.
+
+- **Read repositories** are read-only through file permissions, not a mount:
+  a file with an execute bit becomes `0555`, other files `0444`, directories
+  `0555`, and setuid, setgid and sticky bits are cleared. A command can still
+  change its own copy's permissions, but a read repository's content is never
+  uploaded or collected.
+- **Repositories root.** After seeding, the bridge sets `/repos` to `0755`,
+  or else adds the sticky bit, when it is allowed to. On a root-owned mount
+  it is not, and the root keeps its mode; the bridge logs
+  `substrate_bridge_repos_root_not_hardened` and the run continues. A write
+  repository's folder is re-checked before collect either way.
+- **Disk.** The default repository and every extra are seeded as tars into one
+  budget, the run's disk (`workspaceDiskMb`, else `CODING_DISK_MB`). Over it,
+  the run fails at launch with
+  [`substrate_seed_too_large`](../help/errors/substrate-seed-too-large.md).
+- **Upload cap.** Each writable repository's upload must fit
+  `SUBSTRATE_WORKSPACE_MAX_MB` on its own. An extra over it, or whose folder
+  was replaced during the run (for example with a symlink, recorded as code
+  `repository_changed` in the tool side's `substrate_bridge_collect_failed`
+  log line), fails only that repository. If another repository published
+  changes, the run ends `partially_published`, as on Docker and Kubernetes. If
+  none did, the run fails with that failure. A missing collected workspace
+  fails only that extra repository (`failed(workspace)`, counted the same
+  way); only the default repository's missing workspace fails the whole run.
+- **Git history** works per repository: each writable extra uploads its own
+  result bundle (see [Git history](#git-history)).
+- **One difference from Docker and Kubernetes.** If collecting the default
+  repository fails, the whole run fails on Substrate, extras included; Docker
+  and Kubernetes still publish the extras.
+- **Warm rounds.** A run with extra repositories never keeps or resumes a warm
+  round: every round starts fresh (see
+  [When a round starts fresh](#when-a-round-starts-fresh)).
+- **Upgrade the coding proxy before the control plane.** These runs need this release's coding
+  proxy and Substrate bridge images. An older proxy has no per-repository
+  routes, so such a run fails at start with `substrate_collect_failed`.
+- **Bridge images.** The bridge images must also be this release or later. An
+  older bridge ignores `repositories`: read extras are missing, and write
+  extras end `failed(workspace)`.
+- **First start.** A run with extra repositories uses its own actor template
+  per image and size, so the first such run builds that template's golden
+  snapshot and starts more slowly.
+- **Cleanup.** If a run's stored repository list cannot be read when the run is
+  removed, the control plane logs the warning
+  `substrate_run_repositories_unreadable` (the run id only) and the extras'
+  stored blobs are left behind. The blob store cannot delete by prefix. Each
+  extra's blobs are under `substrate/runs/<token>/repos/<name>/` (`<token>` is
+  the run's Substrate token, not its run id). A lifecycle rule on the bucket
+  prefix `substrate/runs/` is safe if its age is well past the longest run's
+  timeout plus `SUBSTRATE_PARK_TTL_SEC` (at most a day), because that prefix
+  also holds live and kept runs' blobs: for example 7 days.
 
 ## Warm rounds
 
@@ -288,7 +353,9 @@ saying so (`get_run` shows `warmStart: true` or `false` on the round):
 
 A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
-workspace lacks that merge; it writes no step line.
+workspace lacks that merge; it writes no step line. A round with extra
+repositories always starts fresh too, and writes no step line (the launcher
+records no start reason for it).
 
 ### What is kept and what is removed
 
@@ -362,7 +429,6 @@ Use the Docker or Kubernetes launcher for them.
 
 - Coding services (`.wardby/services.yaml`).
 - The run dependency cache.
-- Extra repositories (multi-repository runs).
 - A custom worker image (`codingProfile.workerImageRef`), for Claude Code and
   Codex alike: it has no Substrate bridge. Only the configured worker and
   tool-runner images run, so a run dispatched with a tool-runner image you have

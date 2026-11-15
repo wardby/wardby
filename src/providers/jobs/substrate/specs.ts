@@ -2,11 +2,16 @@
 // Secret. Templates are shared across runs and logged by Substrate's API server, so nothing
 // here may carry a secret or a per-run value; the capability lives only in the per-run Secret,
 // which the egress gateway reads to inject the header.
+//
+// A run with extra repositories gets one more durable volume, `repos`, mounted at /repos on the
+// workspace holder only (the tool actor, or a Codex run's one actor; never Claude's agent). The
+// volume carries no repository name: the holder's bridge makes /repos/<name> from its setup.
 
 import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
 import { claudeToolLimits } from "../docker-isolation.js";
 import type { JobSpec } from "../types.js";
+import { REPOSITORY_MOUNT_ROOT } from "../storage-init.js";
 import type { ActorTemplateSpec, EgressRule } from "./api.js";
 import { MCP_TOKEN_EGRESS_HEADER, TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
 
@@ -66,19 +71,49 @@ function toolSize(spec: JobSpec): Size {
 }
 
 // Digest of every template field that is not image or size, with worker selector keys sorted so
-// the same selector always hashes the same way.
-function templateVariant(config: SubstrateLaunchConfig): string {
+// the same selector always hashes the same way. `repos` (the /repos volume) is hashed in only when
+// set, so every template without it keeps the name (and golden snapshot) it had before.
+function templateVariant(config: SubstrateLaunchConfig, options: { repos?: boolean } = {}): string {
   const selector = Object.fromEntries(
     Object.entries(config.workerSelector ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
   return createHash("sha256")
-    .update(JSON.stringify({ env: workerEnv(config), workerSelector: selector }))
+    .update(
+      JSON.stringify({ env: workerEnv(config), workerSelector: selector, ...(options.repos ? { repos: true } : {}) }),
+    )
     .digest("hex");
 }
 
 // The files name/atespace/uid appear at the volume root, so the mount path is the directory.
 const actorVolume = { name: "actor", actorMetadata: { path: "" } } as const;
 const actorMount = { name: "actor", mountPath: ACTOR_METADATA_DIR };
+
+/**
+ * The workspace holder's volumes and mounts: the run directory, /workspace, and, only for a run
+ * with extra repositories, /repos (no name in it), then the actor metadata.
+ */
+function holderStorage(spec: JobSpec): {
+  volumes: ActorTemplateSpec["volumes"];
+  volumeMounts: { name: string; mountPath: string }[];
+  repos: boolean;
+} {
+  const repos = spec.repositories !== undefined;
+  return {
+    volumeMounts: [
+      { name: "run", mountPath: "/run/wardby" },
+      { name: "workspace", mountPath: "/workspace" },
+      ...(repos ? [{ name: "repos", mountPath: REPOSITORY_MOUNT_ROOT }] : []),
+      actorMount,
+    ],
+    volumes: [
+      { name: "run", durableDir: true as const },
+      { name: "workspace", durableDir: true as const },
+      ...(repos ? [{ name: "repos", durableDir: true as const }] : []),
+      actorVolume,
+    ],
+    repos,
+  };
+}
 
 export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
   const size = agentSize(spec);
@@ -109,9 +144,16 @@ export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
 export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
   const size = toSize(spec.limits.cpus, spec.limits.memoryMb);
   const cold = { ...config, warmRounds: false };
+  const storage = holderStorage(spec);
   return {
     atespace: config.atespace,
-    name: templateName("codex", spec.image, size.cpuMillicores, size.memoryBytes, templateVariant(cold)),
+    name: templateName(
+      "codex",
+      spec.image,
+      size.cpuMillicores,
+      size.memoryBytes,
+      templateVariant(cold, { repos: storage.repos }),
+    ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
       {
@@ -119,14 +161,10 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
         image: spec.image,
         env: workerEnv(cold),
         wakeupProbe: { path: "/readyz", port: READY_PORT },
-        volumeMounts: [
-          { name: "run", mountPath: "/run/wardby" },
-          { name: "workspace", mountPath: "/workspace" },
-          actorMount,
-        ],
+        volumeMounts: storage.volumeMounts,
       },
     ],
-    volumes: [{ name: "run", durableDir: true }, { name: "workspace", durableDir: true }, actorVolume],
+    volumes: storage.volumes,
     ...size,
     snapshotFidelity: "MEMORY",
   };
@@ -135,9 +173,16 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
 export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
   if (!spec.toolImage) throw new Error("substrate_tool_image_missing");
   const size = toolSize(spec);
+  const storage = holderStorage(spec);
   return {
     atespace: config.atespace,
-    name: templateName("tool", spec.toolImage, size.cpuMillicores, size.memoryBytes, templateVariant(config)),
+    name: templateName(
+      "tool",
+      spec.toolImage,
+      size.cpuMillicores,
+      size.memoryBytes,
+      templateVariant(config, { repos: storage.repos }),
+    ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
       {
@@ -145,14 +190,10 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
         image: spec.toolImage,
         env: workerEnv(config),
         wakeupProbe: { path: "/readyz", port: READY_PORT },
-        volumeMounts: [
-          { name: "run", mountPath: "/run/wardby" },
-          { name: "workspace", mountPath: "/workspace" },
-          actorMount,
-        ],
+        volumeMounts: storage.volumeMounts,
       },
     ],
-    volumes: [{ name: "run", durableDir: true }, { name: "workspace", durableDir: true }, actorVolume],
+    volumes: storage.volumes,
     ...size,
     snapshotFidelity: "MEMORY",
   };

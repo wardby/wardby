@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,7 +12,8 @@ import { parseToolSetup } from "../claude-tool-runner/command.mjs";
 import { claudeToolSetup } from "../providers/jobs/claude-tool-setup.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { JobSpec } from "../providers/jobs/types.js";
-import { BLOB, substrateRunToken, toolActorSubject } from "../providers/jobs/substrate/names.js";
+import { BLOB, REPO_BLOB, substrateRunToken, toolActorSubject } from "../providers/jobs/substrate/names.js";
+import type { SubstrateRunLayout } from "../providers/jobs/substrate/run-store.js";
 import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
 import { MemoryRelayStore } from "../providers/coding-proxy/substrate/memory-relay-store.js";
 import { createSubstrateRoutes } from "../providers/coding-proxy/substrate/routes.js";
@@ -90,6 +92,8 @@ describe("substrate bridges, end to end without Substrate", () => {
   let proxyDelay: ((url: string) => number) | undefined;
   /** The session's MCP tools (harness parameter): pinned tools turn the input's MCP flag on. */
   let mcpTools: ProxySession["mcpTools"] | undefined;
+  /** The run row's layout (harness parameter): stage() sets it for a run with extra repositories. */
+  let layout: SubstrateRunLayout | undefined;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-it-"));
@@ -103,6 +107,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     proxyOverride = undefined;
     proxyDelay = undefined;
     mcpTools = undefined;
+    layout = undefined;
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -123,6 +128,7 @@ describe("substrate bridges, end to end without Substrate", () => {
           ? { ok: true, subject }
           : { ok: false, code: "invalid" },
       tokenForRun: substrateRunToken,
+      runLayoutForToken: async () => layout,
       limits: { resultBytes: 1 << 20, transcriptBytes: 1 << 20, workspaceBytes: 1 << 24 },
       pollWaitMs: 200,
       log: { info: (...args) => void routeLogs.push(args), warn: (...args) => void routeWarns.push(args) },
@@ -148,6 +154,8 @@ describe("substrate bridges, end to end without Substrate", () => {
     agent = tool = undefined;
     proxy.closeAllConnections();
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    // A read extra was made read-only: writable again, so the folder can be removed.
+    await makeWritable(join(dir, "repos"));
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -155,9 +163,23 @@ describe("substrate bridges, end to end without Substrate", () => {
     logs.push(JSON.stringify({ event, ...fields }));
   };
 
+  /** An extra repository stage() seeds (`files` tarred into its seed blob) and lists on the setup and row. */
+  type StagedRepository = {
+    name: string;
+    access: "read" | "write";
+    collectResultBundle?: true;
+    files: Record<string, string>;
+  };
+
   async function stage(
-    options: { collectExclude?: unknown; collectResultBundle?: true } = {},
-  ): Promise<{ workspace: string; toolSetup: string }> {
+    options: {
+      collectExclude?: unknown;
+      collectResultBundle?: true;
+      repositories?: StagedRepository[];
+      /** Written as the setup's `repositories` as is, in place of the staged list (a malformed one). */
+      setupRepositories?: unknown;
+    } = {},
+  ): Promise<{ workspace: string; toolSetup: string; setupText: string }> {
     const seedDir = join(dir, "seed");
     await mkdir(join(seedDir, "src"), { recursive: true });
     await writeFile(join(seedDir, "src", "hello.txt"), "hello from the seed\n");
@@ -174,18 +196,48 @@ describe("substrate bridges, end to end without Substrate", () => {
     const toolSetup = JSON.stringify(setup);
     const put = (key: string, data: Buffer) => blobs.put(key, data);
     await put(BLOB.input(TOKEN), Buffer.from(JSON.stringify({ task: "do the thing" })));
-    await put(
-      BLOB.toolSetup(TOKEN),
-      Buffer.from(
-        JSON.stringify({
-          toolSetup,
-          collectExclude: options.collectExclude ?? { names: ["node_modules"], paths: ["src/skipped"] },
-          ...(options.collectResultBundle ? { collectResultBundle: true } : {}),
-        }),
-      ),
-    );
+    const setupText = JSON.stringify({
+      toolSetup,
+      collectExclude: options.collectExclude ?? { names: ["node_modules"], paths: ["src/skipped"] },
+      ...(options.collectResultBundle ? { collectResultBundle: true } : {}),
+      ...(options.setupRepositories !== undefined
+        ? { repositories: options.setupRepositories }
+        : options.repositories
+          ? {
+              repositories: options.repositories.map(({ name, access, collectResultBundle }) => ({
+                name,
+                access,
+                ...(collectResultBundle ? { collectResultBundle } : {}),
+              })),
+            }
+          : {}),
+    });
+    await put(BLOB.toolSetup(TOKEN), Buffer.from(setupText));
     await put(BLOB.seed(TOKEN), await readFile(join(dir, "seed.tar")));
-    return { workspace: join(dir, "workspace"), toolSetup };
+    for (const repository of options.repositories ?? []) {
+      await put(
+        REPO_BLOB.seed(TOKEN, repository.name),
+        await tarOf(join(dir, `seed-${repository.name}`), repository.files),
+      );
+    }
+    if (options.repositories) {
+      layout = {
+        shape: "pair",
+        repositories: options.repositories.map(({ name, access }) => ({ name, access })),
+      };
+    }
+    return { workspace: join(dir, "workspace"), toolSetup, setupText };
+  }
+
+  /** A seed tar of `files` (paths relative to its root), built in `folder`. */
+  async function tarOf(folder: string, files: Record<string, string>): Promise<Buffer> {
+    for (const [path, text] of Object.entries(files)) {
+      await mkdir(join(folder, path, ".."), { recursive: true });
+      await writeFile(join(folder, path), text);
+    }
+    const tarPath = `${folder}.tar`;
+    await exec("tar", ["-c", "-C", folder, "-f", tarPath, "."], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+    return readFile(tarPath);
   }
 
   const names = async (role: string): Promise<string> => {
@@ -215,6 +267,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       proxyUrl,
       metadataDir: await names("tool"),
       workspace,
+      reposRoot: join(dir, "repos"),
       socketPath,
       readyPort: 0,
       tempRoot: dir,
@@ -1217,6 +1270,321 @@ process.exit(2);
     expect(JSON.stringify([routeWarns, routeLogs, logs])).not.toContain(REGISTRY_TOKEN);
   });
 
+  describe("extra repositories", () => {
+    const alpha = (extra: Partial<StagedRepository> = {}): StagedRepository => ({
+      name: "extra-alpha",
+      access: "write",
+      files: { "a.txt": "alpha\n" },
+      ...extra,
+    });
+    const beta: StagedRepository = { name: "extra-beta", access: "read", files: { "b.txt": "beta\n" } };
+    const repos = (...parts: string[]) => join(dir, "repos", ...parts);
+    const asRoot = process.getuid?.() === 0;
+    /** The proxy's route names, in the order their answers finished. */
+    const routes = (): string[] => routeLogs.map((entry) => ((entry as [{ route: string }])[0] ?? {}).route);
+    const parsedLogs = () => logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    /** A tar blob's entry names. */
+    async function entriesOf(key: string): Promise<string[]> {
+      const tarPath = join(dir, "check-extra.tar");
+      await writeFile(tarPath, await readBlob(key));
+      return (await exec("tar", ["-t", "-f", tarPath])).stdout.split("\n").filter(Boolean);
+    }
+    /** A worker that runs `work` (writing into the extras' folders) and exits 2 without a result. */
+    const exitingWorker = (work: () => Promise<void> = async () => undefined) => ({
+      exited: (async () => {
+        await work();
+        return 2;
+      })(),
+    });
+    /** The run's collect finished and `done` was written. */
+    async function done(): Promise<unknown> {
+      await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
+      return JSON.parse((await readBlob(BLOB.done(TOKEN))).toString()) as unknown;
+    }
+
+    it("seeds each extra before the runner starts, a read one read-only", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      let atLaunch: boolean[] | undefined;
+      tool = await startTool(workspace, toolSetup, {
+        launchRunner: () => {
+          atLaunch = [existsSync(repos("extra-alpha", "a.txt")), existsSync(repos("extra-beta", "b.txt"))];
+          return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+        },
+      });
+      expect(atLaunch).toEqual([true, true]);
+      expect(await readFile(repos("extra-alpha", "a.txt"), "utf8")).toBe("alpha\n");
+      if (!asRoot) {
+        expect(statSync(repos("extra-beta", "b.txt")).mode & 0o777).toBe(0o444);
+        expect(statSync(repos("extra-beta")).mode & 0o777).toBe(0o555);
+      }
+      expect(statSync(repos("extra-alpha", "a.txt")).mode & 0o777).not.toBe(0o444);
+      await waitFor(() => (routes().includes("events") ? true : undefined));
+      const order = routes().filter((route) => ["seed", "repos.seed", "events"].includes(route));
+      expect(order.slice(0, 4)).toEqual(["seed", "repos.seed", "repos.seed", "events"]);
+    });
+
+    it("uploads each writable extra before /workspace, and never a read one", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(
+        await workerOptions({
+          launchWorker: () => exitingWorker(() => writeFile(repos("extra-alpha", "made.txt"), "made\n")),
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      const entries = await entriesOf(REPO_BLOB.workspace(TOKEN, "extra-alpha"));
+      expect(entries).toEqual(expect.arrayContaining(["./made.txt", "./a.txt"]));
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-beta"))).toBeNull();
+      const order = routes();
+      expect(order.indexOf("repos.workspace")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("repos.workspace")).toBeLessThan(order.indexOf("workspace"));
+    });
+
+    it("a history extra uploads only its bundle from .git, and the runner ends first", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha({ collectResultBundle: true }), beta] });
+      const seen: string[] = [];
+      proxyDelay = (request) => {
+        if (request.startsWith(`POST /substrate/runs/${TOKEN}/repos/`)) seen.push("repos.workspace");
+        return 0;
+      };
+      tool = await startTool(workspace, toolSetup, { onStop: (signal) => void seen.push(signal) });
+      agent = await runAgent(
+        await workerOptions({
+          launchWorker: () =>
+            exitingWorker(async () => {
+              await mkdir(repos("extra-alpha", ".git"), { recursive: true });
+              await writeFile(repos("extra-alpha", ".git", "HEAD"), "ref: refs/heads/main\n");
+              await writeFile(repos("extra-alpha", ".git", "wardby-result.bundle"), "alpha bundle\n");
+            }),
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      const entries = await entriesOf(REPO_BLOB.workspace(TOKEN, "extra-alpha"));
+      expect(entries.filter((entry) => entry.startsWith("./.git"))).toEqual(["./.git/wardby-result.bundle"]);
+      expect(entries).toContain("./a.txt");
+      expect(seen.indexOf("stop")).toBeGreaterThanOrEqual(0);
+      expect(seen.indexOf("stop")).toBeLessThan(seen.indexOf("repos.workspace"));
+    }, 20_000);
+
+    it("a failed extra fails only that repository", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      // A tar that cannot archive alpha's folder (GNU tar exits 2 on an unreadable file; bsdtar, used on
+      // macOS, exits 1, which the bridge treats as usable, so the failure is made explicit here).
+      const base = await tarForTests(dir);
+      const shim = join(dir, "failing-extra-tar.mjs");
+      await writeFile(
+        shim,
+        `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args.includes("-c") && args[args.indexOf("-C") + 1] === ${JSON.stringify(repos("extra-alpha"))}) process.exit(2);
+process.exit(spawnSync(${JSON.stringify(base)}, args, { stdio: "inherit" }).status ?? 1);
+`,
+        { mode: 0o755 },
+      );
+      tool = await startTool(workspace, toolSetup, { tarCommand: shim });
+      agent = await runAgent(await workerOptions({ launchWorker: () => exitingWorker() }));
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        { event: "substrate_bridge_collect_failed", runToken: TOKEN, repository: "extra-alpha", code: 2 },
+      ]);
+      expect(routes()).not.toContain("workspace-failed");
+    });
+
+    it("a tampered extra bundle fails only that repository", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha({ collectResultBundle: true })] });
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(
+        await workerOptions({
+          launchWorker: () =>
+            exitingWorker(async () => {
+              await mkdir(repos("extra-alpha", ".git"), { recursive: true });
+              await writeFile(join(dir, "outside.bundle"), "not the run's bundle\n");
+              await symlink(join(dir, "outside.bundle"), repos("extra-alpha", ".git", "wardby-result.bundle"));
+            }),
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        {
+          event: "substrate_bridge_collect_failed",
+          runToken: TOKEN,
+          repository: "extra-alpha",
+          code: "result_bundle_tampered",
+        },
+      ]);
+      const skipped = parsedLogs().filter((entry) => entry.event === "substrate_bridge_result_bundle_skipped");
+      expect(skipped).toEqual([
+        {
+          event: "substrate_bridge_result_bundle_skipped",
+          runToken: TOKEN,
+          round: 1,
+          reason: "bundle_symlink",
+          repository: "extra-alpha",
+        },
+      ]);
+    });
+
+    it("fails only that repository when its folder is swapped while it is archived", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      // A tar that archives alpha's folder, then puts another directory in its place.
+      const base = await tarForTests(dir);
+      const shim = join(dir, "swapping-extra-tar.mjs");
+      await writeFile(
+        shim,
+        `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { mkdirSync, renameSync } from "node:fs";
+const args = process.argv.slice(2);
+const status = spawnSync(${JSON.stringify(base)}, args, { stdio: "inherit" }).status ?? 1;
+if (args.includes("-c") && args[args.indexOf("-C") + 1] === ${JSON.stringify(repos("extra-alpha"))}) {
+  renameSync(${JSON.stringify(repos("extra-alpha"))}, ${JSON.stringify(repos("alpha-moved"))});
+  mkdirSync(${JSON.stringify(repos("extra-alpha"))});
+}
+process.exit(status);
+`,
+        { mode: 0o755 },
+      );
+      tool = await startTool(workspace, toolSetup, { tarCommand: shim });
+      agent = await runAgent(await workerOptions({ launchWorker: () => exitingWorker() }));
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        {
+          event: "substrate_bridge_collect_failed",
+          runToken: TOKEN,
+          repository: "extra-alpha",
+          code: "repository_changed",
+        },
+      ]);
+      expect(routes()).not.toContain("repos.workspace");
+    });
+
+    it("fails only that repository, unread, when its folder is swapped for a symlink", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      const elsewhere = join(dir, "elsewhere-repo");
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(
+        await workerOptions({
+          launchWorker: () =>
+            exitingWorker(async () => {
+              await mkdir(elsewhere, { recursive: true });
+              await writeFile(join(elsewhere, "not-seeded.txt"), "outside the seeded folder\n");
+              await rename(repos("extra-alpha"), repos("alpha-moved"));
+              await symlink(elsewhere, repos("extra-alpha"));
+            }),
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        {
+          event: "substrate_bridge_collect_failed",
+          runToken: TOKEN,
+          repository: "extra-alpha",
+          code: "repository_changed",
+        },
+      ]);
+      expect(routes()).not.toContain("repos.workspace");
+      expect(routes()).not.toContain("workspace-failed");
+    });
+
+    /** A seed with one entry, `../escape`: tar.ts refuses it. */
+    const unsafeSeed = (): Buffer => {
+      const entry = Buffer.alloc(512);
+      entry.write("../escape", 0);
+      entry.write("0000644\0", 100);
+      entry.write("00000000000\0", 124);
+      entry.write("0", 156);
+      return Buffer.concat([entry, Buffer.alloc(1024)]);
+    };
+
+    it.each([
+      [
+        "a missing extra seed",
+        "substrate_bridge_seed_failed",
+        async () => {
+          await stage({ repositories: [alpha(), beta] });
+          await blobs.delete(REPO_BLOB.seed(TOKEN, "extra-beta"));
+        },
+      ],
+      [
+        "an unsafe extra seed",
+        "substrate_bridge_seed_unsafe",
+        async () => {
+          await stage({ repositories: [alpha(), beta] });
+          await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), unsafeSeed());
+        },
+      ],
+      [
+        "a malformed repositories list",
+        "substrate_bridge_setup_invalid",
+        async () => {
+          await stage({ setupRepositories: "nope" });
+        },
+      ],
+    ])("fails the run at start on %s", async (_label, code, prepare) => {
+      await prepare();
+      let launched = false;
+      await expect(
+        startTool(join(dir, "workspace"), "", {
+          launchRunner: () => {
+            launched = true;
+            return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+          },
+        }),
+      ).rejects.toMatchObject({ code });
+      expect(launched).toBe(false);
+      expect(await done()).toEqual({ workspace: "failed" });
+    });
+
+    it("names the extra repository in the unsafe-seed log line", async () => {
+      await stage({ repositories: [alpha(), beta] });
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), unsafeSeed());
+      await expect(startTool(join(dir, "workspace"), "")).rejects.toMatchObject({
+        code: "substrate_bridge_seed_unsafe",
+      });
+      const unsafe = parsedLogs().filter((entry) => entry.event === "substrate_bridge_seed_unsafe");
+      expect(unsafe.filter((entry) => entry.repository === "extra-beta")).toHaveLength(1);
+    });
+
+    it("logs fixed fields only for repositories", async () => {
+      const { workspace, toolSetup, setupText } = await stage({ repositories: [alpha(), beta] });
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(await workerOptions({ launchWorker: () => exitingWorker() }));
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      await done();
+      const withRepository = parsedLogs().filter((entry) => "repository" in entry);
+      expect(withRepository.length).toBeGreaterThan(0);
+      for (const entry of withRepository)
+        for (const key of Object.keys(entry))
+          expect(["event", "runToken", "repository", "entries", "code", "round", "reason"]).toContain(key);
+      const everything = logs.join("\n");
+      // Raw and as a JSON string (each log line is JSON).
+      for (const value of [REGISTRY_TOKEN, CAPABILITY, "alpha\n", toolSetup, setupText])
+        for (const form of [value, JSON.stringify(value).slice(1, -1)]) expect(everything).not.toContain(form);
+    });
+  });
+
   it("answers the readiness probe", async () => {
     const { workspace, toolSetup } = await stage();
     tool = await startTool(workspace, toolSetup);
@@ -1229,4 +1597,12 @@ process.exit(2);
 async function stat0(path: string): Promise<number> {
   const { stat } = await import("node:fs/promises");
   return (await stat(path)).mode;
+}
+
+/** Makes every folder under `root` writable again (a read extra was made read-only); absent is fine. */
+async function makeWritable(root: string): Promise<void> {
+  const metadata = await lstat(root).catch(() => undefined);
+  if (!metadata?.isDirectory()) return;
+  await chmod(root, 0o755);
+  for (const name of await readdir(root)) await makeWritable(join(root, name));
 }

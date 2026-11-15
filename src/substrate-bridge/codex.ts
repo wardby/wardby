@@ -11,6 +11,11 @@
  * worker's output passed on to the actor's log are redacted against it and the placeholders. The
  * setup body is never logged.
  *
+ * Extra repositories (the setup's `repositories`): each one's seed is extracted into /repos/<name>
+ * after the /workspace seed and before the input, a read one made read-only (the boundary is the
+ * proxy and the launcher, which never let a read repository's content out). Once the worker's group
+ * is ended, each writable one is uploaded first, then /workspace as before (its upload writes `done`).
+ *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * There are no warm rounds here.
  */
@@ -37,6 +42,7 @@ import {
   DEFAULT_READY_PORT,
   PLACEHOLDER_CAPABILITY,
   REGISTRY_TOKEN_ENV,
+  REPOSITORY_MOUNT_ROOT,
   REGISTRY_TOKEN_SHAPE,
   WORKER_PLACEHOLDERS,
 } from "./constants.js";
@@ -44,7 +50,18 @@ import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
 import { superviseWorker, type WorkerHandle } from "./worker-run.js";
-import { collectWorkspace, endGroup, extractSeed, fetchSetup, signalGroup } from "./workspace.js";
+import {
+  collectRepositories,
+  collectWorkspace,
+  endGroup,
+  extractRepositorySeeds,
+  type RepositoryFolders,
+  extractSeed,
+  fetchSetup,
+  parseSetupRepositories,
+  signalGroup,
+  type SetupRepository,
+} from "./workspace.js";
 
 const SETUP_DEADLINE_MS = 5 * 60_000;
 const INPUT_DEADLINE_MS = 5 * 60_000;
@@ -56,6 +73,8 @@ export interface CodexOptions {
   env?: NodeJS.ProcessEnv;
   metadataDir?: string;
   workspace?: string;
+  /** Where the extra repositories are extracted, one folder each (default /repos). */
+  reposRoot?: string;
   /** Where the seed and the workspace tar are staged (outside the workspace). */
   tempRoot?: string;
   /** The tar executable (default `tar`, GNU tar in the images). */
@@ -96,6 +115,8 @@ interface CodexSetup {
   registryToken: string;
   exclusions: CollectExclusions;
   collectResultBundle: boolean;
+  /** The run's extra repositories ([] without them). */
+  repositories: SetupRepository[];
 }
 
 /**
@@ -117,7 +138,14 @@ function parseSetup(body: Buffer, onSecret: (value: string) => void): CodexSetup
   const exclusions = parseCollectExclusions(setup.collectExclude);
   if (!exclusions) return undefined;
   if (setup.collectResultBundle !== undefined && setup.collectResultBundle !== true) return undefined;
-  return { registryToken: setup.registryToken, exclusions, collectResultBundle: setup.collectResultBundle === true };
+  const repositories = parseSetupRepositories(setup.repositories);
+  if (!repositories) return undefined;
+  return {
+    registryToken: setup.registryToken,
+    exclusions,
+    collectResultBundle: setup.collectResultBundle === true,
+    repositories,
+  };
 }
 
 /**
@@ -161,6 +189,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   const policy = options.policy ?? DEFAULT_POLICY;
   const env = options.env ?? process.env;
   const workspace = options.workspace ?? "/workspace";
+  const reposRoot = options.reposRoot ?? REPOSITORY_MOUNT_ROOT;
   const tar = options.tarCommand ?? "tar";
   const inputPath = options.inputPath ?? "/run/wardby/input/input.json";
   const resultPath = options.resultPath ?? "/run/wardby/output/result.json";
@@ -211,12 +240,24 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
     throw error;
   }
   if (!setup) return abortStart("substrate_bridge_setup_invalid");
-  const { registryToken, exclusions, collectResultBundle } = setup;
+  const { registryToken, exclusions, collectResultBundle, repositories } = setup;
   log("substrate_bridge_setup_ready", { runToken: token });
 
-  // 4. The seed, checked and extracted into the workspace.
+  /** Each extra's folder as seeded, re-checked before it is collected. */
+  let repositoryFolders: RepositoryFolders = new Map();
+  // 4. The seed, checked and extracted into the workspace; then each extra repository's, into its folder.
   try {
     await extractSeed({ url: `${base}/seed`, headers, workspace, stage, tar, policy, log });
+    repositoryFolders = await extractRepositorySeeds({
+      base,
+      headers,
+      reposRoot,
+      repositories,
+      stage,
+      tar,
+      policy,
+      log,
+    });
   } catch (error) {
     if (
       error instanceof BridgeError &&
@@ -273,10 +314,27 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   });
 
   // 8. Then the worker's whole process group is ended, so no process its tools started can change the
-  // workspace while it is read, and the workspace is uploaded.
+  // workspace or an extra while it is read; the writable extras are uploaded, then the workspace (whose
+  // upload writes `done`, after which the proxy refuses an extra's).
   const collected = supervised.uploaded
     .then(async () => {
       if (worker.child) await endGroup(worker.child, GROUP_GRACE_MS, log);
+      await collectRepositories({
+        base,
+        round: 1,
+        token,
+        headers,
+        reposRoot,
+        repositories,
+        folders: repositoryFolders,
+        stage,
+        tar,
+        exclusions,
+        beforeResultBundleRecheck: options.beforeResultBundleRecheck,
+        policy,
+        log,
+        signal: shutdown.signal,
+      });
       return collectWorkspace({
         base,
         round: 1,

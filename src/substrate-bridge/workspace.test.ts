@@ -1,8 +1,21 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { endGroup, parseProcStat, readProcTable, type ProcEntry, type ProcessSeams } from "./workspace.js";
+import {
+  endGroup,
+  hardenRepositoriesRoot,
+  makeReadOnly,
+  parseProcStat,
+  parseSetupRepositories,
+  readProcTable,
+  type ProcEntry,
+  type ProcessSeams,
+} from "./workspace.js";
+
+const exec = promisify(execFile);
 
 const GROUP = 4242;
 
@@ -135,4 +148,133 @@ describe("endGroup", () => {
     expect(sent(seams.kills)).toEqual([[-1, "SIGKILL"]]);
     expect(logged).toEqual(["substrate_bridge_sweep_still_running"]);
   }, 10_000);
+});
+
+describe("parseSetupRepositories", () => {
+  it("reads an absent list as none, and a valid list field by field", () => {
+    expect(parseSetupRepositories(undefined)).toEqual([]);
+    expect(
+      parseSetupRepositories([
+        { name: "extra-alpha", access: "write", collectResultBundle: true },
+        { name: "extra-beta", access: "read" },
+      ]),
+    ).toEqual([
+      { name: "extra-alpha", access: "write", collectResultBundle: true },
+      { name: "extra-beta", access: "read", collectResultBundle: false },
+    ]);
+  });
+
+  it.each([
+    ["a string", "x"],
+    ["an object", {}],
+    ["17 entries", Array.from({ length: 17 }, (_, i) => ({ name: `extra-${i}`, access: "read" }))],
+    ["the reserved name", [{ name: "workspace", access: "write" }]],
+    ["a path", [{ name: "../x", access: "read" }]],
+    ["an upper-case name", [{ name: "Extra", access: "read" }]],
+    [
+      "a duplicate",
+      [
+        { name: "extra-alpha", access: "read" },
+        { name: "extra-alpha", access: "write" },
+      ],
+    ],
+    ["another key", [{ name: "extra-alpha", access: "read", hostPath: "/etc" }]],
+    ["a non-boolean bundle flag", [{ name: "extra-alpha", access: "write", collectResultBundle: "yes" }]],
+    ["a bundle flag on a read entry", [{ name: "extra-alpha", access: "read", collectResultBundle: true }]],
+  ])("refuses %s", (_label, value) => {
+    expect(parseSetupRepositories(value)).toBeUndefined();
+  });
+});
+
+describe.skipIf(process.getuid?.() === 0)("makeReadOnly", () => {
+  let dir: string;
+  afterEach(async () => {
+    // Writable again, so the folder can be removed.
+    for (const path of [join(dir, "tree", "sub"), join(dir, "tree")]) await chmod(path, 0o755).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const tree = async (): Promise<string> => {
+    dir = await mkdtemp(join(tmpdir(), "read-only-"));
+    const root = join(dir, "tree");
+    await mkdir(join(root, "sub"), { recursive: true });
+    await writeFile(join(root, "a.txt"), "a\n", { mode: 0o644 });
+    await writeFile(join(root, "sub", "b.txt"), "b\n", { mode: 0o644 });
+    await writeFile(join(dir, "outside.txt"), "outside\n", { mode: 0o644 });
+    await chmod(join(dir, "outside.txt"), 0o644);
+    await symlink(join(dir, "outside.txt"), join(root, "link"));
+    return root;
+  };
+
+  it("makes directories 0555 and files 0444, leaving a symlink and its target alone", async () => {
+    const root = await tree();
+    const linkBefore = await lstat(join(root, "link"));
+    await makeReadOnly(root, 10);
+    const mode = async (path: string) => (await stat(path)).mode & 0o777;
+    expect(await mode(root)).toBe(0o555);
+    expect(await mode(join(root, "sub"))).toBe(0o555);
+    expect(await mode(join(root, "a.txt"))).toBe(0o444);
+    expect(await mode(join(root, "sub", "b.txt"))).toBe(0o444);
+    expect(await mode(join(dir, "outside.txt"))).toBe(0o644);
+    const linkAfter = await lstat(join(root, "link"));
+    expect(linkAfter.mode).toBe(linkBefore.mode);
+    await expect(writeFile(join(root, "new.txt"), "x")).rejects.toMatchObject({ code: "EACCES" });
+  });
+
+  it("keeps a script runnable (0555) and a plain file 0444, clearing setuid, setgid and sticky", async () => {
+    const root = await tree();
+    const script = join(root, "sub", "run.sh");
+    await writeFile(script, "#!/bin/sh\necho ran\n", { mode: 0o755 });
+    await chmod(script, 0o755);
+    const owner = join(root, "owner-x.bin");
+    await writeFile(owner, "x\n");
+    await chmod(owner, 0o744);
+    const special = join(root, "special.sh");
+    await writeFile(special, "#!/bin/sh\n");
+    await chmod(special, 0o6755);
+    const plain = join(root, "plain.txt");
+    await writeFile(plain, "p\n");
+    await chmod(plain, 0o4644);
+    await chmod(join(root, "sub"), 0o1755);
+    await makeReadOnly(root, 20);
+    const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+    expect(await mode(script)).toBe(0o555);
+    expect(await mode(owner)).toBe(0o555);
+    expect(await mode(special)).toBe(0o555);
+    expect(await mode(plain)).toBe(0o444);
+    expect(await mode(join(root, "a.txt"))).toBe(0o444);
+    expect(await mode(join(root, "sub"))).toBe(0o555);
+    expect((await exec(script, [])).stdout).toBe("ran\n");
+  });
+
+  it("refuses a tree past its bound, before changing anything", async () => {
+    const root = await tree();
+    await expect(makeReadOnly(root, 2)).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
+    expect((await stat(root)).mode & 0o777).not.toBe(0o555);
+  });
+});
+
+describe("hardenRepositoriesRoot", () => {
+  it("makes an owned world-writable root 0755", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-repos-root-"));
+    try {
+      await chmod(root, 0o777);
+      const events: string[] = [];
+      await hardenRepositoriesRoot(root, (event) => events.push(event));
+      expect((await stat(root)).mode & 0o7777).toBe(0o755);
+      expect(events).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a fixed event, and does not throw, when the root cannot be changed", async () => {
+    const events: [string, unknown][] = [];
+    await expect(
+      hardenRepositoriesRoot(join(tmpdir(), "wardby-no-such-repos-root"), (event, fields) =>
+        events.push([event, fields]),
+      ),
+    ).resolves.toBeUndefined();
+    expect(events).toEqual([["substrate_bridge_repos_root_not_hardened", {}]]);
+  });
 });

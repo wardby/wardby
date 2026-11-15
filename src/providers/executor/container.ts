@@ -2838,6 +2838,9 @@ export class ContainerExecutor implements Executor {
     // A git-history run's pushed commit is the control plane's rewrite, which the kept actor's .git
     // never had: such a round is never kept (the next starts fresh, from that commit).
     if (gitHistoryOf(run)) return undefined;
+    // A run with extra repositories (#537) is never kept: a kept read copy would hold the previous
+    // round's pinned commit; per-repository warm rounds are a follow-up (W2).
+    if (folderRows(run.repositories).length > 0) return undefined;
     // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
     const fingerprint = run.warmFingerprint;
     if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;
@@ -4164,12 +4167,15 @@ export class ContainerExecutor implements Executor {
    * The agent fingerprint (warm-fingerprint.ts) of the job this run launches with: its resolved
    * images and limits, model, agent, system prompt, repository, secrets (identity and version
    * only) and MCP tool pins. Undefined when any is unknown
-   * (then nothing is retained or resumed), and for a run with git history (never warm: see
-   * retentionFor).
+   * (then nothing is retained or resumed), and for a run with git history or extra repositories
+   * (never warm: see retentionFor).
    */
   private warmFingerprintOf(run: ContainerRunSnapshot, pins: readonly McpToolPin[]): string | undefined {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
     if (gitHistoryOf(run) || !run.secretVersions) return undefined;
+    // A run with extra repositories (#537) is never kept: a kept read copy would hold the previous
+    // round's pinned commit; per-repository warm rounds are a follow-up (W2).
+    if (folderRows(run.repositories).length > 0) return undefined;
     try {
       const spec = this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true });
       if (!spec.toolImage) return undefined;

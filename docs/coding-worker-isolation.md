@@ -484,6 +484,9 @@ The worker sees only these volume subpaths:
   Codex worker and Claude Code's tool runner mount them; the Claude agent
   container never does, as it never mounts `/workspace`. Only `/workspace` and
   the writable `/repos/<name>` folders are collected after the run.
+  On the Substrate launcher a read link's folder is made read-only with file
+  permissions instead of a read-only mount; it is never uploaded or collected
+  (see [Extra repositories](substrate-backend.md#extra-repositories)).
 - Git metadata remains in the trusted keeper volume and is not mounted into the
   worker. The one exception is a run with `codingProfile.gitHistory`: Wardby
   builds a fresh `.git` in `/workspace` and in each writable `/repos/<name>`,

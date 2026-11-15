@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { collectExclusions } from "../../coding/collect-exclude.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
-import { CODEX_WORKER_SETUP_LIMITS, codexWorkerSetup, type CodexWorkerSetup } from "./codex-worker-setup.js";
+import {
+  CODEX_WORKER_SETUP_LIMITS,
+  codexWorkerSetup,
+  holderSetupRepositories,
+  type CodexWorkerSetup,
+  type HolderSetupRepository,
+} from "./codex-worker-setup.js";
 import type { JobSpec } from "./types.js";
 
 const FAKE_CAP = "rrp_fake_capability_value_000001";
@@ -58,5 +64,51 @@ describe("codexWorkerSetup", () => {
     expect(() =>
       codexWorkerSetup({ ...spec, collectExclude: { names: [], paths } }, FAKE_CAP, { collectResultBundle: false }),
     ).toThrow("codex_worker_setup_too_large");
+  });
+
+  it("has no repositories key without extras, and lists exactly what it is given, never a host path", () => {
+    expect(JSON.parse(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }))).not.toHaveProperty(
+      "repositories",
+    );
+    const repositories: HolderSetupRepository[] = [
+      { name: "extra-alpha", access: "write", collectResultBundle: true },
+      { name: "extra-beta", access: "read" },
+    ];
+    const raw = codexWorkerSetup(
+      {
+        ...spec,
+        repositories: [
+          { name: "extra-alpha", access: "write", hostPath: "/runs/run-codex-setup/repos/extra-alpha/workspace" },
+          { name: "extra-beta", access: "read", hostPath: "/runs/run-codex-setup/repos/extra-beta/workspace" },
+        ],
+      },
+      FAKE_CAP,
+      { collectResultBundle: false, repositories },
+    );
+    expect((JSON.parse(raw) as CodexWorkerSetup).repositories).toEqual(repositories);
+    expect(raw).not.toContain("hostPath");
+    expect(raw).not.toContain("/runs/");
+  });
+});
+
+describe("holderSetupRepositories", () => {
+  it("is undefined for a spec without extras", () => {
+    expect(holderSetupRepositories({}, new Set())).toBeUndefined();
+  });
+
+  it("lists the extras in spec order, a bundle only for a write extra in the history", () => {
+    const repositories: JobSpec["repositories"] = [
+      { name: "extra-alpha", access: "write", hostPath: "/a" },
+      { name: "extra-beta", access: "read", hostPath: "/b" },
+    ];
+    const history = new Set(["/workspace", "/repos/extra-alpha", "/repos/extra-beta"]);
+    expect(holderSetupRepositories({ repositories }, history)).toEqual([
+      { name: "extra-alpha", access: "write", collectResultBundle: true },
+      { name: "extra-beta", access: "read" },
+    ]);
+    expect(holderSetupRepositories({ repositories }, new Set(["/workspace"]))).toEqual([
+      { name: "extra-alpha", access: "write" },
+      { name: "extra-beta", access: "read" },
+    ]);
   });
 });

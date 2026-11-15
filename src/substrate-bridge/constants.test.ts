@@ -138,3 +138,13 @@ it("matches the worker's and the proxy's MCP names", async () => {
   expect(bridge.MCP_TOKEN_ENV).toBe(controlPlane.MCP_TOKEN_ENV);
   expect(bridge.WORKER_PLACEHOLDERS).toEqual([PLACEHOLDER_CAPABILITY, bridge.INJECTED_MCP_TOKEN_PLACEHOLDER]);
 });
+
+it("matches the launcher's repository root and bounds", async () => {
+  const bridge = await import("./constants.js");
+  const storage = await import("../providers/jobs/storage-init.js");
+  const protocol = await import("../coding/protocol.js");
+  expect(bridge.REPOSITORY_MOUNT_ROOT).toBe(storage.REPOSITORY_MOUNT_ROOT);
+  expect(bridge.MAX_SETUP_REPOSITORIES).toBe(protocol.MAX_RUN_REPOSITORIES_IN_INPUT);
+  expect(bridge.REPOSITORY_NAME.source).toBe(protocol.CODING_REPOSITORY_NAME.source);
+  expect(bridge.REPOSITORY_NAME.flags).toBe(protocol.CODING_REPOSITORY_NAME.flags);
+});

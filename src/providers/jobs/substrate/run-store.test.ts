@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { describeSubstrateRunStoreContract } from "./run-store.contract.test-support.js";
-import { MemorySubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
+import { MemorySubstrateRunStore, parseRunRepositories, type SubstrateRunRecord } from "./run-store.js";
 
 const record: SubstrateRunRecord = {
   runId: "r1",
@@ -79,4 +79,38 @@ describeSubstrateRunStoreContract("MemorySubstrateRunStore", {
   store: (now) => new MemorySubstrateRunStore(now),
   runs: async () => undefined,
   id: (name) => `run-${name}`,
+});
+
+describe("parseRunRepositories", () => {
+  it("reads nothing for null or undefined", () => {
+    expect(parseRunRepositories(null)).toBeUndefined();
+    expect(parseRunRepositories(undefined)).toBeUndefined();
+  });
+
+  it("returns a valid list as it is", () => {
+    const list = [
+      { name: "extra-alpha", access: "write" },
+      { name: "extra-beta", access: "read" },
+    ];
+    expect(parseRunRepositories(list)).toEqual(list);
+  });
+
+  it.each([
+    ["an empty list", []],
+    ["a string", "x"],
+    ["an unknown access", [{ name: "extra-alpha", access: "admin" }]],
+    ["the reserved name", [{ name: "workspace", access: "read" }]],
+    ["an invalid name", [{ name: "Extra", access: "read" }]],
+    [
+      "a name twice",
+      [
+        { name: "extra-alpha", access: "read" },
+        { name: "extra-alpha", access: "write" },
+      ],
+    ],
+    ["an extra key", [{ name: "extra-alpha", access: "read", hostPath: "/x" }]],
+    ["17 entries", Array.from({ length: 17 }, (_, i) => ({ name: `extra-${i}`, access: "read" }))],
+  ])("reads nothing for %s", (_label, value) => {
+    expect(parseRunRepositories(value)).toBeUndefined();
+  });
 });

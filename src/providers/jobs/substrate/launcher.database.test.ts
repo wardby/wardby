@@ -4,10 +4,28 @@ import { createSubstrateRunFixture } from "../../coding-proxy/substrate/substrat
 import type { SubstrateApi } from "./api.js";
 import { makeHarness } from "./launcher.test-support.js";
 import { BLOB } from "./names.js";
-import { PrismaSubstrateRunStore } from "./run-store.js";
+import { PrismaSubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
 
 const db = createPrismaClient();
 const labels = ["launcher-db-1", "launcher-db-2", "launcher-db-3"];
+
+/**
+ * The Prisma store, seeing only this file's parked rows: the launcher sweeps every parked row it can
+ * list, and the run-store contract (run-store.database.test.ts) parks and counts its own rows in the
+ * same database while this file runs in parallel.
+ */
+class OwnRowsRunStore extends PrismaSubstrateRunStore {
+  private readonly own = new Set(labels.map((label) => `substrate-run-${label}`));
+
+  override async listParked(options: { olderThan?: Date; limit?: number } = {}): Promise<SubstrateRunRecord[]> {
+    const rows = (await super.listParked({ olderThan: options.olderThan })).filter((row) => this.own.has(row.runId));
+    return options.limit === undefined ? rows : rows.slice(0, options.limit);
+  }
+
+  override async countParked(): Promise<number> {
+    return (await this.listParked()).length;
+  }
+}
 
 /** A CodingRun for `label` (the SubstrateRun row's foreign key), with no SubstrateRun yet. */
 async function codingRun(label: string): Promise<string> {
@@ -28,7 +46,7 @@ describe.skipIf(!process.env.DATABASE_URL)("SubstrateJobLauncher with PrismaSubs
 
   it("launches, fences a repeat or conflicting launch, removes and keeps the tombstone", async () => {
     const runId = await codingRun(labels[0]);
-    const h = await makeHarness({ runId, runs: new PrismaSubstrateRunStore(db) });
+    const h = await makeHarness({ runId, runs: new OwnRowsRunStore(db) });
     const handle = await h.launcher.launch(h.spec);
     expect(h.api.actors.size).toBe(2);
     expect(h.api.egressPolicies.size).toBe(2);
@@ -55,7 +73,7 @@ describe.skipIf(!process.env.DATABASE_URL)("SubstrateJobLauncher with PrismaSubs
 
   it("records a timeout so it never changes afterwards", async () => {
     const runId = await codingRun(labels[1]);
-    const h = await makeHarness({ runId, runs: new PrismaSubstrateRunStore(db) });
+    const h = await makeHarness({ runId, runs: new OwnRowsRunStore(db) });
     const handle = await h.launcher.launch(h.spec);
     h.setNow(1_000_000 + 600_001);
     expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
@@ -65,7 +83,7 @@ describe.skipIf(!process.env.DATABASE_URL)("SubstrateJobLauncher with PrismaSubs
 
   it("creates the actors exactly once for two concurrent launches", async () => {
     const runId = await codingRun(labels[2]);
-    const h = await makeHarness({ runId, runs: new PrismaSubstrateRunStore(db) });
+    const h = await makeHarness({ runId, runs: new OwnRowsRunStore(db) });
     const created: string[] = [];
     const api: SubstrateApi = h.api;
     const createActor = api.createActor.bind(api);

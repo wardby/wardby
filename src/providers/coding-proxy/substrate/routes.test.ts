@@ -3,7 +3,8 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BLOB, roundBlob, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
+import { BLOB, REPO_BLOB, roundBlob, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
+import type { SubstrateRunLayout } from "../../jobs/substrate/run-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import { BlobStoreError } from "../../storage/types.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
@@ -618,7 +619,7 @@ describe("substrate routes", () => {
     const upload = (body: string) => ({ method: "POST", body });
     const SETUP = JSON.stringify({ registryToken: deriveRegistryToken(CAPABILITY) });
     const single = (): void => {
-      overrides = { ...overrides, actorShapeForToken: async () => "single" };
+      overrides = { ...overrides, runLayoutForToken: async () => ({ shape: "single" }) };
     };
     /** Every log line, info and warn, with nothing of a secret or a body in it. */
     const expectNoSecretsLogged = async (bodies: string[] = []): Promise<void> => {
@@ -667,7 +668,7 @@ describe("substrate routes", () => {
     });
 
     it("keeps today's rule for a pair run: the holder is the tool actor, by its JWT only", async () => {
-      overrides = { actorShapeForToken: async () => "pair" };
+      overrides = { runLayoutForToken: async () => ({ shape: "pair" }) };
       await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
       await start();
       expect((await fetch(`${base}/tool-setup`, agent())).status).toBe(401);
@@ -748,7 +749,7 @@ describe("substrate routes", () => {
     });
 
     it("a pair run's input download leaves the tool setup for the tool's first events poll", async () => {
-      overrides = { actorShapeForToken: async () => "pair" };
+      overrides = { runLayoutForToken: async () => ({ shape: "pair" }) };
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
       await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
       await start();
@@ -800,7 +801,7 @@ describe("substrate routes", () => {
 
     it("answers 500 with the fixed body when the shape lookup fails, and logs only the route line", async () => {
       const failing = new Error(`lookup failed ${CAPABILITY}`);
-      overrides = { actorShapeForToken: async () => Promise.reject(failing) };
+      overrides = { runLayoutForToken: async () => Promise.reject(failing) };
       await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
       await start();
       const answer = await fetch(`${base}/tool-setup`, agent());
@@ -815,8 +816,8 @@ describe("substrate routes", () => {
 
     it("remembers the shape of a token whose row exists, and asks again while there is none", async () => {
       for (const shape of ["single", "pair"] as const) {
-        const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => shape);
-        overrides = { actorShapeForToken: lookup };
+        const lookup = vi.fn(async (): Promise<SubstrateRunLayout | undefined> => ({ shape }));
+        overrides = { runLayoutForToken: lookup };
         await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
         await start();
         const holder = shape === "single" ? agent : tool;
@@ -829,22 +830,22 @@ describe("substrate routes", () => {
         });
       }
       // No row yet: treated as pair, and not remembered (the row may appear).
-      const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => undefined);
-      overrides = { actorShapeForToken: lookup };
+      const lookup = vi.fn(async (): Promise<SubstrateRunLayout | undefined> => undefined);
+      overrides = { runLayoutForToken: lookup };
       await start();
       expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
       expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
       expect(lookup).toHaveBeenCalledTimes(2);
-      lookup.mockResolvedValue("single");
+      lookup.mockResolvedValue({ shape: "single" });
       expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
       expect((await fetch(`${base}/seed`, tool())).status).toBe(401);
       expect(lookup).toHaveBeenCalledTimes(3);
     });
 
     it("refuses a request with neither credential header before the shape lookup", async () => {
-      const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => "single");
+      const lookup = vi.fn(async (): Promise<SubstrateRunLayout | undefined> => ({ shape: "single" }));
       const verifyActor = vi.fn(async () => ({ ok: true as const, subject: "x" }));
-      overrides = { actorShapeForToken: lookup, verifyActor };
+      overrides = { runLayoutForToken: lookup, verifyActor };
       await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
       await start();
       for (const [path, init] of [
@@ -880,7 +881,7 @@ describe("substrate routes", () => {
     });
 
     it("logs no setupDeleted field on a pair run's input", async () => {
-      overrides = { actorShapeForToken: async () => "pair" };
+      overrides = { runLayoutForToken: async () => ({ shape: "pair" }) };
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"t"}'));
       await start();
       expect((await fetch(`${base}/input`, agent())).status).toBe(200);
@@ -955,7 +956,7 @@ describe("substrate routes", () => {
 
     it("marks a single-shape run's input the same way", async () => {
       pinned([PIN]);
-      overrides = { ...overrides, actorShapeForToken: async () => "single" };
+      overrides = { ...overrides, runLayoutForToken: async () => ({ shape: "single" }) };
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
       await start();
       const res = await fetch(`${base}/input`, agent());
@@ -1191,6 +1192,352 @@ describe("substrate routes", () => {
       await fetch(`${base}/result?round=3`, agent(upload("{}")));
       const logged = JSON.stringify([logCalls, warnCalls]);
       for (const secret of [CAPABILITY, REGISTRY_TOKEN]) expect(logged).not.toContain(secret);
+    });
+  });
+
+  describe("extra repositories", () => {
+    // fetch sends Content-Length for a string body.
+    const upload = (body: string) => ({ method: "POST", body });
+    const LAYOUT: SubstrateRunLayout = {
+      shape: "pair",
+      repositories: [
+        { name: "extra-alpha", access: "write" },
+        { name: "extra-beta", access: "read" },
+      ],
+    };
+    beforeEach(() => {
+      overrides = { runLayoutForToken: async () => LAYOUT };
+    });
+    const routeLines = (): Record<string, unknown>[] =>
+      logCalls.map((call) => call[0] as Record<string, unknown>).filter((l) => l.event === "substrate.route");
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+    it("serves a listed repository's seed to the holder", async () => {
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), Buffer.from("seed-beta"));
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-alpha"), Buffer.from("seed-alpha"));
+      await start();
+      for (const [name, body] of [
+        ["extra-beta", "seed-beta"],
+        ["extra-alpha", "seed-alpha"],
+      ] as const) {
+        const answer = await fetch(`${base}/repos/${name}/seed`, tool());
+        expect(answer.status).toBe(200);
+        expect(answer.headers.get("content-type")).toBe("application/x-tar");
+        expect(await answer.text()).toBe(body);
+      }
+    });
+
+    it("refuses an unknown repository's seed, and the agent on a pair run", async () => {
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-gamma"), Buffer.from("seed-gamma"));
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), Buffer.from("seed-beta"));
+      await start();
+      const unknown = await fetch(`${base}/repos/extra-gamma/seed`, tool());
+      expect(unknown.status).toBe(404);
+      expect(await unknown.json()).toEqual({ error: { type: "not_found" } });
+      const asAgent = await fetch(`${base}/repos/extra-beta/seed`, agent());
+      expect(asAgent.status).toBe(401);
+      expect(await asAgent.json()).toEqual({ error: { type: "unauthorized" } });
+    });
+
+    it("stores a writable repository's upload without ending the run", async () => {
+      await start();
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(200);
+      expect((await blobs.get(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toString()).toBe("tar");
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+      // The relay was not dropped: the tool's events poll still answers.
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+    });
+
+    it.each(["extra-beta", "extra-gamma"])(
+      "refuses an upload to %s (read or unknown), writing nothing",
+      async (name) => {
+        await start();
+        const answer = await fetch(`${base}/repos/${name}/workspace`, tool(upload("tar")));
+        expect(answer.status).toBe(404);
+        expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+        expect(await blobs.head(REPO_BLOB.workspace(TOKEN, name))).toBeNull();
+        expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      },
+    );
+
+    it("caps each repository upload at the workspace limit", async () => {
+      await start();
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("x".repeat(65))));
+      expect(answer.status).toBe(413);
+      expect(await answer.json()).toEqual({ error: { type: "too_large" } });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+    });
+
+    it("refuses an upload after done", async () => {
+      await blobs.put(BLOB.done(TOKEN), Buffer.from(JSON.stringify({ workspace: "ok" })));
+      await start();
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+    });
+
+    it("refuses another round's upload", async () => {
+      await start();
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace?round=2`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "round_mismatch" } });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha", 2))).toBeNull();
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+    });
+
+    it.each([
+      ["GET", "repos/workspace/seed"],
+      ["GET", "repos/Extra/seed"],
+      ["GET", "repos/extra-alpha/b/seed"],
+      ["GET", "repos/extra-alpha/other"],
+      ["GET", "repos/extra-alpha/workspace"],
+      ["POST", "repos/extra-alpha/seed"],
+      ["GET", "repos/a%2Fb/seed"],
+      ["POST", "repos/a%2Fb/workspace"],
+      ["GET", `repos/${"a".repeat(64)}/seed`],
+      ["POST", `repos/${"a".repeat(64)}/workspace`],
+    ])("%s %s is unmatched", async (method, path) => {
+      const lookup = vi.fn(async () => LAYOUT);
+      overrides = { runLayoutForToken: lookup };
+      await start();
+      const answer = await fetch(`${base}/${path}`, tool(method === "POST" ? upload("tar") : {}));
+      expect(answer.status).toBe(404);
+      expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+      await settle();
+      expect(routeLines()).toEqual([expect.objectContaining({ route: "unmatched", status: 404 })]);
+      expect(routeLines()[0]).not.toHaveProperty("repository");
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it("a_b is a valid link name: matched, but 404 and unlogged when the row does not list it", async () => {
+      await start();
+      expect((await fetch(`${base}/repos/a_b/seed`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/repos/a_b/workspace`, tool(upload("tar")))).status).toBe(404);
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "a_b"))).toBeNull();
+      await settle();
+      expect(routeLines()).toEqual([
+        expect.objectContaining({ route: "repos.seed", status: 404 }),
+        expect.objectContaining({ route: "repos.workspace", status: 404 }),
+      ]);
+      for (const line of routeLines()) expect(line).not.toHaveProperty("repository");
+    });
+
+    /** A request sent with its path exactly as given (fetch and URL parsing would resolve dot segments). */
+    const raw = (
+      method: string,
+      path: string,
+      headers: Record<string, string>,
+      body?: string,
+    ): Promise<{ status: number; body: string }> =>
+      new Promise((resolve, reject) => {
+        const { hostname, port, pathname } = new URL(base);
+        const req = httpRequest({ hostname, port, method, path: `${pathname}/${path}`, headers }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+        });
+        req.on("error", reject);
+        if (body !== undefined) req.write(body);
+        req.end();
+      });
+
+    it.each([
+      ["GET", "repos/%2e%2e/seed"],
+      ["GET", "repos/%2E%2e/seed"],
+      ["POST", "repos/%2e%2e/workspace"],
+      ["POST", "repos/../workspace"],
+      ["GET", "repos/./seed"],
+      // URL parsing reads `\` as `/` for http: each of these would otherwise resolve to `workspace`.
+      ["POST", "repos\\..\\workspace"],
+      ["POST", "repos/a\\..\\..\\workspace"],
+      ["POST", "repos%5c..\\..\\workspace"],
+      ["POST", "repos%5c..%5cworkspace"],
+    ])("%s %s (a path URL parsing changes) is unmatched and never reaches the default routes", async (method, path) => {
+      const lookup = vi.fn(async () => LAYOUT);
+      overrides = { runLayoutForToken: lookup };
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("default-seed"));
+      await start();
+      const body = method === "POST" ? "tar" : undefined;
+      const headers = { ...AUTH, ...(body !== undefined ? { "content-length": String(body.length) } : {}) };
+      const answer = await raw(method, path, headers, body);
+      expect(answer.status).toBe(404);
+      expect(JSON.parse(answer.body)).toEqual({ error: { type: "not_found" } });
+      expect(await blobs.head(BLOB.workspace(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      await settle();
+      expect(routeLines()).toEqual([expect.objectContaining({ route: "unmatched", status: 404 })]);
+      expect(routeLines()[0]).not.toHaveProperty("repository");
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it.each(["extra-beta", "extra-gamma"])(
+      "refuses an upload to %s before its body is read",
+      async (name) => {
+        await start();
+        // Content-Length declared, body never sent: an answer proves the route did not wait to read it.
+        const status = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            `${base}/repos/${name}/workspace`,
+            { method: "POST", headers: { ...AUTH, "content-length": "40" } },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.flushHeaders();
+        });
+        expect(status).toBe(404);
+        expect(await blobs.head(REPO_BLOB.workspace(TOKEN, name))).toBeNull();
+      },
+      2_000,
+    );
+
+    it("refuses an upload that finishes after done was written, and deletes its blob", async () => {
+      await start();
+      const putStream = blobs.putStream.bind(blobs);
+      vi.spyOn(blobs, "putStream").mockImplementation(async (key, body, options) => {
+        const stored = await putStream(key, body, options);
+        // The default workspace upload lands while this extra's body was streaming.
+        if (key === REPO_BLOB.workspace(TOKEN, "extra-alpha")) {
+          await blobs.put(BLOB.done(TOKEN), Buffer.from(JSON.stringify({ workspace: "ok" })));
+        }
+        return stored;
+      });
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+    });
+
+    it("still answers 409 when deleting a late upload's blob fails", async () => {
+      await start();
+      const putStream = blobs.putStream.bind(blobs);
+      vi.spyOn(blobs, "putStream").mockImplementation(async (key, body, options) => {
+        const stored = await putStream(key, body, options);
+        if (key === REPO_BLOB.workspace(TOKEN, "extra-alpha")) {
+          await blobs.put(BLOB.done(TOKEN), Buffer.from(JSON.stringify({ workspace: "ok" })));
+        }
+        return stored;
+      });
+      const remove = vi.spyOn(blobs, "delete").mockRejectedValue(new Error("store down"));
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(remove).toHaveBeenCalledWith(REPO_BLOB.workspace(TOKEN, "extra-alpha"));
+      await settle();
+      expect(routeLines()).toEqual([expect.objectContaining({ route: "repos.workspace", status: 409 })]);
+      expect(routeLines()[0]).not.toHaveProperty("errorKind");
+    });
+
+    it("logs the repository only after auth, and only a name on the row", async () => {
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), Buffer.from("seed-beta"));
+      await start();
+      // Unauthenticated (bad actor JWT, then no credential at all): no repository on the line.
+      const bad = { headers: { "x-wardby-actor-jwt": "Bearer bad" } };
+      expect((await fetch(`${base}/repos/extra-beta/seed`, bad)).status).toBe(401);
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, { ...upload("tar"), ...bad })).status).toBe(401);
+      expect((await fetch(`${base}/repos/extra-beta/seed`)).status).toBe(401);
+      // Authenticated but not on the row: 404, no repository.
+      expect((await fetch(`${base}/repos/extra-gamma/seed`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/repos/extra-gamma/workspace`, tool(upload("tar")))).status).toBe(404);
+      await settle();
+      const refused = routeLines();
+      expect(refused).toHaveLength(5);
+      for (const line of refused) expect(line).not.toHaveProperty("repository");
+      // Authenticated and on the row (a read one refused for upload included): the name is logged.
+      expect((await fetch(`${base}/repos/extra-beta/seed`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/repos/extra-beta/workspace`, tool(upload("tar")))).status).toBe(404);
+      await settle();
+      expect(routeLines().slice(5)).toEqual([
+        expect.objectContaining({ route: "repos.seed", status: 200, repository: "extra-beta" }),
+        expect.objectContaining({ route: "repos.workspace", status: 404, repository: "extra-beta" }),
+      ]);
+    });
+
+    it("single shape: the agent actor is the holder", async () => {
+      overrides = { runLayoutForToken: async () => ({ ...LAYOUT, shape: "single" }) };
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), Buffer.from("seed-beta"));
+      await start();
+      expect((await fetch(`${base}/repos/extra-beta/seed`, tool())).status).toBe(401);
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("w")))).status).toBe(401);
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const seed = await fetch(`${base}/repos/extra-beta/seed`, agent());
+      expect(seed.status).toBe(200);
+      expect(await seed.text()).toBe("seed-beta");
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, agent(upload("tar")))).status).toBe(200);
+      expect((await blobs.get(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toString()).toBe("tar");
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    });
+
+    it("a run without a row or without repositories has no repository routes", async () => {
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-alpha"), Buffer.from("seed-alpha"));
+      for (const layout of [undefined, { shape: "pair" as const }]) {
+        overrides = { runLayoutForToken: async () => layout };
+        await start();
+        expect((await fetch(`${base}/repos/extra-alpha/seed`, tool())).status).toBe(404);
+        expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")))).status).toBe(404);
+        expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      }
+    });
+
+    it("looks the layout up once per token", async () => {
+      const lookup = vi.fn(async () => LAYOUT);
+      overrides = { runLayoutForToken: lookup };
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-alpha"), Buffer.from("seed-alpha"));
+      await start();
+      expect((await fetch(`${base}/repos/extra-alpha/seed`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")))).status).toBe(200);
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    });
+
+    it("logs the repository name and nothing of the body", async () => {
+      await start();
+      const answers: string[] = [];
+      const ok = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload(CAPABILITY)));
+      expect(ok.status).toBe(200);
+      answers.push(await ok.text());
+      const refused = await fetch(`${base}/repos/extra-beta/workspace`, tool(upload(CAPABILITY)));
+      expect(refused.status).toBe(404);
+      answers.push(await refused.text());
+      await settle();
+      const lines = routeLines();
+      const line = lines.find((l) => l.route === "repos.workspace" && l.status === 200);
+      expect(line).toMatchObject({ route: "repos.workspace", repository: "extra-alpha" });
+      const allowed = [
+        "event",
+        "runToken",
+        "route",
+        "status",
+        "bytes",
+        "durationMs",
+        "errorKind",
+        "setupDeleted",
+        "repository",
+      ];
+      for (const l of lines) for (const key of Object.keys(l)) expect(allowed).toContain(key);
+      expect(JSON.stringify(logCalls)).not.toContain(CAPABILITY);
+      expect(JSON.stringify(warnCalls)).not.toContain(CAPABILITY);
+      for (const body of answers) expect(body).not.toContain(CAPABILITY);
+    });
+
+    it("the default workspace upload still ends the run after the extras", async () => {
+      await start();
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("a")))).status).toBe(200);
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+      // After done, a late extra upload is refused.
+      expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("late")))).status).toBe(409);
+      expect((await blobs.get(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toString()).toBe("a");
     });
   });
 });

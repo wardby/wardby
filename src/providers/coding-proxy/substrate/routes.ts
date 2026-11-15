@@ -35,6 +35,18 @@
  * Once the proxy has written a run's `done` marker its outcome is fixed: `workspace` and
  * `workspace-failed` are refused (409 substrate_run_collected), so a late or forged post cannot
  * change it.
+ *
+ * Extra repositories (multi-repository runs): `GET repos/<name>/seed` and `POST repos/<name>/workspace`
+ * are holder-only, like `seed` and `workspace`. `<name>` must be a link name (isCodingRepositoryName;
+ * anything else is unmatched) listed in the run's row (SubstrateRun.repositories, read with the shape
+ * in one lookup): any listed repository's seed can be served, but only a `write` one can be uploaded,
+ * so a read repository's content never leaves through the proxy; an unlisted name answers 404 before
+ * any body is read. An extra's upload is capped at the workspace limit, refused after `done` (409)
+ * and for another round (409), and never writes `done`, drops the relay or touches the setup state:
+ * the default `workspace` upload, which the bridge sends last, still ends the run. Nothing of a body
+ * is logged; the route line's `repository` field is the validated link name, set only once the caller
+ * authenticated and the row lists that name. An upload that finishes after `done` was written is
+ * refused (409) and its blob deleted.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -42,15 +54,17 @@ import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport
 import { logger } from "../../../core/logger.js";
 import { redactExactSecretValues, withEscapedForms } from "../../../core/secret-spans.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
+import { isCodingRepositoryName } from "../../../coding/protocol.js";
 import {
   BLOB,
   MAX_ROUND,
   parseRound,
+  REPO_BLOB,
   roundBlob,
   TOOL_ACTOR_JWT_HEADER,
   toolActorSubject,
 } from "../../jobs/substrate/names.js";
-import type { SubstrateActorShape } from "../../jobs/substrate/run-store.js";
+import type { SubstrateRunLayout } from "../../jobs/substrate/run-store.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
@@ -94,10 +108,11 @@ export interface SubstrateRouteOptions {
    */
   tokenForRun: (runId: string) => string | Promise<string>;
   /**
-   * The run's actor shape, by its token (SubstrateRun.actorShape); undefined when the token has no row
-   * (treated as `pair`, and asked again next time). Absent: every run is `pair`.
+   * The run's actor shape and extra repositories, by its token (one SubstrateRun row read); undefined
+   * when the token has no row (treated as a pair with no repositories, and asked again next time).
+   * Absent: every run is a pair with no repositories.
    */
-  actorShapeForToken?: (token: string) => Promise<SubstrateActorShape | undefined>;
+  runLayoutForToken?: (token: string) => Promise<SubstrateRunLayout | undefined>;
   /**
    * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): per-round files (`?round=n`, absent = 1) for the
    * round in the token's round record. Off: every request is round 1, exactly as before.
@@ -131,12 +146,16 @@ type RouteName =
   | "workspace"
   | "exit"
   | "workspace-failed"
-  | "diagnostics";
+  | "diagnostics"
+  | "repos.seed"
+  | "repos.workspace";
 
 interface Matched {
   name: RouteName;
   caller: Caller;
   channel?: string;
+  /** repos.*: the extra repository, a validated link name. */
+  repository?: string;
 }
 
 /** The routes between the agent and the tool actor: a single-shape run (no tool actor) has none. */
@@ -147,13 +166,24 @@ const RELAY_ROUTES: ReadonlySet<RouteName> = new Set<RouteName>([
   "channels.from-tool",
   "events",
 ]);
-/** Tokens whose shape is known (their row exists), oldest forgotten first past the cap. */
-const KNOWN_SHAPES_MAX = 10_000;
+/** Tokens whose layout is known (their row exists), oldest forgotten first past the cap. */
+const KNOWN_LAYOUTS_MAX = 10_000;
+/** A run's default layout: a pair with no extra repositories (no row, or no lookup). */
+const DEFAULT_LAYOUT: SubstrateRunLayout = { shape: "pair" };
 
 const RUN_PATH = /^\/substrate\/runs\/(wr-[0-9a-f]{20})\/(.+)$/;
 const CHANNEL_PATH = /^channels\/(c[0-9]{1,9})\/(lines|from-tool)$/;
+const REPO_PATH = /^repos\/([^/]+)\/(seed|workspace)$/;
 
 function match(method: string, rest: string): Matched | undefined {
+  const repo = REPO_PATH.exec(rest);
+  if (repo) {
+    const repository = repo[1];
+    if (!isCodingRepositoryName(repository)) return undefined;
+    if (repo[2] === "seed" && method === "GET") return { name: "repos.seed", caller: "holder", repository };
+    if (repo[2] === "workspace" && method === "POST") return { name: "repos.workspace", caller: "holder", repository };
+    return undefined;
+  }
   const channel = CHANNEL_PATH.exec(rest);
   if (channel) {
     if (channel[2] === "lines" && method === "POST")
@@ -291,24 +321,33 @@ export function createSubstrateRoutes(
   /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
   /**
-   * The shape of every token whose row was found: a token's shape is set when its row is created and
-   * never changes. A token with no row is not remembered, so a row not yet visible is never pinned.
+   * The layout of every token whose row was found: a token's row, its shape and its repositories are
+   * set when the row is created and never change. A token with no row is not remembered, so a row not
+   * yet visible is never pinned.
    */
-  const knownShapes = new Map<string, SubstrateActorShape>();
+  const knownLayouts = new Map<string, SubstrateRunLayout>();
 
-  async function shapeFor(token: string): Promise<SubstrateActorShape> {
-    if (!options.actorShapeForToken) return "pair";
-    const known = knownShapes.get(token);
+  async function layoutFor(token: string): Promise<SubstrateRunLayout> {
+    if (!options.runLayoutForToken) return DEFAULT_LAYOUT;
+    const known = knownLayouts.get(token);
     if (known) return known;
-    const found = await options.actorShapeForToken(token);
-    if (found === undefined) return "pair";
-    const shape: SubstrateActorShape = found === "single" ? "single" : "pair";
-    knownShapes.set(token, shape);
-    if (knownShapes.size > KNOWN_SHAPES_MAX) {
-      const oldest = knownShapes.keys().next().value;
-      if (oldest !== undefined) knownShapes.delete(oldest);
+    const found = await options.runLayoutForToken(token);
+    if (found === undefined) return DEFAULT_LAYOUT;
+    const layout: SubstrateRunLayout = {
+      shape: found.shape === "single" ? "single" : "pair",
+      ...(found.repositories ? { repositories: found.repositories } : {}),
+    };
+    knownLayouts.set(token, layout);
+    if (knownLayouts.size > KNOWN_LAYOUTS_MAX) {
+      const oldest = knownLayouts.keys().next().value;
+      if (oldest !== undefined) knownLayouts.delete(oldest);
     }
-    return shape;
+    return layout;
+  }
+
+  /** Whether the run's row lists the extra repository (`write`: as writable). */
+  function listed(layout: SubstrateRunLayout, name: string, write: boolean): boolean {
+    return (layout.repositories ?? []).some((entry) => entry.name === name && (!write || entry.access === "write"));
   }
 
   /** Whether the request carries either credential header (a request with neither is refused unread). */
@@ -508,7 +547,11 @@ export function createSubstrateRoutes(
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
-    const found = RUN_PATH.exec(url.pathname);
+    // URL parsing resolves dot segments (`repos/%2e%2e/workspace` → `workspace`), turns `\` into `/`
+    // and re-encodes characters, so a path it changed in any way could reach a route the caller did not
+    // name: such a request is unmatched (404, no layout lookup). URL parsing resolves a plain or percent-encoded `.`/`..` segment, so the comparison covers it.
+    const rawPath = (request.url ?? "/").split(/[?#]/, 1)[0];
+    const found = rawPath !== url.pathname ? null : RUN_PATH.exec(url.pathname);
     const matched = found ? match(request.method ?? "", found[2]) : undefined;
     const token = found?.[1] ?? "unknown";
     const route = matched?.name ?? "unmatched";
@@ -516,6 +559,8 @@ export function createSubstrateRoutes(
     let errorKind: string | undefined;
     /** A single-shape input: whether this request deleted the run's setup (fixed true/false). */
     let inputDeletedSetup: boolean | undefined;
+    /** repos.*: the repository name, set only once the caller authenticated and the row lists it. */
+    let loggedRepository: string | undefined;
     response.once("close", () => {
       log.info(
         {
@@ -527,6 +572,7 @@ export function createSubstrateRoutes(
           durationMs: Math.round(performance.now() - startedAt),
           ...(errorKind ? { errorKind } : {}),
           ...(inputDeletedSetup !== undefined ? { setupDeleted: inputDeletedSetup } : {}),
+          ...(loggedRepository ? { repository: loggedRepository } : {}),
         },
         "coding proxy substrate route",
       );
@@ -537,9 +583,10 @@ export function createSubstrateRoutes(
       if (matched.name === "diagnostics" && request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined) {
         throw new RouteError(403, "diagnostics_agent_only");
       }
-      // No credential at all: refused before the shape lookup (no database read for it).
+      // No credential at all: refused before the layout lookup (no database read for it).
       if (!hasCredential(request)) throw new RouteError(401, "unauthorized");
-      const shape = await shapeFor(token);
+      const layout = await layoutFor(token);
+      const shape = layout.shape;
       if (shape === "single" && RELAY_ROUTES.has(matched.name)) throw new RouteError(404, "not_found");
       const side = matched.caller === "holder" ? (shape === "single" ? "agent" : "tool") : matched.caller;
       // The agent side's session (the input answer's MCP flag reads it); the tool side has none.
@@ -547,6 +594,9 @@ export function createSubstrateRoutes(
       if (side === "agent") session = await agentSession(request, token);
       const allowed = side === "agent" ? session !== undefined : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
+      if (matched.repository !== undefined && listed(layout, matched.repository, false)) {
+        loggedRepository = matched.repository;
+      }
       const { relay, blobs, limits } = options;
       const channel = matched.channel ?? "";
       switch (matched.name) {
@@ -721,6 +771,43 @@ export function createSubstrateRoutes(
               { event: "substrate.diagnostics", runToken: token, side, ...(round > 1 ? { round } : {}), tail },
               "substrate actor diagnostics",
             );
+          }
+          sendJson(response, 200, {});
+          return;
+        }
+        case "repos.seed": {
+          const name = matched.repository ?? "";
+          if (!listed(layout, name, false)) throw new RouteError(404, "not_found");
+          await sendBlob(response, REPO_BLOB.seed(token, name), "application/x-tar", counters);
+          return;
+        }
+        case "repos.workspace": {
+          // Before the body is read: an unlisted or read-only repository is refused (404, connection closed).
+          // Never writes `done`, drops the relay or touches setupDeleted: the default `workspace` upload,
+          // sent last, ends the run.
+          const name = matched.repository ?? "";
+          if (!listed(layout, name, true)) throw new RouteError(404, "not_found");
+          const round = await roundFor(url, token, "upload");
+          await refuseOnceCollected(token, round);
+          counters.bytes = await receiveBlob(
+            request,
+            REPO_BLOB.workspace(token, name, round),
+            limits.workspaceBytes,
+            clearBodyTimer,
+          );
+          // `done` may have been written while the body streamed. The launcher's collect follows `done`,
+          // so it may already have read this blob, or may not: the upload is refused and its blob removed
+          // best-effort either way. Only a misbehaving holder can cause this (the bridge uploads every extra
+          // before the default `workspace` post that writes `done`), and the holder could equally have sent
+          // that folder in order, so a late upload that is or is not collected gives it nothing new. The
+          // run's cleanup removes a blob the delete leaves behind.
+          if (await blobs.head(BLOB.done(token, round))) {
+            try {
+              await blobs.delete(REPO_BLOB.workspace(token, name, round));
+            } catch {
+              // Best-effort: the answer is 409 whatever the delete did.
+            }
+            throw new RouteError(409, "substrate_run_collected");
           }
           sendJson(response, 200, {});
           return;

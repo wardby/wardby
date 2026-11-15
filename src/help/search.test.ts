@@ -387,6 +387,35 @@ describe("Substrate MCP help", () => {
   });
 });
 
+describe("Substrate multi-repository help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const query of [
+      "substrate repositories",
+      "substrate multi repository",
+      "substrate multi-repo",
+      "extra repositories substrate",
+    ]) {
+      expect(top3(query), query).toContain("job-launcher-substrate");
+    }
+    for (const query of ["read-only repository substrate", "substrate read-only repository"]) {
+      expect(top3(query), query).toContain("multi-repository-runs");
+    }
+    expect(top3("repositories")).toContain("multi-repository-runs");
+    for (const query of ["multi-repository", "extra repositories"]) {
+      const ids = searchHelp(catalog, query).map((r) => r.page.id);
+      expect(ids.indexOf("multi-repository-runs"), query).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf("multi-repository-runs"), query).toBeLessThanOrEqual(ids.indexOf("job-launcher-substrate"));
+    }
+  });
+});
+
 describe("pnpm and yarn help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

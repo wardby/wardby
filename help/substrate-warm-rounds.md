@@ -46,6 +46,8 @@ Rounds with git history always start fresh: a round of an agent with
 `codingProfile.gitHistory` set is never kept, and a continuation of one
 never resumes. See [Git history](git-history.md).
 
+A round with extra repositories is never kept; the next round starts fresh.
+
 ## Did the next round resume?
 
 `get_run` shows `warmStart: true` when a round resumed and `false` when it

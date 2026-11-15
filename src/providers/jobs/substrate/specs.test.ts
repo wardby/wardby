@@ -38,12 +38,86 @@ function fakeClaudeSpec(): JobSpec {
   };
 }
 
+function fakeCodexSpec(): JobSpec {
+  const { toolImage: _tool, ...spec } = fakeClaudeSpec();
+  return { ...spec, provider: "codex", image: `registry.example/substrate-codex@sha256:${"d".repeat(64)}` };
+}
+
+const REPOSITORIES: NonNullable<JobSpec["repositories"]> = [
+  { name: "extra-alpha", access: "write", hostPath: "/runs/run-1/repos/extra-alpha/workspace" },
+];
+const REPOS_SPEC: JobSpec = { ...fakeClaudeSpec(), repositories: REPOSITORIES };
+const REPOS_CODEX_SPEC: JobSpec = { ...fakeCodexSpec(), repositories: REPOSITORIES };
+
 describe("substrate spec builders", () => {
+  it("keeps today's tool and Codex template names without repositories", () => {
+    expect(toolTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-tool-1400fad4aaa431ed");
+    expect(codexTemplate(fakeCodexSpec(), CONFIG).name).toBe("wardby-codex-bde8fe8a156efd90");
+  });
+
+  it("mounts /repos on the tool template only for a spec with repositories", () => {
+    const plain = toolTemplate(fakeClaudeSpec(), CONFIG);
+    const t = toolTemplate(REPOS_SPEC, CONFIG);
+    expect(t.volumes).toEqual([
+      { name: "run", durableDir: true },
+      { name: "workspace", durableDir: true },
+      { name: "repos", durableDir: true },
+      { name: "actor", actorMetadata: { path: "" } },
+    ]);
+    expect(t.containers[0]?.volumeMounts).toEqual([
+      { name: "run", mountPath: "/run/wardby" },
+      { name: "workspace", mountPath: "/workspace" },
+      { name: "repos", mountPath: "/repos" },
+      { name: "actor", mountPath: "/run/ate/actor" },
+    ]);
+    expect(t.name).not.toBe(plain.name);
+    const other = toolTemplate(
+      { ...fakeClaudeSpec(), repositories: [{ name: "extra-beta", access: "read", hostPath: "/y" }] },
+      CONFIG,
+    );
+    expect(other.name).toBe(t.name);
+    expect(other).toEqual(t);
+    expect(t.cpuMillicores).toBe(plain.cpuMillicores);
+    expect(t.memoryBytes).toBe(plain.memoryBytes);
+  });
+
+  it("never mounts /repos on the agent template", () => {
+    expect(agentTemplate(REPOS_SPEC, CONFIG)).toEqual(agentTemplate(fakeClaudeSpec(), CONFIG));
+  });
+
+  it("mounts /repos on the Codex template the same way", () => {
+    const plain = codexTemplate(fakeCodexSpec(), CONFIG);
+    const t = codexTemplate(REPOS_CODEX_SPEC, CONFIG);
+    expect(t.volumes).toEqual([
+      { name: "run", durableDir: true },
+      { name: "workspace", durableDir: true },
+      { name: "repos", durableDir: true },
+      { name: "actor", actorMetadata: { path: "" } },
+    ]);
+    expect(t.containers[0]?.volumeMounts).toEqual([
+      { name: "run", mountPath: "/run/wardby" },
+      { name: "workspace", mountPath: "/workspace" },
+      { name: "repos", mountPath: "/repos" },
+      { name: "actor", mountPath: "/run/ate/actor" },
+    ]);
+    expect(t.name).not.toBe(plain.name);
+    expect(
+      codexTemplate(
+        { ...fakeCodexSpec(), repositories: [{ name: "extra-beta", access: "read", hostPath: "/y" }] },
+        CONFIG,
+      ).name,
+    ).toBe(t.name);
+    expect(t.cpuMillicores).toBe(plain.cpuMillicores);
+    expect(t.memoryBytes).toBe(plain.memoryBytes);
+  });
+
   it("never puts a secret in a template, env or egress policy", () => {
     const spec = fakeClaudeSpec();
     const all = JSON.stringify([
       agentTemplate(spec, CONFIG),
       toolTemplate(spec, CONFIG),
+      toolTemplate(REPOS_SPEC, CONFIG),
+      codexTemplate(REPOS_CODEX_SPEC, CONFIG),
       agentEgress(TOKEN, CONFIG),
       agentEgress(TOKEN, CONFIG, { mcp: true }),
       toolEgress(CONFIG),
@@ -56,6 +130,8 @@ describe("substrate spec builders", () => {
     expect(all).not.toContain("WARDBY_TOOL_SETUP");
     expect(all).not.toContain("WARDBY_RUN_TOKEN");
     expect(all).not.toContain("WARDBY_RUN_CAPABILITY");
+    expect(all).not.toContain("extra-alpha");
+    expect(all).not.toContain("/runs/");
   });
 
   it("puts the capability only in the per-run Secret", () => {
@@ -220,11 +296,6 @@ describe("substrate spec builders", () => {
   });
 
   describe("codexTemplate", () => {
-    const fakeCodexSpec = (): JobSpec => {
-      const { toolImage: _tool, ...spec } = fakeClaudeSpec();
-      return { ...spec, provider: "codex", image: `registry.example/substrate-codex@sha256:${"d".repeat(64)}` };
-    };
-
     it("builds one container with the run's whole size, the workspace and the actor metadata", () => {
       const spec = fakeCodexSpec();
       const t = codexTemplate(spec, { ...CONFIG, workerSelector: { pool: "x" } });

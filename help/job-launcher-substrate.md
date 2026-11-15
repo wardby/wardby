@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp, repositories, multi repository]
 appliesTo: ">=0.9.15"
 ---
 
@@ -23,7 +23,7 @@ reach is the coding proxy.
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
 - your coding agents are Claude Code or Codex, without coding services, the
-  dependency cache, extra repositories or a custom worker image
+  dependency cache or a custom worker image
   (`workerImageRef`).
 
 Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
@@ -62,9 +62,15 @@ run that needs a feature the Substrate backend lacks fails with
    `NODE_EXTRA_CA_CERTS` on the proxy to the CA bundle from the
    `servicedns.podcert.ate.dev` ClusterTrustBundle.
 
-Run the coding proxy of the same release before sending Codex runs, and apply
-the `20261121000000_substrate_codex_shape` migration (`prisma migrate deploy`)
-before the new control plane and proxy start.
+Run the coding proxy of the same release before sending Codex runs. When you
+upgrade, go in this order:
+
+1. Apply the `20261121000000_substrate_codex_shape` and
+   `20261122000000_substrate_repositories` migrations
+   (`prisma migrate deploy`). The new proxy reads the `repositories` column on
+   every Substrate request, so it must exist before the proxy starts.
+2. Start the new coding proxy.
+3. Start the new control plane.
 
 ## MCP tools
 
@@ -74,6 +80,15 @@ Substrate's egress gateway adds the run's MCP token in the `X-Wardby-Mcp-Token`
 header of `/mcp` requests. Run this release's coding proxy before sending MCP
 runs, and set `WARDBY_MCP_GATEWAY_URL` on it. See
 [MCP tools on Substrate](../docs/substrate-backend.md#mcp-tools).
+
+## Extra repositories
+
+Runs with [extra repositories](multi-repository-runs.md) work for Claude Code
+and Codex. A read repository is read-only by file permissions and never
+uploaded, the default repository and the extras share the run's disk limit, and
+such runs always start fresh under warm rounds. Run this release's coding proxy
+before sending them. See
+[Extra repositories on Substrate](../docs/substrate-backend.md#extra-repositories).
 
 ## Worker images
 
@@ -109,8 +124,7 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs services, the dependency cache, extra repositories or a custom
-  worker image.
+  run needs services, the dependency cache or a custom worker image.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and

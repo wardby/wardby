@@ -81,3 +81,9 @@ export const CAPABILITY_HEADER_ENV = "WARDBY_CAPABILITY_HEADER";
 export const REGISTRY_TOKEN_ENV = "WARDBY_REGISTRY_TOKEN";
 /** A run's registry-only token (coding-worker/credentials.ts REGISTRY_TOKEN_SHAPE). */
 export const REGISTRY_TOKEN_SHAPE = /^rrg_[A-Za-z0-9_-]{43}$/;
+
+/** Where extra repositories live (providers/jobs/storage-init.ts REPOSITORY_MOUNT_ROOT). */
+export const REPOSITORY_MOUNT_ROOT = "/repos";
+/** coding/protocol.ts MAX_RUN_REPOSITORIES_IN_INPUT and CODING_REPOSITORY_NAME (constants.test.ts keeps them equal). */
+export const MAX_SETUP_REPOSITORIES = 16;
+export const REPOSITORY_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;

@@ -13,7 +13,7 @@ import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { loadBlobStoreConfig, substrateProxyPort } from "../../config/providers.js";
 import { substrateRunToken } from "../jobs/substrate/names.js";
-import type { SubstrateActorShape } from "../jobs/substrate/run-store.js";
+import { parseRunRepositories, type SubstrateRunLayout } from "../jobs/substrate/run-store.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
 import type { BlobStore } from "../storage/types.js";
 import { startEviction } from "./dependency-cache/eviction.js";
@@ -154,17 +154,22 @@ export interface SubstrateProxyConfig {
  * host on port 80, which HTTP clients leave out of the Host header.
  */
 /**
- * A run's actor shape by its token, from its SubstrateRun row (wardby_proxy has SELECT on it): `single`
- * only when the row says so, any other value `pair` (today's behaviour), and undefined when there is
- * no row (the routes treat it as `pair` without remembering it).
+ * A run's layout by its token, from its SubstrateRun row (wardby_proxy has SELECT on it): `single`
+ * only when the row says so, any other value `pair` (today's behaviour); repositories only when
+ * parseRunRepositories accepts them (an unreadable value means none). Undefined when there is no row
+ * (the routes treat it as a pair with no repositories without remembering it).
  */
-export function substrateActorShapeLookup(
+export function substrateRunLayoutLookup(
   db: Pick<PrismaClient, "substrateRun">,
-): (token: string) => Promise<SubstrateActorShape | undefined> {
+): (token: string) => Promise<SubstrateRunLayout | undefined> {
   return async (token) => {
-    const row = await db.substrateRun.findUnique({ where: { token }, select: { actorShape: true } });
+    const row = await db.substrateRun.findUnique({
+      where: { token },
+      select: { actorShape: true, repositories: true },
+    });
     if (!row) return undefined;
-    return row.actorShape === "single" ? "single" : "pair";
+    const repositories = parseRunRepositories(row.repositories);
+    return { shape: row.actorShape === "single" ? "single" : "pair", ...(repositories ? { repositories } : {}) };
   };
 }
 
@@ -350,7 +355,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
               (await options.db.substrateRun.findUnique({ where: { runId }, select: { token: true } }))?.token ??
               substrateRunToken(runId)
           : substrateRunToken,
-        actorShapeForToken: substrateActorShapeLookup(options.db),
+        runLayoutForToken: substrateRunLayoutLookup(options.db),
         ...(substrateConfig.warmRounds ? { warmRounds: true } : {}),
         limits: substrateConfig.limits,
       })
