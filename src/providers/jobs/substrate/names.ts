@@ -96,12 +96,4 @@ export function retiredRunToken(runId: string): string {
   return `wa-${hex(`retired|${runId}`, 20)}`;
 }
 
-/**
- * The per-run Secret holding the capability. Round 1 (and every run without warm rounds) uses the
- * token itself; with SUBSTRATE_WARM_SECRET=fresh a later round gets its own name.
- */
-export function runSecretName(token: string, round = 1): string {
-  return round === 1 ? token : `${token}-r${round}`;
-}
-
 export const PLACEHOLDER_CAPABILITY = "rrp_placeholder_injected_by_gateway";

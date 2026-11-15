@@ -145,7 +145,11 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(build({})).not.toHaveProperty("warmRounds");
     expect(build({ SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_PARK_TTL_SEC: "600" }).warmRounds).toEqual({
       parkTtlMs: 600_000,
-      secret: "same",
+      parkMax: 10,
+    });
+    expect(build({ SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_PARK_MAX: "0" }).warmRounds).toEqual({
+      parkTtlMs: 3_600_000,
+      parkMax: 0,
     });
   });
 });

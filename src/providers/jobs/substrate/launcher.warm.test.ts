@@ -1,38 +1,73 @@
-// Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike): park on remove, adopt on continuation.
+// Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): retain() parks, a continuation (JobSpec.warm) adopts.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { JobCapacityError, type JobHandle, type JobSpec } from "../types.js";
+import { logger, setLogLineFilter } from "../../../core/logger.js";
+import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } from "../types.js";
 import { CONFIG, FAKE_CAP, makeHarness, TOOL_IMAGE, type Harness } from "./launcher.test-support.js";
+import type { Room } from "./placement.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
 import { BLOB, agentActorName, retiredRunToken, roundBlob, substrateRunToken, toolActorName } from "./names.js";
 import { agentTemplate, toolTemplate, WARM_ROUNDS_ENV } from "./specs.js";
 
-const WARM: WarmRoundsOptions = { parkTtlMs: 3_600_000, secret: "same" };
+const WARM: WarmRoundsOptions = { parkTtlMs: 3_600_000, parkMax: 10 };
+const SHA_1 = "1".repeat(40);
+const SHA_2 = "2".repeat(40);
+const FP = "f".repeat(64);
+/** What the executor retains a delivered round with: the commit it pushed, the agent's fingerprint. */
+const RETAIN: JobRetention = { headSha: SHA_1, fingerprint: FP };
 const CAP_2 = "rrp_fake_capability_value_000002";
 const CAP_3 = "rrp_fake_capability_value_000003";
 const CAPS: Record<string, string> = { "run-1": FAKE_CAP, "run-2": CAP_2, "run-3": CAP_3 };
 const MODEL = "claude-sonnet-5";
 
-async function warmHarness(options: { warmRounds?: WarmRoundsOptions } = {}): Promise<Harness> {
+async function warmHarness(
+  options: { warmRounds?: WarmRoundsOptions; workers?: number; workerSize?: Room; suspendedHoldRoom?: boolean } = {},
+): Promise<Harness> {
   const h = await makeHarness({
     warmRounds: options.warmRounds ?? WARM,
+    ...(options.workers !== undefined ? { workers: options.workers } : {}),
+    ...(options.workerSize ? { workerSize: options.workerSize } : {}),
+    ...(options.suspendedHoldRoom ? { suspendedHoldRoom: true } : {}),
     capabilityFor: (runId) => CAPS[runId] ?? FAKE_CAP,
   });
   await writeFile(h.spec.inputArtifact, JSON.stringify({ schemaVersion: 1, runId: "run-1", model: MODEL, task: "1" }));
   return h;
 }
 
-/** A follow-up run's spec: its own input (continuing run-1, the thread's root) and workspace. */
-async function followUp(h: Harness, runId: string, model = MODEL): Promise<JobSpec> {
+/** Another run's spec: its own input and workspace, continuing nothing. */
+async function otherRun(h: Harness, runId: string): Promise<JobSpec> {
   await mkdir(join(h.workspaceRoot, runId, "workspace"), { recursive: true });
   await writeFile(join(h.workspaceRoot, runId, "workspace", "README.md"), "# hello\n");
   const inputArtifact = join(h.root, `input-${runId}.json`);
-  await writeFile(
-    inputArtifact,
-    JSON.stringify({ schemaVersion: 1, runId, model, task: `task of ${runId}`, continuationOf: { runId: "run-1" } }),
-  );
+  await writeFile(inputArtifact, JSON.stringify({ schemaVersion: 1, runId, model: MODEL, task: `task of ${runId}` }));
   return { ...h.spec, runId, inputArtifact };
+}
+
+/**
+ * A follow-up run's spec: its own input and workspace, continuing `from` (default run-1) on the
+ * branch head `headSha` with the agent fingerprint `fingerprint` (default: what run-1 was retained with).
+ */
+async function followUp(
+  h: Harness,
+  runId: string,
+  warm: { from?: string; headSha?: string; fingerprint?: string } = {},
+): Promise<JobSpec> {
+  const spec = await otherRun(h, runId);
+  await writeFile(
+    spec.inputArtifact,
+    JSON.stringify({
+      schemaVersion: 1,
+      runId,
+      model: MODEL,
+      task: `task of ${runId}`,
+      continuationOf: { runId: "run-1" },
+    }),
+  );
+  return {
+    ...spec,
+    warm: { fromRunId: warm.from ?? "run-1", headSha: warm.headSha ?? SHA_1, fingerprint: warm.fingerprint ?? FP },
+  };
 }
 
 /** What the proxy writes when a round's worker and tool finish: result-n and done-n. */
@@ -61,16 +96,35 @@ async function allBlobs(h: Harness): Promise<Map<string, string>> {
   return out;
 }
 
-async function parkedRoundOne(h: Harness): Promise<JobHandle> {
+async function parkedRoundOne(h: Harness, retention: JobRetention = RETAIN): Promise<JobHandle> {
   const handle = await h.launcher.launch(h.spec);
   await finishRound(h, h.token, "run-1", 1);
   expect((await h.launcher.status(handle)).state).toBe("succeeded");
-  await h.launcher.remove(handle);
+  expect(await h.launcher.retain(handle, retention)).toBe(true);
   return handle;
 }
 
+/** A launcher on the same store, blobs, API and Secrets: the control plane after a restart. */
+function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | undefined = WARM): SubstrateJobLauncher {
+  return new SubstrateJobLauncher({
+    api: h.api,
+    runs: h.runs,
+    blobs: h.blobs,
+    secrets: h.secrets,
+    relay: h.relay,
+    bridgeToolImages: [TOOL_IMAGE],
+    config: CONFIG,
+    workspaceRoot: h.workspaceRoot,
+    resolveCapability: async (runId) => CAPS[runId] ?? FAKE_CAP,
+    now: () => 1_000_000,
+    ...(warmRounds ? { warmRounds, onWarmEvent: (event) => h.warmEvents.push(event) } : {}),
+  });
+}
+
+const secretKey = (h: Harness) => `${CONFIG.credentialsNamespace}/${h.token}`;
+
 describe("SubstrateJobLauncher without warm rounds", () => {
-  it("keeps today's handle, templates and removal", async () => {
+  it("keeps today's handle, templates and removal; retain() removes and warmOutcome() knows nothing", async () => {
     const h = await makeHarness();
     expect(h.launcher.plannedHandle(h.spec)).toEqual({ backend: "substrate", id: `wardby-runs/${h.token}` });
     const handle = await h.launcher.launch(h.spec);
@@ -79,10 +133,20 @@ describe("SubstrateJobLauncher without warm rounds", () => {
       expect(template.containers[0].env!.map((e) => e.name)).toEqual(["WARDBY_PROXY_URL"]);
     }
     await finishRound(h, h.token, "run-1", 1);
-    await h.launcher.remove(handle);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
     expect(h.api.actors.size).toBe(0);
     expect((await h.runs.get("run-1"))!.phase).toBe("removed");
     expect(h.secrets.secrets.size).toBe(0);
+    expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
+  });
+
+  it("ignores a continuation's warm hint", async () => {
+    const h = await makeHarness();
+    const spec = { ...h.spec, warm: { fromRunId: "run-0", headSha: SHA_1, fingerprint: FP } };
+    const handle = await h.launcher.launch(spec);
+    expect(handle.id).toBe(`wardby-runs/${h.token}`);
+    expect((await h.runs.get("run-1"))!.coldReason).toBeUndefined();
+    expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
   });
 });
 
@@ -98,39 +162,137 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     }
     expect(agentTemplate(h.spec, CONFIG).name).not.toBe(agentTemplate(h.spec, { ...CONFIG, warmRounds: true }).name);
     expect(toolTemplate(h.spec, CONFIG).name).not.toBe(toolTemplate(h.spec, { ...CONFIG, warmRounds: true }).name);
+    // A run that continues nothing has no warm outcome.
+    expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
   });
 
-  it("parks a succeeded run on remove: actors suspended, Secret and policies kept, still succeeded", async () => {
+  it("refuses a malformed warm hint (no planned handle, the launch rejects)", async () => {
     const h = await warmHarness();
-    const handle = await parkedRoundOne(h);
+    for (const warm of [
+      { fromRunId: "run-0", headSha: "not-a-sha", fingerprint: FP },
+      { fromRunId: "run-0", headSha: SHA_1, fingerprint: "F".repeat(64) },
+      { fromRunId: "../x", headSha: SHA_1, fingerprint: FP },
+    ]) {
+      expect(h.launcher.plannedHandle({ ...h.spec, warm })).toBeUndefined();
+      await expect(h.launcher.launch({ ...h.spec, warm })).rejects.toThrow("substrate_spec_invalid");
+    }
+  });
+
+  it("retain() parks a succeeded run: actors suspended, Secret and tool setup gone, relay purged, still succeeded", async () => {
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    const channel = await h.relay.openChannel(h.token);
+    await h.relay.fromAgent(h.token, channel, 1, '{"jsonrpc":"2.0","method":"tool"}');
+    await finishRound(h, h.token, "run-1", 1);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
     const record = await h.runs.get("run-1");
-    expect(record!.phase).toBe("parked");
-    expect(record!.deadlineAt.getTime()).toBe(1_000_000 + WARM.parkTtlMs);
-    // Recorded through the store's park(): when, and at which round.
-    expect(record).toMatchObject({ parkedAt: new Date(1_000_000), round: 1 });
+    expect(record).toMatchObject({
+      phase: "parked",
+      headSha: SHA_1,
+      fingerprint: FP,
+      parkedAt: new Date(1_000_000),
+      round: 1,
+      deadlineAt: new Date(1_000_000 + WARM.parkTtlMs),
+    });
     expect(actorStates(h, h.token)).toEqual(["SUSPENDED", "SUSPENDED"]);
     expect(h.api.egressPolicies.size).toBe(2);
-    expect(h.secrets.secrets.has(`${CONFIG.credentialsNamespace}/${h.token}`)).toBe(true);
+    // No live credential at rest: the Secret and the registry token's only home are gone.
+    expect(h.secrets.secrets.has(secretKey(h))).toBe(false);
+    expect(await h.blobs.head(BLOB.toolSetup(h.token))).toBeNull();
+    expect(h.relay.hasRelayRows(h.token)).toBe(false);
     expect(await h.blobs.head(BLOB.seed(h.token))).toBeNull();
     expect(await h.blobs.head(BLOB.workspace(h.token))).toBeNull();
     expect(await h.blobs.head(BLOB.result(h.token))).not.toBeNull();
     const result = await h.launcher.collect(handle);
     expect(result).toMatchObject({ exitCode: 0, reason: "completed" });
     expect(JSON.parse(result.resultArtifact!)).toMatchObject({ runId: "run-1" });
-    expect(h.warmEvents.map((e) => e.event)).toEqual(["substrate_warm_parked"]);
-    expect(h.warmEvents[0]).toMatchObject({ runId: "run-1", runToken: h.token, round: 1 });
+    expect(h.warmEvents).toEqual([
+      { event: "substrate_warm_parked", runId: "run-1", runToken: h.token, round: 1, ms: expect.any(Number) },
+    ]);
+    // A retried retain() with the same retention is answered again; nothing changes.
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    expect((await h.runs.get("run-1"))!.phase).toBe("parked");
   });
 
-  it("does not park a failed run", async () => {
+  it("remove() always removes, even a succeeded run", async () => {
     const h = await warmHarness();
     const handle = await h.launcher.launch(h.spec);
-    await h.blobs.put(BLOB.done(h.token), Buffer.from('{"workspace":"failed"}'));
+    await finishRound(h, h.token, "run-1", 1);
     await h.launcher.remove(handle);
     expect(h.api.actors.size).toBe(0);
     expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.warmEvents).toEqual([]);
   });
 
-  it("removes a parked run in full when remove() is called on it again", async () => {
+  it("retain() removes, and answers false, for a run it cannot keep", async () => {
+    // A failed run.
+    const failed = await warmHarness();
+    const handle = await failed.launcher.launch(failed.spec);
+    await failed.blobs.put(BLOB.done(failed.token), Buffer.from('{"workspace":"failed"}'));
+    expect(await failed.launcher.retain(handle, RETAIN)).toBe(false);
+    expect(failed.api.actors.size).toBe(0);
+    expect((await failed.runs.get("run-1"))!.phase).toBe("removed");
+    // Parking off (SUBSTRATE_PARK_MAX=0).
+    const off = await warmHarness({ warmRounds: { ...WARM, parkMax: 0 } });
+    const offHandle = await off.launcher.launch(off.spec);
+    await finishRound(off, off.token, "run-1", 1);
+    expect(await off.launcher.retain(offHandle, RETAIN)).toBe(false);
+    expect((await off.runs.get("run-1"))!.phase).toBe("removed");
+    expect(off.api.actors.size).toBe(0);
+    // A malformed retention.
+    const bad = await warmHarness();
+    const badHandle = await bad.launcher.launch(bad.spec);
+    await finishRound(bad, bad.token, "run-1", 1);
+    expect(await bad.launcher.retain(badHandle, { headSha: "HEAD", fingerprint: FP })).toBe(false);
+    expect((await bad.runs.get("run-1"))!.phase).toBe("removed");
+    // A run still running: as remove(), refused.
+    const live = await warmHarness();
+    const liveHandle = await live.launcher.launch(live.spec);
+    await expect(live.launcher.retain(liveHandle, RETAIN)).rejects.toThrow("job_not_terminal");
+    expect((await live.runs.get("run-1"))!.phase).toBe("running");
+    // An unknown handle.
+    expect(await live.launcher.retain({ backend: "substrate", id: "wardby-runs/nope" }, RETAIN)).toBe(false);
+  });
+
+  it("retain() of a run parked with another retention removes it", async () => {
+    const h = await warmHarness();
+    const handle = await parkedRoundOne(h);
+    expect(await h.launcher.retain(handle, { headSha: SHA_2, fingerprint: FP })).toBe(false);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.api.actors.size).toBe(0);
+  });
+
+  it("retain() removes the run when a park step fails: a suspend, or the Secret's deletion", async () => {
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    h.api.suspendActor = async () => {
+      throw new Error("down");
+    };
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.warmEvents.map((e) => e.event)).toEqual(["substrate_warm_park_failed"]);
+    expect(h.callFailures).toEqual([{ runId: "run-1", substrateCall: "suspendActor", errorCode: "unexpected" }]);
+
+    const s = await warmHarness();
+    const second = await s.launcher.launch(s.spec);
+    await finishRound(s, s.token, "run-1", 1);
+    const deleteSecret = s.secrets.deleteSecret.bind(s.secrets);
+    let fail = true;
+    s.secrets.deleteSecret = async (namespace, name) => {
+      if (fail) {
+        fail = false;
+        throw new Error("api_down");
+      }
+      return deleteSecret(namespace, name);
+    };
+    expect(await s.launcher.retain(second, RETAIN)).toBe(false);
+    expect((await s.runs.get("run-1"))!.phase).toBe("removed");
+    expect(s.secrets.secrets.size).toBe(0);
+  });
+
+  it("removes a parked run in full when remove() is called on it", async () => {
     const h = await warmHarness();
     const handle = await parkedRoundOne(h);
     await h.launcher.remove(handle);
@@ -141,15 +303,18 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect([...(await allBlobs(h)).keys()]).toEqual([]);
   });
 
-  it("adopts the parked actors for a continuation: same token, round 2, new capability, resumed", async () => {
+  it("adopts the continued run's parked actors: same token, round 2, a fresh Secret with the new capability", async () => {
     const h = await warmHarness();
     const first = await parkedRoundOne(h);
     const spec2 = await followUp(h, "run-2");
     expect(h.launcher.plannedHandle(spec2)).toEqual({ backend: "substrate", id: "wardby-runs/run-2" });
+    const before = h.secrets.calls.length;
     const handle = await h.launcher.launch(spec2);
     expect(handle).toEqual(h.launcher.plannedHandle(spec2));
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: true });
     // The rows: run-2 holds run-1's token at round 2; run-1 is adopted under a retired token.
     expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "running", round: 2 });
+    expect((await h.runs.get("run-2"))!.coldReason).toBeUndefined();
     expect(await h.runs.get("run-1")).toMatchObject({ token: retiredRunToken("run-1"), phase: "adopted" });
     // No new actors, no seed: the same two, resumed.
     expect(h.api.actors.size).toBe(2);
@@ -158,14 +323,9 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.blobs.get(roundBlob(h.token))).toString())).toEqual({ round: 2 });
     expect(JSON.parse((await h.blobs.get(BLOB.input(h.token, 2))).toString())).toMatchObject({ runId: "run-2" });
     expect(await h.blobs.head(BLOB.toolSetup(h.token))).not.toBeNull();
-    // The Secret was replaced under the same name with the new run's capability.
-    expect(h.secrets.secrets.get(`${CONFIG.credentialsNamespace}/${h.token}`)!.stringData).toEqual({
-      capability: CAP_2,
-    });
-    expect(h.secrets.calls.slice(-2)).toEqual([
-      `delete ${CONFIG.credentialsNamespace}/${h.token}`,
-      `create ${CONFIG.credentialsNamespace}/${h.token}`,
-    ]);
+    // The Secret, absent while parked, is created fresh with run-2's capability.
+    expect(h.secrets.secrets.get(secretKey(h))!.stringData).toEqual({ capability: CAP_2 });
+    expect(h.secrets.calls.slice(before)).toEqual([`delete ${secretKey(h)}`, `create ${secretKey(h)}`]);
     expect(h.warmEvents.at(-1)).toMatchObject({
       event: "substrate_warm_adopted",
       runId: "run-2",
@@ -176,6 +336,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     // Round 1's handle names its own (adopted) row: still the succeeded run, and removing it
     // touches nothing of run-2.
     expect((await h.launcher.status(first)).state).toBe("succeeded");
+    expect(await h.launcher.warmOutcome(first)).toBeUndefined();
     await h.launcher.remove(first);
     expect((await h.runs.get("run-1"))!.phase).toBe("removed");
     expect(actorStates(h, h.token)).toEqual(["RUNNING", "RUNNING"]);
@@ -190,25 +351,33 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse(result.resultArtifact!)).toMatchObject({ runId: "run-2" });
     // A relaunch of the same spec finds its row and returns the same handle.
     expect(await h.launcher.launch(spec2)).toEqual(handle);
+    // After a restart, the outcome is read from the row.
+    expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: true });
   });
 
-  it("chains: round 2 parks and round 3 adopts it (round 3 files), then a removal deletes every round", async () => {
+  it("chains by the continued run: round 2 parks and round 3 adopts it, then a removal deletes every round", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
     const second = await h.launcher.launch(await followUp(h, "run-2"));
     await finishRound(h, h.token, "run-2", 2);
-    await h.launcher.remove(second);
+    expect(await h.launcher.retain(second, { headSha: SHA_2, fingerprint: FP })).toBe(true);
+    expect(await h.runs.get("run-2")).toMatchObject({ phase: "parked", round: 2, headSha: SHA_2 });
+    expect(h.secrets.secrets.size).toBe(0);
+    // Continuing run-1 (the root) finds nothing parked: run-2 holds the thread's latest round.
+    const stale = await h.launcher.launch(await followUp(h, "run-x", { from: "run-1", headSha: SHA_2 }));
+    expect(await h.launcher.warmOutcome(stale)).toEqual({ adopted: false, reason: "not_parked" });
     expect((await h.runs.get("run-2"))!.phase).toBe("parked");
-    const third = await h.launcher.launch(await followUp(h, "run-3"));
+    const third = await h.launcher.launch(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 }));
     expect(third.id).toBe("wardby-runs/run-3");
     expect(await h.runs.get("run-3")).toMatchObject({ token: h.token, round: 3 });
     expect(JSON.parse((await h.blobs.get(roundBlob(h.token))).toString())).toEqual({ round: 3 });
     expect(await h.runs.get("run-2")).toMatchObject({ token: retiredRunToken("run-2"), phase: "adopted" });
+    expect(h.secrets.secrets.get(secretKey(h))!.stringData).toEqual({ capability: CAP_3 });
     await h.blobs.put(BLOB.done(h.token, 3), Buffer.from('{"workspace":"failed"}'));
     await h.launcher.remove(third);
-    expect(h.api.actors.size).toBe(0);
-    expect(h.secrets.secrets.size).toBe(0);
-    expect([...(await allBlobs(h)).keys()]).toEqual([]);
+    expect([...h.api.actors.keys()].filter((key) => key.includes(h.token))).toEqual([]);
+    expect(h.secrets.secrets.has(secretKey(h))).toBe(false);
+    for (const key of (await allBlobs(h)).keys()) expect(key).not.toContain(h.token);
   });
 
   it("on full removal of a chain: purges the relay, and deletes the last round's done, then the round record, last", async () => {
@@ -241,33 +410,113 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect((await h.runs.get("run-2"))!.phase).toBe("removed");
   });
 
-  it("launches cold, and removes the parked run, when the continuation does not fit it", async () => {
-    const h = await warmHarness();
-    await parkedRoundOne(h);
-    const spec2 = await followUp(h, "run-2", "claude-opus-5");
-    const handle = await h.launcher.launch(spec2);
-    expect(handle.id).toBe("wardby-runs/run-2");
-    expect(await h.runs.get("run-2")).toMatchObject({ token: substrateRunToken("run-2"), round: 1 });
-    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
-    expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
-    expect(h.warmEvents.find((e) => e.event === "substrate_warm_not_adopted")).toMatchObject({
-      reason: "model_changed",
-      adoptedRunId: "run-1",
+  /** Each way a continuation launches cold instead: the reason, on the row and as an event. */
+  const refusals: {
+    reason: string;
+    /** Changes the world after round 1 is parked; returns the continuation's spec. */
+    arrange: (h: Harness) => Promise<JobSpec>;
+    /** Whether the parked round 1 is removed (it is unless there was nothing parked to remove). */
+    removesPark: boolean;
+  }[] = [
+    {
+      reason: "not_parked",
+      arrange: (h) => followUp(h, "run-2", { from: "run-0" }),
+      removesPark: false,
+    },
+    {
+      reason: "expired",
+      arrange: async (h) => {
+        // Past the park's expiry but inside the sweep interval, so no sweep removed it first.
+        h.setNow(1_000_000 + 10_001);
+        return followUp(h, "run-2");
+      },
+      removesPark: true,
+    },
+    {
+      reason: "branch_moved",
+      arrange: (h) => followUp(h, "run-2", { headSha: SHA_2 }),
+      removesPark: true,
+    },
+    {
+      reason: "fingerprint_changed",
+      arrange: (h) => followUp(h, "run-2", { fingerprint: "e".repeat(64) }),
+      removesPark: true,
+    },
+    {
+      reason: "actor_missing",
+      arrange: async (h) => {
+        h.api.actors.delete(`wardby-runs/${toolActorName(h.token)}`);
+        return followUp(h, "run-2");
+      },
+      removesPark: true,
+    },
+    {
+      reason: "actor_not_suspended",
+      arrange: async (h) => {
+        h.api.setState("wardby-runs", agentActorName(h.token), "CRASHED");
+        return followUp(h, "run-2");
+      },
+      removesPark: true,
+    },
+  ];
+  for (const { reason, arrange, removesPark } of refusals) {
+    it(`launches cold, recording ${reason}, when the continuation cannot adopt`, async () => {
+      const h = await warmHarness({ warmRounds: { ...WARM, parkTtlMs: 10_000 } });
+      await parkedRoundOne(h);
+      const spec2 = await arrange(h);
+      const handle = await h.launcher.launch(spec2);
+      expect(handle.id).toBe("wardby-runs/run-2");
+      expect(await h.runs.get("run-2")).toMatchObject({
+        token: substrateRunToken("run-2"),
+        round: 1,
+        phase: "running",
+        coldReason: reason,
+      });
+      expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason });
+      expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: false, reason });
+      expect((await h.runs.get("run-1"))!.phase).toBe(removesPark ? "removed" : "parked");
+      if (removesPark) expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
+      const event = h.warmEvents.find((e) => e.event === "substrate_warm_not_adopted");
+      expect(event).toEqual({
+        event: "substrate_warm_not_adopted",
+        runId: "run-2",
+        adoptedRunId: spec2.warm!.fromRunId,
+        reason,
+        ...(removesPark ? { runToken: h.token } : {}),
+      });
     });
-  });
+  }
 
-  it("launches cold for a run that continues nothing", async () => {
+  it("cleans up and requeues when a resume finds no room; the relaunch is cold, for capacity", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
     const spec2 = await followUp(h, "run-2");
-    await writeFile(spec2.inputArtifact, JSON.stringify({ schemaVersion: 1, runId: "run-2", model: MODEL }));
+    h.api.options.workers = 0;
+    await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
+    const planned = h.launcher.plannedHandle(spec2)!;
+    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "requeued", round: 2 });
+    expect(await h.launcher.warmOutcome(planned)).toEqual({ adopted: false, reason: "capacity" });
+    expect(h.api.actors.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+    h.api.options.workers = 2;
     const handle = await h.launcher.launch(spec2);
-    expect(handle.id).toBe("wardby-runs/run-2");
-    expect(await h.runs.get("run-2")).toMatchObject({ token: substrateRunToken("run-2"), round: 1 });
-    expect((await h.runs.get("run-1"))!.phase).toBe("parked");
+    // Round 1's names under the inherited token: a fresh seed and input, no round record.
+    expect(await h.runs.get("run-2")).toMatchObject({
+      token: h.token,
+      phase: "running",
+      round: 1,
+      coldReason: "capacity",
+    });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "capacity" });
+    expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: false, reason: "capacity" });
+    expect(await h.blobs.head(BLOB.seed(h.token))).not.toBeNull();
+    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+    await finishRound(h, h.token, "run-2", 1);
+    expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
-  it("sweeps a parked run past its expiry", async () => {
+  it("sweeps a parked run past its expiry, and once at start-up (warmUp)", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
     h.setNow(1_000_000 + WARM.parkTtlMs + 1);
@@ -275,6 +524,30 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect((await h.runs.get("run-1"))!.phase).toBe("removed");
     expect(h.api.actors.size).toBe(0);
     expect(h.warmEvents.at(-1)).toMatchObject({ event: "substrate_warm_expired", runId: "run-1" });
+
+    const s = await warmHarness();
+    await parkedRoundOne(s);
+    s.setNow(1_000_000 + WARM.parkTtlMs + 1);
+    // A new control plane: its warm-up removes what expired while nothing swept.
+    const restarted = new SubstrateJobLauncher({
+      api: s.api,
+      runs: s.runs,
+      blobs: s.blobs,
+      secrets: s.secrets,
+      relay: s.relay,
+      bridgeToolImages: [TOOL_IMAGE],
+      config: CONFIG,
+      workspaceRoot: s.workspaceRoot,
+      resolveCapability: async () => FAKE_CAP,
+      now: () => 1_000_000 + WARM.parkTtlMs + 1,
+      warmRounds: WARM,
+      onWarmEvent: () => undefined,
+    });
+    await restarted.warmUp();
+    expect((await s.runs.get("run-1"))!.phase).toBe("removed");
+    expect(s.api.actors.size).toBe(0);
+    // Without warm rounds, warm-up does nothing.
+    await expect(restartedLauncher(s, undefined).warmUp()).resolves.toBeUndefined();
   });
 
   it("does not adopt an expired park (launch's own sweep removes it first)", async () => {
@@ -285,45 +558,80 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(handle.id).toBe("wardby-runs/run-2");
     expect(await h.runs.get("run-2")).toMatchObject({ token: substrateRunToken("run-2"), round: 1 });
     expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "not_parked" });
   });
 
-  it("with a fresh Secret per round: a new name, the agent policy re-pointed, the old Secret gone", async () => {
-    const h = await warmHarness({ warmRounds: { ...WARM, secret: "fresh" } });
+  it("caps parks at parkMax: the oldest is removed for a new one (one without parkedAt counts as the oldest)", async () => {
+    const h = await warmHarness({ warmRounds: { ...WARM, parkMax: 2 } });
     await parkedRoundOne(h);
-    await h.launcher.launch(await followUp(h, "run-2"));
-    const ns = CONFIG.credentialsNamespace;
-    expect([...h.secrets.secrets.keys()]).toEqual([`${ns}/${h.token}-r2`]);
-    expect(h.secrets.secrets.get(`${ns}/${h.token}-r2`)!.stringData).toEqual({ capability: CAP_2 });
-    const policy = h.api.egressPolicies.get(`wardby-runs/${agentActorName(h.token)}`)!;
-    expect(JSON.stringify(policy)).toContain(`/${ns}/${h.token}-r2/capability`);
+    // A park from before parkedAt was recorded (a spike-era row).
+    const legacy = await otherRun(h, "run-legacy");
+    const legacyHandle = await h.launcher.launch(legacy);
+    await finishRound(h, substrateRunToken("run-legacy"), "run-legacy", 1);
+    expect((await h.launcher.status(legacyHandle)).state).toBe("succeeded");
+    await h.runs.park("run-legacy", { parkedAt: undefined as unknown as Date, round: 1, expiresAt: new Date(9e12) });
+    // A third run, parked later: the cap is 2, so the legacy park goes, then run-1 stays.
+    h.setNow(1_000_500);
+    const third = await otherRun(h, "run-b");
+    const thirdHandle = await h.launcher.launch(third);
+    await finishRound(h, substrateRunToken("run-b"), "run-b", 1);
+    expect(await h.launcher.retain(thirdHandle, RETAIN)).toBe(true);
+    expect((await h.runs.get("run-legacy"))!.phase).toBe("removed");
+    expect((await h.runs.get("run-1"))!.phase).toBe("parked");
+    expect((await h.runs.get("run-b"))!.phase).toBe("parked");
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_evicted")).toEqual([
+      {
+        event: "substrate_warm_evicted",
+        runId: "run-legacy",
+        runToken: substrateRunToken("run-legacy"),
+        reason: "park_max",
+      },
+    ]);
+    // And the next park removes run-1, the oldest by parkedAt.
+    h.setNow(1_000_900);
+    const fourth = await otherRun(h, "run-c");
+    const fourthHandle = await h.launcher.launch(fourth);
+    await finishRound(h, substrateRunToken("run-c"), "run-c", 1);
+    expect(await h.launcher.retain(fourthHandle, RETAIN)).toBe(true);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(await h.runs.countParked()).toBe(2);
+    expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
   });
 
-  it("cleans up and requeues when a resume finds no room", async () => {
-    const h = await warmHarness();
+  it("parks never block a run: with no room, the oldest parks are removed first (never the one continued)", async () => {
+    // One worker with room for one run's two actors (750m + 250m), where a parked run keeps its room.
+    const h = await warmHarness({
+      workers: 1,
+      workerSize: { cpuMillicores: 1000, memoryBytes: 8 * 2 ** 30 },
+      suspendedHoldRoom: true,
+    });
     await parkedRoundOne(h);
-    h.api.options.workers = 0;
-    await expect(h.launcher.launch(await followUp(h, "run-2"))).rejects.toBeInstanceOf(JobCapacityError);
-    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "requeued" });
-    expect(h.api.actors.size).toBe(0);
-    expect(h.secrets.secrets.size).toBe(0);
-    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+    // The continuation of the parked run: its own park is kept, so there is no room for a cold start.
+    expect(await h.launcher.hasCapacityFor(await followUp(h, "run-2"))).toBe(false);
+    expect((await h.runs.get("run-1"))!.phase).toBe("parked");
+    // Another run: the park goes, and then it fits.
+    const other = await otherRun(h, "run-b");
+    expect(await h.launcher.hasCapacityFor(other)).toBe(true);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(h.warmEvents.at(-1)).toEqual({
+      event: "substrate_warm_evicted",
+      runId: "run-1",
+      runToken: h.token,
+      reason: "capacity",
+    });
   });
 
-  it("relaunches a requeued adopter cold, at round 1 on its row (its round-2 state was cleaned up)", async () => {
-    const h = await warmHarness();
+  it("launch() removes parks for room too, before provisioning", async () => {
+    const h = await warmHarness({
+      workers: 1,
+      workerSize: { cpuMillicores: 1000, memoryBytes: 8 * 2 ** 30 },
+      suspendedHoldRoom: true,
+    });
     await parkedRoundOne(h);
-    const spec2 = await followUp(h, "run-2");
-    h.api.options.workers = 0;
-    await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
-    expect(await h.runs.get("run-2")).toMatchObject({ phase: "requeued", round: 2 });
-    h.api.options.workers = 2;
-    const handle = await h.launcher.launch(spec2);
-    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "running", round: 1 });
-    // Round 1's names: a fresh seed and input, no round record.
-    expect(await h.blobs.head(BLOB.seed(h.token))).not.toBeNull();
-    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
-    await finishRound(h, h.token, "run-2", 1);
-    expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
+    const handle = await h.launcher.launch(await otherRun(h, "run-b"));
+    expect((await h.runs.get("run-b"))!.phase).toBe("running");
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
   });
 
   it("records the spec's agent on the row, on a cold launch and on an adoption", async () => {
@@ -331,38 +639,24 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     await h.launcher.launch({ ...h.spec, agentId: "agent-1" });
     expect(await h.runs.get("run-1")).toMatchObject({ agentId: "agent-1" });
     await finishRound(h, h.token, "run-1", 1);
-    await h.launcher.remove(h.launcher.plannedHandle(h.spec)!);
+    expect(await h.launcher.retain(h.launcher.plannedHandle(h.spec)!, RETAIN)).toBe(true);
     await h.launcher.launch({ ...(await followUp(h, "run-2")), agentId: "agent-1" });
     expect(await h.runs.get("run-2")).toMatchObject({ agentId: "agent-1", round: 2 });
   });
 
-  it("after a restart (a new launcher on the same store), status, collect and remove a warm round by its planned handle", async () => {
+  it("after a restart (a new launcher on the same store), adopts, then status, collect, retain and remove a warm round", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);
+    const restarted = restartedLauncher(h);
     const spec2 = await followUp(h, "run-2");
-    await h.launcher.launch(spec2);
-    const planned = h.launcher.plannedHandle(spec2)!;
-    const restarted = new SubstrateJobLauncher({
-      api: h.api,
-      runs: h.runs,
-      blobs: h.blobs,
-      secrets: h.secrets,
-      relay: h.relay,
-      bridgeToolImages: [TOOL_IMAGE],
-      config: CONFIG,
-      workspaceRoot: h.workspaceRoot,
-      resolveCapability: async () => FAKE_CAP,
-      now: () => 1_000_000,
-      warmRounds: WARM,
-      onWarmEvent: () => undefined,
-    });
-    // The handle is derived from the spec alone, so the new instance plans the same one.
-    expect(restarted.plannedHandle(spec2)).toEqual(planned);
+    const planned = restarted.plannedHandle(spec2)!;
+    // The park survives the restart: the new instance adopts it.
+    expect(await restarted.launch(spec2)).toEqual(planned);
+    expect(await restarted.warmOutcome(planned)).toEqual({ adopted: true });
     expect((await restarted.status(planned)).state).toBe("running");
     await finishRound(h, h.token, "run-2", 2);
     expect(JSON.parse((await restarted.collect(planned)).resultArtifact!)).toMatchObject({ runId: "run-2" });
-    // Removing it parks it (round 2, read from the row), then removes it in full.
-    await restarted.remove(planned);
+    expect(await restarted.retain(planned, RETAIN)).toBe(true);
     expect(await h.runs.get("run-2")).toMatchObject({ phase: "parked", round: 2 });
     await restarted.remove(planned);
     expect((await h.runs.get("run-2"))!.phase).toBe("removed");
@@ -375,37 +669,11 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     const cold = await makeHarness();
     const phaseA = await cold.launcher.launch(cold.spec);
     expect(phaseA.id).toBe(`wardby-runs/${cold.token}`);
-    const warmOn = new SubstrateJobLauncher({
-      api: cold.api,
-      runs: cold.runs,
-      blobs: cold.blobs,
-      secrets: cold.secrets,
-      relay: cold.relay,
-      bridgeToolImages: [TOOL_IMAGE],
-      config: CONFIG,
-      workspaceRoot: cold.workspaceRoot,
-      resolveCapability: async () => FAKE_CAP,
-      now: () => 1_000_000,
-      warmRounds: WARM,
-      onWarmEvent: () => undefined,
-    });
-    expect((await warmOn.status(phaseA)).state).toBe("running");
+    expect((await restartedLauncher(cold).status(phaseA)).state).toBe("running");
     // A run launched with them on, read by a launcher with them off.
     const h = await warmHarness();
     const warmHandle = await h.launcher.launch(h.spec);
-    const warmOff = new SubstrateJobLauncher({
-      api: h.api,
-      runs: h.runs,
-      blobs: h.blobs,
-      secrets: h.secrets,
-      relay: h.relay,
-      bridgeToolImages: [TOOL_IMAGE],
-      config: CONFIG,
-      workspaceRoot: h.workspaceRoot,
-      resolveCapability: async () => FAKE_CAP,
-      now: () => 1_000_000,
-    });
-    expect((await warmOff.status(warmHandle)).state).toBe("running");
+    expect((await restartedLauncher(h, undefined).status(warmHandle)).state).toBe("running");
     // Neither form names another atespace's run, or a malformed one.
     await expect(h.launcher.status({ backend: "substrate", id: "other/run-1" })).rejects.toThrow("job_not_found");
     await expect(h.launcher.status({ backend: "substrate", id: "wardby-runs/run-1/x" })).rejects.toThrow(
@@ -413,31 +681,51 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     );
   });
 
-  it("keeps every capability out of templates, policies, blobs (but the tool setup) and warm events", async () => {
+  it("keeps every capability and registry token out of templates, policies, rows, blobs (but the tool setup), events and logs", async () => {
     const h = await warmHarness();
     const stdout: string[] = [];
     const writeOut = process.stdout.write.bind(process.stdout);
     const writeErr = process.stderr.write.bind(process.stderr);
     process.stdout.write = (chunk: string) => (stdout.push(String(chunk)), true);
     process.stderr.write = (chunk: string) => (stdout.push(String(chunk)), true);
+    // Every server log line, as written.
+    setLogLineFilter((line) => (stdout.push(line), line));
+    // A launcher without an event sink logs its warm events: those are captured too.
+    const logged = restartedLauncher(h, WARM);
+    (logged as unknown as { options: { onWarmEvent?: unknown } }).options.onWarmEvent = undefined;
     try {
       await parkedRoundOne(h);
-      await h.launcher.launch(await followUp(h, "run-2"));
+      // While parked, nothing anywhere holds round 1's capability (the Secret is gone).
+      expect(JSON.stringify([...h.secrets.secrets.values()])).not.toContain(FAKE_CAP);
+      const second = await logged.launch(await followUp(h, "run-2"));
+      await finishRound(h, h.token, "run-2", 2);
+      await logged.retain(second, RETAIN);
+      await logged.launch(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 }));
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
+      setLogLineFilter((line) => line);
     }
-    const shapes = [FAKE_CAP, CAP_2, "rrg_"];
+    const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_"];
+    const rows = await Promise.all(["run-1", "run-2", "run-3"].map((id) => h.runs.get(id)));
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),
       JSON.stringify([...h.api.egressPolicies.values()]),
       JSON.stringify(h.warmEvents),
       JSON.stringify(h.callFailures),
+      JSON.stringify(rows),
       stdout.join(""),
     ];
     for (const [key, body] of await allBlobs(h)) {
       if (!key.endsWith("tool-setup.json")) outputs.push(body);
     }
     for (const output of outputs) for (const shape of shapes) expect(output).not.toContain(shape);
+    // Warm events carry fixed fields only: never the commit or the fingerprint either.
+    const allowed = new Set(["event", "runId", "runToken", "round", "adoptedRunId", "reason", "ms", "steps"]);
+    for (const event of h.warmEvents) for (const key of Object.keys(event)) expect(allowed.has(key)).toBe(true);
+    expect(JSON.stringify(h.warmEvents)).not.toContain(FP);
+    expect(JSON.stringify(h.warmEvents)).not.toContain(SHA_1);
+    // The logged events reached the log (so the check above saw them).
+    if (logger.isLevelEnabled("info")) expect(stdout.join("")).toContain("substrate_warm_not_adopted");
   });
 });

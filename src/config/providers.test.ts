@@ -546,27 +546,45 @@ describe("loadSubstrateJobConfig", () => {
     }
   });
 
-  it("turns warm rounds on only with SUBSTRATE_WARM_ROUNDS=true, with its park TTL and Secret mode", () => {
+  it("turns warm rounds on only with SUBSTRATE_WARM_ROUNDS=true, with its park TTL and park cap", () => {
     expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
     expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_PARK_TTL_SEC: "120" })).not.toHaveProperty("warmRounds");
     expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true" }).warmRounds).toEqual({
       parkTtlSec: 3600,
-      secret: "same",
+      parkMax: 10,
     });
     expect(
       loadSubstrateJobConfig({
         ...base,
         SUBSTRATE_WARM_ROUNDS: "true",
         SUBSTRATE_PARK_TTL_SEC: "120",
-        SUBSTRATE_WARM_SECRET: "fresh",
+        SUBSTRATE_PARK_MAX: "3",
       }).warmRounds,
-    ).toEqual({ parkTtlSec: 120, secret: "fresh" });
+    ).toEqual({ parkTtlSec: 120, parkMax: 3 });
+    // 0 turns parking off (warm rounds stay on, so the bridges keep their templates); 1000 is the top.
+    for (const parkMax of [0, 1000]) {
+      expect(
+        loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_PARK_MAX: String(parkMax) })
+          .warmRounds,
+      ).toEqual({ parkTtlSec: 3600, parkMax });
+    }
+    // The spike's Secret mode is gone: the variable is ignored.
+    expect(
+      loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_WARM_SECRET: "fresh" }).warmRounds,
+    ).toEqual({ parkTtlSec: 3600, parkMax: 10 });
     for (const [name, value] of [
       ["SUBSTRATE_WARM_ROUNDS", "yes"],
       ["SUBSTRATE_PARK_TTL_SEC", "30"],
-      ["SUBSTRATE_WARM_SECRET", "rotate"],
+      ["SUBSTRATE_PARK_MAX", "-1"],
+      ["SUBSTRATE_PARK_MAX", "1001"],
+      ["SUBSTRATE_PARK_MAX", "2.5"],
+      ["SUBSTRATE_PARK_MAX", "lots"],
     ] as const) {
       expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", [name]: value })).toThrow(name);
+      // The error names the variable, never the value.
+      expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", [name]: value })).not.toThrow(
+        value,
+      );
     }
   });
 });

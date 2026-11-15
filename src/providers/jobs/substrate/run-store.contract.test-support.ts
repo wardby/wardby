@@ -84,8 +84,21 @@ export function describeSubstrateRunStoreContract(name: string, setup: RunStoreC
       const later = new Date(NOW + 2 * HOUR);
       expect(await s.reclaim(r2, later)).toBeUndefined();
       await s.setPhase(r2, "requeued", ["provisioning"]);
-      expect(await s.reclaim(r2, later)).toMatchObject({ phase: "provisioning", deadlineAt: later, round: 1 });
+      const reclaimed = await s.reclaim(r2, later, { coldReason: "capacity" });
+      expect(reclaimed).toMatchObject({ phase: "provisioning", deadlineAt: later, round: 1, coldReason: "capacity" });
+      expect(await s.get(r2)).toMatchObject({ coldReason: "capacity" });
       expect(await s.reclaim(r2, later)).toBeUndefined();
+    });
+
+    it("records a cold continuation's reason on claim; none otherwise", async () => {
+      const r1 = setup.id("cold");
+      const r2 = setup.id("plain");
+      await setup.runs(r1, r2);
+      const s = store();
+      expect((await s.claim(record(r1, { coldReason: "branch_moved" }))).record.coldReason).toBe("branch_moved");
+      expect(await s.get(r1)).toMatchObject({ coldReason: "branch_moved" });
+      expect((await s.claim(record(r2))).record.coldReason).toBeUndefined();
+      expect((await s.get(r2))!.coldReason).toBeUndefined();
     });
 
     it("parks only a running run, with what it was parked with", async () => {

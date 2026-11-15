@@ -1,4 +1,5 @@
 import type { PrismaClient } from "#prisma";
+import type { WarmColdReason } from "../types.js";
 import { retiredRunToken } from "./names.js";
 
 /**
@@ -46,6 +47,8 @@ export interface SubstrateRunRecord {
   fingerprint?: string;
   /** Warm rounds: when park() parked the run. */
   parkedAt?: Date;
+  /** Warm rounds: why this continuation launched cold (set on claim, or on reclaim of a refused adopter). */
+  coldReason?: WarmColdReason;
   /**
    * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
    * neither actor has reached the proxy, that is when it became running: the relay's own writes to
@@ -78,9 +81,13 @@ export interface SubstrateRunStore {
   /**
    * Moves a requeued run back to provisioning with a fresh deadline, at round 1 (a relaunch after a
    * capacity refusal is always cold: the refused attempt was cleaned up); undefined when it is not
-   * requeued.
+   * requeued. `coldReason`, when given, is recorded with it (a refused adopter: `capacity`).
    */
-  reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined>;
+  reclaim(
+    runId: string,
+    deadlineAt: Date,
+    fields?: { coldReason?: WarmColdReason },
+  ): Promise<SubstrateRunRecord | undefined>;
   /**
    * Moves the run to `phase`; with `from`, only when its current phase is listed (else
    * substrate_phase_conflict). `deadlineAt`, when given, is written with it.
@@ -132,6 +139,7 @@ interface Row {
   headSha: string | null;
   fingerprint: string | null;
   parkedAt: Date | null;
+  coldReason: string | null;
   updatedAt: Date;
 }
 
@@ -147,6 +155,7 @@ function toRecord(row: Row): SubstrateRunRecord {
     ...(row.headSha !== null ? { headSha: row.headSha } : {}),
     ...(row.fingerprint !== null ? { fingerprint: row.fingerprint } : {}),
     ...(row.parkedAt !== null ? { parkedAt: row.parkedAt } : {}),
+    ...(row.coldReason !== null ? { coldReason: row.coldReason as WarmColdReason } : {}),
     updatedAt: row.updatedAt,
   };
 }
@@ -175,6 +184,7 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
           deadlineAt: record.deadlineAt,
           round: record.round ?? 1,
           agentId: record.agentId ?? null,
+          coldReason: record.coldReason ?? null,
         },
       });
       return { created: true, record: toRecord(row) };
@@ -196,10 +206,19 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
     return row ? toRecord(row) : undefined;
   }
 
-  async reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined> {
+  async reclaim(
+    runId: string,
+    deadlineAt: Date,
+    fields: { coldReason?: WarmColdReason } = {},
+  ): Promise<SubstrateRunRecord | undefined> {
     const result = await this.db.substrateRun.updateMany({
       where: { runId, phase: "requeued" },
-      data: { phase: "provisioning", deadlineAt, round: 1 },
+      data: {
+        phase: "provisioning",
+        deadlineAt,
+        round: 1,
+        ...(fields.coldReason !== undefined ? { coldReason: fields.coldReason } : {}),
+      },
     });
     if (result.count === 0) return undefined;
     return this.get(runId);
@@ -309,6 +328,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
       deadlineAt: record.deadlineAt,
       round: record.round ?? 1,
       ...(record.agentId !== undefined ? { agentId: record.agentId } : {}),
+      ...(record.coldReason !== undefined ? { coldReason: record.coldReason } : {}),
       updatedAt: new Date(this.now()),
     };
     this.rows.set(record.runId, row);
@@ -325,12 +345,17 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
     return row ? copy(row) : undefined;
   }
 
-  async reclaim(runId: string, deadlineAt: Date): Promise<SubstrateRunRecord | undefined> {
+  async reclaim(
+    runId: string,
+    deadlineAt: Date,
+    fields: { coldReason?: WarmColdReason } = {},
+  ): Promise<SubstrateRunRecord | undefined> {
     const row = this.rows.get(runId);
     if (!row || row.phase !== "requeued") return undefined;
     row.phase = "provisioning";
     row.deadlineAt = deadlineAt;
     row.round = 1;
+    if (fields.coldReason !== undefined) row.coldReason = fields.coldReason;
     row.updatedAt = new Date(this.now());
     return copy(row);
   }

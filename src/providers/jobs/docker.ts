@@ -491,8 +491,8 @@ function hash(value: string): string {
 }
 
 function stableSpecHash(spec: JobSpec): string {
-  // agentId is metadata (see JobSpec), never part of the job's identity.
-  const { agentId: _agentId, ...job } = spec;
+  // agentId and warm are metadata (see JobSpec), never part of the job's identity.
+  const { agentId: _agentId, warm: _warm, ...job } = spec;
   return hash(
     JSON.stringify({
       ...job,

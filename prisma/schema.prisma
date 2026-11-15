@@ -2371,6 +2371,10 @@ model SubstrateRun {
   parkedAt    DateTime?
   /// The run's agent (from the JobSpec); null on rows from before warm rounds.
   agentId     String?
+  /// Warm rounds: why this continuation launched cold (not_parked | expired | actor_missing |
+  /// actor_not_suspended | branch_moved | fingerprint_changed | capacity); null when it adopted or
+  /// continued nothing.
+  coldReason  String?
   createdAt   DateTime                @default(now())
   updatedAt   DateTime                @updatedAt
   channels    SubstrateRelayChannel[]

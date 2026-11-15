@@ -127,8 +127,8 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
   };
 }
 
-/** `secretName`: the per-run Secret holding the capability (the token itself unless a warm round got a fresh one). */
-export function agentEgress(token: string, config: SubstrateLaunchConfig, secretName: string = token): EgressRule[] {
+/** The agent's one rule: the proxy, its X-Api-Key filled from the per-run Secret (named after the token). */
+export function agentEgress(token: string, config: SubstrateLaunchConfig): EgressRule[] {
   return [
     {
       kind: "http",
@@ -137,7 +137,7 @@ export function agentEgress(token: string, config: SubstrateLaunchConfig, secret
       replaceHeaders: [
         {
           header: "X-Api-Key",
-          credentialUri: `ate-secret://k8s.io/default/${config.credentialsNamespace}/${secretName}/capability`,
+          credentialUri: `ate-secret://k8s.io/default/${config.credentialsNamespace}/${token}/capability`,
         },
       ],
     },
@@ -162,17 +162,12 @@ export function toolEgress(config: SubstrateLaunchConfig): EgressRule[] {
 }
 
 /** The only place the capability appears. Never log or serialize this object. */
-export function runSecret(
-  token: string,
-  capability: string,
-  config: SubstrateLaunchConfig,
-  secretName: string = token,
-): V1Secret {
+export function runSecret(token: string, capability: string, config: SubstrateLaunchConfig): V1Secret {
   return {
     apiVersion: "v1",
     kind: "Secret",
     metadata: {
-      name: secretName,
+      name: token,
       namespace: config.credentialsNamespace,
       labels: { "wardby.dev/substrate-run": token },
     },

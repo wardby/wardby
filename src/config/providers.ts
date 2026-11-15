@@ -744,9 +744,9 @@ export interface SubstrateJobConfig {
   /**
    * SUBSTRATE_WARM_ROUNDS=true (experimental spike): park a succeeded run's actors for a follow-up
    * and let a continuation adopt them. SUBSTRATE_PARK_TTL_SEC (60..86400, default 3600) bounds the
-   * park; SUBSTRATE_WARM_SECRET (`same`, default, or `fresh`) picks how the new capability is handed over.
+   * park; SUBSTRATE_PARK_MAX (0..1000, default 10; 0 = never park) bounds how many runs are parked at once.
    */
-  warmRounds?: { parkTtlSec: number; secret: "same" | "fresh" };
+  warmRounds?: { parkTtlSec: number; parkMax: number };
 }
 
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
@@ -834,9 +834,9 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
     const parkTtlSec =
       optionalBoundedInteger(env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined, "SUBSTRATE_PARK_TTL_SEC", 60, 86_400) ??
       3_600;
-    const secret = env.SUBSTRATE_WARM_SECRET?.trim() || "same";
-    if (secret !== "same" && secret !== "fresh") throw new Error("SUBSTRATE_WARM_SECRET must be same or fresh.");
-    config.warmRounds = { parkTtlSec, secret };
+    const parkMax =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_MAX?.trim() || undefined, "SUBSTRATE_PARK_MAX", 0, 1_000) ?? 10;
+    config.warmRounds = { parkTtlSec, parkMax };
   }
   return config;
 }

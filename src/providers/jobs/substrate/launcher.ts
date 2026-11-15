@@ -15,11 +15,15 @@
  *   the deadline (plus 5 s of clock skew), is success; a later one is a timeout.
  *   Outcomes the launcher observes itself (timeout, a lost or crashed actor, a failed provisioning)
  *   are written to the row's phase, so a terminal state never changes afterwards.
- * - Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike; off by default, and then nothing below
- *   applies): remove() of a succeeded run suspends its actors and parks it; a continuation of it
- *   adopts them (its row takes the parked token and the next round, per-round files `-<n>`, the
- *   Secret gets the new capability, both actors resume) and the bridges run the next round on the
- *   same workspace and the same Claude Code session. Handles are then `<atespace>/<runId>`: the
+ * - Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental; off by default, and then nothing below
+ *   applies): retain() of a succeeded, delivered run suspends its actors, deletes its Secret and
+ *   parks it with the commit it pushed and its agent's fingerprint (at most parkMax parks, the oldest
+ *   removed first); remove() always removes. A continuation naming that run (JobSpec.warm) with the
+ *   same commit and fingerprint adopts the actors (its row takes the parked token and the next round,
+ *   per-round files `-<n>`, a fresh Secret with the new capability, both actors resume) and the
+ *   bridges run the next round on the same workspace and the same Claude Code session; any mismatch
+ *   removes the park and launches cold, with the reason on the row (warmOutcome). Parks never block
+ *   a launch: with no room, the oldest are removed first. Handles are then `<atespace>/<runId>`: the
  *   token, and the round, are always read from the run's row (never derived from the run id).
  */
 import { lstat, readFile, rm } from "node:fs/promises";
@@ -43,12 +47,17 @@ import { CAPABILITY, FINISHED_AT_SKEW_MS, hostTarArchive, stableSpecHash } from 
 import { safeExtract } from "../safe-extract.js";
 import {
   JobCapacityError,
+  WARM_FINGERPRINT,
+  WARM_HEAD_SHA,
   type JobHandle,
   type JobResult,
+  type JobRetention,
   type JobSpec,
   type JobStatus,
   type MaterializedWorkspace,
   type MaterializeWorkspaceOptions,
+  type WarmColdReason,
+  type WarmOutcome,
   type WorkspaceJobLauncher,
 } from "../types.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../worker-diagnostic.js";
@@ -61,15 +70,7 @@ import {
   type ActorTemplateSpec,
   type SubstrateApi,
 } from "./api.js";
-import {
-  BLOB,
-  ROUND_BLOBS,
-  agentActorName,
-  roundBlob,
-  runSecretName,
-  substrateRunToken,
-  toolActorName,
-} from "./names.js";
+import { BLOB, ROUND_BLOBS, agentActorName, roundBlob, substrateRunToken, toolActorName } from "./names.js";
 import { canPlaceAll } from "./placement.js";
 import type { SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
@@ -112,9 +113,9 @@ export interface SubstrateJobLauncherOptions {
    */
   startupTimeoutMs?: number;
   /**
-   * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike): a succeeded run's actors are suspended
-   * and parked on remove() instead of deleted, and a continuation of that run adopts them (same
-   * actors, same workspace, the same Claude Code session). Absent: every behaviour is unchanged.
+   * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): retain() parks a succeeded run's suspended
+   * actors, and a continuation of that run adopts them (same actors, same workspace, the same Claude
+   * Code session). Absent: every behaviour is unchanged (retain() removes).
    */
   warmRounds?: WarmRoundsOptions;
   /** Where warm-round steps are reported with their timings (default: the server log, at info). */
@@ -124,17 +125,17 @@ export interface SubstrateJobLauncherOptions {
 export interface WarmRoundsOptions {
   /** How long a parked run waits for a follow-up before a sweep removes it. */
   parkTtlMs: number;
-  /**
-   * How an adopted round gets the new run's capability: `same` replaces the per-run Secret under its
-   * name (delete, then create); `fresh` creates a Secret under a new name per round and re-puts the
-   * agent's egress policy to point at it (for a credential provider that caches by name).
-   */
-  secret: "same" | "fresh";
+  /** At most this many runs parked at once (SUBSTRATE_PARK_MAX); the oldest go first. 0: never park. */
+  parkMax: number;
 }
 
+/** Why a park was removed to make room: for a launch (`capacity`) or for a newer park (`park_max`). */
+export type WarmEvictReason = "capacity" | "park_max";
+
 /**
- * A warm-round step, fixed fields only (never a capability, a request or a message). `ms` is the
- * step's duration; `reason` a fixed code for a refused adoption.
+ * A warm-round step, fixed fields only (never a capability, a commit, a fingerprint, a request or a
+ * message). `ms` is the step's duration; `reason` a fixed code: a WarmColdReason on
+ * substrate_warm_not_adopted, a WarmEvictReason on substrate_warm_evicted.
  */
 export interface WarmEvent {
   event:
@@ -142,12 +143,14 @@ export interface WarmEvent {
     | "substrate_warm_park_failed"
     | "substrate_warm_adopted"
     | "substrate_warm_not_adopted"
+    | "substrate_warm_evicted"
     | "substrate_warm_expired";
   runId: string;
-  runToken: string;
+  /** The parked actors' token (absent when there was no park to name). */
+  runToken?: string;
   round?: number;
   adoptedRunId?: string;
-  reason?: string;
+  reason?: WarmColdReason | WarmEvictReason;
   ms?: number;
   steps?: Record<string, number>;
 }
@@ -274,23 +277,36 @@ function validateSpec(spec: JobSpec, bridgeToolImages: readonly string[]): void 
     if (spec[feature] !== undefined) throw new Error(`substrate_feature_unsupported:${feature}`);
   }
   if (!bridgeToolImages.includes(spec.toolImage)) throw new Error("substrate_feature_unsupported:workerImage");
+  const warm = spec.warm;
+  if (
+    warm !== undefined &&
+    (typeof warm !== "object" ||
+      warm === null ||
+      typeof warm.fromRunId !== "string" ||
+      !RUN_ID.test(warm.fromRunId) ||
+      typeof warm.headSha !== "string" ||
+      !WARM_HEAD_SHA.test(warm.headSha) ||
+      typeof warm.fingerprint !== "string" ||
+      !WARM_FINGERPRINT.test(warm.fingerprint))
+  ) {
+    throw new Error("substrate_spec_invalid");
+  }
 }
 
-/** What warm rounds read from a coding input: the run it continues (its root) and its model. */
-function summarizeInput(body: Buffer): { root?: string; model?: string } {
-  try {
-    const value = JSON.parse(body.toString("utf8")) as {
-      continuationOf?: { runId?: unknown } | null;
-      model?: unknown;
-    } | null;
-    const root = value?.continuationOf?.runId;
-    return {
-      ...(typeof root === "string" ? { root } : {}),
-      ...(typeof value?.model === "string" ? { model: value.model } : {}),
-    };
-  } catch {
-    return {};
-  }
+function validRetention(retention: JobRetention): boolean {
+  return (
+    typeof retention === "object" &&
+    retention !== null &&
+    typeof retention.headSha === "string" &&
+    WARM_HEAD_SHA.test(retention.headSha) &&
+    typeof retention.fingerprint === "string" &&
+    WARM_FINGERPRINT.test(retention.fingerprint)
+  );
+}
+
+/** Parks oldest first; a park without parkedAt (from before it was recorded) counts as the oldest. */
+function oldestFirst(parks: SubstrateRunRecord[]): SubstrateRunRecord[] {
+  return [...parks.filter((park) => !park.parkedAt), ...parks.filter((park) => park.parkedAt)];
 }
 
 export class SubstrateJobLauncher implements WorkspaceJobLauncher {
@@ -343,17 +359,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    */
   async hasCapacityFor(spec: JobSpec): Promise<boolean> {
     if (this.warm) await this.sweepParkedSometimes();
+    let templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec };
     try {
-      const { agent, tool } = this.templatesFor(spec);
-      const selector = Object.entries(this.config.workerSelector ?? {});
-      const free = (await this.api.listWorkers())
-        .filter((worker) => selector.every(([key, value]) => worker.labels?.[key] === value))
-        .map((worker) => ({ cpuMillicores: worker.freeCpuMillicores, memoryBytes: worker.freeMemoryBytes }));
-      const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
-      return canPlaceAll(free, [size(agent), size(tool)]);
+      templates = this.templatesFor(spec);
     } catch {
       return true;
     }
+    if (await this.fits(templates)) return true;
+    // Warm rounds: parks never block a run; the oldest go until it fits (never the one it continues).
+    return this.warm ? this.evictUntilFits(templates, spec.warm?.fromRunId) : false;
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
@@ -361,9 +375,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const token = substrateRunToken(spec.runId);
     const specHash = stableSpecHash(spec);
     const deadline = () => new Date(this.now() + spec.timeoutSec * 1000);
+    let coldReason: WarmColdReason | undefined;
     if (this.warm) {
       await this.sweepParkedSometimes();
-      if (await this.adoptParked(spec, templates, specHash, deadline())) return this.handleFor(spec.runId);
+      // A relaunch of a run that has a row keeps whatever that row says.
+      if (!(await this.runs.get(spec.runId))) {
+        if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
+        const outcome = await this.adoptParked(spec, specHash, deadline());
+        if (outcome?.adopted) return this.handleFor(spec.runId);
+        coldReason = outcome?.reason;
+      }
     }
     const claimed = await this.runs.claim({
       runId: spec.runId,
@@ -372,6 +393,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       phase: "provisioning",
       deadlineAt: deadline(),
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
+      ...(coldReason !== undefined ? { coldReason } : {}),
     });
     const handle = this.handleFor(spec.runId);
     if (!claimed.created) {
@@ -379,8 +401,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // Any phase but requeued: another launch owns (or owned) this run; never relaunch it. A
       // still-provisioning row whose launch crashed is left to its deadline, as on Kubernetes.
       if (claimed.record.phase !== "requeued") return handle;
-      // Refused for capacity before: provision afresh (round 1), unless another replica just did.
-      if (!(await this.runs.reclaim(spec.runId, deadline()))) return handle;
+      // Refused for capacity before: provision afresh (round 1), unless another replica just did. A
+      // refused adopter (it holds the parked run's token) relaunches cold, for capacity.
+      const refusedAdopter = claimed.record.token !== token;
+      const fields = refusedAdopter ? { coldReason: "capacity" as const } : {};
+      if (!(await this.runs.reclaim(spec.runId, deadline(), fields))) return handle;
     }
     // An adopter refused for capacity keeps the parked run's token on its row (warm rounds).
     await this.provision(spec, claimed.record.token, templates);
@@ -493,12 +518,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(record.runId, "removed", ["adopted"]);
       return;
     }
+    // Warm rounds: a parked run is removed in full; one a continuation just adopted, as adopted.
+    if (record.phase === "parked") {
+      if (!(await this.removeParked(record))) await this.remove(handle);
+      return;
+    }
     const observed = await this.observe(record);
     if (!observed.result) throw new Error("job_not_terminal");
-    // Warm rounds: a succeeded run waits, suspended, for a follow-up (a parked run is removed in full).
-    if (this.warm && record.phase === "running" && observed.status.state === "succeeded") {
-      if (await this.park(record)) return;
-    }
     // Every deletion is tried even when one fails; the first failure is reported and the run is
     // not marked removed, so a later remove() tries again.
     await this.removeInFull(record.token, roundOf(record));
@@ -893,7 +919,58 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   // -------------------------------------------------------------------------
-  // Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike)
+  // Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental)
+
+  /**
+   * Keeps a succeeded, delivered run's actors for the next round (see WorkspaceJobLauncher.retain):
+   * with warm rounds on, parking allowed (parkMax > 0) and the run running and succeeded, the oldest
+   * parks go until there is room under parkMax, then the run is parked with `retention`. Anything
+   * else, or any failed step, removes the run as remove() does, and the answer is false. Retaining a
+   * run already parked with the same retention is true again (a retried call); with another, it is
+   * removed.
+   */
+  async retain(handle: JobHandle, retention: JobRetention): Promise<boolean> {
+    const record = await this.recordFor(handle);
+    if (!record || record.phase === "removed") return false;
+    if (
+      record.phase === "parked" &&
+      validRetention(retention) &&
+      record.headSha === retention.headSha &&
+      record.fingerprint === retention.fingerprint
+    ) {
+      return true;
+    }
+    if (this.warm && this.warm.parkMax > 0 && record.phase === "running" && validRetention(retention)) {
+      const observed = await this.observe(record);
+      if (observed.status.state === "succeeded" && (await this.roomForPark(record.runId))) {
+        if (await this.park(record, retention)) return true;
+      }
+    }
+    await this.remove(handle);
+    return false;
+  }
+
+  /**
+   * For a run launched with JobSpec.warm (warm rounds on): adopted, or launched cold and why. Read
+   * from the run's row, so it answers after a restart too: a recorded cold reason; else a row holding
+   * another run's token adopted it (round > 1), or, requeued, was refused for capacity while resuming.
+   */
+  async warmOutcome(handle: JobHandle): Promise<WarmOutcome | undefined> {
+    if (!this.warm) return undefined;
+    const record = await this.recordFor(handle);
+    if (!record) return undefined;
+    if (record.coldReason !== undefined) return { adopted: false, reason: record.coldReason };
+    if (record.token === substrateRunToken(record.runId)) return undefined;
+    if (record.phase === "requeued") return { adopted: false, reason: "capacity" };
+    return roundOf(record) > 1 ? { adopted: true } : undefined;
+  }
+
+  /** Start-up: removes the parks that expired while no control plane was sweeping. Never throws. */
+  async warmUp(): Promise<void> {
+    if (!this.warm) return;
+    this.lastSweepAt = this.now();
+    await this.sweepParked().catch(() => undefined);
+  }
 
   private warmEvent(event: WarmEvent): void {
     try {
@@ -905,48 +982,127 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Suspends both actors (the snapshot durable before this returns) and records the run as parked
-   * until now + parkTtlMs. Keeps the Secret, the egress policies, the actors' state and the small
-   * files the run's outcome is read from; drops the seed and the workspace tar. False, with nothing
-   * recorded, when a suspend fails: the caller then removes the run as usual.
+   * Whether both actors can be placed now on the workers the configured selector matches, by free
+   * CPU and memory (Substrate packs many actors per worker): the larger first on the worker with the
+   * most free room, then the other, on the same worker or another. No workers: false. Any error (an
+   * unreachable API): true, so the launch itself decides (a refusal there is a JobCapacityError).
    */
-  private async park(record: SubstrateRunRecord): Promise<boolean> {
+  private async fits(templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec }): Promise<boolean> {
+    try {
+      const selector = Object.entries(this.config.workerSelector ?? {});
+      const free = (await this.api.listWorkers())
+        .filter((worker) => selector.every(([key, value]) => worker.labels?.[key] === value))
+        .map((worker) => ({ cpuMillicores: worker.freeCpuMillicores, memoryBytes: worker.freeMemoryBytes }));
+      const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
+      return canPlaceAll(free, [size(templates.agent), size(templates.tool)]);
+    } catch {
+      return true;
+    }
+  }
+
+  /** Every park, oldest first (none when the store cannot be read: a launch never fails for it). */
+  private async parks(): Promise<SubstrateRunRecord[]> {
+    return oldestFirst(await this.runs.listParked().catch(() => []));
+  }
+
+  /** Removes parks, oldest first and never `keep`, until the templates fit; whether they do. */
+  private async evictUntilFits(
+    templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
+    keep: string | undefined,
+  ): Promise<boolean> {
+    for (const park of await this.parks()) {
+      if (park.runId === keep || !(await this.evict(park, "capacity"))) continue;
+      if (await this.fits(templates)) return true;
+    }
+    return false;
+  }
+
+  /** Removes the oldest parks (never `runId`'s own) until fewer than parkMax remain; whether they do. */
+  private async roomForPark(runId: string): Promise<boolean> {
+    const parks = (await this.parks()).filter((park) => park.runId !== runId);
+    let count = parks.length;
+    for (const park of parks) {
+      if (count < this.warm!.parkMax) break;
+      if (await this.evict(park, "park_max")) count -= 1;
+    }
+    return count < this.warm!.parkMax;
+  }
+
+  private async evict(park: SubstrateRunRecord, reason: WarmEvictReason): Promise<boolean> {
+    try {
+      if (!(await this.removeParked(park))) return false;
+    } catch {
+      return false;
+    }
+    this.warmEvent({ event: "substrate_warm_evicted", runId: park.runId, runToken: park.token, reason });
+    return true;
+  }
+
+  /**
+   * Suspends both actors (the snapshot durable before this returns), deletes the per-run Secret (no
+   * live credential at rest: nothing runs, and adoption creates it fresh), the seed, the workspace
+   * tar and the tool setup (the run's registry-only token), and the relay's rows (which would
+   * otherwise follow the retired token on adoption), then records the run as parked until now +
+   * parkTtlMs with the round, its commit and fingerprint. Keeps the egress policies, the actors'
+   * state and the small files the run's outcome is read from. False, with nothing recorded, when any
+   * step fails: the caller then removes the run.
+   */
+  private async park(record: SubstrateRunRecord, retention: JobRetention): Promise<boolean> {
     const { atespace } = this.config;
     const startedAt = this.now();
     const clock = performance.now();
+    const round = roundOf(record);
     try {
-      // The tool first: it holds the workspace and the agent never needs it while suspended.
-      await this.api.suspendActor(atespace, toolActorName(record.token));
-      await this.api.suspendActor(atespace, agentActorName(record.token));
-    } catch (error) {
-      this.reportCallFailure({
-        runId: record.runId,
-        substrateCall: "suspendActor",
-        errorCode: substrateErrorCode(error),
+      try {
+        // The tool first: it holds the workspace and the agent never needs it while suspended.
+        await this.api.suspendActor(atespace, toolActorName(record.token));
+        await this.api.suspendActor(atespace, agentActorName(record.token));
+      } catch (error) {
+        this.reportCallFailure({
+          runId: record.runId,
+          substrateCall: "suspendActor",
+          errorCode: substrateErrorCode(error),
+        });
+        throw error;
+      }
+      await settleAll([
+        () => this.deleteSecret(record.token),
+        () => this.deleteBlob(BLOB.seed(record.token)),
+        () => this.deleteBlob(BLOB.workspace(record.token, round)),
+        () => this.deleteBlob(BLOB.toolSetup(record.token)),
+      ]);
+      await this.options.relay.purgeRelay(record.token);
+      await this.runs.park(record.runId, {
+        headSha: retention.headSha,
+        fingerprint: retention.fingerprint,
+        parkedAt: new Date(startedAt),
+        round,
+        expiresAt: new Date(startedAt + this.warm!.parkTtlMs),
       });
-      this.warmEvent({ event: "substrate_warm_park_failed", runId: record.runId, runToken: record.token });
+    } catch {
+      this.warmEvent({ event: "substrate_warm_park_failed", runId: record.runId, runToken: record.token, round });
       return false;
     }
     const ms = Math.round(performance.now() - clock);
-    const round = roundOf(record);
-    await this.runs.park(record.runId, {
-      parkedAt: new Date(startedAt),
-      round,
-      expiresAt: new Date(startedAt + this.warm!.parkTtlMs),
-    });
-    await settleAll([
-      () => this.deleteBlob(BLOB.seed(record.token)),
-      () => this.deleteBlob(BLOB.workspace(record.token, round)),
-      () => this.deleteBlob(BLOB.toolSetup(record.token)),
-    ]).catch(() => undefined);
     this.warmEvent({ event: "substrate_warm_parked", runId: record.runId, runToken: record.token, round, ms });
     return true;
   }
 
-  /** Removes a parked run in full (an expired park, or one a continuation could not adopt). */
-  private async removeParked(record: SubstrateRunRecord): Promise<void> {
+  /**
+   * Removes a parked run in full (expired, evicted, removed, or one a continuation could not adopt).
+   * Its park is expired first, so no continuation adopts it while its actors go; false, with
+   * nothing touched, when one adopted it already.
+   */
+  private async removeParked(record: SubstrateRunRecord): Promise<boolean> {
+    try {
+      await this.runs.setPhase(record.runId, "parked", ["parked"], new Date(0));
+    } catch (error) {
+      if (isPhaseConflict(error)) return false;
+      throw error;
+    }
     await this.removeInFull(record.token, roundOf(record));
     await this.runs.setPhase(record.runId, "removed", ["parked"]);
+    return true;
   }
 
   private async sweepParkedSometimes(): Promise<void> {
@@ -961,77 +1117,57 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     for (const record of await this.runs.listParked()) {
       if (record.deadlineAt.getTime() > this.now()) continue;
       try {
-        await this.removeParked(record);
-        this.warmEvent({ event: "substrate_warm_expired", runId: record.runId, runToken: record.token });
+        if (await this.removeParked(record)) {
+          this.warmEvent({ event: "substrate_warm_expired", runId: record.runId, runToken: record.token });
+        }
       } catch {
         // Tried again on the next sweep.
       }
     }
   }
 
-  /** The run id the input continues (the thread's root run) and its model; undefined fields when absent. */
-  private async inputSummary(inputArtifact: string): Promise<{ root?: string; model?: string }> {
-    try {
-      const source = await lstat(inputArtifact);
-      if (!source.isFile() || source.size > MAX_CODING_INPUT_BYTES) return {};
-      return summarizeInput(await readFile(inputArtifact));
-    } catch {
-      return {};
-    }
-  }
-
   /**
-   * Adopts the parked run this continuation continues, when there is one and it fits: the parked
-   * row moves to `adopted` and this run's row takes its token, then the next round's files and the
-   * new capability are staged and both actors resume. Undefined when there is nothing to adopt (the
-   * caller launches cold). A parked run that does not fit is removed, so no later round adopts state
-   * older than the branch.
+   * Adopts the run this continuation names (JobSpec.warm.fromRunId) when it is parked, unexpired,
+   * both its actors are suspended, and it was parked with the commit and fingerprint the spec
+   * carries: the parked row moves to `adopted` and this run's row takes its token, then the next
+   * round's files and the new capability are staged and both actors resume. Undefined for a spec
+   * without `warm`. Otherwise why not (the caller launches cold); a park that does not fit is
+   * removed, so no later round adopts state older than the branch.
    */
-  private async adoptParked(
-    spec: JobSpec,
-    templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
-    specHash: string,
-    deadlineAt: Date,
-  ): Promise<string | undefined> {
-    if (await this.runs.get(spec.runId)) return undefined;
-    const input = await this.inputSummary(spec.inputArtifact);
-    if (!input.root || !RUN_ID.test(input.root)) return undefined;
-    const parked = await this.runs.getByToken(substrateRunToken(input.root));
-    // Spike behaviour, kept until the continued run is named in the spec: the root's token leads to
-    // the latest round's row.
-    if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return undefined;
-    const notAdopted = async (reason: string): Promise<undefined> => {
+  private async adoptParked(spec: JobSpec, specHash: string, deadlineAt: Date): Promise<WarmOutcome | undefined> {
+    const warm = spec.warm;
+    if (!warm) return undefined;
+    const parked = await this.runs.get(warm.fromRunId);
+    const notAdopted = async (reason: WarmColdReason, park?: SubstrateRunRecord): Promise<WarmOutcome> => {
       this.warmEvent({
         event: "substrate_warm_not_adopted",
         runId: spec.runId,
-        runToken: parked.token,
-        adoptedRunId: parked.runId,
+        ...(park ? { runToken: park.token } : {}),
+        adoptedRunId: warm.fromRunId,
         reason,
       });
-      await this.removeParked(parked).catch(() => undefined);
-      return undefined;
+      if (park) await this.removeParked(park).catch(() => undefined);
+      return { adopted: false, reason };
     };
-    if (parked.deadlineAt.getTime() <= this.now()) return notAdopted("expired");
+    if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return notAdopted("not_parked");
+    if (parked.deadlineAt.getTime() <= this.now()) return notAdopted("expired", parked);
+    if (parked.headSha !== warm.headSha) return notAdopted("branch_moved", parked);
+    if (parked.fingerprint !== warm.fingerprint) return notAdopted("fingerprint_changed", parked);
     const { atespace } = this.config;
     const [agent, tool] = await Promise.all([
       this.api.getActor(atespace, agentActorName(parked.token)),
       this.api.getActor(atespace, toolActorName(parked.token)),
     ]);
-    if (!agent || !tool) return notAdopted("actor_missing");
-    if (agent.state !== "SUSPENDED" || tool.state !== "SUSPENDED") return notAdopted("actor_not_suspended");
-    if (agent.templateName !== templates.agent.name || tool.templateName !== templates.tool.name) {
-      return notAdopted("template_changed");
-    }
-    const before = await this.readBlob(BLOB.input(parked.token, roundOf(parked)), MAX_CODING_INPUT_BYTES);
-    if (!before || summarizeInput(before).model !== input.model) return notAdopted("model_changed");
+    if (!agent || !tool) return notAdopted("actor_missing", parked);
+    if (agent.state !== "SUSPENDED" || tool.state !== "SUSPENDED") return notAdopted("actor_not_suspended", parked);
     const record = await this.runs.adopt(parked.runId, spec.runId, deadlineAt, {
       specHash,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
     });
-    // Another launch adopted it first, it expired meanwhile, or this run got a row: launch as usual.
-    if (!record) return undefined;
+    // Another launch adopted or removed it first, it expired meanwhile, or this run got a row.
+    if (!record) return notAdopted("not_parked");
     await this.resumeAdopted(spec, record, roundOf(record), parked.runId);
-    return record.token;
+    return { adopted: true };
   }
 
   /**
@@ -1073,21 +1209,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
           contentType: "application/json",
         });
       });
+      // Fresh, with the new run's capability: the park deleted the last round's (any left from before
+      // that rule is deleted first).
       await timed("secret", async () => {
-        const namespace = this.config.credentialsNamespace;
-        if (this.warm!.secret === "fresh") {
-          // A new name per round, and the agent's policy pointed at it.
-          const name = runSecretName(token, round);
-          await this.createSecret(runSecret(token, capability, this.config, name));
-          await call("deleteEgressPolicy", () => this.api.deleteEgressPolicy(atespace, agent));
-          await call("putEgressPolicy", () =>
-            this.api.putEgressPolicy(atespace, agent, agentEgress(token, this.config, name)),
-          );
-          await this.deleteSecret(runSecretName(token, round - 1));
-        } else {
-          await this.deleteSecret(token);
-          await this.options.secrets.createSecret(namespace, runSecret(token, capability, this.config));
-        }
+        await this.deleteSecret(token);
+        await this.options.secrets.createSecret(
+          this.config.credentialsNamespace,
+          runSecret(token, capability, this.config),
+        );
       });
       await timed("resumeTool", () => call("resumeActor", () => this.api.resumeActor(atespace, tool)));
       await timed("resumeAgent", () => call("resumeActor", () => this.api.resumeActor(atespace, agent)));
@@ -1121,14 +1250,6 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     });
   }
 
-  private async createSecret(body: ReturnType<typeof runSecret>): Promise<void> {
-    try {
-      await this.options.secrets.createSecret(this.config.credentialsNamespace, body);
-    } catch (error) {
-      if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Cleanup (each step: missing is success)
 
@@ -1143,7 +1264,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /**
    * Every resource of the run, one step per deletion, so none waits on (or is skipped by) another.
    * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done) nor the
-   * round record. With warm rounds: every round's files and Secrets (`rounds` from the round record).
+   * round record. With warm rounds: every round's files (`rounds` from the run's row).
    */
   private deletions(
     token: string,
@@ -1163,7 +1284,6 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     ];
     if (!this.warm) return steps;
     for (let round = 2; round <= rounds; round += 1) {
-      steps.push(() => this.deleteSecret(runSecretName(token, round)));
       for (const name of ROUND_BLOBS) {
         if (outcome || !OUTCOME_ROUND_BLOBS.includes(name)) steps.push(() => this.deleteBlob(BLOB[name](token, round)));
       }

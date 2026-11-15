@@ -109,6 +109,7 @@ export async function makeHarness(
     workers?: number;
     workerSize?: FakeSubstrateOptions["workerSize"];
     workerLabels?: FakeSubstrateOptions["workerLabels"];
+    suspendedHoldRoom?: boolean;
     config?: Partial<SubstrateLaunchConfig>;
     runId?: string;
     runs?: SubstrateRunStore;
@@ -130,6 +131,7 @@ export async function makeHarness(
     workers: options.workers ?? 2,
     ...(options.workerSize ? { workerSize: options.workerSize } : {}),
     ...(options.workerLabels ? { workerLabels: options.workerLabels } : {}),
+    ...(options.suspendedHoldRoom ? { suspendedHoldRoom: true } : {}),
   });
   let now = 1_000_000;
   const runs = options.runs ?? new MemorySubstrateRunStore(() => now);

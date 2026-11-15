@@ -362,8 +362,8 @@ export interface KubernetesJobLauncherOptions {
 
 /** The spec hash a launch fence compares (also the Substrate launcher's). */
 export function stableSpecHash(spec: JobSpec): string {
-  // agentId is metadata (see JobSpec), never part of the job's identity.
-  const { agentId: _agentId, ...job } = spec;
+  // agentId and warm are metadata (see JobSpec), never part of the job's identity.
+  const { agentId: _agentId, warm: _warm, ...job } = spec;
   return createHash("sha256")
     .update(
       JSON.stringify({
