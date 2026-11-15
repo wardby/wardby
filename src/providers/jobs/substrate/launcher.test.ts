@@ -1,11 +1,14 @@
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateUnavailableError, type WorkerInfo } from "./api.js";
+import { inputHasGitHistory } from "./launcher.js";
 import { agentTemplate, toolTemplate } from "./specs.js";
 import {
   CONFIG,
@@ -122,6 +125,8 @@ describe("SubstrateJobLauncher", () => {
     expect(setup.toolSetup).not.toContain("wardby-proxy");
     expect(setup.collectExclude.paths).toEqual([]);
     expect(setup.collectExclude.names.length).toBeGreaterThan(0);
+    // Without git history the tool bridge uploads the workspace as it is.
+    expect(setup).not.toHaveProperty("collectResultBundle");
     expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("# hello");
   });
 
@@ -694,6 +699,52 @@ describe("SubstrateJobLauncher", () => {
     });
     expect(taken).toEqual({ bundle: true });
     expect((await readFile(bundleDestination)).length).toBe(4096);
+  });
+
+  it("tells the tool bridge to upload only the result bundle on a git-history run", async () => {
+    const h = await makeHarness();
+    const gitHistory = { repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] }] };
+    await writeFile(h.spec.inputArtifact, JSON.stringify({ schemaVersion: 1, task: "say hello", gitHistory }));
+    await h.launcher.launch(h.spec);
+    const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as Record<string, unknown>;
+    expect(setup.collectResultBundle).toBe(true);
+  });
+
+  it("reads git history from the worker input only when it is an object", () => {
+    expect(inputHasGitHistory(Buffer.from(JSON.stringify({ gitHistory: { repositories: [] } })))).toBe(true);
+    for (const input of ["{}", '{"gitHistory":null}', '{"gitHistory":true}', "[]", "null", "not json"]) {
+      expect(inputHasGitHistory(Buffer.from(input))).toBe(false);
+    }
+  });
+
+  it("takes the bundle from a history run's workspace whose .git holds only the bundle", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    // The tool bridge's shape on a history run: the files, then only ./.git/wardby-result.bundle
+    // (no .git directory entry, no other .git file).
+    const source = await mkdtemp(join(tmpdir(), "wardby-substrate-ws-"));
+    await mkdir(join(source, ".git"));
+    await writeFile(join(source, "README.md"), "# changed\n");
+    await writeFile(join(source, ".git", "wardby-result.bundle"), "# v2 git bundle\n");
+    const tarPath = join(source, "..", `${h.token}-workspace.tar`);
+    await promisify(execFile)(
+      "tar",
+      ["-c", "-f", tarPath, "-C", source, "--no-recursion", "./README.md", "./.git/wardby-result.bundle"],
+      { env: { ...process.env, COPYFILE_DISABLE: "1" } },
+    );
+    await h.blobs.put(BLOB.workspace(h.token), await readFile(tarPath));
+    await finish(h);
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const trusted = await mkdtemp(join(tmpdir(), "wardby-substrate-bundle-"));
+    const bundleDestination = join(trusted, "result.bundle");
+    expect(
+      await h.launcher.materializeWorkspace(handle, destination, undefined, {
+        gitHistory: { bundleDestination, maxBundleBytes: 1024 },
+      }),
+    ).toEqual({ bundle: true });
+    expect(await readFile(bundleDestination, "utf8")).toBe("# v2 git bundle\n");
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# changed\n");
+    expect(await readdir(destination)).not.toContain(".git");
   });
 
   it("seeds a history run's root .git with the workspace", async () => {

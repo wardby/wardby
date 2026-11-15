@@ -17,10 +17,11 @@ worker's, when the worker reported one.
 The tool actor reports this when:
 
 - **the workspace is over the proxy's limit.** The proxy refuses a workspace
-  upload larger than `SUBSTRATE_WORKSPACE_MAX_MB` (1024 by default). A
-  `gitHistory` run uploads the repository's whole `.git` with its files, so a
-  long history can exceed the limit. Raise it on the coding proxy, or keep large
-  build output out of the workspace with the agent's collect exclusions;
+  upload larger than `SUBSTRATE_WORKSPACE_MAX_MB` (1024 by default). Raise it
+  on the coding proxy, or keep large build output out of the workspace with the
+  agent's collect exclusions. A `gitHistory` run uploads only its result bundle
+  from `.git`, never the repository's history, so history size is not the
+  cause;
 - **the upload failed** after its retries, or the proxy refused it for another
   reason (check the proxy is healthy and the blob store is writable);
 - **archiving the workspace failed** (`tar` exited with an error);

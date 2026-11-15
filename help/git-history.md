@@ -158,7 +158,6 @@ Operator guide:
 ## Substrate launcher
 
 With the experimental `JOB_LAUNCHER=substrate`, a history run uploads the
-repository's whole `.git` with the workspace, so the coding proxy's
-`SUBSTRATE_WORKSPACE_MAX_MB` must allow for the history size; a workspace over
-it fails the run with `substrate_collect_failed`. See the
-`job-launcher-substrate` help article.
+workspace and, from `.git`, only the run's result bundle, so the repository's
+history does not count toward the coding proxy's `SUBSTRATE_WORKSPACE_MAX_MB`.
+See the `job-launcher-substrate` help article.

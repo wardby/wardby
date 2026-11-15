@@ -137,7 +137,7 @@ The digest requirement for the worker and tool-runner images is the same as for
 | `SUBSTRATE_ACTOR_JWKS_URL`    |                | `<issuer>/openid/v1/jwks` | Where the proxy fetches the issuer's signing keys, when they are not at the default path.                                                                                                                   |
 | `SUBSTRATE_RESULT_MAX_MB`     |                | `16`                      | Largest result a run may upload.                                                                                                                                                                            |
 | `SUBSTRATE_TRANSCRIPT_MAX_MB` |                | `64`                      | Largest session transcript a run may upload.                                                                                                                                                                |
-| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload. See [Git history](#git-history).                                                                                                                              |
+| `SUBSTRATE_WORKSPACE_MAX_MB`  |                | `1024`                    | Largest collected workspace a run may upload.                                                                                                                                                               |
 | `BLOB_STORE` and its settings | When routes on |                           | The same blob store as the control plane.                                                                                                                                                                   |
 
 The proxy refuses to start when `SUBSTRATE_ATESPACE` is set and a required
@@ -155,13 +155,11 @@ must arrive within ten minutes of being authenticated.
 
 ### Git history
 
-A `gitHistory` run is supported. The run's whole `.git` is uploaded with the
-workspace when the run ends, so `SUBSTRATE_WORKSPACE_MAX_MB` on the proxy must be
-large enough for the repository's history as well as its files. The proxy
-refuses a workspace upload over the limit, and the run fails with
-[`substrate_collect_failed`](../help/errors/substrate-collect-failed.md). The
-collected archive's entries count toward the extraction limit of 100,000
-entries, the `.git` ones included. See
+A `gitHistory` run is supported. When the run ends the tool side uploads the
+workspace and, from `.git`, only the run's result bundle
+(`.git/wardby-result.bundle`), never the rest of the repository's history, so
+the history's size does not count toward `SUBSTRATE_WORKSPACE_MAX_MB` or the
+extraction limit of 100,000 entries. See
 [Git history in coding runs](../help/git-history.md).
 
 ## Warm rounds

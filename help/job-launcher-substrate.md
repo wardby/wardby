@@ -59,8 +59,7 @@ feature. A run that needs a feature the Substrate backend lacks fails with
    `NODE_EXTRA_CA_CERTS` on the proxy to the CA bundle from the
    `servicedns.podcert.ate.dev` ClusterTrustBundle.
 
-Every variable, default and limit (`SUBSTRATE_WORKSPACE_MAX_MB` matters for
-`gitHistory` runs, which upload the whole `.git`) is in the
+Every variable, default and limit is in the
 [Substrate backend guide](../docs/substrate-backend.md).
 
 ## Warm rounds

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -147,7 +147,9 @@ describe("substrate bridges, end to end without Substrate", () => {
     logs.push(JSON.stringify({ event, ...fields }));
   };
 
-  async function stage(options: { collectExclude?: unknown } = {}): Promise<{ workspace: string; toolSetup: string }> {
+  async function stage(
+    options: { collectExclude?: unknown; collectResultBundle?: true } = {},
+  ): Promise<{ workspace: string; toolSetup: string }> {
     const seedDir = join(dir, "seed");
     await mkdir(join(seedDir, "src"), { recursive: true });
     await writeFile(join(seedDir, "src", "hello.txt"), "hello from the seed\n");
@@ -170,6 +172,7 @@ describe("substrate bridges, end to end without Substrate", () => {
         JSON.stringify({
           toolSetup,
           collectExclude: options.collectExclude ?? { names: ["node_modules"], paths: ["src/skipped"] },
+          ...(options.collectResultBundle ? { collectResultBundle: true } : {}),
         }),
       ),
     );
@@ -395,6 +398,67 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(await tool.collected).toBe("ok");
     await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
     expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+  });
+
+  /** A worker that leaves a root .git (history, objects, and optionally the result bundle) and exits. */
+  const historyWorker = (workspace: string, bundle: "file" | "symlink" | "none") => ({
+    exited: (async () => {
+      await mkdir(join(workspace, ".git", "objects", "ab"), { recursive: true });
+      await writeFile(join(workspace, ".git", "HEAD"), "ref: refs/heads/main\n");
+      await writeFile(join(workspace, ".git", "objects", "ab", "cdef"), "a history object\n");
+      await writeFile(join(dir, "outside.bundle"), "not the run's bundle\n");
+      if (bundle === "file") await writeFile(join(workspace, ".git", "wardby-result.bundle"), "the result bundle\n");
+      if (bundle === "symlink")
+        await symlink(join(dir, "outside.bundle"), join(workspace, ".git", "wardby-result.bundle"));
+      return 2;
+    })(),
+  });
+
+  async function collectedEntries(): Promise<string[]> {
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
+    const tarPath = join(dir, "check.tar");
+    await writeFile(tarPath, await readBlob(BLOB.workspace(TOKEN)));
+    return (await exec("tar", ["-t", "-f", tarPath])).stdout.split("\n").filter(Boolean);
+  }
+
+  it("uploads only the result bundle from .git on a git-history run (#536)", async () => {
+    const { workspace, toolSetup } = await stage({ collectResultBundle: true });
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, "file") }));
+    await agent.uploaded;
+    const entries = await collectedEntries();
+    expect(entries.filter((entry) => entry.includes(".git"))).toEqual(["./.git/wardby-result.bundle"]);
+    expect(entries).toContain("./src/hello.txt");
+    expect(entries.some((entry) => entry.includes("node_modules") || entry.includes("src/skipped"))).toBe(false);
+    const tarPath = join(dir, "check.tar");
+    expect((await exec("tar", ["-x", "-O", "-f", tarPath, "./.git/wardby-result.bundle"])).stdout).toBe(
+      "the result bundle\n",
+    );
+  });
+
+  it.each(["none", "symlink"] as const)(
+    "uploads no .git at all on a git-history run whose bundle is %s",
+    async (bundle) => {
+      const { workspace, toolSetup } = await stage({ collectResultBundle: true });
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, bundle) }));
+      await agent.uploaded;
+      const entries = await collectedEntries();
+      expect(entries.filter((entry) => entry.includes(".git"))).toEqual([]);
+      expect(entries).toContain("./src/hello.txt");
+    },
+  );
+
+  it("uploads the workspace's .git unchanged on a run without git history", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    agent = await runAgent(await workerOptions({ launchWorker: () => historyWorker(workspace, "file") }));
+    await agent.uploaded;
+    const entries = await collectedEntries();
+    expect(entries).toEqual(
+      expect.arrayContaining(["./.git/HEAD", "./.git/objects/ab/cdef", "./.git/wardby-result.bundle"]),
+    );
   });
 
   it("uploads the transcript before the result or exit report that ends the run", async () => {

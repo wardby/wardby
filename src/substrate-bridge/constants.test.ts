@@ -8,9 +8,11 @@ import {
   SAFE_WORKER_DIAGNOSTIC as BRIDGE_SAFE_WORKER_DIAGNOSTIC,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
   PLACEHOLDER_CAPABILITY,
+  RESULT_BUNDLE_FILE as BRIDGE_RESULT_BUNDLE_FILE,
   RUN_TOKEN_PATTERN,
   TOOL_SUFFIX,
 } from "./constants.js";
+import { RESULT_BUNDLE_FILE } from "../providers/jobs/workspace-swap.js";
 import {
   agentActorName,
   PLACEHOLDER_CAPABILITY as LAUNCHER_CAPABILITY,
@@ -87,4 +89,8 @@ it("matches the warm-rounds values of the launcher, the names and the worker", a
   expect(bridge.WARM_ROUNDS_ENV).toBe(specs.WARM_ROUNDS_ENV);
   expect(bridge.MAX_ROUND).toBe(names.MAX_ROUND);
   expect(bridge.WORKER_CONTEXT_ROOT).toBe(context.CONTEXT_ROOT);
+});
+
+it("names the same result bundle as the launcher", () => {
+  expect(BRIDGE_RESULT_BUNDLE_FILE).toBe(RESULT_BUNDLE_FILE);
 });

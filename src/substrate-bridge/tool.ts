@@ -12,7 +12,7 @@
  * (the proxy refuses a tool-side one; see routes.ts). Its children's stderr goes to the actor's log.
  */
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,7 @@ import {
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
+  RESULT_BUNDLE_FILE,
   WARM_ROUNDS_ENV,
 } from "./constants.js";
 import { waitAtMost } from "./diagnostics.js";
@@ -197,6 +198,22 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
  * Runs a subprocess to completion with no shell; resolves with its exit code once its stderr ended.
  * Its stderr is passed on to the bridge's.
  */
+/** The tool-setup file the proxy serves: the runner's setup plus what the bridge itself needs. */
+interface SetupFile {
+  toolSetup?: unknown;
+  collectExclude?: unknown;
+  /** Set (true) only on a git-history run. */
+  collectResultBundle?: unknown;
+}
+
+/** True when the workspace's root .git is a directory holding the result bundle as a regular file. */
+async function resultBundleIsFile(workspace: string): Promise<boolean> {
+  const git = await lstat(join(workspace, ".git")).catch(() => undefined);
+  if (!git?.isDirectory()) return false;
+  const bundle = await lstat(join(workspace, ".git", RESULT_BUNDLE_FILE)).catch(() => undefined);
+  return bundle?.isFile() ?? false;
+}
+
 const exec = (command: string, args: string[]): Promise<number> =>
   new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -273,18 +290,21 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   // run's registry-only token; once the runner has started, the runner is its only holder (`current`).
   let toolSetup: string;
   let exclusions: CollectExclusions;
+  // A git-history run (#536): the upload carries only the root .git's result bundle (see collect).
+  let collectResultBundle = false;
   try {
     const result = await withRetry(
       () => send(`${base}/tool-setup`, { method: "GET", headers, timeoutMs: REQUEST_TIMEOUT_MS }),
       { policy, deadlineMs: SETUP_DEADLINE_MS, signal: shutdown.signal },
     );
     if (result.status !== 200) return await abortStart("substrate_bridge_setup_failed");
-    const parsed = JSON.parse(result.body.toString("utf8")) as { toolSetup?: unknown; collectExclude?: unknown };
+    const parsed = JSON.parse(result.body.toString("utf8")) as SetupFile;
     if (typeof parsed.toolSetup !== "string") return await abortStart("substrate_bridge_setup_invalid");
     const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
     if (!parsedExclusions) return await abortStart("substrate_bridge_exclude_invalid");
     toolSetup = parsed.toolSetup;
     exclusions = parsedExclusions;
+    collectResultBundle = parsed.collectResultBundle === true;
   } catch (error) {
     if (error instanceof BridgeError && error.code !== "substrate_bridge_retry_exhausted") throw error;
     return abortStart("substrate_bridge_setup_failed");
@@ -435,7 +455,24 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   let round = 1;
   const collect = async (): Promise<"ok" | "rejected" | "failed"> => {
     const tarPath = join(stage, "workspace.tar");
-    const code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(exclusions), "-f", tarPath, "."]);
+    // A history run leaves the root .git out, then adds back only its result bundle when that is a
+    // regular file in a real .git directory (lstat: a symlinked .git or bundle is never followed).
+    const createExclusions = collectResultBundle
+      ? { names: exclusions.names, paths: [...exclusions.paths, ".git"] }
+      : exclusions;
+    let code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(createExclusions), "-f", tarPath, "."]);
+    if ((code === 0 || code === 1) && collectResultBundle && (await resultBundleIsFile(workspace))) {
+      const appended = await exec(tar, [
+        "-r",
+        "-f",
+        tarPath,
+        "-C",
+        workspace,
+        "--no-recursion",
+        `./.git/${RESULT_BUNDLE_FILE}`,
+      ]);
+      if (appended !== 0 && appended !== 1) code = appended;
+    }
     // 1: some files changed while being read; the tar is still usable.
     if (code !== 0 && code !== 1) {
       log("substrate_bridge_collect_failed", { code });
@@ -576,11 +613,12 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     );
     let setup: string;
     try {
-      const parsed = JSON.parse(answer.body.toString("utf8")) as { toolSetup?: unknown; collectExclude?: unknown };
+      const parsed = JSON.parse(answer.body.toString("utf8")) as SetupFile;
       const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
       if (typeof parsed.toolSetup !== "string" || !parsedExclusions) throw new Error("invalid");
       setup = parsed.toolSetup;
       exclusions = parsedExclusions;
+      collectResultBundle = parsed.collectResultBundle === true;
     } catch {
       log("substrate_bridge_setup_invalid", { runToken: token, round });
       return false;
