@@ -10,8 +10,8 @@ appliesTo: ">=0.9.15"
 # The Substrate launcher does not support this run
 
 `substrate_feature_unsupported` means the run asked for something the
-experimental Substrate launcher cannot do. The run fails at launch, before any actor is created. The control
-plane log names the feature (`services`, `mcpTools`, `dependencyCache`,
+experimental Substrate launcher cannot do. The run fails at launch, before any
+actor is created. The control plane log names the feature (`services`, `mcpTools`, `dependencyCache`,
 `repositories` or `workerImage`).
 
 | Trigger                                                                     | Feature           |
