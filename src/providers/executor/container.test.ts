@@ -36,7 +36,12 @@ import {
   type WarmOutcome,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
-import { systemPromptSha256, warmFingerprint, type WarmFingerprintInput } from "../jobs/warm-fingerprint.js";
+import {
+  systemPromptSha256,
+  warmFingerprint,
+  type WarmFingerprintInput,
+  type WarmSecretVersion,
+} from "../jobs/warm-fingerprint.js";
 import type { RunStepBatch } from "../../core/run-steps/types.js";
 import type {
   ContinuationFinishedDetails,
@@ -6693,6 +6698,7 @@ describe("ContainerExecutor warm rounds", () => {
     model: "claude-sonnet-5",
     workerImage: CLAUDE_IMAGE,
     systemPromptSha256: PROMPT_SHA,
+    secretVersions: [] as WarmSecretVersion[],
   } as const;
   const continuation = { ...claudeRun, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" } as const;
   const fingerprintFor = (overrides: Partial<WarmFingerprintInput> = {}) =>
@@ -6707,6 +6713,7 @@ describe("ContainerExecutor warm rounds", () => {
       diskMb: 512,
       systemPromptSha256: PROMPT_SHA,
       repository: "openai/example",
+      secrets: [],
       ...overrides,
     });
 
@@ -6754,6 +6761,8 @@ describe("ContainerExecutor warm rounds", () => {
       /** A retaining launcher with warm rounds off (Substrate with SUBSTRATE_WARM_ROUNDS unset). */
       warmOff?: boolean;
       previous?: { runId: string; commitSha: string | null } | null;
+      /** More executor options (a transcript recorder, say). */
+      extra?: Partial<ContainerExecutorOptions>;
     } = {},
   ) {
     const steps: Array<{ runId: string; batch: RunStepBatch }> = [];
@@ -6768,6 +6777,7 @@ describe("ContainerExecutor warm rounds", () => {
             steps.push({ runId, batch: structuredClone(batch) });
           },
         },
+        ...options.extra,
       },
     );
     created.jobs.result.resultArtifact = JSON.stringify({
@@ -7189,6 +7199,96 @@ describe("ContainerExecutor warm rounds", () => {
       const created = await warmHarness({}, { warmOff: true });
       await expect(created.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
       expect(created.warm!.calls.removedFor).toEqual([]);
+    });
+  });
+
+  describe("secrets changed between rounds", () => {
+    const OLD_VALUE = "sk-fake-old-secret-value-000001";
+    const NEW_VALUE = "sk-fake-new-secret-value-000002";
+    const V1: WarmSecretVersion = { id: "secret-1", name: "API_KEY", updatedAt: "2026-11-14T10:00:00.000Z" };
+    const V2: WarmSecretVersion = { ...V1, updatedAt: "2026-11-14T11:00:00.000Z" };
+
+    /**
+     * Round 2 of a chain whose round 1 was retained under `retained`. The fake launcher adopts only
+     * when the fingerprints match, as Substrate does; an adopted round's session (and so its
+     * transcript) still holds round 1's raw tool output with the value round 1 saw, a cold one only
+     * its own. The recorder redacts against the values current now, as RunTranscriptRecorder does.
+     */
+    async function secondRound(secretVersions: WarmSecretVersion[], retained: string) {
+      const storedTranscripts: string[] = [];
+      const next = await warmHarness(
+        { ...continuation, sessionResume: true, secretVersions },
+        {
+          extra: {
+            transcripts: {
+              record: async (input) => {
+                const text = (await input.read(1 << 20)) ?? "";
+                storedTranscripts.push(text.split(NEW_VALUE).join("[REDACTED]"));
+                return "stored";
+              },
+            },
+          },
+        },
+      );
+      let adopted = false;
+      next.jobs.onLaunch = () => {
+        adopted = next.jobs.lastSpec?.warm?.fingerprint === retained;
+        next.warm!.setOutcome(adopted ? { adopted: true } : { adopted: false, reason: "fingerprint_changed" });
+      };
+      next.jobs.readTranscript = async () =>
+        adopted ? `round 1 tool output: ${OLD_VALUE}\nround 2: ${NEW_VALUE}` : `round 2: ${NEW_VALUE}`;
+      await next.executor.start("run-1");
+      return { next, storedTranscripts };
+    }
+
+    it("a secret rotated between rounds starts the next round fresh, and its transcript never holds the old value", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const retained = first.warm!.calls.retains[0].retention.fingerprint;
+      expect(retained).toBe(fingerprintFor({ secrets: [V1] }));
+
+      const { next, storedTranscripts } = await secondRound([V2], retained);
+      expect(next.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor({ secrets: [V2] }));
+      expect(next.warmStarts).toEqual([["run-1", false]]);
+      expect(next.steps.map((step) => step.batch.steps[0].text)).toEqual([
+        "Started a fresh workspace: the agent's settings changed since the previous round",
+      ]);
+      expect(storedTranscripts).toHaveLength(1);
+      expect(storedTranscripts.join("")).not.toContain(OLD_VALUE);
+      expect(storedTranscripts.join("")).not.toContain(NEW_VALUE);
+    });
+
+    it("a secret detached between rounds starts the next round fresh too", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next, storedTranscripts } = await secondRound([], first.warm!.calls.retains[0].retention.fingerprint);
+      expect(next.warmStarts).toEqual([["run-1", false]]);
+      expect(storedTranscripts.join("")).not.toContain(OLD_VALUE);
+    });
+
+    it("unchanged secrets still resume", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next } = await secondRound([V1], first.warm!.calls.retains[0].retention.fingerprint);
+      expect(next.warmStarts).toEqual([["run-1", true]]);
+    });
+
+    it("a run whose secrets could not be read is never retained and never resumes", async () => {
+      const created = await warmHarness({ secretVersions: undefined });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.fingerprints).toEqual([]);
+      const next = await warmHarness({ ...continuation, secretVersions: undefined });
+      await next.executor.start("run-1");
+      expect(next.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("keeps secret versions and values out of the step lines and the logs", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next } = await secondRound([V2], first.warm!.calls.retains[0].retention.fingerprint);
+      const published = JSON.stringify({ steps: next.steps, logged });
+      for (const text of [OLD_VALUE, NEW_VALUE, V1.updatedAt, V2.updatedAt]) expect(published).not.toContain(text);
     });
   });
 

@@ -75,6 +75,7 @@ import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
+import { removeRetainedRounds } from "./retained-rounds.js";
 import {
   authorizeRepositoryForSet,
   canonicalLocalRepository,
@@ -149,18 +150,6 @@ function warmFingerprintChanged(before: WarmFingerprintSource, after: WarmFinger
     a.workerImageRef !== b.workerImageRef ||
     a.workspaceDiskMb !== b.workspaceDiskMb
   );
-}
-
-/** Warm rounds: removes an agent's retained coding sandboxes. Best effort, never throws. */
-async function removeRetainedRounds(ctx: McpRequestContext, agentId: string): Promise<void> {
-  try {
-    await ctx.providers.executor.removeRetainedRounds?.(agentId);
-  } catch (err) {
-    agentsLog.warn(
-      { agentId, event: "coding.warm_remove_failed", errorName: err instanceof Error ? err.name : typeof err },
-      "could not remove an agent's retained rounds",
-    );
-  }
 }
 
 const MAX_DEBUG_TRACE_MINUTES = 24 * 60;

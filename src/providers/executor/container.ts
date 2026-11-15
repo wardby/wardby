@@ -128,7 +128,8 @@ import {
   type JobWarmStart,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
-import { systemPromptSha256, warmFingerprint } from "../jobs/warm-fingerprint.js";
+import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
+import { agentSecretVersions } from "../../core/secret-versions.js";
 import { RUN_ID } from "../jobs/kubernetes-isolation.js";
 import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
 import type { RunStepSink } from "../../core/run-steps/types.js";
@@ -784,6 +785,12 @@ export interface ContainerRunSnapshot {
   warmFingerprint?: string;
   /** Warm rounds: CodingRun.warmStart (null until a continuation's outcome is recorded). */
   warmStart?: boolean | null;
+  /**
+   * Warm rounds: identity and version of every secret delivered to the run (secret-guard.ts
+   * agentSecretVersions), never a value. Absent = unknown (not read, or the read failed): the run is
+   * then never retained and never asks to resume a retained round.
+   */
+  secretVersions?: WarmSecretVersion[];
 }
 
 /**
@@ -979,6 +986,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         })
       : null;
     const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
+    // Warm rounds' fingerprint covers the run's secrets (identity and version only); only Claude Code
+    // rounds are ever kept. A failed read leaves it unknown, which is never warm.
+    const secretVersions =
+      row.codingRun.provider === "claude-code"
+        ? await agentSecretVersions(this.db, row.agentId).catch(() => undefined)
+        : undefined;
     return {
       repositories,
       runId: row.id,
@@ -1042,6 +1055,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       systemPromptSha256: systemPromptSha256(row.agent.systemPrompt),
       ...(row.codingRun.warmFingerprint ? { warmFingerprint: row.codingRun.warmFingerprint } : {}),
       warmStart: row.codingRun.warmStart,
+      ...(secretVersions ? { secretVersions } : {}),
     };
   }
 
@@ -4120,13 +4134,14 @@ export class ContainerExecutor implements Executor {
 
   /**
    * The agent fingerprint (warm-fingerprint.ts) of the job this run launches with: its resolved
-   * images and limits, model, agent, system prompt and repository. Undefined when any is unknown
+   * images and limits, model, agent, system prompt, repository and secrets (identity and version
+   * only). Undefined when any is unknown
    * (then nothing is retained or resumed), and for a run with git history (never warm: see
    * retentionFor).
    */
   private warmFingerprintOf(run: ContainerRunSnapshot): string | undefined {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
-    if (gitHistoryOf(run)) return undefined;
+    if (gitHistoryOf(run) || !run.secretVersions) return undefined;
     try {
       const spec = this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true });
       if (!spec.toolImage) return undefined;
@@ -4141,6 +4156,7 @@ export class ContainerExecutor implements Executor {
         diskMb: spec.limits.diskMb,
         systemPromptSha256: run.systemPromptSha256,
         repository: run.repository,
+        secrets: run.secretVersions,
       });
       return WARM_FINGERPRINT.test(fingerprint) ? fingerprint : undefined;
     } catch {

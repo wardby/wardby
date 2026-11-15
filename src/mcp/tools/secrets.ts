@@ -39,6 +39,7 @@ import {
 } from "./secret-elicitation.js";
 import { allowedSecretNames, brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 import { textResult } from "./text-result.js";
+import { removeRetainedRounds, removeRetainedRoundsForSecret } from "./retained-rounds.js";
 import { describeOAuthSecretError } from "./oauth-secret-errors.js";
 import {
   mintOAuthLoopbackLink,
@@ -245,19 +246,21 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         if (args.value !== undefined || args.broker !== undefined || args.oauth !== undefined) {
           throw new McpError(400, CONFIRMATION_CODE_ALONE);
         }
+        let finished;
         try {
-          return textResult(
-            await finishOAuthSecretConnect({
-              db: ctx.db,
-              cipher: ctx.providers.secrets,
-              ownerId: ctx.principal.id,
-              name: args.name,
-              confirmationCode: args.confirmationCode,
-            }),
-          );
+          finished = await finishOAuthSecretConnect({
+            db: ctx.db,
+            cipher: ctx.providers.secrets,
+            ownerId: ctx.principal.id,
+            name: args.name,
+            confirmationCode: args.confirmationCode,
+          });
         } catch (err) {
           mapOAuthSecretError(err);
         }
+        // Warm rounds: a kept round's session may hold the previous tokens (see retained-rounds.ts).
+        await removeRetainedRoundsForSecret(ctx, ctx.principal.id, args.name);
+        return textResult(finished);
       }
       if (args.oauth !== undefined) {
         if (args.value !== undefined) throw new McpError(400, "Pass either value or oauth, not both.");
@@ -348,6 +351,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         } catch (err) {
           mapSecretError(err);
         }
+        // Warm rounds: a kept round's session may hold the previous value (see retained-rounds.ts).
+        await removeRetainedRoundsForSecret(ctx, ctx.principal.id, args.name);
         // A fresh broker config supersedes any earlier, browser-confirmed removal still on record.
         if (broker) await clearUnbrokerOutcome(ctx.principal.id, args.name, ctx.db);
         return textResult({
@@ -375,6 +380,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       const existingOutcome = await getSecretElicitationOutcome(ctx.principal.id, args.name, ctx.db);
       if (existingOutcome) {
         if (!existingOutcome.ok) throw new McpError(400, existingOutcome.error);
+        // The value was entered in the browser: kept rounds go as for a value passed here.
+        await removeRetainedRoundsForSecret(ctx, ctx.principal.id, args.name);
         return textResult(existingOutcome.secret);
       }
 
@@ -444,6 +451,9 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         } catch (err) {
           mapSecretError(err);
         }
+        if (JSON.stringify(change.before) !== JSON.stringify(change.after)) {
+          await removeRetainedRoundsForSecret(ctx, ownerId, args.name);
+        }
         await clearUnbrokerOutcome(ownerId, args.name, ctx.db);
         const warnings = await brokerWarningsForSecret(ctx.db, ownerId, args.name);
         return textResult(withWarnings({ name: args.name, before: change.before, broker: change.after }, warnings));
@@ -465,6 +475,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       const existingOutcome = await getSecretElicitationOutcome(ownerId, args.name, ctx.db, "unbroker");
       if (existingOutcome) {
         if (!existingOutcome.ok) mapSecretError(new Error(existingOutcome.error));
+        await removeRetainedRoundsForSecret(ctx, ownerId, args.name);
         return textResult({ unbrokered: true, secret: existingOutcome.secret });
       }
 
@@ -543,6 +554,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         if (err instanceof Error && err.message === WEBHOOK_SECRET_ATTACHED) throw new McpError(409, err.message);
         throw new McpError(404, err instanceof Error ? err.message : String(err));
       }
+      // Warm rounds: the next round gets a different set of secrets (and redacts against it).
+      await removeRetainedRounds(ctx, args.agentId);
       return textResult({ attached: true });
     },
   });
@@ -564,6 +577,9 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       if (count === 0) {
         throw new McpError(404, `No secret is attached to agent "${args.agentId}" as "${args.name}".`);
       }
+      // Warm rounds: a kept round's session may hold the detached value, which the next round's
+      // transcript would no longer be redacted against.
+      await removeRetainedRounds(ctx, args.agentId);
       return textResult({ detached: true, count });
     },
   });

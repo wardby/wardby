@@ -6,6 +6,7 @@ import { registerSecretsTools } from "./secrets.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
+import { setLogLineFilter } from "../../core/logger.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
@@ -47,6 +48,7 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
   >();
   let counter = 0;
   const mcpServerRows: { name: string; secretNames: string[] }[] = [];
+  const agentMcpServerRows: { agentId: string; server: { ownerId: string; secretNames: string[] } }[] = [];
 
   const fake = {
     resourceGrant: fakeResourceGrants(grants),
@@ -57,6 +59,16 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
         mcpServerRows.filter((r) => r.secretNames.includes(where.secretNames.has)),
     },
     mcpServerRows,
+    agentMcpServerRows,
+    agentMcpServer: {
+      findMany: async ({ where }: { where: { server: { ownerId: string; secretNames: { has: string } } } }) =>
+        agentMcpServerRows
+          .filter(
+            (r) =>
+              r.server.ownerId === where.server.ownerId && r.server.secretNames.includes(where.server.secretNames.has),
+          )
+          .map((r) => ({ agentId: r.agentId })),
+    },
     agentSecretRows: agentSecrets,
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
@@ -119,6 +131,13 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     agentSecret: {
+      findMany: async ({ where }: { where: { secret: { ownerId: string; name: string } } }) =>
+        agentSecrets
+          .filter((a) => {
+            const secret = secrets.get(a.secretId);
+            return secret?.ownerId === where.secret.ownerId && secret.name === where.secret.name;
+          })
+          .map((a) => ({ agentId: a.agentId })),
       create: async ({ data }: { data: { agentId: string; secretId: string } }) => {
         agentSecrets.push(data);
         return data;
@@ -740,6 +759,110 @@ describe("secrets tools", () => {
       const denied = await client.callTool({ name: "set_secret_broker", arguments: { name: "K", broker: BROKER } });
       expect(denied.isError).toBe(true);
       await client.close();
+    });
+  });
+
+  describe("warm rounds: an agent's kept rounds go when its secrets change", () => {
+    async function withExecutor(fail = false) {
+      const db = fakeDb([
+        { id: "a1", ownerId: "p1" },
+        { id: "a2", ownerId: "p1" },
+        { id: "a3", ownerId: "p1" },
+      ]);
+      const cipher = fakeCipher();
+      const removed: string[] = [];
+      const providers = {
+        secrets: cipher,
+        executor: {
+          removeRetainedRounds: async (agentId: string) => {
+            removed.push(agentId);
+            if (fail) throw new Error("substrate_down sk-fake-should-not-log");
+            return 1;
+          },
+        },
+      } as never;
+      const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext({ ...fakeCtx(db, cipher, "p1", ["secrets:write"]), providers });
+      registerSecretsTools(mcp, {
+        buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+        protocolElicitation: false,
+        oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
+      });
+      return { client: await connectClient(mcp), removed, db };
+    }
+
+    it("attach_secret and detach_secret remove that agent's kept rounds", async () => {
+      const { client, removed } = await withExecutor();
+      try {
+        await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-fake-value-000001" } });
+        removed.length = 0;
+        const attached = await client.callTool({
+          name: "attach_secret",
+          arguments: { agentId: "a1", name: "API_KEY" },
+        });
+        expect(attached.isError).toBeFalsy();
+        expect(removed).toEqual(["a1"]);
+        const detached = await client.callTool({
+          name: "detach_secret",
+          arguments: { agentId: "a1", name: "API_KEY" },
+        });
+        expect(detached.isError).toBeFalsy();
+        expect(removed).toEqual(["a1", "a1"]);
+        // Nothing detached: nothing removed.
+        await client.callTool({ name: "detach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
+        expect(removed).toEqual(["a1", "a1"]);
+      } finally {
+        await client.close();
+      }
+    });
+
+    it("a new value removes the kept rounds of every agent it is delivered to (attached or through an MCP server)", async () => {
+      const { client, removed, db } = await withExecutor();
+      try {
+        await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-fake-value-000001" } });
+        await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
+        (db as unknown as { agentMcpServerRows: unknown[] }).agentMcpServerRows.push(
+          { agentId: "a2", server: { ownerId: "p1", secretNames: ["API_KEY"] } },
+          { agentId: "a3", server: { ownerId: "p1", secretNames: ["OTHER"] } },
+        );
+        removed.length = 0;
+        const rotated = await client.callTool({
+          name: "create_secret",
+          arguments: { name: "API_KEY", value: "sk-fake-value-000002" },
+        });
+        expect(rotated.isError).toBeFalsy();
+        expect(removed.sort()).toEqual(["a1", "a2"]);
+      } finally {
+        await client.close();
+      }
+    });
+
+    it("a failed removal never fails the tool, and logs no secret value", async () => {
+      const lines: string[] = [];
+      setLogLineFilter((line) => (lines.push(line), ""));
+      const { client, removed } = await withExecutor(true);
+      try {
+        await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-fake-value-000001" } });
+        const attached = await client.callTool({
+          name: "attach_secret",
+          arguments: { agentId: "a1", name: "API_KEY" },
+        });
+        expect(attached.isError).toBeFalsy();
+        const rotated = await client.callTool({
+          name: "create_secret",
+          arguments: { name: "API_KEY", value: "sk-fake-value-000002" },
+        });
+        expect(rotated.isError).toBeFalsy();
+        expect(removed).toEqual(["a1", "a1"]);
+        const joined = lines.join("\n");
+        expect(joined).toContain("coding.warm_remove_failed");
+        for (const text of ["sk-fake-value-000001", "sk-fake-value-000002", "sk-fake-should-not-log"]) {
+          expect(joined).not.toContain(text);
+        }
+      } finally {
+        setLogLineFilter((line) => line);
+        await client.close();
+      }
     });
   });
 });

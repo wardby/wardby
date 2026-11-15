@@ -92,6 +92,68 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("warm rounds: loads the run's secrets as identity and version only, and a rotation changes the version", async () => {
+    const runId = `container-secrets-${randomUUID()}`;
+    const fakeValue = `sk-fake-${randomUUID()}`;
+    const secret = await db.secret.create({
+      data: { name: `API_KEY_${suffix}`, ciphertext: `ct:${fakeValue}`, keyId: "appkey:test", ownerId: principalId },
+    });
+    const server = await db.mcpServer.create({
+      data: {
+        ownerId: principalId,
+        name: `docs-${suffix}`,
+        url: "https://mcp.example/mcp",
+        secretNames: [secret.name, "MISSING"],
+      },
+    });
+    try {
+      await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: "API_KEY" } });
+      await db.agentMcpServer.create({
+        data: { agentId, serverId: server.id, allowedTools: ["search"], attachedById: principalId },
+      });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "claude-code",
+          model: "claude-sonnet-5",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      const loaded = await store.load(runId);
+      const at = secret.updatedAt.toISOString();
+      expect(loaded!.secretVersions).toEqual([
+        { id: secret.id, name: "API_KEY", updatedAt: at },
+        { id: secret.id, name: `mcp:${server.name}/${secret.name}`, updatedAt: at },
+      ]);
+      expect(JSON.stringify(loaded)).not.toContain(fakeValue);
+
+      await db.secret.update({ where: { id: secret.id }, data: { ciphertext: `ct:${fakeValue}-rotated` } });
+      const rotated = await store.load(runId);
+      expect(rotated!.secretVersions![0].updatedAt).not.toBe(at);
+
+      await db.agentSecret.deleteMany({ where: { agentId, secretId: secret.id } });
+      expect((await store.load(runId))!.secretVersions!.map((v) => v.name)).toEqual([
+        `mcp:${server.name}/${secret.name}`,
+      ]);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+      await db.agentMcpServer.deleteMany({ where: { agentId } });
+      await db.agentSecret.deleteMany({ where: { agentId } });
+      await db.mcpServer.deleteMany({ where: { id: server.id } });
+      await db.secret.deleteMany({ where: { id: secret.id } });
+    }
+  });
+
   it("loads the agent's current profile repository and its authorization stamp with the run", async () => {
     const runId = `container-auth-${randomUUID()}`;
     try {
