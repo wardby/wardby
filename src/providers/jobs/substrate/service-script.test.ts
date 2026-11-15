@@ -11,6 +11,7 @@ import {
 } from "../../../coding/services/catalog.js";
 import {
   MAX_SERVICE_SCRIPT_BYTES,
+  MAX_SERVICE_SCRIPTS_BYTES,
   SERVICE_SCRIPT_DIR,
   SERVICE_STATE_LINE,
   serviceStartScript,
@@ -350,6 +351,33 @@ describe("substrateServiceProblems", () => {
     const big = { ...FAKE_SERVICE, serviceEnv };
     expect(Buffer.byteLength(serviceStartScript(big))).toBeGreaterThan(MAX_SERVICE_SCRIPT_BYTES);
     expect(substrateServiceProblems([big])).toEqual([{ name: "fakedb", reason: "setup_too_large" }]);
+  });
+
+  it("measures a script as it sits in the setup JSON, where quotes and backslashes take two bytes", () => {
+    // Raw, the script fits its bound; JSON-escaped (codexWorkerSetup), it would not.
+    const heavy = `"\\`.repeat(300);
+    const serviceEnv = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`V${i}`, heavy]));
+    const service = { ...FAKE_SERVICE, serviceEnv };
+    const script = serviceStartScript(service);
+    expect(Buffer.byteLength(script)).toBeLessThan(MAX_SERVICE_SCRIPT_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(script))).toBeGreaterThan(MAX_SERVICE_SCRIPT_BYTES);
+    expect(substrateServiceProblems([service])).toEqual([{ name: "fakedb", reason: "setup_too_large" }]);
+  });
+
+  it("measures the run's total as JSON too", () => {
+    const fill = (name: string): ResolvedCodingService => ({
+      ...FAKE_SERVICE,
+      name,
+      serviceEnv: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`V${i}`, `"\\`.repeat(300)])),
+    });
+    const raw = Buffer.byteLength(serviceStartScript(fill("a")));
+    const json = Buffer.byteLength(JSON.stringify(serviceStartScript(fill("a"))));
+    expect(raw * 5).toBeLessThan(MAX_SERVICE_SCRIPTS_BYTES);
+    expect(json).toBeLessThan(MAX_SERVICE_SCRIPT_BYTES);
+    expect(json * 5).toBeGreaterThan(MAX_SERVICE_SCRIPTS_BYTES);
+    const names = ["svc-a", "svc-b", "svc-c", "svc-d", "svc-e"];
+    expect(json * 4).toBeLessThan(MAX_SERVICE_SCRIPTS_BYTES);
+    expect(substrateServiceProblems(names.map(fill))).toEqual([{ name: "svc-e", reason: "setup_too_large" }]);
   });
 
   it("flags the service that takes the total past its bound, in name order", () => {

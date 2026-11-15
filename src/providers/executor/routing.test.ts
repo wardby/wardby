@@ -184,6 +184,40 @@ describe("RoutingExecutor", () => {
   });
 });
 
+describe("RoutingExecutor coding services", () => {
+  const SERVICE = {
+    name: "fakedb",
+    version: "1",
+    image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+    port: 5999,
+    serviceEnv: {},
+    testEnv: {},
+    readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+    resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+    dataPath: "/var/lib/fakedb",
+    writablePaths: [],
+  };
+
+  it("passes unstartableCodingServices through to the coding executor", () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const problems = [{ name: "fakedb", reason: "start_command_missing" as const }];
+    const coding = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      unstartableCodingServices: vi.fn(() => problems),
+    };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
+    expect(executor.unstartableCodingServices([SERVICE])).toEqual(problems);
+    expect(coding.unstartableCodingServices).toHaveBeenCalledWith([SERVICE]);
+  });
+
+  it("finds none when the coding executor lacks the hook", () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, native);
+    expect(executor.unstartableCodingServices([SERVICE])).toEqual([]);
+  });
+});
+
 describe("RoutingExecutor native sandbox routing", () => {
   const fake = (name: string, calls: string[]) => ({
     start: vi.fn(async (runId: string) => {

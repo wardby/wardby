@@ -4,6 +4,7 @@
  * Public repositories read these, so they carry only fixed text, validated
  * service names and versions, and the declaration's line numbers.
  */
+import type { UnstartableService, UnstartableServiceReason } from "../../providers/jobs/types.js";
 import { CODING_SERVICE_NAME } from "../protocol.js";
 
 export const SERVICE_REFUSAL_CODES = [
@@ -55,7 +56,20 @@ export const DECLARATION_UNAVAILABLE_SENTENCE =
   "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again.";
 
 export const LAUNCHER_UNSUPPORTED_SENTENCE =
-  "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes or Docker job launcher.";
+  "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher.";
+
+const UNSTARTABLE_REASON_CLAUSES: Record<UnstartableServiceReason, string> = {
+  start_command_missing: "its service catalog entry has no start command",
+  data_path_reserved: "its service catalog entry's data path overlaps a directory the job launcher reserves",
+  setup_too_large: "its service catalog entry's environment and commands are too large for the job launcher",
+};
+
+/** A per-service service_launcher_unsupported sentence (the launcher can run services, but not this one). */
+export function unstartableServiceSentence(service: UnstartableService): string {
+  // Only the validated catalog name and a fixed clause: nothing else of the entry reaches a host.
+  if (!CODING_SERVICE_NAME.test(service.name)) return LAUNCHER_UNSUPPORTED_SENTENCE;
+  return `This repository asks for \`${service.name}\`, which this wardby deployment can't start: ${UNSTARTABLE_REASON_CLAUSES[service.reason]}.`;
+}
 
 /** The launcher's error when a service's sidecar never became ready: `coding_service_unready:<name>`. */
 export const SERVICE_UNREADY_ERROR = "coding_service_unready";

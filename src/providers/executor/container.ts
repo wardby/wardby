@@ -24,7 +24,12 @@ import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../.
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
-import { parseStoredServices, storedServiceNames, workerServices } from "../../coding/services/catalog.js";
+import {
+  parseStoredServices,
+  storedServiceNames,
+  workerServices,
+  type ResolvedCodingService,
+} from "../../coding/services/catalog.js";
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
 import {
   SERVICE_UNREADY_CATEGORY,
@@ -126,6 +131,7 @@ import {
   type JobRetention,
   type JobSpec,
   type JobWarmStart,
+  type UnstartableService,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
 import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
@@ -4040,9 +4046,14 @@ export class ContainerExecutor implements Executor {
     return this.options.repoAccess.authorizeUse(input);
   }
 
-  /** The job launcher decides (Kubernetes and Docker start services for both providers). */
+  /** The job launcher decides (Kubernetes, Docker and Substrate start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
+  }
+
+  /** The job launcher decides; a launcher without the hook (Docker, Kubernetes) can start them all. */
+  unstartableCodingServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return this.options.jobs.unstartableServices?.(services) ?? [];
   }
 
   /** Delegates to the job launcher's own warm-up (Executor.warmUp); a no-op for a launcher without one. */

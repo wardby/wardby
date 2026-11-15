@@ -1306,6 +1306,30 @@ describe("ContainerExecutor", () => {
       expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
     });
 
+    it("asks the job launcher which services it cannot start", async () => {
+      const service = {
+        name: "fakedb",
+        version: "1",
+        image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+        port: 5999,
+        serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+        testEnv: {},
+        readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+        resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+        dataPath: "/var/lib/fakedb",
+        writablePaths: [],
+      };
+      const created = await harness();
+      // A launcher without the hook (Docker, Kubernetes): every service can start.
+      expect(created.executor.unstartableCodingServices([service])).toEqual([]);
+      const unstartableServices = vi.fn(() => [{ name: "fakedb", reason: "setup_too_large" as const }]);
+      (created.jobs as { unstartableServices?: unknown }).unstartableServices = unstartableServices;
+      expect(created.executor.unstartableCodingServices([service])).toEqual([
+        { name: "fakedb", reason: "setup_too_large" },
+      ]);
+      expect(unstartableServices).toHaveBeenCalledWith([service]);
+    });
+
     it("delegates warmUp to its job launcher", async () => {
       const created = await harness();
       await created.executor.warmUp();

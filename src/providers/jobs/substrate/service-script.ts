@@ -10,15 +10,19 @@
  * never in an actor template, a log or an error. The state file holds the fixed SERVICE_STATE_LINE
  * tokens only, never a value. The script never restarts the service and never exits.
  *
- * Pure: it imports only the ResolvedCodingService type.
+ * Pure: it imports only the ResolvedCodingService and UnstartableService types.
  */
 import type { ResolvedCodingService } from "../../../coding/services/catalog.js";
+import type { UnstartableService } from "../types.js";
 
 /** Where a service container sees its own script volume (start.sh, state). Never a catalog path. */
 export const SERVICE_SCRIPT_DIR = "/run/wardby-svc";
 /** Where the holder sees service i's script volume: `${SERVICES_ROOT}/<i>` (i in name order). */
 export const SERVICES_ROOT = "/run/wardby-services";
-/** One start script's largest size, and all of a run's together (inside the Codex setup's 96 KiB). */
+/**
+ * One start script's largest size, and all of a run's together (inside the Codex setup's 96 KiB), both
+ * as JSON-encoded in the setup document (substrateServiceProblems).
+ */
 export const MAX_SERVICE_SCRIPT_BYTES = 16 * 1024;
 export const MAX_SERVICE_SCRIPTS_BYTES = 64 * 1024;
 /** How long a service may go without writing its first state after start.sh is written (start_failed). */
@@ -27,12 +31,6 @@ export const SERVICE_START_MARKER_MS = 30_000;
 /** The fixed state-file tokens (one line), written by the start script only. */
 export const SERVICE_STATE_LINE =
   /^state=(starting|probing|ready|failed|exited)(?: attempts=([0-9]{1,5}))?(?: reason=(probe_failed))?\n?$/;
-
-export type UnstartableServiceReason = "start_command_missing" | "data_path_reserved" | "setup_too_large";
-export interface UnstartableService {
-  name: string;
-  reason: UnstartableServiceReason;
-}
 
 /** POSIX sh single quoting: `'` + value with each `'` as `'\''` + `'`. */
 export function shellQuote(value: string): string {
@@ -106,7 +104,10 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
       problems.push({ name: service.name, reason: "data_path_reserved" });
       continue;
     }
-    const size = Buffer.byteLength(serviceStartScript(service));
+    // Measured as the script will sit in the setup JSON (codexWorkerSetup, the Claude setup document):
+    // JSON.stringify escapes each `"`, `\` and newline to two bytes, so a quote- or backslash-heavy
+    // value that fits raw could still push the setup past its 96 KiB bound at launch.
+    const size = Buffer.byteLength(JSON.stringify(serviceStartScript(service)));
     if (size > MAX_SERVICE_SCRIPT_BYTES || total + size > MAX_SERVICE_SCRIPTS_BYTES) {
       problems.push({ name: service.name, reason: "setup_too_large" });
       continue;
