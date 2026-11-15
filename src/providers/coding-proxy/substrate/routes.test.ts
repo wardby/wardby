@@ -71,8 +71,12 @@ describe("substrate routes", () => {
     overrides = {};
   });
   afterEach(async () => {
-    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-    server?.closeAllConnections();
+    // Close idle keep-alive connections as the server closes, or close() waits on them.
+    await new Promise<void>((resolve) => {
+      if (!server) return resolve();
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -776,8 +780,10 @@ describe("substrate routes", () => {
         expect((await fetch(`${base}/seed`, holder())).status).toBe(200);
         expect((await fetch(`${base}/seed`, holder())).status).toBe(200);
         expect(lookup).toHaveBeenCalledTimes(1);
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-        server.closeAllConnections();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
       }
       // No row yet: treated as pair, and not remembered (the row may appear).
       const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => undefined);
@@ -886,8 +892,10 @@ describe("substrate routes", () => {
       const answer = await fetch(`${base}/events?after=0`, tool());
       expect(answer.status).toBe(404);
       expect(await answer.json()).toEqual({ error: { type: "not_found" } });
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      server.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
       // With warm rounds a tool setup already gone is fine (a later round stages it again).
       overrides = { blobs: failing("not_found"), warmRounds: true, tokenForRun: async () => TOKEN };
       await start();
