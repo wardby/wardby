@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { Executor } from "../providers/executor/types.js";
 import { createPrismaClient } from "./db.js";
-import { mentionDeclinedBody, routeHostEvent, type HostEvent } from "./host-events.js";
+import { mentionDeclinedBody, routeHostEvent, unknownPriorRunBody, type HostEvent } from "./host-events.js";
 import type { RepoAccessGate } from "./repo-access.js";
 import { startReviewFixRound } from "./review-fix.js";
 import { rootFollowUpInFlight } from "./run-pull-request.js";
@@ -65,7 +65,7 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
   const executor: Executor = { start: vi.fn(async () => {}), async stop() {} };
   const deps = { db, executor, hosts: { github: host }, repoAccess, mentionHandle: "wardby" };
 
-  const mention = (repository: string, number: number): HostEvent => ({
+  const mention = (repository: string, number: number, priorRunId = id("root")): HostEvent => ({
     kind: "mention",
     provider: "github",
     repository,
@@ -75,7 +75,7 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
     body: "@wardby please fix it",
     author: "someone",
     authorId: "1001",
-    priorRunId: id("root"),
+    priorRunId,
   });
 
   beforeAll(async () => {
@@ -178,6 +178,66 @@ describe.skipIf(!process.env.DATABASE_URL)("one follow-up in flight per root run
     await db.run.updateMany({
       where: { id: { in: [review, (round as { runId: string }).runId] } },
       data: { status: "succeeded", finishedAt: new Date() },
+    });
+  });
+
+  describe("a pull request whose marker run is still running", () => {
+    // The PR's marker names a follow-up of the root that has not finished. Review-fix and mentions
+    // only validate the marker (they continue nothing themselves), so a running one is not
+    // "unknown": they wait or decline as they always have, never stop the PR or deny the run.
+    const marker = id("marker");
+    beforeAll(async () => {
+      await db.run.create({ data: { id: marker, agentId: responder, status: "running", trigger: "host_event" } });
+      await db.codingRun.create({
+        data: {
+          runId: marker,
+          rootCodingRunId: id("root"),
+          task: "t",
+          repository: FORK,
+          baseRef: "main",
+          headRef: `wardby/run-${id("root")}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 900,
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      await db.runHostStatus.create({
+        data: { runId: marker, provider: "github", repository: FORK, number: 7, commentKind: "conversation" },
+      });
+    });
+    afterAll(async () => {
+      await db.run.update({ where: { id: marker }, data: { status: "succeeded", finishedAt: new Date() } });
+    });
+
+    it("a fix round skips as in flight: no stopped label, no unknown-run reply", async () => {
+      comments.length = 0;
+      const addLabel = host.addLabel as ReturnType<typeof vi.fn>;
+      addLabel.mockClear();
+      (host.pullRequestOrigin as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        headSha: "a".repeat(40),
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: marker,
+      });
+      const round = await startReviewFixRound(
+        { provider: "github", repository: FORK, prNumber: 7, headSha: "a".repeat(40), reviewBody: "Fix the bug." },
+        deps,
+      );
+      expect(round).toEqual({ kind: "skipped", reason: "in_flight" });
+      expect(addLabel).not.toHaveBeenCalled();
+      expect(comments.some((c) => c.body === unknownPriorRunBody(marker))).toBe(false);
+    });
+
+    it("a mention is declined as a follow-up already running, not refused as an unknown run", async () => {
+      comments.length = 0;
+      const routed = await routeHostEvent(mention(FORK, 7, marker), deps);
+      for (const f of routed.followUps) await f();
+      expect(routed.runIds).toEqual([]);
+      expect(comments.map((c) => c.body)).toContain(mentionDeclinedBody("follow_up_running"));
+      expect(comments.some((c) => c.body === unknownPriorRunBody(marker))).toBe(false);
     });
   });
 });

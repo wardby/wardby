@@ -370,7 +370,12 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       const { agentId } = await codingAgent();
       const { runId } = await rootWithTools(agentId, "opened");
       await db.run.update({ where: { id: runId }, data: { status } });
-      expect(await checkContinuation(db, runId, "acme/fork", owner)).toEqual({ ok: false, reason: "run_not_finished" });
+      expect(await checkContinuation(db, runId, "acme/fork", owner, undefined, { requireFinished: true })).toEqual({
+        ok: false,
+        reason: "run_not_finished",
+      });
+      // Validating the marker run only (review-fix, mentions) does not require it finished.
+      expect(await checkContinuation(db, runId, "acme/fork", owner)).toMatchObject({ ok: true });
       // Dispatch, which a delegation's continuePriorRun reaches, refuses the same way and starts nothing.
       const before = await db.run.count({ where: { agentId } });
       await expect(
@@ -384,7 +389,9 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       ).rejects.toEqual(new ContinuationRefusedError("run_not_finished"));
       expect(await db.run.count({ where: { agentId } })).toBe(before);
       // A different owner still learns nothing about its state.
-      expect(await checkContinuation(db, runId, "acme/fork", "someone-else")).toEqual({
+      expect(
+        await checkContinuation(db, runId, "acme/fork", "someone-else", undefined, { requireFinished: true }),
+      ).toEqual({
         ok: false,
         reason: "other_owner",
       });

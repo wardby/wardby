@@ -414,8 +414,9 @@ interface CodingBranch {
  * Why a continuation is refused. Dispatch itself gives all but other_agent_run and not_a_coding_run;
  * a caller that names the run directly (trigger_agent's continuePriorRun, see checkContinuePriorRun
  * in mcp/tools/trigger.ts) gives every code, before any run exists, and checks run_not_finished
- * with the same isRunUnfinished rule. Every code has a help article under
- * help/errors/.
+ * with the same isRunUnfinished rule. run_not_finished comes only from a dispatch that continues
+ * a run (trigger_agent, delegation), never from review-fix or mentions (see checkContinuation).
+ * Every code has a help article under help/errors/.
  */
 export type ContinuationRefusal =
   | "unknown_run"
@@ -475,6 +476,12 @@ export type ContinuationCheck =
  * let this dispatch push to a PR another owner's agent controls. `undefined`
  * skips the check for callers that only ask "does this deployment know this
  * run at all" (a user-facing refusal message, not a dispatch).
+ *
+ * `options.requireFinished` refuses (run_not_finished) a run that is still pending or running.
+ * Only a dispatch that actually continues the run sets it (continuationRoot: trigger_agent's and a
+ * delegation's continuePriorRun). Review-fix and mentions call this only to validate the pull
+ * request's marker run, which may legitimately still be going: they wait (in_flight,
+ * root_in_flight) or decline (follow_up_running) on their own, so they leave it off.
  */
 export async function checkContinuation(
   reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
@@ -488,6 +495,7 @@ export async function checkContinuation(
    * defaults to the repository id's.
    */
   pullRequest?: { provider?: string; number?: number },
+  options?: { requireFinished?: boolean },
 ): Promise<ContinuationCheck> {
   const resolved = await resolveRunPullRequest(reader, {
     markerRunId: runId,
@@ -495,8 +503,7 @@ export async function checkContinuation(
     repository,
     ...(pullRequest?.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
     ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
-    // A run that is still going has no final branch or pull request to continue, whoever asks.
-    requireFinished: true,
+    ...(options?.requireFinished ? { requireFinished: true } : {}),
   });
   if (!resolved.ok) return resolved;
   const { root, repo } = resolved;
@@ -560,7 +567,8 @@ async function continuationRoot(
   repository: string,
   ownerId: string | null,
 ): Promise<{ runId: string; baseRef: string; headRef: string }> {
-  const check = await checkContinuation(reader, runId, repository, ownerId);
+  // A run that is still going has no final branch or pull request to continue yet.
+  const check = await checkContinuation(reader, runId, repository, ownerId, undefined, { requireFinished: true });
   if (check.ok) {
     if (check.root.repo.kind !== "default") throw new ContinuationRefusedError("other_repository");
     return check.root;
