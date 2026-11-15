@@ -227,42 +227,29 @@ const ACTIVE_PHASES: readonly SubstratePhase[] = ["provisioning", "running", "re
 const LIVE_PHASES: SubstratePhase[] = ["provisioning", "running"];
 
 /**
- * Whether the worker input asks for git history (CodingTaskInput.gitHistory, written only on such a
- * run). An input that does not parse counts as none: the bridge then uploads the whole workspace, as
- * before, and the worker refuses the input itself.
+ * What the worker input says about git history (CodingTaskInput.gitHistory, written only on such a run),
+ * parsed once: whether it asks for history, and the paths in gitHistory.repositories (`/workspace`,
+ * `/repos/<name>`). An input that does not parse counts as none: the bridge then uploads the whole
+ * workspace, as before, and the worker refuses the input itself.
  */
-export function inputHasGitHistory(input: Buffer): boolean {
-  try {
-    const parsed: unknown = JSON.parse(input.toString("utf8"));
-    if (typeof parsed !== "object" || parsed === null) return false;
-    const history = (parsed as { gitHistory?: unknown }).gitHistory;
-    return typeof history === "object" && history !== null;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The paths in the worker input's gitHistory.repositories (`/workspace`, `/repos/<name>`); empty when
- * the input has no history or does not parse (as inputHasGitHistory).
- */
-export function inputHistoryPaths(input: Buffer): ReadonlySet<string> {
+export function inputGitHistory(input: Buffer): { requested: boolean; paths: ReadonlySet<string> } {
   const paths = new Set<string>();
   try {
     const parsed: unknown = JSON.parse(input.toString("utf8"));
-    if (typeof parsed !== "object" || parsed === null) return paths;
+    if (typeof parsed !== "object" || parsed === null) return { requested: false, paths };
     const history = (parsed as { gitHistory?: unknown }).gitHistory;
-    if (typeof history !== "object" || history === null) return paths;
+    if (typeof history !== "object" || history === null) return { requested: false, paths };
     const repositories = (history as { repositories?: unknown }).repositories;
-    if (!Array.isArray(repositories)) return paths;
-    for (const entry of repositories) {
-      const path = typeof entry === "object" && entry !== null ? (entry as { path?: unknown }).path : undefined;
-      if (typeof path === "string") paths.add(path);
+    if (Array.isArray(repositories)) {
+      for (const entry of repositories) {
+        const path = typeof entry === "object" && entry !== null ? (entry as { path?: unknown }).path : undefined;
+        if (typeof path === "string") paths.add(path);
+      }
     }
+    return { requested: true, paths };
   } catch {
-    // Does not parse: no history (the worker refuses the input itself).
+    return { requested: false, paths: new Set() };
   }
-  return paths;
 }
 
 /** The round a row's actors are on (the row records it; round.json is the bridges' and the proxy's copy). */
@@ -759,7 +746,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const mcpToken = await this.mcpTokenFor(spec);
       for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
       const input = await this.stageInput(spec.inputArtifact, token);
-      await this.stageSetup(spec, capability, token, inputHasGitHistory(input), inputHistoryPaths(input));
+      const history = inputGitHistory(input);
+      await this.stageSetup(spec, capability, token, history.requested, history.paths);
       await this.stageSeed(spec, token);
       try {
         await this.options.secrets.createSecret(
@@ -1518,7 +1506,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const mcpToken = await this.mcpTokenFor(spec);
       await timed("stage", async () => {
         const input = await this.stageInput(spec.inputArtifact, token, round);
-        await this.stageSetup(spec, capability, token, inputHasGitHistory(input), inputHistoryPaths(input));
+        const history = inputGitHistory(input);
+        await this.stageSetup(spec, capability, token, history.requested, history.paths);
         await this.blobs.put(roundBlob(token), Buffer.from(JSON.stringify({ round })), {
           contentType: "application/json",
         });

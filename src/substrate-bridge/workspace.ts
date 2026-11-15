@@ -267,6 +267,8 @@ export async function extractSeed(o: {
   tar: string;
   policy: RetryPolicy;
   log: Logger;
+  /** An extra repository's validated name: added to the unsafe-seed log line (never a path). */
+  repository?: string;
 }): Promise<{ entries: number }> {
   const seedPath = join(o.stage, "seed.tar");
   try {
@@ -277,7 +279,10 @@ export async function extractSeed(o: {
     if (seed.status !== 200) throw new BridgeError("substrate_bridge_seed_failed");
     const checked = await checkTarFile(seedPath, true);
     if (!checked.ok) {
-      o.log("substrate_bridge_seed_unsafe", { reason: checked.reason });
+      o.log("substrate_bridge_seed_unsafe", {
+        reason: checked.reason,
+        ...(o.repository === undefined ? {} : { repository: o.repository }),
+      });
       throw new BridgeError("substrate_bridge_seed_unsafe");
     }
     await mkdir(o.workspace, { recursive: true });
@@ -423,6 +428,7 @@ export async function extractRepositorySeeds(o: {
       tar: o.tar,
       policy: o.policy,
       log,
+      repository: name,
     });
     if (access === "read") {
       try {
@@ -462,18 +468,16 @@ export async function collectRepositories(o: {
   policy: RetryPolicy;
   log: Logger;
   signal: AbortSignal;
-}): Promise<Record<string, "ok" | "rejected" | "failed">> {
-  const outcomes: Record<string, "ok" | "rejected" | "failed"> = {};
+}): Promise<void> {
   for (const { name, access, collectResultBundle } of o.repositories) {
     if (access !== "write") continue;
     const folder = o.folders.get(name);
     if (!folder) {
       // Never seeded by this bridge: nothing to compare against, so it is not read.
       o.log("substrate_bridge_collect_failed", { runToken: o.token, repository: name, code: REPOSITORY_CHANGED });
-      outcomes[name] = "failed";
       continue;
     }
-    outcomes[name] = await collectWorkspace({
+    await collectWorkspace({
       base: o.base,
       round: o.round,
       token: o.token,
@@ -497,7 +501,6 @@ export async function collectRepositories(o: {
       return "failed";
     });
   }
-  return outcomes;
 }
 
 /** Why a git-history run's upload carries no result bundle (a fixed value, logged as is). */

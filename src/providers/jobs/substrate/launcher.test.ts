@@ -14,7 +14,7 @@ import { collectExclusions } from "../../../coding/collect-exclude.js";
 import type { CodexWorkerSetup } from "../codex-worker-setup.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
-import { inputHasGitHistory } from "./launcher.js";
+import { inputGitHistory } from "./launcher.js";
 import { agentEgress, agentTemplate, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   allBlobs,
@@ -860,9 +860,9 @@ describe("SubstrateJobLauncher", () => {
   });
 
   it("reads git history from the worker input only when it is an object", () => {
-    expect(inputHasGitHistory(Buffer.from(JSON.stringify({ gitHistory: { repositories: [] } })))).toBe(true);
+    expect(inputGitHistory(Buffer.from(JSON.stringify({ gitHistory: { repositories: [] } }))).requested).toBe(true);
     for (const input of ["{}", '{"gitHistory":null}', '{"gitHistory":true}', "[]", "null", "not json"]) {
-      expect(inputHasGitHistory(Buffer.from(input))).toBe(false);
+      expect(inputGitHistory(Buffer.from(input)).requested).toBe(false);
     }
   });
 

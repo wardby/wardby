@@ -1556,6 +1556,16 @@ process.exit(status);
       expect(await done()).toEqual({ workspace: "failed" });
     });
 
+    it("names the extra repository in the unsafe-seed log line", async () => {
+      await stage({ repositories: [alpha(), beta] });
+      await blobs.put(REPO_BLOB.seed(TOKEN, "extra-beta"), unsafeSeed());
+      await expect(startTool(join(dir, "workspace"), "")).rejects.toMatchObject({
+        code: "substrate_bridge_seed_unsafe",
+      });
+      const unsafe = parsedLogs().filter((entry) => entry.event === "substrate_bridge_seed_unsafe");
+      expect(unsafe.filter((entry) => entry.repository === "extra-beta")).toHaveLength(1);
+    });
+
     it("logs fixed fields only for repositories", async () => {
       const { workspace, toolSetup, setupText } = await stage({ repositories: [alpha(), beta] });
       tool = await startTool(workspace, toolSetup);
