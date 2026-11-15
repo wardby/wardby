@@ -235,6 +235,33 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
   const headers = proxyHeaders({ [ACTOR_JWT_HEADER]: GATEWAY_ACTOR_JWT_PLACEHOLDER });
   const shutdown = new AbortController();
+  // 0. The image self-check: after the run token (the golden actor never runs it), before any fetch
+  // and before the temp directory, so a missing prerequisite is reported even on an image whose
+  // temp directory cannot be made (that one fails the start, it is not an image item).
+  const runnerEntry = options.runnerEntry ?? RUNNER_ENTRY;
+  const imageCheck = options.imageCheck ?? {};
+  const missing =
+    imageCheck === false
+      ? undefined
+      : await checkImage({ runnerEntry, tar, workspace, runDirs: [dirname(socketPath)], ...imageCheck });
+  if (missing) {
+    log("substrate_bridge_image_incomplete", { runToken: token, item: missing });
+    await postCapped(
+      `${base}/image-incomplete`,
+      headers,
+      { item: missing },
+      policy,
+      log,
+      "image-incomplete",
+      shutdown.signal,
+    ).catch(() => undefined);
+    // The readiness server stays open: the actor keeps answering its probe and idles.
+    throw new ImageIncompleteError(missing, async () => {
+      await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+      ready.server.closeAllConnections();
+    });
+  }
+
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
   const connections = new Map<string, { socket: Socket; relayClosed(): void }>();
   let stopped = false;
@@ -259,32 +286,6 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     await cleanup();
     throw new BridgeError(code);
   };
-
-  // 0. The image self-check: after the run token (the golden actor never runs it), before any fetch.
-  const runnerEntry = options.runnerEntry ?? RUNNER_ENTRY;
-  const imageCheck = options.imageCheck ?? {};
-  const missing =
-    imageCheck === false
-      ? undefined
-      : await checkImage({ runnerEntry, tar, workspace, runDirs: [dirname(socketPath)], ...imageCheck });
-  if (missing) {
-    log("substrate_bridge_image_incomplete", { runToken: token, item: missing });
-    await postCapped(
-      `${base}/image-incomplete`,
-      headers,
-      { item: missing },
-      policy,
-      log,
-      "image-incomplete",
-      shutdown.signal,
-    ).catch(() => undefined);
-    await cleanup();
-    // The readiness server stays open: the actor keeps answering its probe and idles.
-    throw new ImageIncompleteError(missing, async () => {
-      await new Promise<void>((resolve) => ready.server.close(() => resolve()));
-      ready.server.closeAllConnections();
-    });
-  }
 
   // 1. The tool setup (before the first events poll, which deletes it on the proxy). It carries the
   // run's registry-only token; once the runner has started, the runner is its only holder (`current`).

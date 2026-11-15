@@ -224,28 +224,9 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
   const headers = proxyHeaders({ "x-api-key": PLACEHOLDER_CAPABILITY });
   const shutdown = new AbortController();
-  const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
-
-  const cleanup = async (): Promise<void> => {
-    await rm(stage, { recursive: true, force: true }).catch(() => undefined);
-  };
-  /**
-   * Fails the run now instead of letting it time out: workspace-failed, then the exit report (this is
-   * the only actor, so nobody else would). Best effort: postCapped gives up quietly when the proxy
-   * cannot be reached.
-   */
-  const abortStart = async (code: string): Promise<never> => {
-    log(code, { runToken: token });
-    await postCapped(`${base}/workspace-failed`, headers, undefined, policy, log, "workspace-failed").catch(
-      () => undefined,
-    );
-    await postCapped(`${base}/exit`, headers, { code: 1 }, policy, log, "exit").catch(() => undefined);
-    ready.server.close();
-    await cleanup();
-    throw new BridgeError(code);
-  };
-
-  // The image self-check: after the run token (the golden actor never runs it), before any fetch.
+  // The image self-check: after the run token (the golden actor never runs it), before any fetch
+  // and before the temp directory, so a missing prerequisite is reported even on an image whose
+  // temp directory cannot be made (that one fails the start, it is not an image item).
   const workerEntry = options.workerEntry ?? CODEX_WORKER_ENTRY;
   const imageCheck = options.imageCheck ?? {};
   const missing =
@@ -269,13 +250,33 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
       "image-incomplete",
       shutdown.signal,
     ).catch(() => undefined);
-    await cleanup();
     // The readiness server stays open: the actor keeps answering its probe and idles.
     throw new ImageIncompleteError(missing, async () => {
       await new Promise<void>((resolve) => ready.server.close(() => resolve()));
       ready.server.closeAllConnections();
     });
   }
+
+  const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
+
+  const cleanup = async (): Promise<void> => {
+    await rm(stage, { recursive: true, force: true }).catch(() => undefined);
+  };
+  /**
+   * Fails the run now instead of letting it time out: workspace-failed, then the exit report (this is
+   * the only actor, so nobody else would). Best effort: postCapped gives up quietly when the proxy
+   * cannot be reached.
+   */
+  const abortStart = async (code: string): Promise<never> => {
+    log(code, { runToken: token });
+    await postCapped(`${base}/workspace-failed`, headers, undefined, policy, log, "workspace-failed").catch(
+      () => undefined,
+    );
+    await postCapped(`${base}/exit`, headers, { code: 1 }, policy, log, "exit").catch(() => undefined);
+    ready.server.close();
+    await cleanup();
+    throw new BridgeError(code);
+  };
 
   // 3. The setup (before the input, whose first download deletes it on the proxy).
   let setup: CodexSetup | undefined;

@@ -321,6 +321,11 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
 
 /** The blobs observe() reads an outcome from besides `done`, which remove() deletes after them. */
 const OUTCOME_BLOBS: readonly ((token: string, round?: number) => string)[] = [BLOB.result, BLOB.exit];
+/**
+ * The run's (not a round's) outcome blobs: the image report, which observe() reads an
+ * image_incomplete run's item from. Deleted with the outcome, once.
+ */
+const OUTCOME_RUN_BLOBS: readonly ((token: string) => string)[] = [BLOB.imageIncomplete];
 /** The per-round names among ROUND_BLOBS that carry a round's outcome (deleted last). */
 const OUTCOME_ROUND_BLOBS: readonly (typeof ROUND_BLOBS)[number][] = ["result", "exit", "done"];
 
@@ -1654,8 +1659,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * Every resource of the run, one step per deletion, so none waits on (or is skipped by) another.
-   * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done) nor the
-   * round record. Every round's files (`rounds` from the run's row), whatever the warm-rounds
+   * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done, the image
+   * report) nor the round record. Every round's files (`rounds` from the run's row), whatever the warm-rounds
    * setting now: a run from when it was on is removed in full after it is turned off. `repositories`
    * (the run's extra repositories, by name): each one's seed and every round's workspace upload.
    */
@@ -1671,7 +1676,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const { atespace } = this.config;
     const actors = actorNamesFor(token, shape);
     const blobs = Object.values(BLOB).filter(
-      (blob) => outcome || (blob !== BLOB.done && !OUTCOME_BLOBS.includes(blob)),
+      (blob) => outcome || (blob !== BLOB.done && !OUTCOME_BLOBS.includes(blob) && !OUTCOME_RUN_BLOBS.includes(blob)),
     );
     const steps = [
       ...actors.map((name) => () => this.api.deleteActor(atespace, name)),
@@ -1710,7 +1715,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   ): Promise<void> {
     await settleAll(this.deletions(token, rounds, { outcome: false, shape, repositories }));
     await this.options.relay.purgeRelay(token);
-    const outcome: (() => Promise<void>)[] = [];
+    const outcome: (() => Promise<void>)[] = OUTCOME_RUN_BLOBS.map((blob) => () => this.deleteBlob(blob(token)));
     for (let round = 1; round <= rounds; round += 1) {
       outcome.push(...OUTCOME_BLOBS.map((blob) => () => this.deleteBlob(blob(token, round))));
       if (round < rounds) outcome.push(() => this.deleteBlob(BLOB.done(token, round)));

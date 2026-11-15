@@ -2203,4 +2203,23 @@ describe("image self-check", () => {
     await h.launcher.remove(handle);
     expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
   });
+
+  it("remove keeps the report with the outcome until every other deletion succeeds", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await report(h, "workspace");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    const deleteActor = h.api.deleteActor.bind(h.api);
+    let fail = true;
+    h.api.deleteActor = async (atespace, name) => {
+      if (fail && name === agentActorName(h.token)) throw new SubstrateUnavailableError("substrate_unavailable");
+      return deleteActor(atespace, name);
+    };
+    await expect(h.launcher.remove(handle)).rejects.toThrow("substrate_unavailable");
+    expect(await blobKeys(h)).toContain("imageIncomplete");
+    expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_image_incomplete:workspace");
+    fail = false;
+    await h.launcher.remove(handle);
+    expect(await blobKeys(h)).toEqual([]);
+  });
 });

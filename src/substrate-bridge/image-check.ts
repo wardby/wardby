@@ -8,7 +8,7 @@
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  */
 import { execFile } from "node:child_process";
-import { access, constants, mkdir } from "node:fs/promises";
+import { access, constants, mkdir, stat } from "node:fs/promises";
 import type { IMAGE_ITEMS } from "./constants.js";
 import { BridgeError } from "./http.js";
 
@@ -68,6 +68,13 @@ function isGnuTar(tar: string, timeoutMs: number): Promise<boolean> {
   });
 }
 
+/** A regular file (not a directory) that can be read. */
+const isReadableFile = (path: string): Promise<boolean> =>
+  stat(path).then(
+    (info) => info.isFile() && succeeds(access(path, constants.R_OK)),
+    () => false,
+  );
+
 /** Created when missing, then writable. */
 const writableDir = (dir: string): Promise<boolean> =>
   succeeds(mkdir(dir, { recursive: true }).then(() => access(dir, constants.W_OK)));
@@ -80,7 +87,7 @@ export async function checkImage(
   check: ImageCheck,
   options?: { tarTimeoutMs?: number },
 ): Promise<ImageItem | undefined> {
-  if (!(await succeeds(access(check.runnerEntry, constants.R_OK)))) return "runner";
+  if (!(await isReadableFile(check.runnerEntry))) return "runner";
   if (!(await isGnuTar(check.tar, options?.tarTimeoutMs ?? TAR_TIMEOUT_MS))) return "tar";
   if (!(await writableDir(check.workspace))) return "workspace";
   for (const dir of check.runDirs) {

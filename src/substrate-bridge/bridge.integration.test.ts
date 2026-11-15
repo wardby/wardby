@@ -396,6 +396,35 @@ describe("substrate bridges, end to end without Substrate", () => {
       await expect(fetch(`http://127.0.0.1:${port}/readyz`)).rejects.toThrow();
     });
 
+    it("runs by default: a bridge started without imageCheck checks its image", async () => {
+      const { workspace } = await stage();
+      let launched = false;
+      const error = (await startTool(workspace, "", {
+        imageCheck: undefined,
+        runnerEntry: join(dir, "missing.mjs"),
+        launchRunner: () => {
+          launched = true;
+          return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+        },
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "runner" });
+      expect(launched).toBe(false);
+      await error.close();
+    });
+
+    it("reports a missing prerequisite even when the temp directory cannot be made", async () => {
+      const { workspace } = await stage();
+      const error = (await startTool(workspace, "", {
+        imageCheck: await imageCheckFor(workspace),
+        tempRoot: join(dir, "no-such", "tmp"),
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      await error.close();
+    });
+
     it("reports a tar that is not GNU tar", async () => {
       const { workspace } = await stage();
       const runnerEntry = join(dir, "main.mjs");

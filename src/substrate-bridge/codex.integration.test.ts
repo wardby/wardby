@@ -22,7 +22,7 @@ import { codexWorkerSetup } from "../providers/jobs/codex-worker-setup.js";
 import { BLOB, REPO_BLOB, substrateRunToken } from "../providers/jobs/substrate/names.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
-import { run as runCodex, spawnCodexWorker, type CodexHandle } from "./codex.js";
+import { run as runCodex, spawnCodexWorker, type CodexHandle, type CodexOptions } from "./codex.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
 import { ImageIncompleteError, type ImageCheck } from "./image-check.js";
@@ -213,7 +213,8 @@ describe("Codex bridge, end to end without Substrate", () => {
     launchWorker: (env: NodeJS.ProcessEnv, secrets: () => readonly string[]) => WorkerHandle,
     metadataDir?: string,
     extraEnv: NodeJS.ProcessEnv = {},
-    imageCheck: Partial<ImageCheck> | false = false,
+    imageCheck: Partial<ImageCheck> | false | undefined = false,
+    overrides: Partial<CodexOptions> = {},
   ) {
     await mkdir(join(dir, "out"), { recursive: true });
     return runCodex({
@@ -231,6 +232,7 @@ describe("Codex bridge, end to end without Substrate", () => {
       log,
       launchWorker,
       imageCheck,
+      ...overrides,
     });
   }
 
@@ -450,6 +452,56 @@ describe("Codex bridge, end to end without Substrate", () => {
       expect(JSON.parse(posted("image-incomplete")[0].body.toString())).toEqual({ item: "runner" });
       expect(posted("image-incomplete")[0].headers["x-wardby-bridge-protocol"]).toBe("1");
       expect(launched).toBe(false);
+    });
+
+    it("runs by default: a bridge started without imageCheck checks its image", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      let launched = false;
+      const started = runCodex({
+        proxyUrl,
+        env: { PATH: process.env.PATH },
+        metadataDir: await names(),
+        workspace,
+        reposRoot: join(dir, "repos"),
+        tempRoot: dir,
+        tarCommand: await gnuTar(),
+        readyPort: 0,
+        inputPath: join(dir, "in", "input.json"),
+        resultPath: resultPath(),
+        policy: FAST,
+        log,
+        workerEntry: join(dir, "missing.js"),
+        launchWorker: () => {
+          launched = true;
+          return { exited: Promise.resolve(0) };
+        },
+      });
+      const error = (await started.catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      await error.close();
+      expect(order()).toEqual(["POST image-incomplete"]);
+      expect(launched).toBe(false);
+    });
+
+    it("reports a missing prerequisite even when the temp directory cannot be made", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      const error = (await start(
+        () => ({ exited: Promise.resolve(0) }),
+        undefined,
+        {},
+        {
+          runnerEntry: join(dir, "missing.js"),
+          tar: await gnuTar(),
+          workspace,
+          runDirs: [join(dir, "in"), join(dir, "out")],
+        },
+        { tempRoot: join(dir, "no-such", "tmp") },
+      ).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      await error.close();
+      expect(order()).toEqual(["POST image-incomplete"]);
     });
 
     it.skipIf(process.getuid?.() === 0)("reports an unwritable workspace", async () => {

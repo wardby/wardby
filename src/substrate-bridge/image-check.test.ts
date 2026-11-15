@@ -53,6 +53,12 @@ describe("checkImage", () => {
     expect(await checkImage({ ...good(), runnerEntry: join(dir, "missing.mjs"), tar: bsdTar })).toBe("runner");
   });
 
+  it("reports a runner path that is a directory", async () => {
+    const folder = join(dir, "runner-dir");
+    await mkdir(folder);
+    expect(await checkImage({ ...good(), runnerEntry: folder })).toBe("runner");
+  });
+
   it("reports a tar that is not GNU tar", async () => {
     expect(await checkImage({ ...good(), tar: bsdTar })).toBe("tar");
   });
