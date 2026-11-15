@@ -4,7 +4,7 @@ import { readWorkerCredentials } from "./credentials.js";
 import { describeError, workerTracerFor, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
-import { readMcpToken } from "./mcp-config.js";
+import { readMcpConfig } from "./mcp-config.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -32,16 +32,18 @@ try {
   // WARDBY_RUN_CAPABILITY, plus on Substrate the header mode and the registry token (credentials.ts).
   const credentials = readWorkerCredentials(process.env);
   const { capability, capabilityHeader, registryToken } = credentials;
-  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
-  const mcpToken = readMcpToken();
-  trace = workerTracerFor(input, credentials, mcpToken, (line) => process.stdout.write(line));
+  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server. On Substrate it
+  // is the gateway's placeholder, in header mode (readMcpConfig refuses anything else).
+  const mcp = readMcpConfig();
+  trace = workerTracerFor(input, credentials, mcp?.token, (line) => process.stdout.write(line));
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
     reposRoot: REPOS_PATH,
     proxyBaseUrl,
     capability,
-    ...(mcpToken ? { mcpToken } : {}),
+    ...(mcp ? { mcpToken: mcp.token } : {}),
+    ...(mcp?.header ? { mcpTokenHeader: mcp.header } : {}),
     ...(registryToken ? { registryToken } : {}),
     ...(capabilityHeader ? { capabilityHeader } : {}),
     signal: controller.signal,

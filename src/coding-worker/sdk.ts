@@ -1,16 +1,27 @@
 import { Codex } from "@openai/codex-sdk";
 import { INJECTED_CAPABILITY_PLACEHOLDER } from "./credentials.js";
-import { MCP_TOKEN_ENV, WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS, wardbyMcpUrl } from "./mcp-config.js";
+import {
+  INJECTED_MCP_TOKEN_PLACEHOLDER,
+  MCP_TOKEN_ENV,
+  type MCP_TOKEN_HEADER,
+  WARDBY_MCP_SERVER,
+  WARDBY_MCP_TIMEOUT_MS,
+  wardbyMcpUrl,
+} from "./mcp-config.js";
 import type { WorkerClientConfig, WorkerClientFactory } from "./types.js";
 
-type WardbyMcpServers = {
-  [WARDBY_MCP_SERVER]: {
-    url: string;
-    bearer_token_env_var: typeof MCP_TOKEN_ENV;
-    tool_timeout_sec: number;
-    default_tools_approval_mode: "approve";
-  };
-};
+type WardbyMcpServer = {
+  url: string;
+  tool_timeout_sec: number;
+  default_tools_approval_mode: "approve";
+} & (
+  | { bearer_token_env_var: typeof MCP_TOKEN_ENV }
+  // Header mode (Substrate; Task 1A outcome A): with no bearer_token_env_var Codex sends these headers
+  // and no Authorization.
+  | { http_headers: { [MCP_TOKEN_HEADER]: string } }
+);
+
+type WardbyMcpServers = { [WARDBY_MCP_SERVER]: WardbyMcpServer };
 
 /**
  * The wardby_mcp server on a run with MCP tools. Codex reads the bearer from its own process env
@@ -18,6 +29,8 @@ type WardbyMcpServers = {
  * with it Codex's command line, never holds the token. That does not hide it from the model: shell
  * commands run in the same container and can still read the token from Codex's environment through
  * /proc, which is why a Codex run gets only read-only MCP tools (isCodexCoding, core/mcp-tools.ts).
+ * On Substrate (header mode) the token is the gateway's placeholder, sent in its own header from the
+ * config: the shells can read only the placeholder, and the egress gateway injects the real token.
  */
 function wardbyMcpServers(config: WorkerClientConfig): Record<string, never> | { mcp_servers: WardbyMcpServers } {
   if (!config.mcpToken) return {};
@@ -25,7 +38,9 @@ function wardbyMcpServers(config: WorkerClientConfig): Record<string, never> | {
     mcp_servers: {
       [WARDBY_MCP_SERVER]: {
         url: wardbyMcpUrl(config.proxyBaseUrl),
-        bearer_token_env_var: MCP_TOKEN_ENV,
+        ...(config.mcpTokenHeader
+          ? { http_headers: { [config.mcpTokenHeader]: config.mcpToken } }
+          : { bearer_token_env_var: MCP_TOKEN_ENV }),
         tool_timeout_sec: WARDBY_MCP_TIMEOUT_MS / 1000,
         // Today's default under approval_policy "never" runs every call too; pinned so a changed
         // default can't stall a run. The proxy and gateway allow only the run's pinned tools.
@@ -71,11 +86,20 @@ function wardbyProxyProvider(config: WorkerClientConfig): WardbyProxyProvider {
 }
 
 export function codexSdkOptions(config: WorkerClientConfig) {
+  // Header mode puts the MCP token in Codex's `-c` command-line config, readable by every process in
+  // the container: only the gateway's placeholder may ever go there. No value in the message.
+  if (config.mcpTokenHeader && config.mcpToken !== INJECTED_MCP_TOKEN_PLACEHOLDER) {
+    throw new Error("worker_mcp_header_needs_placeholder");
+  }
   return {
     ...(config.capabilityHeader ? {} : { apiKey: config.capability }),
     // The Codex process env. The shells' own env is only shell_environment_policy.set, which never holds
-    // the MCP token, but a shell can still read Codex's env (and the token) through /proc.
-    env: config.mcpToken ? { ...config.environment, [MCP_TOKEN_ENV]: config.mcpToken } : config.environment,
+    // the MCP token, but a shell can still read Codex's env (and the token) through /proc. Header mode
+    // sends the token from the config instead, so the env holds none.
+    env:
+      config.mcpToken && !config.mcpTokenHeader
+        ? { ...config.environment, [MCP_TOKEN_ENV]: config.mcpToken }
+        : config.environment,
     config: {
       developer_instructions: config.developerInstructions,
       skills: { config: config.disabledSkills.map((name) => ({ name, enabled: false })) },

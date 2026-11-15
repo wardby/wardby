@@ -165,8 +165,11 @@ export interface ClaudeQueryOptions {
   resumeSessionId?: string;
   /** Set only on a traced run: receives Claude Code's own stderr output. */
   stderr?: (data: string) => void;
-  /** Set only on a run with MCP tools: the proxy's /mcp route and the run's MCP token (sdk.ts adds wardby_mcp). */
-  mcp?: { url: string; token: string };
+  /**
+   * Set only on a run with MCP tools: the proxy's /mcp route and the run's MCP token (sdk.ts adds
+   * wardby_mcp). With `header` (Substrate), the token is the gateway's placeholder, sent in that header.
+   */
+  mcp?: { url: string; token: string; header?: "x-wardby-mcp-token" };
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -192,6 +195,8 @@ export interface ClaudeWorkerRunOptions {
   prepareDependencies?: () => Promise<unknown>;
   /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
   mcpToken?: string;
+  /** Substrate: send the (placeholder) MCP token in this header (WARDBY_MCP_TOKEN_HEADER), never Authorization. */
+  mcpTokenHeader?: "x-wardby-mcp-token";
   /**
    * On a run with git history (CodingTaskInput.gitHistory, #536): asks the tool runner whether it has
    * git (callGitCheck, tool-socket.ts) before anything else, and resolves with its unchecked JSON.
@@ -446,7 +451,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   const injected = bareMode ? bareModeContextPrompt(files) : "";
   // Only on a run with MCP tools; the token goes into the wardby_mcp server's header (sdk.ts), never
   // into an environment.
-  const mcp = options.mcpToken ? { url: wardbyMcpUrl(options.proxyBaseUrl), token: options.mcpToken } : undefined;
+  const mcp = options.mcpToken
+    ? {
+        url: wardbyMcpUrl(options.proxyBaseUrl),
+        token: options.mcpToken,
+        ...(options.mcpTokenHeader ? { header: options.mcpTokenHeader } : {}),
+      }
+    : undefined;
   const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
   const stream = options.createQuery({

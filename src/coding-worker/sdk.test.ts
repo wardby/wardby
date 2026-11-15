@@ -121,6 +121,54 @@ describe("codexSdkOptions", () => {
       expect(baseConfig.environment).not.toHaveProperty("WARDBY_MCP_TOKEN");
     });
 
+    // Task 1A outcome A: Codex sends http_headers and no Authorization when bearer_token_env_var is unset.
+    it("header mode: the placeholder goes in http_headers", () => {
+      const options = codexSdkOptions({
+        ...baseConfig,
+        mcpToken: "rmt_placeholder_injected_by_gateway",
+        mcpTokenHeader: "x-wardby-mcp-token",
+      });
+      expect((options.config as Record<string, unknown>).mcp_servers).toEqual({
+        wardby_mcp: {
+          url: "http://proxy:8080/mcp",
+          http_headers: { "x-wardby-mcp-token": "rmt_placeholder_injected_by_gateway" },
+          tool_timeout_sec: 300,
+          default_tools_approval_mode: "approve",
+        },
+      });
+      expect(options.env).toEqual(baseConfig.environment);
+      expect(options.env).not.toHaveProperty("WARDBY_MCP_TOKEN");
+    });
+
+    it("header mode refuses a real token", () => {
+      const real = "rmt_" + "A".repeat(43);
+      let error: unknown;
+      try {
+        codexSdkOptions({ ...baseConfig, mcpToken: real, mcpTokenHeader: "x-wardby-mcp-token" });
+      } catch (caught) {
+        error = caught;
+      }
+      expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+      expect(String(error)).not.toContain(real);
+      expect(() =>
+        createCodexSdkClient({ ...baseConfig, mcpToken: real, mcpTokenHeader: "x-wardby-mcp-token" }),
+      ).toThrow("worker_mcp_header_needs_placeholder");
+    });
+
+    it("header mode with the capability header too: nothing sets Authorization", () => {
+      const options = codexSdkOptions({
+        ...baseConfig,
+        capability: "rrp_placeholder_injected_by_gateway",
+        capabilityHeader: "x-api-key",
+        mcpToken: "rmt_placeholder_injected_by_gateway",
+        mcpTokenHeader: "x-wardby-mcp-token",
+      });
+      const serialized = JSON.stringify(options);
+      expect(serialized).not.toContain('"env_key"');
+      expect(serialized).not.toContain('"bearer_token_env_var"');
+      expect("apiKey" in options).toBe(false);
+    });
+
     it("is unchanged without MCP tools", () => {
       const options = codexSdkOptions(baseConfig);
       expect(options.config).not.toHaveProperty("mcp_servers");

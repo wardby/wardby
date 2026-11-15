@@ -24,6 +24,7 @@ import { CodingProxy } from "../providers/coding-proxy/proxy.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../providers/coding-proxy/server.js";
 import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CLAUDE_OUTPUT_JSON_SCHEMA, claudeWorkerSecurityInstructions, type ClaudeSdkMessage } from "./driver.js";
+import { startGatewaySimulator } from "../coding-worker/gateway-simulator.test-support.js";
 import { startRecordingMcpServer } from "../coding-worker/mcp-stub.test-support.js";
 import { buildClaudeSdkOptions } from "./sdk.js";
 
@@ -368,6 +369,158 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
 
     // Neither the MCP token nor the run capability shows up in any proxy log line.
     expect(logged.length).toBeGreaterThan(0);
+    expect(JSON.stringify(logged)).not.toContain(token);
+    expect(JSON.stringify(logged)).not.toContain(session.capability);
+  }, 120_000);
+
+  it("header mode: the egress gateway injects the capability and the MCP token; Claude Code sends only placeholders", async () => {
+    const { sdk, z } = loaded!;
+    logged.length = 0;
+    const token = mintMcpToken();
+    const gateway = await fakeGateway(token);
+    cleanup.push(gateway.close);
+
+    const forwarded: Array<{ body: Record<string, unknown> }> = [];
+    const ledger = new MemoryProxyLedger();
+    const audit: ProxyAuditEvent[] = [];
+    const proxy = new CodingProxy({
+      ledger,
+      credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+      pricing: () => ({
+        encoding: "o200k_base",
+        inputPerMTok: 3,
+        cachedInputPerMTok: 0.3,
+        cacheWritePerMTok: 3.75,
+        outputPerMTok: 15,
+      }),
+      audit: (event) => audit.push(event),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        forwarded.push({ body });
+        const turn =
+          forwarded.length === 1
+            ? sse([
+                { type: "tool_use", id: "toolu_mcp_header", name: PINNED, input: { text: "hello-from-fake-model" } },
+              ])
+            : sse([
+                {
+                  type: "tool_use",
+                  id: "toolu_final_header",
+                  name: "StructuredOutput",
+                  input: {
+                    schemaVersion: CODING_PROTOCOL_VERSION,
+                    runId: RUN_ID,
+                    outcome: "no_changes",
+                    summary: "Echoed hello.",
+                    tests: [],
+                  },
+                },
+              ]);
+        return new Response(turn, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const session = await proxy.createSession({
+      runId: RUN_ID,
+      credentialRef: "anthropic/compatibility",
+      protocol: "anthropic-messages",
+      allowedModels: [MODEL],
+      deadlineAt: new Date(Date.now() + 120_000),
+      budgetUsd: 10,
+      mcpTools: [
+        {
+          exposedName: "echo",
+          toolName: "echo",
+          serverId: "srv_compat",
+          serverName: "compat",
+          definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+        },
+      ],
+      mcpTokenHash: mcpTokenHash(token),
+    });
+    const requests: Array<{ protocol: string; status: number }> = [];
+    let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+      host: "127.0.0.1",
+      port: 0,
+      onRequest: (event) => requests.push({ protocol: event.protocol, status: event.status }),
+      mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
+    });
+    cleanup.push(async () => {
+      await server?.close();
+      server = undefined;
+    });
+    const sim = await startGatewaySimulator(server.port, { capability: session.capability, mcpToken: token });
+    cleanup.push(sim.close);
+
+    const root = await mkdtemp(join(tmpdir(), "wardby-claude-compat-mcp-header-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const config = join(root, "config");
+    const workspace = join(root, "workspace");
+    for (const directory of [home, config, workspace]) await mkdir(directory, { recursive: true });
+
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 90_000);
+    cleanup.push(async () => clearTimeout(timer));
+    const options = buildClaudeSdkOptions({
+      prompt: "Echo hello with the wardby_mcp echo tool.",
+      model: MODEL,
+      budgetUsd: 1,
+      maxTurns: 4,
+      signal: abort.signal,
+      environment: {
+        HOME: home,
+        LANG: "C.UTF-8",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        TMPDIR: root,
+        CLAUDE_CONFIG_DIR: config,
+        ANTHROPIC_BASE_URL: sim.url,
+        ANTHROPIC_API_KEY: "rrp_placeholder_injected_by_gateway",
+        CLAUDE_CODE_SIMPLE: "1",
+        CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
+        CLAUDE_CODE_MAX_RETRIES: "0",
+        DISABLE_UPDATES: "1",
+      },
+      relayEnvironment: {},
+      outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,
+      developerInstructions: claudeWorkerSecurityInstructions(true),
+      contextDirectory: null,
+      skills: false,
+      persistSession: false,
+      mcp: { url: wardbyMcpUrl(sim.url), token: "rmt_placeholder_injected_by_gateway", header: "x-wardby-mcp-token" },
+    });
+    const mcpServers = options.mcpServers as Record<string, unknown>;
+    const relay = sdk.createSdkMcpServer({
+      name: "wardby_tools",
+      tools: [
+        sdk.tool("run_command", "Run one bounded command.", { command: z.string() }, async () => ({
+          content: [{ type: "text", text: "exit_code=0\n" }],
+        })),
+      ],
+    });
+    for await (const _message of sdk.query({
+      prompt: "Echo hello with the wardby_mcp echo tool.",
+      options: { ...options, cwd: workspace, mcpServers: { ...mcpServers, wardby_tools: relay } },
+    })) {
+      // drained
+    }
+
+    expect(requests.filter((r) => r.protocol === "anthropic-messages")).toEqual([
+      { protocol: "anthropic-messages", status: 200 },
+      { protocol: "anthropic-messages", status: 200 },
+    ]);
+    expect(audit.filter((event) => event.type === "request.rejected")).toEqual([]);
+    // The proxy built the gateway's Bearer from the token the egress gateway injected.
+    expect(gateway.calls.length).toBeGreaterThan(0);
+    expect(gateway.calls.every((call) => call.authorized)).toBe(true);
+    expect(gateway.calls.filter((call) => call.method === "tools/call")).toHaveLength(1);
+    const mcpRequests = sim.observed.filter((entry) => entry.url.startsWith("/mcp"));
+    expect(mcpRequests.length).toBeGreaterThan(0);
+    expect(mcpRequests.every((entry) => entry.mcpTokenIsPlaceholder && !entry.hasAuthorization)).toBe(true);
+    expect(JSON.stringify(forwarded[1]?.body)).toContain("ECHO:hello-from-fake-model");
+    expect(JSON.stringify(forwarded)).not.toContain(token);
     expect(JSON.stringify(logged)).not.toContain(token);
     expect(JSON.stringify(logged)).not.toContain(session.capability);
   }, 120_000);

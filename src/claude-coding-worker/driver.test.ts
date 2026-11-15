@@ -689,6 +689,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   async function capture(
     mcpToken: string | undefined,
     servers: Array<{ name: string; status: string }> = [{ name: "wardby_tools", status: "connected" }],
+    mcpTokenHeader?: "x-wardby-mcp-token",
   ) {
     let captured: ClaudeQueryOptions | undefined;
     const progress = vi.fn();
@@ -698,6 +699,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
       capability: "rrp_worker_capability",
       signal: new AbortController().signal,
       ...(mcpToken !== undefined ? { mcpToken } : {}),
+      ...(mcpTokenHeader !== undefined ? { mcpTokenHeader } : {}),
       onProgress: progress,
       createQuery: (options) => {
         captured = options;
@@ -714,6 +716,15 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   it("gives the query the proxy's /mcp route and the token", async () => {
     const { config } = await capture(TOKEN);
     expect(config.mcp).toEqual({ url: "http://wardby-proxy:8787/mcp", token: TOKEN });
+  });
+
+  it("gives the query the MCP header mode when it is set", async () => {
+    const { config } = await capture(TOKEN, undefined, "x-wardby-mcp-token");
+    expect(config.mcp).toStrictEqual({
+      url: "http://wardby-proxy:8787/mcp",
+      token: TOKEN,
+      header: "x-wardby-mcp-token",
+    });
   });
 
   it("keeps the token out of every environment and every progress event", async () => {

@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -23,6 +23,7 @@ import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
 import { recordCodexRequests } from "./codex-recorder.test-support.js";
+import { startGatewaySimulator } from "./gateway-simulator.test-support.js";
 import { startRecordingMcpServer } from "./mcp-stub.test-support.js";
 import { codexSdkOptions, createCodexSdkClient } from "./sdk.js";
 import { CODEX_BUILTIN_SKILLS } from "./skills.js";
@@ -189,51 +190,6 @@ describe.runIf(RECORD)("record the pinned Codex CLI's Responses requests", () =>
   }, 900_000);
 });
 
-/** What the gateway simulator saw on one request: booleans only, never a header value. */
-interface GatewayObservation {
-  url: string;
-  hasAuthorization: boolean;
-  authorizationIsPlaceholderBearer: boolean;
-  apiKeyIsPlaceholder: boolean;
-}
-
-/**
- * A stand-in for the Substrate egress gateway in front of the proxy: it replaces the worker's
- * placeholder `x-api-key` with the run's real capability (as the gateway's replaceHeaders does)
- * and pipes the request on. Every other header passes through unchanged.
- */
-async function startGatewaySimulator(proxyPort: number, capability: string) {
-  const observed: GatewayObservation[] = [];
-  const server = createServer((request, response) => {
-    observed.push({
-      url: request.url ?? "",
-      hasAuthorization: request.headers.authorization !== undefined,
-      authorizationIsPlaceholderBearer: request.headers.authorization === `Bearer ${PLACEHOLDER_CAPABILITY}`,
-      apiKeyIsPlaceholder: request.headers["x-api-key"] === PLACEHOLDER_CAPABILITY,
-    });
-    const headers = { ...request.headers, "x-api-key": capability, host: `127.0.0.1:${proxyPort}` };
-    const upstream = httpRequest(
-      { host: "127.0.0.1", port: proxyPort, method: request.method, path: request.url, headers },
-      (proxied) => {
-        response.writeHead(proxied.statusCode ?? 502, proxied.headers);
-        proxied.pipe(response);
-      },
-    );
-    upstream.on("error", () => response.destroy());
-    request.pipe(upstream);
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    observed,
-    close: () =>
-      new Promise<void>((resolve) => {
-        server.closeAllConnections();
-        server.close(() => resolve());
-      }),
-  };
-}
-
 describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
   const cleanup: Array<() => Promise<void>> = [];
   afterEach(async () => {
@@ -389,7 +345,7 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
       await server?.close();
       server = undefined;
     });
-    const gateway = await startGatewaySimulator(server.port, session.capability);
+    const gateway = await startGatewaySimulator(server.port, { capability: session.capability });
     cleanup.push(gateway.close);
     const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-header-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -690,6 +646,127 @@ describe.skipIf(RECORD || !codexBinaryInstalled())(
       },
       120_000,
     );
+
+    it("header mode: the egress gateway injects the capability and the MCP token; Codex sends only placeholders", async () => {
+      const model = "gpt-5.6-terra";
+      const token = mintMcpToken();
+      const gateway = await fakeGateway(token);
+      cleanup.push(gateway.close);
+      const forwarded: Record<string, unknown>[] = [];
+      const ledger = new MemoryProxyLedger();
+      const proxy = new CodingProxy({
+        ledger,
+        credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+        pricing: () => ({
+          encoding: "o200k_base",
+          inputPerMTok: 1,
+          cachedInputPerMTok: 0.1,
+          cacheWritePerMTok: 1,
+          outputPerMTok: 1,
+        }),
+        fetch: async (_input, init) => {
+          const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+          forwarded.push(body);
+          return new Response(scriptedMcpTurn(forwarded.length, model), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const session = await proxy.createSession({
+        runId: "codex-compat-mcp-header-mode",
+        credentialRef: "openai/compatibility",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 120_000),
+        budgetUsd: 10,
+        mcpTools: [
+          {
+            exposedName: "echo",
+            toolName: "echo",
+            serverId: "srv_compat",
+            serverName: "compat",
+            definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+          },
+        ],
+        mcpTokenHash: mcpTokenHash(token),
+      });
+      const rejected: string[] = [];
+      let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+        host: "127.0.0.1",
+        port: 0,
+        onRequest: (event) => {
+          if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+        },
+        mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
+      });
+      cleanup.push(async () => {
+        await server?.close();
+        server = undefined;
+      });
+      const sim = await startGatewaySimulator(server.port, { capability: session.capability, mcpToken: token });
+      cleanup.push(sim.close);
+      const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-header-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      await mkdir(home, { recursive: true });
+      await mkdir(workspace, { recursive: true });
+
+      const blocked = "http://127.0.0.1:9";
+      const client = createCodexSdkClient({
+        proxyBaseUrl: sim.url,
+        capability: "rrp_placeholder_injected_by_gateway",
+        capabilityHeader: "x-api-key",
+        developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
+        environment: {
+          HOME: home,
+          LANG: "C.UTF-8",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: root,
+          HTTPS_PROXY: blocked,
+          HTTP_PROXY: blocked,
+          ALL_PROXY: blocked,
+          NO_PROXY: "127.0.0.1,localhost",
+        },
+        disabledSkills: [...CODEX_BUILTIN_SKILLS],
+        mcpToken: "rmt_placeholder_injected_by_gateway",
+        mcpTokenHeader: "x-wardby-mcp-token",
+      });
+      const thread = client.startThread({
+        model,
+        sandboxMode: "danger-full-access",
+        workingDirectory: workspace,
+        skipGitRepoCheck: true,
+        networkAccessEnabled: false,
+        webSearchMode: "disabled",
+        approvalPolicy: "never",
+      });
+      const streamed = await thread.runStreamed("Echo hello.", {
+        outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+        signal: AbortSignal.timeout(90_000),
+      });
+      const events: Array<{ type: string }> = [];
+      for await (const event of streamed.events) events.push(event);
+
+      expect(rejected).toEqual([]);
+      expect(events.map((event) => event.type)).toContain("turn.completed");
+      // The proxy built the gateway's Bearer from the token the egress gateway injected.
+      expect(gateway.calls.length).toBeGreaterThan(0);
+      expect(gateway.calls.every((call) => call.authorized)).toBe(true);
+      const toolCalls = gateway.calls.filter((call) => call.method === "tools/call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]?.params).toMatchObject({ name: "echo", arguments: { text: "hello-from-fake-model" } });
+      const mcpRequests = sim.observed.filter((entry) => entry.url.startsWith("/mcp"));
+      expect(mcpRequests.length).toBeGreaterThan(0);
+      expect(mcpRequests.every((entry) => entry.mcpTokenIsPlaceholder)).toBe(true);
+      // Outcome A: Codex sets no Authorization at all in header mode, on any request.
+      expect(sim.observed.every((entry) => !entry.hasAuthorization)).toBe(true);
+      const sent = JSON.stringify(forwarded);
+      expect(sent).toContain("ECHO:hello-from-fake-model");
+      expect(sent).not.toContain(token);
+      expect(sent).not.toContain(session.capability);
+    }, 120_000);
 
     it("MCP header mode spike: the pinned Codex CLI sends http_headers on a streamable-HTTP MCP server", async () => {
       const model = "gpt-5.6-terra";

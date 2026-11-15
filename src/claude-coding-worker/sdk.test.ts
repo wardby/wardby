@@ -161,6 +161,37 @@ describe("Claude SDK configuration", () => {
       expect(JSON.stringify({ ...options, mcpServers: { wardby_tools: servers.wardby_tools } })).not.toContain(TOKEN);
     });
 
+    it("header mode: the placeholder in x-wardby-mcp-token, no Authorization", () => {
+      const options = buildClaudeSdkOptions({
+        ...config(),
+        mcp: {
+          url: "http://wardby-proxy:8787/mcp",
+          token: "rmt_placeholder_injected_by_gateway",
+          header: "x-wardby-mcp-token",
+        },
+      });
+      expect((options.mcpServers as Record<string, unknown>).wardby_mcp).toEqual({
+        type: "http",
+        url: "http://wardby-proxy:8787/mcp",
+        headers: { "x-wardby-mcp-token": "rmt_placeholder_injected_by_gateway" },
+        alwaysLoad: true,
+        timeout: 300_000,
+      });
+      expect(options.allowedTools).toEqual(["mcp__wardby_tools__run_command", "mcp__wardby_mcp"]);
+    });
+
+    it("header mode refuses a real token", () => {
+      const real = "rmt_" + "A".repeat(43);
+      let error: unknown;
+      try {
+        buildClaudeSdkOptions({ ...config(), mcp: { url: mcp.url, token: real, header: "x-wardby-mcp-token" } });
+      } catch (caught) {
+        error = caught;
+      }
+      expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+      expect(String(error)).not.toContain(real);
+    });
+
     it("is unchanged without MCP tools", () => {
       const strip = (options: Record<string, unknown>) => {
         const { abortController: _ignored, ...rest } = options;
