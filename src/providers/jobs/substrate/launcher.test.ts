@@ -2140,7 +2140,7 @@ describe("image self-check", () => {
   const report = (h: Harness, item: string) =>
     h.blobs.put(BLOB.imageIncomplete(h.token), Buffer.from(JSON.stringify({ item })));
 
-  it.each(["runner", "tar", "workspace", "run_dir"])(
+  it.each(["user", "runner", "tar", "workspace", "run_dir"])(
     "fails a %s report with its item, and deletes the actors",
     async (item) => {
       const h = await makeHarness();
@@ -2583,6 +2583,36 @@ describe("template record and readiness", () => {
       { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
     ]);
     await noTraceOf(h, h.spec.runId);
+  });
+
+  it("starts the never-ready clock at the first refusal with room, not at the template's creation", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    refuseToolResume(h);
+    const listWorkers = h.api.listWorkers.bind(h.api);
+    // A new template whose first runs wait for real capacity (no room known) well past the window.
+    h.api.listWorkers = async () => {
+      throw new Error("unreachable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    const tool = toolTemplate(h.spec, CONFIG).name;
+    expect(await h.templates.get(tool)).toMatchObject({ createdAt: new Date(T0) });
+    h.setNow(T0 + 10 * MINUTE);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    // Room now: the first refusal with room starts the clock, and the run still requeues.
+    h.api.listWorkers = listWorkers;
+    h.setNow(T0 + 10 * MINUTE + 1000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 10 * MINUTE + 61_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    expect(h.templateEvents).toEqual([]);
+    // Past the window from that first refusal with room: never ready.
+    h.setNow(T0 + 10 * MINUTE + 62_000);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_unready");
+    expect(h.templateEvents).toEqual([
+      { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
+    ]);
   });
 
   it("names the template of the actor whose resume was refused", async () => {

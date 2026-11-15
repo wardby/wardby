@@ -753,7 +753,7 @@ describe("substrate routes", () => {
         .filter((fields) => fields.event === "substrate.route" && fields.route === "image-incomplete");
     };
 
-    it.each(["runner", "tar", "workspace", "run_dir"])("stores the holder's %s report once", async (item) => {
+    it.each(["user", "runner", "tar", "workspace", "run_dir"])("stores the holder's %s report once", async (item) => {
       await start();
       const answer = await fetch(`${base}/image-incomplete`, tool(json({ item })));
       expect(answer.status).toBe(200);

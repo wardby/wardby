@@ -20,10 +20,11 @@
  * There are no warm rounds here.
  *
  * Image self-check (image-check.ts): once the actor has a run actor's name, and before anything is
- * fetched, the bridge checks that its image has the worker entry, GNU tar, a writable /workspace and
- * /run/wardby/input and /run/wardby/output. It runs after the run token, so the golden actor never
- * runs it. The first missing one is posted as `image-incomplete` (an enum item, never free text), and
- * the bridge then idles with its probe answering; it posts neither workspace-failed nor exit.
+ * fetched, the bridge checks that it does not run as root and that its image has the worker entry, GNU
+ * tar, a writable /workspace and /run/wardby/input and /run/wardby/output. It runs after the run
+ * token, so the golden actor never runs it. The first missing one is posted as `image-incomplete` (an
+ * enum item, never free text), and the bridge then idles with its probe answering; it posts neither
+ * workspace-failed nor exit. If that post fails after its retries, main exits non-zero instead.
  */
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -241,7 +242,8 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
         });
   if (missing) {
     log("substrate_bridge_image_incomplete", { runToken: token, item: missing });
-    await postCapped(
+    // postCapped retries with the bridge's normal policy; false once it gave up or was refused.
+    const reported = await postCapped(
       `${base}/image-incomplete`,
       headers,
       { item: missing },
@@ -249,12 +251,16 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
       log,
       "image-incomplete",
       shutdown.signal,
-    ).catch(() => undefined);
-    // The readiness server stays open: the actor keeps answering its probe and idles.
-    throw new ImageIncompleteError(missing, async () => {
-      await new Promise<void>((resolve) => ready.server.close(() => resolve()));
-      ready.server.closeAllConnections();
-    });
+    ).catch(() => false);
+    // The readiness server stays open: once reported, the actor keeps answering its probe and idles.
+    throw new ImageIncompleteError(
+      missing,
+      async () => {
+        await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+        ready.server.closeAllConnections();
+      },
+      reported,
+    );
   }
 
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
@@ -432,11 +438,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   try {
     handle = await run({ proxyUrl: requireProxyUrl(env), env });
   } catch (error) {
-    if (error instanceof ImageIncompleteError) {
+    if (error instanceof ImageIncompleteError && error.reported) {
       // Reported to the proxy; idle with the probe answering (the readiness server holds the event loop open).
       stderrLogger(error.code);
       return;
     }
+    // An unreported image report falls through: exit non-zero so the actor ends and the run fails now.
     stderrLogger(error instanceof BridgeError ? error.code : "substrate_bridge_start_failed");
     process.exit(1);
   }

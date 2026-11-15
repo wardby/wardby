@@ -160,6 +160,8 @@ Other rules:
   bridge the agent's runs fail with
   `substrate_image_unready`. The layer does
   nothing on Docker and Kubernetes, so one image serves every launcher.
+  Substrate runs the image as its last `USER` and the bridge refuses root
+  (`substrate_image_incomplete:user`), so keep `USER 10001:10001` last.
 
 ## Step 4: build it and run the tests the way a run would
 

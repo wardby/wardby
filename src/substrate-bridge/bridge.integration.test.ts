@@ -366,6 +366,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       tar: extra.tar ?? (await tarScript("gnu-tar", "tar (GNU tar) 1.35")),
       workspace,
       runDirs: [join(dir, "tool")],
+      uid: 10001,
     });
     const routesSeen = (): { route: string; status: number }[] =>
       routeLogs.map((call) => (call as [{ route: string; status: number }])[0]);
@@ -394,6 +395,31 @@ describe("substrate bridges, end to end without Substrate", () => {
       expect((await fetch(`http://127.0.0.1:${port}/readyz`)).status).toBe(200);
       await error.close();
       await expect(fetch(`http://127.0.0.1:${port}/readyz`)).rejects.toThrow();
+    });
+
+    it("reports root as user", async () => {
+      const { workspace } = await stage();
+      const error = (await startTool(workspace, "", {
+        imageCheck: { ...(await imageCheckFor(workspace)), uid: 0 },
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("user");
+      expect(error.reported).toBe(true);
+      expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "user" });
+      await error.close();
+    });
+
+    it("marks the report unreported when the post fails after its retries (main then exits non-zero)", async () => {
+      const { workspace } = await stage();
+      const error = (await startTool(workspace, "", {
+        imageCheck: await imageCheckFor(workspace),
+        proxyUrl: "http://127.0.0.1:1",
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      expect(error.reported).toBe(false);
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+      await error.close();
     });
 
     it("runs by default: a bridge started without imageCheck checks its image", async () => {

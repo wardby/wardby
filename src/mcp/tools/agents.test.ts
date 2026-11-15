@@ -2008,6 +2008,12 @@ describe("agent CRUD tools", () => {
       vi.unstubAllEnvs();
     });
 
+    it("names every Substrate image failure code in the warning", () => {
+      for (const code of ["substrate_image_unready", "substrate_bridge_incompatible", "substrate_image_incomplete"]) {
+        expect(SUBSTRATE_IMAGE_WARNING).toContain(code);
+      }
+    });
+
     it("warns on a Substrate deployment that a custom image needs the bridge", async () => {
       vi.stubEnv("JOB_LAUNCHER", "substrate");
       const client = await setup(["agents:write", "agents:read", "agents:admin"]);

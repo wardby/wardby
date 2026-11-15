@@ -443,15 +443,59 @@ describe("Codex bridge, end to end without Substrate", () => {
           tar: await gnuTar(),
           workspace,
           runDirs: [join(dir, "in"), join(dir, "out")],
+          uid: 10001,
         },
       ).catch((e: unknown) => e)) as ImageIncompleteError;
       expect(error).toBeInstanceOf(ImageIncompleteError);
       expect(error.item).toBe("runner");
+      expect(error.reported).toBe(true);
       await error.close();
       expect(order()).toEqual(["POST image-incomplete"]);
       expect(JSON.parse(posted("image-incomplete")[0].body.toString())).toEqual({ item: "runner" });
       expect(posted("image-incomplete")[0].headers["x-wardby-bridge-protocol"]).toBe("1");
       expect(launched).toBe(false);
+    });
+
+    it("marks the report unreported when the post fails after its retries (main then exits non-zero)", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      const error = (await start(
+        () => ({ exited: Promise.resolve(0) }),
+        undefined,
+        {},
+        {
+          runnerEntry: join(dir, "missing.js"),
+          tar: await gnuTar(),
+          workspace,
+          runDirs: [join(dir, "in"), join(dir, "out")],
+          uid: 10001,
+        },
+        { proxyUrl: "http://127.0.0.1:1" },
+      ).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      expect(error.reported).toBe(false);
+      await error.close();
+    });
+
+    it("reports root as user before the runner", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      const error = (await start(
+        () => ({ exited: Promise.resolve(0) }),
+        undefined,
+        {},
+        {
+          runnerEntry: join(dir, "missing.js"),
+          tar: await gnuTar(),
+          workspace,
+          runDirs: [join(dir, "in"), join(dir, "out")],
+          uid: 0,
+        },
+      ).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("user");
+      expect(error.reported).toBe(true);
+      await error.close();
+      expect(JSON.parse(posted("image-incomplete")[0].body.toString())).toEqual({ item: "user" });
     });
 
     it("runs by default: a bridge started without imageCheck checks its image", async () => {
@@ -495,6 +539,7 @@ describe("Codex bridge, end to end without Substrate", () => {
           tar: await gnuTar(),
           workspace,
           runDirs: [join(dir, "in"), join(dir, "out")],
+          uid: 10001,
         },
         { tempRoot: join(dir, "no-such", "tmp") },
       ).catch((e: unknown) => e)) as ImageIncompleteError;
@@ -520,6 +565,7 @@ describe("Codex bridge, end to end without Substrate", () => {
             tar: await gnuTar(),
             workspace,
             runDirs: [join(dir, "in"), join(dir, "out")],
+            uid: 10001,
           },
         ).catch((e: unknown) => e)) as ImageIncompleteError;
         expect(error).toBeInstanceOf(ImageIncompleteError);

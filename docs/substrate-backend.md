@@ -93,12 +93,6 @@ Docker and Kubernetes ones.
   - update the bridge-image variables (see [Images](#images)) at the same time,
     and rebuild every [custom image](#custom-images) on the new release's
     bridge.
-- **The first run of each kind after this upgrade starts slowly.** Every
-  template name changes with this release, because the templates now set the
-  bridge's command. The first run on each template waits in the queue while
-  Substrate builds its golden snapshot; later runs reuse it. Templates made by
-  an earlier release are not used again (see
-  [Templates and snapshots](#templates-and-snapshots)).
 
 ### Images
 
@@ -144,25 +138,25 @@ coding proxy; the proxy serves the Substrate routes only when
 
 ### Control plane
 
-| Variable                          | Required | Default              | Purpose                                                                                                                                                                   |
-| --------------------------------- | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JOB_LAUNCHER`                    | Yes      | `local`              | Set to `substrate`.                                                                                                                                                       |
-| `SUBSTRATE_API_URL`               | Yes      |                      | Substrate Control API URL (a valid URL).                                                                                                                                  |
-| `SUBSTRATE_TOKEN_FILE`            | Yes      |                      | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.                                               |
-| `SUBSTRATE_ATESPACE`              | Yes      |                      | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                                                               |
-| `SUBSTRATE_PROXY_HOST`            | Yes      |                      | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                                                            |
-| `SUBSTRATE_PROXY_PORT`            |          | `8787`               | Port of the coding proxy as the actors reach it (1 to 65535). Set the same value on the proxy.                                                                            |
-| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets` | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace.                                            |
-| `SUBSTRATE_KUBE_CONTEXT`          |          | default context      | Kubernetes context used to create and delete the per-run Secrets.                                                                                                         |
-| `SUBSTRATE_CA_FILE`               |          | system trust         | CA bundle that verifies the Substrate API's certificate.                                                                                                                  |
-| `SUBSTRATE_SERVER_NAME`           |          | from the URL         | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                                                                          |
-| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker           | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                                                                      |
-| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                                                                 |
-| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                | After the worker exits without a result, how long the tool side may take to report the workspace before the run fails (10 to 3600).                                       |
-| `SUBSTRATE_TEMPLATE_TTL_SEC`      |          | `604800` (7 days)    | Templates no run used for this long are removed (3600 to 7776000). Never less than 27 hours, whatever the value; see [Templates and snapshots](#templates-and-snapshots). |
-| `SUBSTRATE_TEMPLATE_READY_SEC`    |          | `900`                | How long a new template may build without ever starting an actor, while the workers have room, before its runs fail with `substrate_image_unready` (60 to 7200).          |
-| `SUBSTRATE_TEMPLATE_RETRY_SEC`    |          | `600`                | After a template's golden snapshot fails, the window in which a second failure fails the run with `substrate_image_unready` instead of rebuilding (120 to 86400).         |
-| `BLOB_STORE` and its settings     | Yes      |                      | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                                                              |
+| Variable                          | Required | Default              | Purpose                                                                                                                                                                                        |
+| --------------------------------- | -------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JOB_LAUNCHER`                    | Yes      | `local`              | Set to `substrate`.                                                                                                                                                                            |
+| `SUBSTRATE_API_URL`               | Yes      |                      | Substrate Control API URL (a valid URL).                                                                                                                                                       |
+| `SUBSTRATE_TOKEN_FILE`            | Yes      |                      | File holding the Substrate API token (audience `api.ate-system.svc`). Read on each call, so a refreshed token is picked up.                                                                    |
+| `SUBSTRATE_ATESPACE`              | Yes      |                      | The Substrate atespace the run actors live in (a DNS label). No default; the proxy must use the same value.                                                                                    |
+| `SUBSTRATE_PROXY_HOST`            | Yes      |                      | Hostname the actors use to reach the coding proxy. It is also the egress destination Wardby allows each actor.                                                                                 |
+| `SUBSTRATE_PROXY_PORT`            |          | `8787`               | Port of the coding proxy as the actors reach it (1 to 65535). Set the same value on the proxy.                                                                                                 |
+| `SUBSTRATE_CREDENTIALS_NAMESPACE` |          | `wardby-run-secrets` | Namespace where Wardby creates the per-run Secret. The credential provider must be granted read access to it for the atespace.                                                                 |
+| `SUBSTRATE_KUBE_CONTEXT`          |          | default context      | Kubernetes context used to create and delete the per-run Secrets.                                                                                                                              |
+| `SUBSTRATE_CA_FILE`               |          | system trust         | CA bundle that verifies the Substrate API's certificate.                                                                                                                                       |
+| `SUBSTRATE_SERVER_NAME`           |          | from the URL         | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`.                                                                                                               |
+| `SUBSTRATE_WORKER_SELECTOR`       |          | any worker           | Comma-separated `key=value` worker labels; only matching workers count for capacity.                                                                                                           |
+| `SUBSTRATE_STARTUP_TIMEOUT_SEC`   |          | `300`                | How long the actors may take to reach the coding proxy before the run fails (30 to 7200).                                                                                                      |
+| `SUBSTRATE_COLLECT_GRACE_SEC`     |          | `120`                | After the worker exits without a result, how long the tool side may take to report the workspace before the run fails (10 to 3600).                                                            |
+| `SUBSTRATE_TEMPLATE_TTL_SEC`      |          | `604800` (7 days)    | Templates no run used for this long are removed (3600 to 7776000). Never less than 27 hours, whatever the value; see [Templates and snapshots](#templates-and-snapshots).                      |
+| `SUBSTRATE_TEMPLATE_READY_SEC`    |          | `900`                | How long a new template may keep failing to start an actor while the workers have room (counted from the first such refusal) before its runs fail with `substrate_image_unready` (60 to 7200). |
+| `SUBSTRATE_TEMPLATE_RETRY_SEC`    |          | `600`                | After a template's golden snapshot fails, the window in which a second failure fails the run with `substrate_image_unready` instead of rebuilding (120 to 86400).                              |
+| `BLOB_STORE` and its settings     | Yes      |                      | The blob store shared with the proxy. See [Local coding-agent setup](coding-agent-setup.md).                                                                                                   |
 
 The digest requirement for the worker and tool-runner images is the same as for
 `JOB_LAUNCHER=kubernetes`; the control plane refuses to start without digests.
@@ -394,8 +388,11 @@ which take both bases as digest-pinned build arguments, are
 
 Before it starts the run, the bridge checks the image and fails the run with
 [`substrate_image_incomplete:<item>`](../help/errors/substrate-image-incomplete.md)
-if the runner, GNU tar, a writable `/workspace` or a writable `/run/wardby`
-directory is missing. It does not check `/tmp`: an image whose only fault is an
+if it runs as root, or if the runner, GNU tar, a writable `/workspace` or a
+writable `/run/wardby` directory is missing. The Docker and Kubernetes
+launchers always run the image as user 10001; Substrate has no such setting,
+so the image's last `USER` line decides. End the image with `USER 10001:10001`,
+as the examples do. It does not check `/tmp`: an image whose only fault is an
 unwritable `/tmp` fails with
 [`substrate_startup_timeout`](../help/errors/substrate-startup-timeout.md)
 instead.
@@ -407,9 +404,9 @@ per role (agent, tool or Codex), image and size. It records every template it
 creates in the database (the `SubstrateTemplate` table), with when a launch,
 park or adoption last used it.
 
-- **Cleanup.** At most once an hour, a launch removes up to 50 templates no
-  run used for `SUBSTRATE_TEMPLATE_TTL_SEC` (default 7 days): first the record,
-  then the Substrate template. Each removal logs `substrate_template_removed`
+- **Cleanup.** At start-up, and at most once an hour on a launch, Wardby
+  removes up to 50 templates no run used for `SUBSTRATE_TEMPLATE_TTL_SEC`
+  (default 7 days): first the record, then the Substrate template. Each removal logs `substrate_template_removed`
   (info). If Substrate refuses the delete, the record is put back, the warning
   `substrate_template_remove_failed` is logged, and the next sweep tries again.
   The removal age is never less than 27 hours, whatever the setting: the
@@ -423,7 +420,10 @@ park or adoption last used it.
   A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a new template that never starts an actor within
-  `SUBSTRATE_TEMPLATE_READY_SEC` while the workers have room. A run that finds
+  `SUBSTRATE_TEMPLATE_READY_SEC` while the workers have room. That time counts
+  from the first start Substrate refused while the workers had room, so time a
+  new template spent waiting for capacity does not count; a control plane
+  restart starts the count again. A run that finds
   another launch rebuilding its template goes back to the queue and waits, as
   for a capacity refusal; no error is recorded on the run.
 - **Log events**, each with the template's name and role and never an image's
@@ -432,9 +432,6 @@ park or adoption last used it.
   failure count could not be written; the template is rebuilt),
   `substrate_template_remove_failed` (all warn) and `substrate_template_removed`
   (info).
-- **Templates made before this release** are not in the table, and because
-  every template name changed with this release, none of them is used again.
-  The cleanup never sees them: remove them once with Substrate's own tooling.
 
 ## Warm rounds
 
@@ -631,9 +628,10 @@ Known recovery steps:
   release than the coding proxy. Rebuild the image on this release's bridge,
   and use the bridge images of the same release as the proxy.
 - **`substrate_image_incomplete:<item>`.** The bridge found the image lacks
-  something it runs: `runner` (the tool runner or Codex worker), `tar` (GNU
-  tar), `workspace` (a `/workspace` that user 10001 can write) or `run_dir` (a
-  `/run/wardby` directory that user 10001 can write). See
+  something it runs: `user` (the image runs as root; end it with
+  `USER 10001:10001`), `runner` (the tool runner or Codex worker), `tar` (GNU
+  tar), `workspace` (a `/workspace` that the image's user can write) or
+  `run_dir` (a `/run/wardby` directory that the image's user can write). See
   [`substrate_image_incomplete`](../help/errors/substrate-image-incomplete.md).
 
 Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.md),
