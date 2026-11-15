@@ -74,7 +74,7 @@ describe("substrate names", () => {
     assertValidBlobKey(BLOB.imageIncomplete("wr-00000000000000000000"));
   });
   it("accepts only the image check's items", () => {
-    for (const item of ["runner", "tar", "workspace", "run_dir"]) expect(isSubstrateImageItem(item)).toBe(true);
+    for (const item of ["user", "runner", "tar", "workspace", "run_dir"]) expect(isSubstrateImageItem(item)).toBe(true);
     for (const value of ["other", "", "Runner", 1, null, undefined, {}, ["tar"]]) {
       expect(isSubstrateImageItem(value)).toBe(false);
     }

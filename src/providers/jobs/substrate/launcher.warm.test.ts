@@ -475,12 +475,11 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
     expect(await lastUsed()).toEqual([new Date(T0 + HOUR), new Date(T0 + HOUR)]);
     h.setNow(T0 + 2 * HOUR);
-    // A continuation whose own spec names another tool template: the bump follows the parked actors.
-    const spec2 = { ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
-    const second = await h.launcher.launch(spec2);
+    // The continuation adopts: the bump follows the parked actors' templates (a spec naming another
+    // tool template starts cold instead; see "starts cold with fingerprint_changed ...").
+    const second = await h.launcher.launch(await followUp(h, "run-2"));
     expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
     expect(await lastUsed()).toEqual([new Date(T0 + 2 * HOUR), new Date(T0 + 2 * HOUR)]);
-    expect(await h.templates.get(toolTemplate(spec2, { ...CONFIG, warmRounds: true }).name)).toBeUndefined();
     expect(await h.templates.get(names[0])).toMatchObject({ createdAt: new Date(T0) });
 
     // Best effort: a park whose getActor fails still parks.
@@ -554,6 +553,20 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     const tool3 = h.api.actors.get(`${CONFIG.atespace}/${toolActorName(token3)}`);
     expect(tool3?.templateName).toBe(toolTemplate(spec3, { ...CONFIG, warmRounds: true }).name);
     expect(h.api.templates.get(`${CONFIG.atespace}/${tool3!.templateName}`)?.containers[0]?.image).toBe(newDigest);
+  });
+
+  it("starts cold with fingerprint_changed when the parked tool actor's template is not the spec's", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    // The same fingerprint, but a spec whose tool template differs (as a changed worker env would).
+    const spec2: JobSpec = { ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
+    const second = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    const token2 = substrateRunToken("run-2");
+    expect(await h.runs.get("run-2")).toMatchObject({ token: token2, round: 1, coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    const tool2 = h.api.actors.get(`${CONFIG.atespace}/${toolActorName(token2)}`);
+    expect(tool2?.templateName).toBe(toolTemplate(spec2, { ...CONFIG, warmRounds: true }).name);
   });
 
   it("adopts with MCP tools: the fresh Secret holds the new run's MCP token; no policy is re-put", async () => {

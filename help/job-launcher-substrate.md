@@ -75,8 +75,6 @@ Upgrade with no Substrate run in flight, and move the bridge images and every
 custom image to the new release's bridge at the same time: the proxy refuses a
 bridge of another release
 ([substrate_bridge_incompatible](errors/substrate-bridge-incompatible.md)).
-Every template name changes with this release, so the first run of each kind
-waits while Substrate builds its golden snapshot.
 
 ## MCP tools
 
@@ -153,7 +151,8 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_bridge_incompatible](errors/substrate-bridge-incompatible.md): the
   image's bridge is from another release than the coding proxy.
 - [substrate_image_incomplete](errors/substrate-image-incomplete.md): the image
-  lacks the runner, GNU tar, or a writable `/workspace` or `/run/wardby`.
+  runs as root, or lacks the runner, GNU tar, or a writable `/workspace` or
+  `/run/wardby`.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and

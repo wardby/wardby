@@ -40,12 +40,31 @@ describe("checkImage", () => {
     tar: gnuTar,
     workspace: join(dir, "ws"),
     runDirs: [join(dir, "run", "tool")],
+    uid: 10001,
   });
 
   it("finds nothing missing, and creates the directories", async () => {
     expect(await checkImage(good())).toBeUndefined();
     expect(existsSync(join(dir, "ws"))).toBe(true);
     expect(existsSync(join(dir, "run", "tool"))).toBe(true);
+  });
+
+  it("reports root (uid 0) as user, before anything else", async () => {
+    expect(await checkImage({ ...good(), uid: 0 })).toBe("user");
+    expect(
+      await checkImage({ ...good(), uid: 0, runnerEntry: join(dir, "missing.mjs"), tar: join(dir, "no-tar") }),
+    ).toBe("user");
+    // Nothing else ran: the directories were not created.
+    expect(existsSync(join(dir, "ws"))).toBe(false);
+  });
+
+  it("passes uid 10001", async () => {
+    expect(await checkImage({ ...good(), uid: 10001 })).toBeUndefined();
+  });
+
+  it("defaults to the process's uid", async () => {
+    const { uid: _uid, ...withoutUid } = good();
+    expect(await checkImage(withoutUid)).toBe(asRoot ? "user" : undefined);
   });
 
   it("reports a missing runner first, before a bad tar", async () => {
@@ -97,6 +116,8 @@ describe("ImageIncompleteError", () => {
     expect(error.code).toBe("substrate_bridge_image_incomplete");
     expect(error.message).toBe("substrate_bridge_image_incomplete");
     expect(error.item).toBe("tar");
+    expect(error.reported).toBe(true);
+    expect(new ImageIncompleteError("user", async () => undefined, false).reported).toBe(false);
     await error.close();
     expect(closed).toBe(true);
   });

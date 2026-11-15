@@ -102,7 +102,7 @@ export const BLOB = {
 };
 
 /** The fixed items a bridge's image check may report (substrate-bridge/constants.ts IMAGE_ITEMS). */
-export const SUBSTRATE_IMAGE_ITEMS = ["runner", "tar", "workspace", "run_dir"] as const;
+export const SUBSTRATE_IMAGE_ITEMS = ["user", "runner", "tar", "workspace", "run_dir"] as const;
 export type SubstrateImageItem = (typeof SUBSTRATE_IMAGE_ITEMS)[number];
 
 /** Whether `value` is one of SUBSTRATE_IMAGE_ITEMS (never any other string: the report carries no free text). */

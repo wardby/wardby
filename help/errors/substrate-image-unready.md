@@ -15,7 +15,9 @@ actor, so the run fails instead of waiting in the queue. One of these happened:
 - Substrate could not build the template's golden snapshot, rebuilt it, and the
   build failed again within `SUBSTRATE_TEMPLATE_RETRY_SEC` (default 600 s); or
 - a new template never started an actor within `SUBSTRATE_TEMPLATE_READY_SEC`
-  (default 900 s) while the workers had room for the run.
+  (default 900 s) while the workers had room for the run. The time counts from
+  the first start Substrate refused while the workers had room; time spent
+  waiting for capacity does not count.
 
 The control plane logs `substrate_template_unready` (with the template's name,
 its role and the reason `golden_failed` or `never_ready`) and, for each failed

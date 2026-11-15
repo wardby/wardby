@@ -55,8 +55,8 @@
  *   it was last used by a launch, park or adoption; its golden-snapshot failures in the current
  *   window; when an actor from it first reached running). A first golden-snapshot failure rebuilds
  *   the template; a second in SUBSTRATE_TEMPLATE_RETRY_SEC, or a never-ready template past
- *   SUBSTRATE_TEMPLATE_READY_SEC with room on the workers, fails the run as substrate_image_unready
- *   instead of requeueing it.
+ *   SUBSTRATE_TEMPLATE_READY_SEC of resumes refused while the workers had room, fails the run as
+ *   substrate_image_unready instead of requeueing it.
  * - Template cleanup (every template wardby recorded, standard and custom): at most once an hour a
  *   launch (and warmUp) removes the templates no launch, park or adoption used for
  *   SUBSTRATE_TEMPLATE_TTL_SEC (default 7 days, never under the longest coding run plus the park TTL
@@ -211,6 +211,8 @@ export interface TemplateEvent {
 }
 
 export const DEFAULT_TEMPLATE_READY_MS = 900_000;
+/** How many template names the never-ready clock tracks at once (oldest dropped first). */
+const NEVER_READY_TRACKED = 1000;
 export const DEFAULT_TEMPLATE_RETRY_MS = 600_000;
 /**
  * A golden-snapshot failure seen within this of the window's first failure is that same build, seen
@@ -568,6 +570,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   readonly warmRounds: boolean;
   private lastSweepAt = Number.NEGATIVE_INFINITY;
   private lastTemplateSweepAt = Number.NEGATIVE_INFINITY;
+  /**
+   * The never-ready clock: per template name, when this control plane first saw a resume on it
+   * refused while the workers had room (neverReady). In memory only, so a restart or another replica
+   * starts its own clock: that errs toward requeueing, never toward failing a healthy template. At
+   * most NEVER_READY_TRACKED names; removed once the template is ready.
+   */
+  private readonly refusedWithRoomSince = new Map<string, number>();
 
   constructor(private readonly options: SubstrateJobLauncherOptions) {
     this.api = options.api;
@@ -641,7 +650,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // A relaunch of a run that has a row keeps whatever that row says.
       if (!(await this.runs.get(spec.runId))) {
         if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
-        const outcome = await this.adoptParked(spec, specHash, deadline());
+        const outcome = await this.adoptParked(spec, templates, specHash, deadline());
         if (outcome?.adopted) return this.handleFor(spec.runId);
         coldReason = outcome?.reason;
       }
@@ -990,20 +999,19 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       return;
     }
     // Every actor resumed from its template: each one is ready (best effort, never fails the run).
-    await this.templates
-      .markReady(
-        actorTemplates(templates).map((t) => t.name),
-        new Date(this.now()),
-      )
-      .catch(() => undefined);
+    const readyNames = actorTemplates(templates).map((t) => t.name);
+    for (const name of readyNames) this.refusedWithRoomSince.delete(name);
+    await this.templates.markReady(readyNames, new Date(this.now())).catch(() => undefined);
   }
 
   /**
    * Whether a refused resume is an image that never becomes ready rather than a full cluster: the
    * workers are known to have room for the run (a worker list that cannot be read is not room), and
-   * the refused actor's template has never started an actor (no readyAt) and has been building (since
-   * it was created, or since its window's first golden-snapshot failure) for longer than
-   * templateReadyMs. Reports that template. Any store error: false (the run requeues, as before).
+   * the refused actor's template has never started an actor (no readyAt) and has been refused with
+   * room for longer than templateReadyMs: since this control plane first saw it refused with room
+   * (refusedWithRoomSince), or since its window's first golden-snapshot failure when that is later.
+   * Time a new template spent waiting for real capacity never counts, and neither does its
+   * createdAt. Reports that template. Any store error: false (the run requeues, as before).
    */
   private async neverReady(templates: RunTemplates, refused: ActorTemplateSpec): Promise<boolean> {
     try {
@@ -1011,8 +1019,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (free === undefined || !placeable(free, templates)) return false;
       const row = await this.templates.get(refused.name);
       if (!row || row.readyAt !== undefined) return false;
-      const since = (row.lastFailureAt ?? row.createdAt).getTime();
-      if (this.now() - since <= this.templateReadyMs) return false;
+      const now = this.now();
+      let seen = this.refusedWithRoomSince.get(refused.name);
+      if (seen === undefined) {
+        if (this.refusedWithRoomSince.size >= NEVER_READY_TRACKED) {
+          const oldest = this.refusedWithRoomSince.keys().next().value;
+          if (oldest !== undefined) this.refusedWithRoomSince.delete(oldest);
+        }
+        this.refusedWithRoomSince.set(refused.name, now);
+        seen = now;
+      }
+      const since = Math.max(seen, row.lastFailureAt?.getTime() ?? Number.NEGATIVE_INFINITY);
+      if (now - since <= this.templateReadyMs) return false;
       this.templateEvent({
         event: "substrate_template_unready",
         name: row.name,
@@ -1786,7 +1804,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * removed, so no later round adopts state older than the branch. Undefined, too, when another
    * launch of the same run got its row first (no event: that launch reports).
    */
-  private async adoptParked(spec: JobSpec, specHash: string, deadlineAt: Date): Promise<WarmOutcome | undefined> {
+  private async adoptParked(
+    spec: JobSpec,
+    templates: RunTemplates,
+    specHash: string,
+    deadlineAt: Date,
+  ): Promise<WarmOutcome | undefined> {
     const warm = spec.warm;
     if (!warm) return undefined;
     const parked = await this.runs.get(warm.fromRunId);
@@ -1816,6 +1839,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     ]);
     if (!agent || !tool) return notAdopted("actor_missing", parked);
     if (agent.state !== "SUSPENDED" || tool.state !== "SUSPENDED") return notAdopted("actor_not_suspended", parked);
+    // The fingerprint covers the images; the template name also covers the worker env and settings,
+    // which may change across a restart. A parked tool actor on another template starts cold.
+    if (templates.shape === "pair" && tool.templateName !== templates.tool.name) {
+      return notAdopted("fingerprint_changed", parked);
+    }
     const record = await this.runs.adopt(parked.runId, spec.runId, deadlineAt, {
       specHash,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),

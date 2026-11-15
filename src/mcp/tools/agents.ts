@@ -199,7 +199,7 @@ export const SESSION_RESUME_NO_STORE_WARNING =
   "sessionResume is on but this server has no blob store (BLOB_STORE), so transcripts are not kept. See the resume-runs-locally help article.";
 
 export const SUBSTRATE_IMAGE_WARNING =
-  "This deployment runs coding agents on Substrate: the image must contain this release's Substrate bridge (see the build-claude-code-image or build-worker-image help article), or its runs fail with substrate_image_unready.";
+  "This deployment runs coding agents on Substrate: the image must contain this release's Substrate bridge (see the build-claude-code-image or build-worker-image help article), and end as a non-root user, or its runs fail (substrate_image_unready, substrate_bridge_incompatible or substrate_image_incomplete).";
 
 /** The stored coding-profile fields the output warnings read. */
 interface WarnedProfile {
