@@ -41,7 +41,10 @@ import {
   parseWorkerDiagnosticLine as sharedParseWorkerDiagnosticLine,
   SAFE_WORKER_DIAGNOSTIC as SHARED_SAFE_WORKER_DIAGNOSTIC,
 } from "../providers/jobs/worker-diagnostic.js";
-import { MAX_DIAGNOSTICS_BYTES } from "../providers/coding-proxy/substrate/routes.js";
+import {
+  MAX_DIAGNOSTICS_BYTES,
+  MCP_TOOLS_INPUT_HEADER as PROXY_MCP_TOOLS_INPUT_HEADER,
+} from "../providers/coding-proxy/substrate/routes.js";
 import { parseWorkerDiagnosticLine as bridgeParseWorkerDiagnosticLine } from "./diagnostics.js";
 
 it("matches the launcher's names", () => {
@@ -119,4 +122,19 @@ it("matches the Codex worker's header-mode environment and entry point", async (
     const entrypoint = /^ENTRYPOINT\s+\["node",\s*"([^"]+)"\]/m.exec(dockerfile);
     expect(entrypoint?.[1]).toBe(CODEX_WORKER_ENTRY);
   }
+});
+
+it("matches the worker's and the proxy's MCP names", async () => {
+  const bridge = await import("./constants.js");
+  const worker = await import("../coding-worker/mcp-config.js");
+  const controlPlane = await import("../coding/mcp-token.js");
+  expect(bridge.MCP_TOKEN_ENV).toBe(worker.MCP_TOKEN_ENV);
+  expect(bridge.MCP_TOKEN_HEADER_ENV).toBe(worker.MCP_TOKEN_HEADER_ENV);
+  expect(bridge.MCP_TOKEN_HEADER).toBe(worker.MCP_TOKEN_HEADER);
+  expect(bridge.INJECTED_MCP_TOKEN_PLACEHOLDER).toBe(worker.INJECTED_MCP_TOKEN_PLACEHOLDER);
+  expect(bridge.MCP_TOOLS_INPUT_HEADER).toBe(PROXY_MCP_TOOLS_INPUT_HEADER);
+  expect(bridge.MCP_TOKEN_HEADER).toBe(controlPlane.MCP_TOKEN_HEADER);
+  expect(bridge.INJECTED_MCP_TOKEN_PLACEHOLDER).toBe(controlPlane.INJECTED_MCP_TOKEN_PLACEHOLDER);
+  expect(bridge.MCP_TOKEN_ENV).toBe(controlPlane.MCP_TOKEN_ENV);
+  expect(bridge.WORKER_PLACEHOLDERS).toEqual([PLACEHOLDER_CAPABILITY, bridge.INJECTED_MCP_TOKEN_PLACEHOLDER]);
 });

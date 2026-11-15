@@ -8,7 +8,7 @@
  * The worker holds only the placeholder capability (the egress gateway injects the real one on the
  * wire) and the run's registry-only token, which the setup carries because it cannot be derived from a
  * placeholder. The token is a secret value: it is never logged, and the diagnostics tail and the
- * worker's output passed on to the actor's log are redacted against it and the placeholder. The
+ * worker's output passed on to the actor's log are redacted against it and the placeholders. The
  * setup body is never logged.
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
@@ -21,11 +21,13 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   DiagnosticsTail,
+  mcpWorkerEnv,
   postCapped,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
   waitForRunToken,
+  withoutMcpEnv,
   type Logger,
 } from "./common.js";
 import {
@@ -36,6 +38,7 @@ import {
   PLACEHOLDER_CAPABILITY,
   REGISTRY_TOKEN_ENV,
   REGISTRY_TOKEN_SHAPE,
+  WORKER_PLACEHOLDERS,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
@@ -67,8 +70,11 @@ export interface CodexOptions {
   signal?: AbortSignal;
   inputPath?: string;
   resultPath?: string;
-  /** Starts the worker with this environment. The default spawns `node /opt/wardby/coding-worker/main.js` in its own process group. */
-  launchWorker?: (env: NodeJS.ProcessEnv) => WorkerHandle;
+  /**
+   * Starts the worker with this environment. The default spawns `node /opt/wardby/coding-worker/main.js`
+   * in its own process group, its output redacted against `secrets` (the bridge's live list).
+   */
+  launchWorker?: (env: NodeJS.ProcessEnv, secrets: () => readonly string[]) => WorkerHandle;
   policy?: RetryPolicy;
   log?: Logger;
   /** Tests only: runs after the result bundle is opened and checked, before `.git` is checked again. */
@@ -146,10 +152,10 @@ export const spawnCodexWorker = (
 };
 
 export async function run(options: CodexOptions): Promise<CodexHandle> {
-  // Every secret value this actor holds: the placeholder, and once the setup is read the run's
-  // registry-only token. The diagnostics tail (the worker's stderr and this bridge's events) and the
+  // Every secret value this actor holds: the placeholders (capability and MCP token), and once the
+  // setup is read the run's registry-only token. The diagnostics tail (the worker's stderr and this bridge's events) and the
   // worker's output passed on to the actor's log are redacted against them by exact value.
-  const secrets: string[] = [PLACEHOLDER_CAPABILITY];
+  const secrets: string[] = [...WORKER_PLACEHOLDERS];
   const diagnostics = new DiagnosticsTail(() => secrets);
   const log = diagnostics.logger(options.log ?? stderrLogger);
   const policy = options.policy ?? DEFAULT_POLICY;
@@ -220,7 +226,8 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
     throw error;
   }
 
-  // 5. The input.
+  // 5. The input, and from its answer whether the worker gets MCP tools.
+  let mcpEnv: Record<string, string>;
   try {
     await mkdir(dirname(inputPath), { recursive: true });
     const input = await withRetry(
@@ -228,6 +235,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
       { policy, deadlineMs: INPUT_DEADLINE_MS },
     );
     if (input.status !== 200) return await abortStart("substrate_bridge_input_failed");
+    mcpEnv = mcpWorkerEnv(input.headers);
   } catch (error) {
     if (error instanceof BridgeError && error.code === "substrate_bridge_input_failed") throw error;
     if (error instanceof BridgeError && error.code === "substrate_bridge_stopped") throw error;
@@ -236,14 +244,18 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   log("substrate_bridge_input_ready", { runToken: token });
 
   // 6. The worker, in header mode.
-  const launch = options.launchWorker ?? ((workerEnv: NodeJS.ProcessEnv) => spawnCodexWorker(workerEnv, () => secrets));
-  const worker = launch({
-    ...env,
-    WARDBY_PROXY_URL: options.proxyUrl,
-    WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
-    [CAPABILITY_HEADER_ENV]: "x-api-key",
-    [REGISTRY_TOKEN_ENV]: registryToken,
-  });
+  const launch = options.launchWorker ?? spawnCodexWorker;
+  const worker = launch(
+    {
+      ...withoutMcpEnv(env),
+      WARDBY_PROXY_URL: options.proxyUrl,
+      WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
+      [CAPABILITY_HEADER_ENV]: "x-api-key",
+      [REGISTRY_TOKEN_ENV]: registryToken,
+      ...mcpEnv,
+    },
+    () => secrets,
+  );
   log("substrate_bridge_worker_started", { runToken: token });
 
   // 7. Its result once it exited (or the diagnostics tail and the exit report). No transcript: Codex

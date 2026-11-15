@@ -24,8 +24,13 @@
  * bridge's bounded stderr tail, redacted here (trusted code) by exact value against every secret
  * value delivered to the run's actors that the proxy can know (the capability the request
  * authenticated with and the registry-only token derived from it), logged at warn to the operator
- * log only, and refused unlogged if a token shape is still in it. A tool-side tail is refused: the
+ * log only, and refused unlogged if a token shape is still in it. An MCP token shape (`rmt_`) left
+ * in a tail is refused too; the actors hold only its placeholder. A tool-side tail is refused: the
  * tool actor runs the model's commands, and the proxy holds no exact value to redact its tail with.
+ *
+ * MCP tools: a 200 `input` answer carries MCP_TOOLS_INPUT_HEADER: "1" exactly when the session the
+ * request authenticated with has at least one pinned MCP tool, so the agent bridge starts that round's
+ * worker in MCP header mode. It is a fixed flag, never a token, pin or name; no other answer has it.
  *
  * Once the proxy has written a run's `done` marker its outcome is fixed: `workspace` and
  * `workspace-failed` are refused (409 substrate_run_collected), so a late or forged post cannot
@@ -49,7 +54,7 @@ import type { SubstrateActorShape } from "../../jobs/substrate/run-store.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
-import type { ProxyLedger } from "../types.js";
+import type { ProxyLedger, ProxySession } from "../types.js";
 import type { IdentityResult } from "./actor-identity.js";
 import { RelayBackpressureError, RelayBusyError, type RelayStore, RelayUnknownError } from "./relay-store.js";
 
@@ -63,10 +68,14 @@ const MAX_EXIT_BYTES = 8 * 1024;
 export const MAX_DIAGNOSTICS_BYTES = 8 * 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
 /**
- * A run capability (`rrp_…`) or registry-only token (`rrg_…`) shape. A tail with either shape left in
- * it after exact-value redaction (a value the proxy could not know) is refused, not logged.
+ * A run capability (`rrp_…`), registry-only token (`rrg_…`) or MCP token (`rmt_…`) shape. A tail with
+ * any of them left in it after exact-value redaction (a value the proxy could not know, or the MCP
+ * placeholder a bridge failed to redact) is refused, not logged.
  */
-const TOKEN_SHAPE = /rr[pg]_[A-Za-z0-9_-]/;
+const TOKEN_SHAPE = /(?:rr[pg]|rmt)_[A-Za-z0-9_-]/;
+
+/** Set to "1" on a 200 `input` answer exactly when the run's session has MCP tools (the bridges read it). */
+export const MCP_TOOLS_INPUT_HEADER = "x-wardby-mcp-tools";
 /** Runs (per side) whose diagnostics this replica already logged; oldest forgotten first past the cap. */
 const DIAGNOSTICS_SEEN_MAX = 10_000;
 /** The time an upload has to arrive once it is authenticated. */
@@ -323,16 +332,12 @@ export function createSubstrateRoutes(
    * reachable from the proxy alone), and the proxy relays steps only from requests it accepted, which
    * need an active session.
    */
-  async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
+  async function agentSession(request: IncomingMessage, token: string): Promise<ProxySession | undefined> {
     const key = request.headers["x-api-key"];
-    if (typeof key !== "string" || key === "") return false;
+    if (typeof key !== "string" || key === "") return undefined;
     const session = await options.ledger.findSessionByCapabilityHash(capabilityHash(key));
-    return (
-      !!session &&
-      session.status === "active" &&
-      session.deadlineAt.getTime() > Date.now() &&
-      (await options.tokenForRun(session.runId)) === token
-    );
+    if (!session || session.status !== "active" || session.deadlineAt.getTime() <= Date.now()) return undefined;
+    return (await options.tokenForRun(session.runId)) === token ? session : undefined;
   }
 
   /** The round the token's actors are on (warm rounds: the launcher's round record; else 1). */
@@ -387,6 +392,8 @@ export function createSubstrateRoutes(
     counter: { bytes: number },
     /** Runs once the blob is known to exist, before anything is sent (a failure answers 500, so the caller retries). */
     beforeSend?: () => Promise<void>,
+    /** Fixed headers for the 200 answer only (never a value from a request or a secret). */
+    extraHeaders: Record<string, string> = {},
   ): Promise<void> {
     const source = await options.blobs.getStream(key);
     if (beforeSend) {
@@ -398,7 +405,7 @@ export function createSubstrateRoutes(
       }
     }
     const meter = countBytes();
-    response.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
+    response.writeHead(200, { ...extraHeaders, "content-type": contentType, "cache-control": "no-store" });
     await new Promise<void>((resolve) => {
       pipeline(source, meter.stream, response, () => {
         counter.bytes = meter.bytes();
@@ -535,7 +542,10 @@ export function createSubstrateRoutes(
       const shape = await shapeFor(token);
       if (shape === "single" && RELAY_ROUTES.has(matched.name)) throw new RouteError(404, "not_found");
       const side = matched.caller === "holder" ? (shape === "single" ? "agent" : "tool") : matched.caller;
-      const allowed = side === "agent" ? await agentAuth(request, token) : await toolAuth(request, token);
+      // The agent side's session (the input answer's MCP flag reads it); the tool side has none.
+      let session: ProxySession | undefined;
+      if (side === "agent") session = await agentSession(request, token);
+      const allowed = side === "agent" ? session !== undefined : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
       const { relay, blobs, limits } = options;
       const channel = matched.channel ?? "";
@@ -546,18 +556,28 @@ export function createSubstrateRoutes(
           // (no `started` record) never fires on a run that did start. A single-shape run has no events
           // poll, so its tool setup (read by the same actor before its input) is deleted here, best effort:
           // the launcher's startup timeout also waits for that deletion.
+          // The MCP flag follows this round's own session (warm rounds: each round has its own).
           const round = await roundFor(url, token, "download");
-          await sendBlob(response, BLOB.input(token, round), "application/json", counters, async () => {
-            if (!(await blobs.head(BLOB.started(token, round)))) {
-              await blobs.put(BLOB.started(token, round), Buffer.from("{}"), { contentType: "application/json" });
-            }
-            if (shape === "single") {
-              inputDeletedSetup = await blobs.delete(BLOB.toolSetup(token)).then(
-                () => true,
-                () => false,
-              );
-            }
-          });
+          const mcpFlag: Record<string, string> =
+            (session?.mcpTools?.length ?? 0) > 0 ? { [MCP_TOOLS_INPUT_HEADER]: "1" } : {};
+          await sendBlob(
+            response,
+            BLOB.input(token, round),
+            "application/json",
+            counters,
+            async () => {
+              if (!(await blobs.head(BLOB.started(token, round)))) {
+                await blobs.put(BLOB.started(token, round), Buffer.from("{}"), { contentType: "application/json" });
+              }
+              if (shape === "single") {
+                inputDeletedSetup = await blobs.delete(BLOB.toolSetup(token)).then(
+                  () => true,
+                  () => false,
+                );
+              }
+            },
+            mcpFlag,
+          );
           return;
         }
         case "tool-setup":

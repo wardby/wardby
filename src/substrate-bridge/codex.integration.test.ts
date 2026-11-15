@@ -16,8 +16,8 @@ import { codexWorkerSetup } from "../providers/jobs/codex-worker-setup.js";
 import { BLOB, substrateRunToken } from "../providers/jobs/substrate/names.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
-import { run as runCodex, type CodexHandle } from "./codex.js";
-import { PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
+import { run as runCodex, spawnCodexWorker, type CodexHandle } from "./codex.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
 import type { WorkerHandle } from "./worker-run.js";
 
@@ -93,6 +93,8 @@ describe("Codex bridge, end to end without Substrate", () => {
   let logs: string[];
   let handle: CodexHandle | undefined;
   let workspace: string;
+  /** Extra headers on the fake proxy's `input` answer (harness parameter): the MCP flag. */
+  let inputHeaders: Record<string, string>;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "codex-bridge-it-"));
@@ -101,6 +103,7 @@ describe("Codex bridge, end to end without Substrate", () => {
     files = new Map();
     onRequest = undefined;
     logs = [];
+    inputHeaders = {};
     proxy = createHttpServer((request, response) => {
       void (async () => {
         const url = new URL(request.url ?? "/", "http://fake.invalid");
@@ -118,7 +121,7 @@ describe("Codex bridge, end to end without Substrate", () => {
           if (!file) return response.writeHead(404).end();
           // As the proxy does for a one-actor run: the first input download deletes the setup.
           if (path === "input") files.delete("tool-setup");
-          return response.writeHead(200).end(file);
+          return response.writeHead(200, path === "input" ? inputHeaders : {}).end(file);
         }
         if (method === "POST" && ["result", "workspace", "workspace-failed", "exit", "diagnostics"].includes(path)) {
           return response.writeHead(200, { "content-type": "application/json" }).end("{}");
@@ -167,11 +170,15 @@ describe("Codex bridge, end to end without Substrate", () => {
 
   const resultPath = (): string => join(dir, "out", "result.json");
 
-  async function start(launchWorker: (env: NodeJS.ProcessEnv) => WorkerHandle, metadataDir?: string) {
+  async function start(
+    launchWorker: (env: NodeJS.ProcessEnv, secrets: () => readonly string[]) => WorkerHandle,
+    metadataDir?: string,
+    extraEnv: NodeJS.ProcessEnv = {},
+  ) {
     await mkdir(join(dir, "out"), { recursive: true });
     return runCodex({
       proxyUrl,
-      env: { PATH: process.env.PATH, [WARM_ROUNDS_ENV]: "1" },
+      env: { PATH: process.env.PATH, [WARM_ROUNDS_ENV]: "1", ...extraEnv },
       metadataDir: metadataDir ?? (await names()),
       workspace,
       tempRoot: dir,
@@ -267,6 +274,63 @@ describe("Codex bridge, end to end without Substrate", () => {
     for (const value of [...forbidden, PLACEHOLDER_CAPABILITY]) expect(tail).not.toContain(value);
     expect(JSON.parse(posted("exit")[0].body.toString())).toEqual({ code: 1, diagnostic: "worker_execution_failed" });
     for (const value of [...forbidden, PLACEHOLDER_CAPABILITY]) expect(logs.join("\n")).not.toContain(value);
+  });
+
+  describe("MCP tools", () => {
+    const launched = async (extraEnv: NodeJS.ProcessEnv = {}): Promise<NodeJS.ProcessEnv> => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      let workerEnv: NodeJS.ProcessEnv | undefined;
+      handle = await start(
+        (env) => {
+          workerEnv = env;
+          return { exited: writeFile(resultPath(), "{}").then(() => 0) };
+        },
+        undefined,
+        extraEnv,
+      );
+      expect(await handle.collected).toBe("ok");
+      return workerEnv!;
+    };
+
+    it("starts the worker in MCP header mode when the input answer has the flag", async () => {
+      inputHeaders = { "x-wardby-mcp-tools": "1" };
+      const env = await launched();
+      expect(env.WARDBY_MCP_TOKEN).toBe("rmt_placeholder_injected_by_gateway");
+      expect(env.WARDBY_MCP_TOKEN_HEADER).toBe("x-wardby-mcp-token");
+      expect(env.WARDBY_CAPABILITY_HEADER).toBe("x-api-key");
+    });
+
+    it.each([
+      ["no flag", {}],
+      ["a flag other than 1", { "x-wardby-mcp-tools": "0" }],
+    ])("with %s the worker gets neither variable, even a stale one the bridge's env held", async (_label, headers) => {
+      inputHeaders = headers;
+      const env = await launched({ WARDBY_MCP_TOKEN: "rmt_STALE_FAKE_NOT_REAL", WARDBY_MCP_TOKEN_HEADER: "x" });
+      expect(env).not.toHaveProperty("WARDBY_MCP_TOKEN");
+      expect(env).not.toHaveProperty("WARDBY_MCP_TOKEN_HEADER");
+      expect(JSON.stringify(env)).not.toContain("rmt_STALE_FAKE_NOT_REAL");
+    });
+
+    it("redacts the MCP placeholder from the diagnostics tail and the passed-on output", async () => {
+      inputHeaders = { "x-wardby-mcp-tools": "1" };
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      const entry = join(dir, "mcp-worker.mjs");
+      await writeFile(
+        entry,
+        `process.stderr.write("mcp header " + process.env.WARDBY_MCP_TOKEN + "\\n");\nsetTimeout(() => process.exit(1), 20);\n`,
+      );
+      let passedOn = "";
+      const sink = { write: (text: string) => void (passedOn += text) };
+      // The bridge's own secrets list, as its default launcher gets it.
+      handle = await start((env, secrets) => spawnCodexWorker(env, secrets, entry, { stdout: sink, stderr: sink }));
+      expect(await handle.collected).toBe("ok");
+      const tail = posted("diagnostics")[0].body.toString();
+      expect(tail).toContain("mcp header [redacted]");
+      expect(tail).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      await waitFor(() => (passedOn.includes("mcp header") ? true : undefined));
+      expect(passedOn).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      expect(logs.join("\n")).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
+    });
   });
 
   it("ends the worker's whole process group before the workspace is read", async () => {
@@ -456,6 +520,15 @@ setTimeout(() => {
     const relay = new MemoryRelayStore();
     relay.register(TOKEN, 1 << 20);
     const routeLogs: unknown[] = [];
+    const PINS: ProxySession["mcpTools"] = [
+      {
+        exposedName: "docs__search",
+        toolName: "search",
+        serverId: "server-1",
+        serverName: "docs",
+        definition: { description: "d", inputSchema: { type: "object" } },
+      },
+    ];
     const routes = createSubstrateRoutes({
       atespace: "wardby-runs",
       relay,
@@ -463,7 +536,12 @@ setTimeout(() => {
       ledger: {
         findSessionByCapabilityHash: async (hash) =>
           hash === capabilityHash(PLACEHOLDER_CAPABILITY)
-            ? ({ runId: "run-codex-1", deadlineAt: new Date(Date.now() + 60_000), status: "active" } as ProxySession)
+            ? ({
+                runId: "run-codex-1",
+                deadlineAt: new Date(Date.now() + 60_000),
+                status: "active",
+                mcpTools: PINS,
+              } as ProxySession)
             : null,
       },
       verifyActor: async () => ({ ok: false, code: "invalid" }),
@@ -483,8 +561,15 @@ setTimeout(() => {
       [BLOB.input(TOKEN), "input"],
     ] as const)
       await blobs.put(key, files.get(name)!);
-    handle = await start(() => ({ exited: writeFile(resultPath(), '{"summary":"done"}').then(() => 0) }));
+    let workerEnv: NodeJS.ProcessEnv | undefined;
+    handle = await start((env) => {
+      workerEnv = env;
+      return { exited: writeFile(resultPath(), '{"summary":"done"}').then(() => 0) };
+    });
     expect(await handle.collected).toBe("ok");
+    // The run's session has MCP tools: the real input answer turned header mode on.
+    expect(workerEnv?.WARDBY_MCP_TOKEN).toBe(INJECTED_MCP_TOKEN_PLACEHOLDER);
+    expect(workerEnv?.WARDBY_MCP_TOKEN_HEADER).toBe("x-wardby-mcp-token");
     expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
     expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"summary":"done"}');
     expect(await blobs.head(BLOB.toolSetup(TOKEN))).toBeFalsy();

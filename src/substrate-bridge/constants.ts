@@ -58,6 +58,20 @@ export const NEXT_ROUND_POLL_MS = 1_000;
 export const RESULT_BUNDLE_FILE = "wardby-result.bundle";
 
 /**
+ * MCP tools (remote MCP servers): the proxy's flag on a round's `input` answer (routes.ts), and the
+ * workers' header-mode environment (coding-worker/mcp-config.ts); constants.test.ts asserts they stay
+ * equal. The MCP placeholder is not a secret, but it is redacted from every tail and passed-on line
+ * like the capability's, so a tail never carries an `rmt_` shape the proxy would refuse.
+ */
+export const MCP_TOOLS_INPUT_HEADER = "x-wardby-mcp-tools";
+export const MCP_TOKEN_ENV = "WARDBY_MCP_TOKEN";
+export const MCP_TOKEN_HEADER_ENV = "WARDBY_MCP_TOKEN_HEADER";
+export const MCP_TOKEN_HEADER = "x-wardby-mcp-token";
+export const INJECTED_MCP_TOKEN_PLACEHOLDER = "rmt_placeholder_injected_by_gateway";
+/** Every placeholder a bridge hands its worker: redacted from every tail and passed-on line. */
+export const WORKER_PLACEHOLDERS: readonly string[] = [PLACEHOLDER_CAPABILITY, INJECTED_MCP_TOKEN_PLACEHOLDER];
+
+/**
  * The Codex worker's entry point in its image (src/coding-worker/Dockerfile ENTRYPOINT), and the
  * environment it reads in header mode (coding-worker/credentials.ts); constants.test.ts asserts they
  * stay equal.
