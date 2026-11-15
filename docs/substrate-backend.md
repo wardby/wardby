@@ -152,7 +152,10 @@ and install and continues the conversation. See
 A round is kept only when it is a Claude Code run that succeeded, its push
 succeeded and pushed changes (a round with no changes is not kept), and its
 session was cancelled (its credentials revoked). Any other
-round is removed, as without warm rounds.
+round is removed, as without warm rounds. Rounds with git history (an agent
+with `codingProfile.gitHistory` set) always start fresh: Wardby rewrites
+the agent's commits before it pushes them, so a kept workspace's history would
+not match the pushed branch.
 
 ### Turn it on
 

@@ -40,6 +40,10 @@ Only a Claude Code round that succeeded, whose push succeeded and pushed
 changes (a round with no changes is not kept), and whose session was cancelled (its credentials revoked) is kept. Any other round is removed, as
 without warm rounds.
 
+Rounds with git history always start fresh: a round of an agent with
+`codingProfile.gitHistory` set is never kept, and a continuation of one
+never resumes. See [Git history](git-history.md).
+
 ## Did the next round resume?
 
 `get_run` shows `warmStart: true` when a round resumed and `false` when it

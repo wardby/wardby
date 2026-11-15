@@ -7192,6 +7192,48 @@ describe("ContainerExecutor warm rounds", () => {
     });
   });
 
+  describe("rounds with git history (always fresh)", () => {
+    it.each([
+      ["a depth", { gitHistoryDepth: 20 }],
+      ["full history", { gitHistoryFull: true }],
+    ] as const)("never retains a delivered round with %s", async (_label, history) => {
+      const created = await warmHarness(history);
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("never retains one recovered with a fingerprint recorded at launch", async () => {
+      const created = await warmHarness({
+        gitHistoryDepth: 20,
+        status: "running",
+        jobHandle: { backend: "fake", id: "job-1" },
+        proxySessionId: "session-1",
+        warmFingerprint: fingerprintFor(),
+      });
+      const executor = created.executor as unknown as {
+        preflight(run: ContainerRunSnapshot, options: { launched: boolean }): VcsPrepareInput;
+      };
+      await created.vcs.prepareWorkspace(executor.preflight(created.store.run, { launched: true }));
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+    });
+
+    it("launches and probes a continuation of one without warm", async () => {
+      for (const history of [{ gitHistoryDepth: 5 }, { gitHistoryFull: true }]) {
+        const created = await warmHarness({ ...continuation, ...history });
+        created.jobs.capacity = true;
+        await created.executor.start("run-1");
+        expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+        expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+        expect(created.fingerprints).toEqual([]);
+        expect(created.steps).toEqual([]);
+      }
+    });
+  });
+
   describe("the launch fingerprint", () => {
     const EDITED_SHA = systemPromptSha256("You fix bugs, carefully.");
     /** The workspace the process that launched the run prepared (a recovered run finishes in it). */

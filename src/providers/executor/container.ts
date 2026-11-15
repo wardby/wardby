@@ -2793,6 +2793,9 @@ export class ContainerExecutor implements Executor {
    */
   private retentionFor(run: ContainerRunSnapshot, headSha: string): JobRetention | undefined {
     if (!this.warmRounds || !this.options.jobs.retain || run.provider !== "claude-code") return undefined;
+    // A git-history run's pushed commit is the control plane's rewrite, which the kept actor's .git
+    // never had: such a round is never kept (the next starts fresh, from that commit).
+    if (gitHistoryOf(run)) return undefined;
     // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
     const fingerprint = run.warmFingerprint;
     if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;
@@ -4118,10 +4121,12 @@ export class ContainerExecutor implements Executor {
   /**
    * The agent fingerprint (warm-fingerprint.ts) of the job this run launches with: its resolved
    * images and limits, model, agent, system prompt and repository. Undefined when any is unknown
-   * (then nothing is retained or resumed).
+   * (then nothing is retained or resumed), and for a run with git history (never warm: see
+   * retentionFor).
    */
   private warmFingerprintOf(run: ContainerRunSnapshot): string | undefined {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
+    if (gitHistoryOf(run)) return undefined;
     try {
       const spec = this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true });
       if (!spec.toolImage) return undefined;
