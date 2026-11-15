@@ -121,14 +121,17 @@ export function isSubstrateImageItem(value: unknown): value is SubstrateImageIte
 export const MAX_SERVICES_REPORT_BYTES = 4096;
 /** The most readiness probes a report may count (the start script writes at most 5 digits). */
 const MAX_REPORTED_ATTEMPTS = 10_000;
-const SERVICE_STATES: readonly ServiceState[] = ["pending", "probing", "ready", "failed"];
-const SERVICE_FAILURE_REASONS: readonly ServiceFailureReason[] = [
-  "image_unavailable",
-  "start_failed",
-  "exited",
-  "probe_failed",
-  "timed_out",
-];
+// Record-typed so a value added to service-state.ts fails to compile here until it is listed.
+const SERVICE_STATE_SET: Record<ServiceState, true> = { pending: true, probing: true, ready: true, failed: true };
+const SERVICE_FAILURE_REASON_SET: Record<ServiceFailureReason, true> = {
+  image_unavailable: true,
+  start_failed: true,
+  exited: true,
+  probe_failed: true,
+  timed_out: true,
+};
+const SERVICE_STATES = Object.keys(SERVICE_STATE_SET) as ServiceState[];
+const SERVICE_FAILURE_REASONS = Object.keys(SERVICE_FAILURE_REASON_SET) as ServiceFailureReason[];
 
 /** One service's state as the holder's bridge reports it (service-state.ts values only). */
 export interface SubstrateServiceReport {

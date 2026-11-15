@@ -73,9 +73,17 @@ export function parseRunServices(value: unknown): string[] | undefined {
   return names.sort();
 }
 
-/** What claim stores for a run's services: each name once, sorted. */
+/**
+ * What claim stores for a run's services: each name once, sorted. A name outside CODING_SERVICE_NAME
+ * or an empty list is refused ("substrate_services_invalid"), in both stores, so neither writes a
+ * value parseRunServices would read back as unreadable.
+ */
 function claimedServices(services: readonly string[]): string[] {
-  return [...new Set(services)].sort();
+  const names = [...new Set(services)];
+  if (names.length < 1 || names.length > MAX_CODING_SERVICES || !names.every((n) => CODING_SERVICE_NAME.test(n))) {
+    throw new Error("substrate_services_invalid");
+  }
+  return names.sort();
 }
 
 /**

@@ -199,6 +199,17 @@ export function describeSubstrateRunStoreContract(name: string, setup: RunStoreC
       expect("servicesUnreadable" in none!).toBe(false);
     });
 
+    it("refuses services that are not catalog names, or none, on claim", async () => {
+      now = NOW;
+      const r = setup.id("services-bad");
+      await setup.runs(r);
+      const s = store();
+      for (const services of [[], ["Postgres"], ["postgres", "not a name"], ["../etc"]]) {
+        await expect(s.claim(record(r, { services }))).rejects.toThrow("substrate_services_invalid");
+      }
+      expect(await s.get(r)).toBeUndefined();
+    });
+
     it("gives an adopter no services", async () => {
       now = NOW;
       const r1 = setup.id("services-adopt-1");

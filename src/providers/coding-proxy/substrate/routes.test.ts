@@ -899,7 +899,7 @@ describe("substrate routes", () => {
       expect(await stored()).toEqual(report);
     });
 
-    it("answers 404 for a run without services", async () => {
+    it("answers 404 for a run without services, before the body is read", async () => {
       for (const layout of [{ shape: "pair" as const }, undefined]) {
         await restart(layout);
         const answer = await fetch(
@@ -909,6 +909,28 @@ describe("substrate routes", () => {
         expect(answer.status).toBe(404);
         expect(await answer.json()).toEqual({ error: { type: "not_found" } });
         expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+        // An oversized body (413 if read) and no Content-Length (411 if checked) still get the 404.
+        const oversized = await fetch(`${base}/services`, tool({ method: "POST", body: "x".repeat(4097) }));
+        expect(oversized.status).toBe(404);
+        const { port } = server.address() as { port: number };
+        const chunked = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              method: "POST",
+              path: `/substrate/runs/${TOKEN}/services`,
+              headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "1", "transfer-encoding": "chunked" },
+            },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.end(JSON.stringify({ services: [{ name: "postgres", state: "ready" }] }));
+        });
+        expect(chunked).toBe(404);
       }
     });
 

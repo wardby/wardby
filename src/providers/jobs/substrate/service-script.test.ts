@@ -432,7 +432,11 @@ describe("servicesWaitMs", () => {
     expect(servicesWaitMs([], 300_000)).toBe(30_000);
   });
 
-  it.each([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])("refuses a cap of %s", (capMs) => {
+  it("accepts a cap exactly at the marker bound", () => {
+    expect(servicesWaitMs([], 30_000)).toBe(30_000);
+  });
+
+  it.each([[0], [-1], [1], [29_999], [Number.NaN], [Number.POSITIVE_INFINITY]])("refuses a cap of %s", (capMs) => {
     expect(() => servicesWaitMs([builtin("postgres", "16")], capMs)).toThrow("substrate_services_wait_cap_invalid");
   });
 });
