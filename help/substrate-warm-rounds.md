@@ -20,7 +20,10 @@ See [Continue a coding run](continue-coding-run.md).
 ## Turn it on
 
 - Set `SUBSTRATE_WARM_ROUNDS=true` on **both** the control plane and the coding
-  proxy. If only one has it, startup is refused.
+  proxy, with the same value. With it on only for the control plane, a
+  follow-up round waits and then fails with the startup timeout
+  (`substrate_startup_timeout`). With it on only for the proxy, rounds simply
+  start fresh.
 - `SUBSTRATE_PARK_TTL_SEC` (control plane): how long a kept round waits for its
   next round, 60 to 86400 seconds, default 3600.
 - `SUBSTRATE_PARK_MAX` (control plane): how many rounds may be kept at once, 0
@@ -33,8 +36,8 @@ Every detail is in the [Substrate backend guide](../docs/substrate-backend.md#wa
 
 ## When a round is kept
 
-Only a Claude Code round that succeeded, whose push succeeded and whose session
-was cancelled (its credentials revoked) is kept. Any other round is removed, as
+Only a Claude Code round that succeeded, whose push succeeded and pushed
+changes (a round with no changes is not kept), and whose session was cancelled (its credentials revoked) is kept. Any other round is removed, as
 without warm rounds.
 
 ## Did the next round resume?
@@ -54,12 +57,13 @@ with no step line.
 ## What is removed
 
 - `stop_run` removes all of that agent's kept rounds.
-- `update_agent` removes them when it changes the model, prompt, images or
-  limits.
+- `update_agent` removes them when it changes any setting the round was
+  launched with (provider, model, prompt, repository, toolchain, images, limits
+  or disk). `delete_agent` removes them too.
 - A kept round expires after `SUBSTRATE_PARK_TTL_SEC`.
 - Past `SUBSTRATE_PARK_MAX`, the oldest is removed.
-- Under capacity pressure at most one kept round is removed per check, never the
-  one being continued.
+- Under capacity pressure kept rounds are removed oldest first, stopping once a
+  removal frees no room, never the one being continued.
 
 ## What carries over, and what does not
 

@@ -40,7 +40,10 @@ and their status. Then check, in order:
    API-server outage.
 5. **The credential provider can read the run Secret.** After granting it
    access to `SUBSTRATE_CREDENTIALS_NAMESPACE`, restart it.
-6. **Slow image pulls.** If the images are large or the registry is slow,
+6. **Warm rounds set on one side only.** `SUBSTRATE_WARM_ROUNDS` must have the
+   same value on the control plane and the proxy. With it on only for the
+   control plane, a follow-up round waits for a proxy that never serves it.
+7. **Slow image pulls.** If the images are large or the registry is slow,
    raise `SUBSTRATE_STARTUP_TIMEOUT_SEC` (30 to 7200).
 
 See [Run coding agents on Substrate](../job-launcher-substrate.md) and the

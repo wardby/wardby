@@ -150,14 +150,17 @@ and install and continues the conversation. See
 [Warm rounds on Substrate](../help/substrate-warm-rounds.md).
 
 A round is kept only when it is a Claude Code run that succeeded, its push
-succeeded, and its session was cancelled (its credentials revoked). Any other
+succeeded and pushed changes (a round with no changes is not kept), and its
+session was cancelled (its credentials revoked). Any other
 round is removed, as without warm rounds.
 
 ### Turn it on
 
 Set `SUBSTRATE_WARM_ROUNDS=true` on **both** the control plane and the coding
-proxy. Startup is refused when only one of them has it, so set both and restart
-both.
+proxy, with the same value, and restart both. With it on only for the control
+plane, a follow-up round waits for the proxy and then fails with the
+[startup timeout](../help/errors/substrate-startup-timeout.md). With it on only
+for the proxy, rounds simply start fresh.
 
 | Variable                 | Where                   | Default | Purpose                                                                                      |
 | ------------------------ | ----------------------- | ------- | -------------------------------------------------------------------------------------------- |
@@ -203,12 +206,13 @@ workspace lacks that merge; it writes no step line.
   credentials (the round's run capability is revoked when it ends; the next
   round gets a new one).
 - `stop_run` removes all of that agent's kept rounds.
-- `update_agent` removes them when it changes the model, prompt, images or
-  limits.
+- `update_agent` removes them when it changes any setting the round was
+  launched with (provider, model, prompt, repository, toolchain, images, limits
+  or disk). `delete_agent` removes them too.
 - A kept round is removed when `SUBSTRATE_PARK_TTL_SEC` passes.
 - When more than `SUBSTRATE_PARK_MAX` rounds are kept, the oldest is removed.
-- When the WorkerPool is short of room, at most one kept round is removed per
-  check, and never the one being continued.
+- When the WorkerPool is short of room, kept rounds are removed oldest first,
+  stopping once a removal frees no room, and never the one being continued.
 
 ### Memory cost
 
