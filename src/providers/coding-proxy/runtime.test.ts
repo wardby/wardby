@@ -14,7 +14,7 @@ import {
   loadRunStepsUrl,
   loadSubstrateProxyConfig,
   startConfiguredCodingProxy,
-  substrateActorShapeLookup,
+  substrateRunLayoutLookup,
 } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
@@ -138,19 +138,38 @@ describe("configured coding proxy runtime", () => {
     expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
   });
 
-  it("reads a Substrate run's actor shape from its row by token: single only when the row says so", async () => {
-    const rows: Record<string, { actorShape: string }> = {
-      "wr-single": { actorShape: "single" },
-      "wr-pair": { actorShape: "pair" },
-      "wr-odd": { actorShape: "other" },
+  it("reads a Substrate run's layout from its row by token: single only when the row says so", async () => {
+    const rows: Record<string, { actorShape: string; repositories: unknown }> = {
+      "wr-single": { actorShape: "single", repositories: null },
+      "wr-pair": { actorShape: "pair", repositories: null },
+      "wr-odd": { actorShape: "other", repositories: null },
     };
     const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
-    const lookup = substrateActorShapeLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
-    expect(await lookup("wr-single")).toBe("single");
-    expect(await lookup("wr-pair")).toBe("pair");
-    expect(await lookup("wr-odd")).toBe("pair");
+    const lookup = substrateRunLayoutLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-single")).toEqual({ shape: "single" });
+    expect(await lookup("wr-pair")).toEqual({ shape: "pair" });
+    expect(await lookup("wr-odd")).toEqual({ shape: "pair" });
     expect(await lookup("wr-missing")).toBeUndefined();
-    expect(findUnique).toHaveBeenCalledWith({ where: { token: "wr-single" }, select: { actorShape: true } });
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { token: "wr-single" },
+      select: { actorShape: true, repositories: true },
+    });
+  });
+
+  it("reads a Substrate run's extra repositories only when they parse", async () => {
+    const rows: Record<string, { actorShape: string; repositories: unknown }> = {
+      "wr-extras": { actorShape: "pair", repositories: [{ name: "extra-alpha", access: "write" }] },
+      "wr-bad-extras": { actorShape: "single", repositories: [{ name: "x", access: "admin" }] },
+    };
+    const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
+    const lookup = substrateRunLayoutLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-extras")).toEqual({
+      shape: "pair",
+      repositories: [{ name: "extra-alpha", access: "write" }],
+    });
+    const bad = await lookup("wr-bad-extras");
+    expect(bad).toEqual({ shape: "single" });
+    expect(bad).not.toHaveProperty("repositories");
   });
 
   it("mounts the Substrate routes only when SUBSTRATE_ATESPACE is set, and names what is missing", async () => {

@@ -1253,7 +1253,7 @@ describe("Codex (single actor)", () => {
       const h = await codex();
       const handle = await h.launcher.launch(h.spec);
       expect(await h.blobs.head(BLOB.toolSetup(h.token))).not.toBeNull();
-      // The proxy's routes on the same blob store, reading the shape from the run's row.
+      // The proxy's routes on the same blob store, reading the layout from the run's row.
       const routes = createSubstrateRoutes({
         atespace: CONFIG.atespace,
         relay: h.relay,
@@ -1264,9 +1264,9 @@ describe("Codex (single actor)", () => {
         },
         verifyActor: async () => ({ ok: false, code: "invalid" }),
         tokenForRun: async (runId) => (await h.runs.get(runId))?.token ?? "",
-        actorShapeForToken: async (token) => {
+        runLayoutForToken: async (token) => {
           const record = await h.runs.get(h.spec.runId);
-          return record?.token === token && record.actorShape === "single" ? "single" : "pair";
+          return { shape: record?.token === token && record.actorShape === "single" ? "single" : "pair" };
         },
         limits: { resultBytes: 1024, transcriptBytes: 1024, workspaceBytes: 1024 },
         log: { info: () => undefined, warn: () => undefined },

@@ -547,7 +547,7 @@ setTimeout(() => {
       },
       verifyActor: async () => ({ ok: false, code: "invalid" }),
       tokenForRun: substrateRunToken,
-      actorShapeForToken: async () => "single",
+      runLayoutForToken: async () => ({ shape: "single" }),
       limits: { resultBytes: 1 << 20, transcriptBytes: 1 << 20, workspaceBytes: 1 << 24 },
       pollWaitMs: 200,
       log: { info: (...args) => void routeLogs.push(args), warn: (...args) => void routeLogs.push(args) },
