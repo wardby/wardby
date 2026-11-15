@@ -4,6 +4,7 @@ import { assertValidBlobKey } from "../../storage/types.js";
 import {
   BLOB,
   MCP_TOKEN_EGRESS_HEADER,
+  REPO_BLOB,
   actorNamesFor,
   agentActorName,
   substrateRunToken,
@@ -45,5 +46,39 @@ describe("substrate names", () => {
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");
     for (const key of Object.values(BLOB)) assertValidBlobKey(key(t));
+  });
+
+  describe("REPO_BLOB", () => {
+    const t = "wr-00000000000000000000";
+
+    it("keys an extra repository's seed and workspace under repos/<name>", () => {
+      expect(REPO_BLOB.seed(t, "extra-alpha")).toBe(
+        "substrate/runs/wr-00000000000000000000/repos/extra-alpha/seed.tar",
+      );
+      expect(REPO_BLOB.workspace(t, "extra-alpha")).toMatch(/\/repos\/extra-alpha\/workspace\.tar$/);
+      expect(REPO_BLOB.workspace(t, "extra-alpha", 1)).toMatch(/\/repos\/extra-alpha\/workspace\.tar$/);
+      expect(REPO_BLOB.workspace(t, "extra-alpha", 3)).toMatch(/\/repos\/extra-alpha\/workspace-3\.tar$/);
+      assertValidBlobKey(REPO_BLOB.seed(t, "extra-alpha"));
+      assertValidBlobKey(REPO_BLOB.workspace(t, "extra-alpha", 3));
+    });
+
+    it.each(["workspace", "../x", "a/b", ""])("refuses a name that is not a link name: %j", (name) => {
+      expect(() => REPO_BLOB.seed(t, name)).toThrow("substrate_repository_name_invalid");
+      expect(() => REPO_BLOB.workspace(t, name)).toThrow("substrate_repository_name_invalid");
+    });
+
+    it("leaves BLOB's keys unchanged", () => {
+      expect(Object.keys(BLOB)).toEqual([
+        "input",
+        "toolSetup",
+        "seed",
+        "result",
+        "transcript",
+        "workspace",
+        "exit",
+        "done",
+        "started",
+      ]);
+    });
   });
 });

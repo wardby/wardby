@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isCodingRepositoryName } from "../../../coding/protocol.js";
 import type { SubstrateActorShape } from "./run-store.js";
 
 const hex = (input: string, length: number): string =>
@@ -74,6 +75,25 @@ export const BLOB = {
   done: (t: string, round?: number) => perRound(t, "done", "json", round),
   /** Written by the proxy (if absent) on the agent's first successful input download: the run reached the proxy. */
   started: (t: string, round?: number) => perRound(t, "started", "json", round),
+};
+
+/** An extra repository's name, refused unless it is a link name (never `workspace`, never a path). */
+function repositoryName(name: string): string {
+  if (!isCodingRepositoryName(name)) throw new Error("substrate_repository_name_invalid");
+  return name;
+}
+
+/**
+ * Per-repository blob keys of a run's extra repositories (multi-repository runs). Throws
+ * "substrate_repository_name_invalid" for a name that is not a link name (isCodingRepositoryName).
+ * Not in BLOB: every BLOB entry is called with the token alone.
+ */
+export const REPO_BLOB = {
+  /** substrate/runs/<t>/repos/<name>/seed.tar */
+  seed: (t: string, name: string): string => `substrate/runs/${t}/repos/${repositoryName(name)}/seed.tar`,
+  /** substrate/runs/<t>/repos/<name>/workspace.tar, or workspace-<n>.tar for round n > 1 (perRound). */
+  workspace: (t: string, name: string, round?: number): string =>
+    perRound(t, `repos/${repositoryName(name)}/workspace`, "tar", round),
 };
 
 /** The BLOB keys that exist once per round (warm rounds, SUBSTRATE_WARM_ROUNDS). */

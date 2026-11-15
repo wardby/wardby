@@ -127,6 +127,11 @@ export async function makeHarness(
     mcpTokenFor?: (runId: string) => string | undefined;
     /** "codex": the spec is a Codex run (one actor) on CODEX_IMAGE, with no tool image. */
     provider?: "claude-code" | "codex";
+    /**
+     * Extra repositories: each gets `<workspaceRoot>/<runId>/repos/<name>/workspace/README.md`
+     * (`# <name>`), and the spec lists it with that folder as its host path.
+     */
+    repositories?: { name: string; access: "read" | "write" }[];
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -134,6 +139,13 @@ export async function makeHarness(
   const runId = options.runId ?? "run-1";
   await mkdir(join(workspaceRoot, runId, "workspace"), { recursive: true });
   await writeFile(join(workspaceRoot, runId, "workspace", "README.md"), "# hello\n");
+  const repositories = [];
+  for (const { name, access } of options.repositories ?? []) {
+    const hostPath = join(workspaceRoot, runId, "repos", name, "workspace");
+    await mkdir(hostPath, { recursive: true });
+    await writeFile(join(hostPath, "README.md"), `# ${name}\n`);
+    repositories.push({ name, access, hostPath });
+  }
   const inputArtifact = join(root, "input.json");
   await writeFile(inputArtifact, JSON.stringify({ schemaVersion: 1, task: "say hello" }));
   const api = new FakeSubstrateApi({
@@ -182,6 +194,7 @@ export async function makeHarness(
     timeoutSec: 600,
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 64 },
     labels: {},
+    ...(options.repositories ? { repositories } : {}),
   };
   return {
     launcher,

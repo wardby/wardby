@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -26,7 +26,7 @@ import {
   SMALL_WORKER,
   type Harness,
 } from "./launcher.test-support.js";
-import { BLOB, agentActorName, toolActorName } from "./names.js";
+import { BLOB, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
 
 const BLOB_KINDS = [
   "input",
@@ -227,6 +227,9 @@ describe("SubstrateJobLauncher", () => {
     // Without git history the tool bridge uploads the workspace as it is.
     expect(setup).not.toHaveProperty("collectResultBundle");
     expect((await h.blobs.get(BLOB.seed(h.token))).toString("latin1")).toContain("# hello");
+    // A run without extra repositories is unchanged.
+    expect(setup).not.toHaveProperty("repositories");
+    expect(await h.runs.get("run-1")).not.toHaveProperty("repositories");
   });
 
   it("is idempotent for the same spec and refuses a different one", async () => {
@@ -698,10 +701,6 @@ describe("SubstrateJobLauncher", () => {
       [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
       [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
-      [
-        { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
-        "substrate_feature_unsupported:repositories",
-      ],
       // An agent's custom tool image (workerImageRef) is a digest but carries no bridge.
       [{ toolImage: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
     ];
@@ -1262,10 +1261,6 @@ describe("Codex (single actor)", () => {
       [{ image: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
       [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
-      [
-        { repositories: [{ name: "lib", access: "read", hostPath: "/x" }] },
-        "substrate_feature_unsupported:repositories",
-      ],
       [{ provider: "other" as JobSpec["provider"] }, "substrate_provider_unsupported"],
     ];
     for (const [change, code] of cases) {
@@ -1503,5 +1498,190 @@ describe("MCP tools", () => {
       await h.launcher.remove(handle);
       expect(h.secrets.secrets.size).toBe(0);
     }
+  });
+});
+
+describe("extra repositories", () => {
+  const REPOS = [
+    { name: "extra-alpha", access: "write" },
+    { name: "extra-beta", access: "read" },
+  ] as const;
+  const repos = () => REPOS.map((r) => ({ ...r }));
+  const NO_HISTORY_LIST = [
+    { name: "extra-alpha", access: "write" },
+    { name: "extra-beta", access: "read" },
+  ];
+
+  /** Whether any seed of the run (the default one or an extra's) is in the blob store. */
+  async function anySeed(h: Harness): Promise<boolean> {
+    for (const key of [BLOB.seed(h.token), ...REPOS.map((r) => REPO_BLOB.seed(h.token, r.name))]) {
+      if (await h.blobs.head(key)) return true;
+    }
+    return false;
+  }
+
+  const hasReposVolume = (template: { volumes: { name: string }[] } | undefined) =>
+    template?.volumes.some((volume) => volume.name === "repos") ?? false;
+
+  it("launches with a /repos volume on the tool actor, the default seed unchanged and one seed per extra", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get("run-1"))?.phase).toBe("running");
+    expect(await blobKeys(h)).toEqual(["input", "toolSetup", "seed"]);
+    for (const name of ["extra-alpha", "extra-beta"]) {
+      expect((await h.blobs.get(REPO_BLOB.seed(h.token, name))).toString("latin1")).toContain(`# ${name}`);
+    }
+    const seed = (await h.blobs.get(BLOB.seed(h.token))).toString("latin1");
+    expect(seed).toContain("# hello");
+    expect(seed).not.toContain("# extra-alpha");
+    const { repositories: _repositories, ...plain } = h.spec;
+    const agent = agentTemplate(plain, CONFIG);
+    const tool = toolTemplate(h.spec, CONFIG);
+    expect(h.api.templates.get(`${CONFIG.atespace}/${agent.name}`)).toEqual(agent);
+    expect(hasReposVolume(h.api.templates.get(`${CONFIG.atespace}/${tool.name}`))).toBe(true);
+    expect(tool.name).not.toBe(toolTemplate(plain, CONFIG).name);
+  });
+
+  it("records names and access on the row, never the host path", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    await h.launcher.launch(h.spec);
+    const row = await h.runs.get("run-1");
+    expect(row?.repositories).toEqual(REPOS);
+    expect(JSON.stringify(row)).not.toContain(h.workspaceRoot);
+  });
+
+  it("lists the repositories in the tool setup, with a bundle only for a writable history extra", async () => {
+    const history = await makeHarness({ repositories: repos() });
+    await writeFile(
+      history.spec.inputArtifact,
+      JSON.stringify({
+        schemaVersion: 1,
+        task: "say hello",
+        gitHistory: {
+          repositories: [
+            { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] },
+            { path: "/repos/extra-alpha", baseCommit: "b".repeat(40), excludeCommits: [] },
+          ],
+        },
+      }),
+    );
+    await history.launcher.launch(history.spec);
+    const withHistory = (await history.blobs.get(BLOB.toolSetup(history.token))).toString();
+    expect(JSON.parse(withHistory)).toMatchObject({
+      repositories: [
+        { name: "extra-alpha", access: "write", collectResultBundle: true },
+        { name: "extra-beta", access: "read" },
+      ],
+      collectResultBundle: true,
+    });
+    expect(JSON.parse(withHistory).repositories[1]).not.toHaveProperty("collectResultBundle");
+    expect(withHistory).not.toContain(history.workspaceRoot);
+
+    const h = await makeHarness({ repositories: repos() });
+    await h.launcher.launch(h.spec);
+    const raw = (await h.blobs.get(BLOB.toolSetup(h.token))).toString();
+    const setup = JSON.parse(raw) as { repositories: unknown };
+    expect(setup.repositories).toEqual(NO_HISTORY_LIST);
+    expect(setup).not.toHaveProperty("collectResultBundle");
+    expect(raw).not.toContain(h.workspaceRoot);
+  });
+
+  it("Codex: the one actor gets the /repos volume and its setup the repositories", async () => {
+    const h = await makeHarness({ provider: "codex", repositories: repos() });
+    await h.launcher.launch(h.spec);
+    const template = codexTemplate(h.spec, CONFIG);
+    expect(hasReposVolume(h.api.templates.get(`${CONFIG.atespace}/${template.name}`))).toBe(true);
+    expect(h.api.templates.size).toBe(1);
+    const raw = (await h.blobs.get(BLOB.toolSetup(h.token))).toString();
+    expect((JSON.parse(raw) as CodexWorkerSetup).repositories).toEqual(NO_HISTORY_LIST);
+    expect(raw).not.toContain(h.workspaceRoot);
+    for (const name of ["extra-alpha", "extra-beta"]) {
+      expect((await h.blobs.get(REPO_BLOB.seed(h.token, name))).toString("latin1")).toContain(`# ${name}`);
+    }
+  });
+
+  const valid = (h: Harness) => h.spec.repositories!;
+  const MALFORMED: [string, (h: Harness) => unknown][] = [
+    ["an empty list", () => []],
+    ["a duplicate name", (h) => [valid(h)[0], { ...valid(h)[1], name: "extra-alpha" }]],
+    ["the reserved name workspace", (h) => [{ ...valid(h)[0], name: "workspace" }]],
+    ["an upper-case name", (h) => [{ ...valid(h)[0], name: "Extra" }]],
+    [
+      "17 entries",
+      (h) =>
+        Array.from({ length: 17 }, (_, i) => ({
+          name: `extra-${i}`,
+          access: "read",
+          hostPath: join(h.workspaceRoot, "run-1", "repos", `extra-${i}`, "workspace"),
+        })),
+    ],
+    ["an entry with a ref", (h) => [{ ...valid(h)[0], ref: "main" }]],
+    ["an unknown access", (h) => [{ ...valid(h)[0], access: "admin" }]],
+  ];
+
+  it.each(MALFORMED)("refuses a malformed repository list before any side effect: %s", async (_label, list) => {
+    for (const provider of ["claude-code", "codex"] as const) {
+      const h = await makeHarness({ provider, repositories: repos() });
+      const calls = recordCalls(h);
+      const spec = { ...h.spec, repositories: list(h) as JobSpec["repositories"] };
+      await expect(h.launcher.launch(spec)).rejects.toThrow("substrate_spec_invalid");
+      expect(h.launcher.plannedHandle(spec)).toBeUndefined();
+      expect(await h.runs.get("run-1")).toBeUndefined();
+      expect(h.api.templates.size).toBe(0);
+      expect(calls).toEqual([]);
+      expect(await blobKeys(h)).toEqual([]);
+    }
+  });
+
+  const MISPLACED: [string, (h: Harness) => string][] = [
+    ["another run's folder", (h) => join(h.workspaceRoot, "run-2", "repos", "extra-alpha", "workspace")],
+    ["the run's own workspace", (h) => join(h.workspaceRoot, "run-1", "workspace")],
+    ["another extra's folder", (h) => join(h.workspaceRoot, "run-1", "repos", "extra-beta", "workspace")],
+    ["a relative path", () => "repos/extra-alpha/workspace"],
+  ];
+
+  it.each(MISPLACED)(
+    "refuses a host path that is not the run's own repos/<name>/workspace: %s",
+    async (_label, hostPath) => {
+      for (const provider of ["claude-code", "codex"] as const) {
+        const h = await makeHarness({ provider, repositories: repos() });
+        const [alpha, beta] = valid(h);
+        const spec = { ...h.spec, repositories: [{ ...alpha, hostPath: hostPath(h) }, beta] };
+        await expect(h.launcher.launch(spec)).rejects.toThrow("substrate_workspace_path_invalid");
+        expect(await h.runs.get("run-1")).toBeUndefined();
+        expect(h.api.templates.size).toBe(0);
+        expect(await blobKeys(h)).toEqual([]);
+        expect(await anySeed(h)).toBe(false);
+      }
+    },
+  );
+
+  it("fails provisioning when an extra's prepared folder is missing, and leaves no blob", async () => {
+    const h = await makeHarness({ repositories: repos() });
+    await rm(join(h.workspaceRoot, "run-1", "repos", "extra-beta"), { recursive: true, force: true });
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_seed_failed");
+    expect((await h.runs.get("run-1"))?.phase).toBe("provisioning_failed");
+    expect(h.api.actors.size).toBe(0);
+    expect(await anySeed(h)).toBe(false);
+    expect(await blobKeys(h)).toEqual([]);
+  });
+
+  it("shares one disk budget across the default repository and the extras", async () => {
+    const MiB = 1024 * 1024;
+    const alone = await makeHarness({ repositories: repos() });
+    await writeFile(join(alone.workspaceRoot, "run-1", "workspace", "big.bin"), Buffer.alloc(40 * MiB));
+    await alone.launcher.launch(alone.spec);
+    expect((await alone.runs.get("run-1"))?.phase).toBe("running");
+
+    const h = await makeHarness({ repositories: repos() });
+    expect(h.spec.limits.diskMb).toBe(64);
+    await writeFile(join(h.workspaceRoot, "run-1", "workspace", "big.bin"), Buffer.alloc(40 * MiB));
+    await writeFile(
+      join(h.workspaceRoot, "run-1", "repos", "extra-alpha", "workspace", "big.bin"),
+      Buffer.alloc(30 * MiB),
+    );
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_seed_too_large");
+    expect(h.api.actors.size).toBe(0);
+    expect(await anySeed(h)).toBe(false);
   });
 });

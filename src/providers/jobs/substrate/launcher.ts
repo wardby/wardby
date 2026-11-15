@@ -28,6 +28,11 @@
  *   removes the park and launches cold, with the reason on the row (warmOutcome). Parks never block
  *   a launch: with no room, the oldest are removed first. Handles are then `<atespace>/<runId>`: the
  *   token, and the round, are always read from the run's row (never derived from the run id).
+ * - Extra repositories (JobSpec.repositories): validated before any side effect (each host path must
+ *   be the run's own repos/<name>/workspace), recorded on the row by name and access only, and one
+ *   seed (REPO_BLOB.seed) and one upload (REPO_BLOB.workspace) per extra, under the run's one diskMb
+ *   budget. Only the workspace holder (the tool actor, or a Codex run's one actor) gets the /repos
+ *   volume, and its setup lists the extras; Claude's agent never sees a repository.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -45,12 +50,13 @@ import type { RelayStore } from "../../coding-proxy/substrate/relay-store.js";
 import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
-import { codexWorkerSetup } from "../codex-worker-setup.js";
+import { codexWorkerSetup, holderSetupRepositories } from "../codex-worker-setup.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
 import { RUN_ID } from "../kubernetes-isolation.js";
 import { CAPABILITY, FINISHED_AT_SKEW_MS, hostTarArchive, stableSpecHash } from "../kubernetes.js";
 import { safeExtract } from "../safe-extract.js";
+import { expectedRepositoryHostPath, jobRepositoriesValid } from "../storage-init.js";
 import {
   JobCapacityError,
   WARM_FINGERPRINT,
@@ -78,6 +84,7 @@ import {
 } from "./api.js";
 import {
   BLOB,
+  REPO_BLOB,
   ROUND_BLOBS,
   actorNamesFor,
   agentActorName,
@@ -219,7 +226,6 @@ const MAX_EXIT_BYTES = 8 * 1024;
 const ACTIVE_PHASES: readonly SubstratePhase[] = ["provisioning", "running", "requeued"];
 const LIVE_PHASES: SubstratePhase[] = ["provisioning", "running"];
 
-/** The round a row's actors are on (the row records it; round.json is the bridges' and the proxy's copy). */
 /**
  * Whether the worker input asks for git history (CodingTaskInput.gitHistory, written only on such a
  * run). An input that does not parse counts as none: the bridge then uploads the whole workspace, as
@@ -236,8 +242,37 @@ export function inputHasGitHistory(input: Buffer): boolean {
   }
 }
 
+/**
+ * The paths in the worker input's gitHistory.repositories (`/workspace`, `/repos/<name>`); empty when
+ * the input has no history or does not parse (as inputHasGitHistory).
+ */
+export function inputHistoryPaths(input: Buffer): ReadonlySet<string> {
+  const paths = new Set<string>();
+  try {
+    const parsed: unknown = JSON.parse(input.toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null) return paths;
+    const history = (parsed as { gitHistory?: unknown }).gitHistory;
+    if (typeof history !== "object" || history === null) return paths;
+    const repositories = (history as { repositories?: unknown }).repositories;
+    if (!Array.isArray(repositories)) return paths;
+    for (const entry of repositories) {
+      const path = typeof entry === "object" && entry !== null ? (entry as { path?: unknown }).path : undefined;
+      if (typeof path === "string") paths.add(path);
+    }
+  } catch {
+    // Does not parse: no history (the worker refuses the input itself).
+  }
+  return paths;
+}
+
+/** The round a row's actors are on (the row records it; round.json is the bridges' and the proxy's copy). */
 function roundOf(record: SubstrateRunRecord): number {
   return record.round ?? 1;
+}
+
+/** The names of a spec's extra repositories, in spec order (none for a spec without any). */
+function repositoryNames(spec: JobSpec): string[] {
+  return (spec.repositories ?? []).map((r) => r.name);
 }
 
 /** The row's actor shape; a row from before the shape was recorded is a pair. */
@@ -311,7 +346,7 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-const UNSUPPORTED_FEATURES = ["services", "dependencyCache", "repositories"] as const;
+const UNSUPPORTED_FEATURES = ["services", "dependencyCache"] as const;
 
 function refuseUnsupportedFeatures(spec: JobSpec): void {
   for (const feature of UNSUPPORTED_FEATURES) {
@@ -324,11 +359,14 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
  * actors or extra secrets, and only on the configured bridge images (a custom image has no bridge):
  * Claude Code's tool image among the tool images, Codex's image among the Codex images. MCP tools
  * are supported: the run's MCP token is a key of the per-run Secret, injected by the agent's egress
- * rule (never in a template, an env or a blob).
+ * rule (never in a template, an env or a blob). Extra repositories are supported on both shapes: the
+ * list must be well formed (jobRepositoriesValid, so every name is a link name before the claim);
+ * each host path is checked against the workspace root in launch (checkRepositoryPaths).
  */
 function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: readonly string[] }): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
   validateWarm(spec);
+  if (!jobRepositoriesValid(spec)) throw new Error("substrate_spec_invalid");
   if (spec.provider === "claude-code") {
     if (!isRepositoryDigest(spec.image) || spec.toolImage === undefined || !isRepositoryDigest(spec.toolImage)) {
       throw new Error("substrate_image_not_digest");
@@ -470,6 +508,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   async launch(spec: JobSpec): Promise<JobHandle> {
     const templates = this.templatesFor(spec);
+    // Before the sweep, any adoption or the claim: a misplaced host path leaves nothing behind.
+    this.checkRepositoryPaths(spec);
     const token = substrateRunToken(spec.runId);
     const specHash = stableSpecHash(spec);
     const deadline = () => new Date(this.now() + spec.timeoutSec * 1000);
@@ -495,6 +535,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       actorShape: templates.shape,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
       ...(coldReason !== undefined ? { coldReason } : {}),
+      // Names and access only: a host path never reaches the row.
+      ...(spec.repositories ? { repositories: spec.repositories.map(({ name, access }) => ({ name, access })) } : {}),
     });
     const handle = this.handleFor(spec.runId);
     if (!claimed.created) {
@@ -643,6 +685,17 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
+   * Each extra repository's host path must be the run's own repos/<name>/workspace under the
+   * workspace root (as the Docker and Kubernetes launchers check), else substrate_workspace_path_invalid.
+   */
+  private checkRepositoryPaths(spec: JobSpec): void {
+    for (const entry of spec.repositories ?? []) {
+      const expected = expectedRepositoryHostPath(this.workspaceRoot, spec.runId, entry.name);
+      if (!expected || resolve(entry.hostPath) !== expected) throw new Error("substrate_workspace_path_invalid");
+    }
+  }
+
+  /**
    * `<atespace>/<token>` (Phase A, unchanged); with warm rounds `<atespace>/<runId>`, because an
    * adopter's token is the parked run's, which only its row records.
    */
@@ -681,7 +734,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const mcpToken = await this.mcpTokenFor(spec);
       for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
       const input = await this.stageInput(spec.inputArtifact, token);
-      await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
+      await this.stageSetup(spec, capability, token, inputHasGitHistory(input), inputHistoryPaths(input));
       await this.stageSeed(spec, token);
       try {
         await this.options.secrets.createSecret(
@@ -719,7 +772,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await call("resumeActor", () => this.api.resumeActor(atespace, agent));
     } catch (error) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
-      await this.cleanup(token, 1, shape);
+      await this.cleanup(token, 1, shape, repositoryNames(spec));
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -731,7 +784,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
       if (!isPhaseConflict(error)) {
-        await this.cleanup(token, 1, shape);
+        await this.cleanup(token, 1, shape, repositoryNames(spec));
         await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
         throw error;
       }
@@ -764,16 +817,20 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * the exclusions; Codex: codexWorkerSetup. `collectResultBundle` (a run with git history, #536):
    * the holder's workspace upload then carries, from the root `.git`, only the result bundle
    * (materializeWorkspace takes it); set only then, so a bridge without history uploads as before.
+   * `repositories` (a run with extras only): each extra's name and access, and a result bundle for a
+   * write extra in the input's history (`historyPaths`); never a host path.
    */
   private async stageSetup(
     spec: JobSpec,
     capability: string,
     token: string,
     collectResultBundle: boolean,
+    historyPaths: ReadonlySet<string>,
   ): Promise<void> {
+    const repositories = holderSetupRepositories(spec, historyPaths);
     const body =
       spec.provider === "codex"
-        ? codexWorkerSetup(spec, capability, { collectResultBundle })
+        ? codexWorkerSetup(spec, capability, { collectResultBundle, ...(repositories ? { repositories } : {}) })
         : JSON.stringify({
             toolSetup: claudeToolSetup(spec, capability, {
               proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
@@ -781,6 +838,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
             // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
             collectExclude: spec.collectExclude ?? collectExclusions([]),
             ...(collectResultBundle ? { collectResultBundle: true } : {}),
+            ...(repositories ? { repositories } : {}),
           });
     await this.blobs.put(BLOB.toolSetup(token), Buffer.from(body), { contentType: "application/json" });
   }
@@ -817,19 +875,38 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     return body;
   }
 
-  /** Streams the run's prepared workspace, as a tar, into the seed blob, bounded by limits.diskMb. */
+  /**
+   * Streams the run's prepared workspace, as a tar, into the seed blob, then each extra repository's
+   * prepared folder (in spec order) into its own REPO_BLOB.seed. One limits.diskMb budget for all of
+   * them, as on Kubernetes (one emptyDir): each seed may take only what the ones before it left.
+   */
   private async stageSeed(spec: JobSpec, token: string): Promise<void> {
     const directory = resolve(this.workspaceRoot, spec.runId, "workspace");
     if (!directory.startsWith(`${this.workspaceRoot}${sep}`)) throw new Error("substrate_seed_failed");
+    const budget = spec.limits.diskMb * MIB;
+    let staged = await this.stageSeedDirectory(directory, BLOB.seed(token), budget);
+    for (const entry of spec.repositories ?? []) {
+      // launch checked it already (checkRepositoryPaths); the folder itself is checked here.
+      staged += await this.stageSeedDirectory(
+        resolve(entry.hostPath),
+        REPO_BLOB.seed(token, entry.name),
+        budget - staged,
+      );
+    }
+  }
+
+  /** One directory, as a tar, into one seed blob of at most `maxBytes`; returns the bytes staged. */
+  private async stageSeedDirectory(directory: string, key: string, maxBytes: number): Promise<number> {
+    if (maxBytes <= 0) throw new Error("substrate_seed_too_large");
     const found = await lstat(directory).catch(() => undefined);
     if (!found?.isDirectory()) throw new Error("substrate_seed_failed");
     const archive = hostTarArchive(directory);
-    const key = BLOB.seed(token);
+    let sizeBytes: number;
     try {
-      await this.blobs.putStream(key, archive.stream, {
+      ({ sizeBytes } = await this.blobs.putStream(key, archive.stream, {
         contentType: "application/x-tar",
-        maxBytes: spec.limits.diskMb * MIB,
-      });
+        maxBytes,
+      }));
     } catch (error) {
       archive.stream.destroy();
       if (error instanceof BlobStoreError && error.code === "blob_too_large") {
@@ -838,6 +915,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       throw new Error("substrate_seed_failed", { cause: error });
     }
     if ((await archive.done) !== 0) throw new Error("substrate_seed_failed");
+    return sizeBytes;
   }
 
   // -------------------------------------------------------------------------
@@ -1413,7 +1491,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const mcpToken = await this.mcpTokenFor(spec);
       await timed("stage", async () => {
         const input = await this.stageInput(spec.inputArtifact, token, round);
-        await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
+        await this.stageSetup(spec, capability, token, inputHasGitHistory(input), inputHistoryPaths(input));
         await this.blobs.put(roundBlob(token), Buffer.from(JSON.stringify({ round })), {
           contentType: "application/json",
         });
@@ -1475,12 +1553,17 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * Every resource of the run, one step per deletion, so none waits on (or is skipped by) another.
    * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done) nor the
    * round record. Every round's files (`rounds` from the run's row), whatever the warm-rounds
-   * setting now: a run from when it was on is removed in full after it is turned off.
+   * setting now: a run from when it was on is removed in full after it is turned off. `repositories`
+   * (the run's extra repositories, by name): each one's seed and every round's workspace upload.
    */
   private deletions(
     token: string,
     rounds: number,
-    { outcome = true, shape }: { outcome?: boolean; shape: SubstrateActorShape },
+    {
+      outcome = true,
+      shape,
+      repositories = [],
+    }: { outcome?: boolean; shape: SubstrateActorShape; repositories?: readonly string[] },
   ): (() => Promise<void>)[] {
     const { atespace } = this.config;
     const actors = actorNamesFor(token, shape);
@@ -1496,6 +1579,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     for (let round = 2; round <= rounds; round += 1) {
       for (const name of ROUND_BLOBS) {
         if (outcome || !OUTCOME_ROUND_BLOBS.includes(name)) steps.push(() => this.deleteBlob(BLOB[name](token, round)));
+      }
+    }
+    for (const name of repositories) {
+      steps.push(() => this.deleteBlob(REPO_BLOB.seed(token, name)));
+      for (let round = 1; round <= rounds; round += 1) {
+        steps.push(() => this.deleteBlob(REPO_BLOB.workspace(token, name, round)));
       }
     }
     if (outcome && (this.warm || rounds > 1)) steps.push(() => this.deleteBlob(roundBlob(token)));
@@ -1540,8 +1629,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /** Best effort after a failed launch: nothing of the attempt (every round up to `rounds`) is left behind. */
-  private async cleanup(token: string, rounds: number, shape: SubstrateActorShape): Promise<void> {
-    await settleAll(this.deletions(token, rounds, { shape })).catch(() => undefined);
+  private async cleanup(
+    token: string,
+    rounds: number,
+    shape: SubstrateActorShape,
+    repositories: readonly string[] = [],
+  ): Promise<void> {
+    await settleAll(this.deletions(token, rounds, { shape, repositories })).catch(() => undefined);
     await this.options.relay.purgeRelay(token).catch(() => undefined);
   }
 }

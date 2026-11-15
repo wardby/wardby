@@ -204,6 +204,31 @@ describe("git history runs: prepare (real git, #536)", { timeout: 30_000 }, () =
     expect(config).not.toMatch(/url|remote|credential|http/i);
   });
 
+  it("puts no credential in a writable extra's .git either", async () => {
+    const f = await fixture();
+    // Remotes are never on a slot: the extra's history is its own repository only.
+    const withoutRemotes = ({ remotes: _remotes, ...rest }: VcsPrepareInput): VcsPrepareInput => rest;
+    // An extra lives in the run root the default repository's preparation creates.
+    await f.provider.prepareWorkspace(input(f, { gitHistory: { depth: "full" } }));
+    const handedBefore = f.remote.tokensHanded;
+    const prepared = await f.provider.prepareWorkspace({
+      ...withoutRemotes(input(f, { gitHistory: { depth: "full" } })),
+      slot: { name: "extra-alpha" },
+    });
+    // The token really was handed to git for the extra itself, so the scan means something.
+    expect(f.remote.tokensHanded - handedBefore).toBeGreaterThanOrEqual(1);
+    expect(prepared.workspacePath).toMatch(/[/\\]repos[/\\]extra-alpha[/\\]workspace$/);
+    const files = await filesUnder(join(prepared.workspacePath, ".git"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const bytes = await readFile(file);
+      expect(bytes.includes(Buffer.from(FAKE_TOKEN))).toBe(false);
+      expect(bytes.includes(Buffer.from("x-access-token"))).toBe(false);
+    }
+    const config = await readFile(join(prepared.workspacePath, ".git", "config"), "utf8");
+    expect(config).not.toMatch(/url|remote|credential|http/i);
+  });
+
   it("commits a continuation's target merge as M0, with two parents, and starts the worker there", async () => {
     const f = await fixture();
     // The continuation's branch, from the fork's main; then main moves on.
