@@ -27,6 +27,14 @@ way, whatever its status says later. When Substrate reports no such status, a
 template counts as ready once an actor from it has started. A failed
 golden-snapshot build always counts as a failure.
 
+A broken image's first run is usually refused by Substrate as unavailable when
+it starts its actors, before the template's status shows the failed build.
+Wardby reads the status again then: a failed build, or a status with no tag on
+a template no actor has started from, counts as a golden-snapshot failure. The
+first such run goes back to the queue while the template is rebuilt, and the
+run after the second failure fails with `substrate_image_unready`, not
+`substrate_unavailable`.
+
 The control plane logs `substrate_template_unready` (with the template's name,
 its role and the reason `golden_failed` or `never_ready`) and, for each failed
 build, `substrate_template_golden_failed`. Substrate's own message is not

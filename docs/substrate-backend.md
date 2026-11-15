@@ -412,11 +412,24 @@ park or adoption last used it.
   The removal age is never less than 27 hours, whatever the setting: the
   longest coding run (2 hours) plus the longest `SUBSTRATE_PARK_TTL_SEC`
   (1 day) plus an hour, so a template is never removed under a running or kept
-  round.
+  round. Substrate does not refuse to delete a template that kept actors still
+  use; if one goes anyway (removed with Substrate's tooling, say), the next
+  round cannot resume them and starts fresh instead (the "no longer available"
+  step line under [When a round starts fresh](#when-a-round-starts-fresh)). A
+  launch whose template is removed just before it creates its actors creates the
+  template again and carries on (see
+  [`substrate_template_missing`](../help/errors/substrate-template-missing.md)).
 - **Storage.** Golden snapshots cost storage in Substrate, as kept rounds do
   (see [Storage cost](#storage-cost)). `SUBSTRATE_TEMPLATE_TTL_SEC` bounds how
   long an unused one stays.
 - **A golden snapshot that fails.** The first failure rebuilds the template.
+  Substrate often refuses a run's actor start as unavailable while the golden
+  build is failing, before its status says so; Wardby then reads the template's
+  status again, and a failed build, or a status with no tag on a template no
+  actor has started from, counts as a golden-snapshot failure rather than
+  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A run
+  whose start counted the first failure goes back to the queue while the
+  template is rebuilt.
   A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a template that never becomes ready within
@@ -496,15 +509,15 @@ A continuation that cannot resume the kept round starts a normal fresh round.
 When the launcher reports how a round started, the round gets one run step line
 saying so (`get_run` shows `warmStart: true` or `false` on the round):
 
-| Step line                                                                        | Meaning                                                            |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Resumed the previous round's workspace and session                               | The round resumed warm.                                            |
-| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                    |
-| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                   |
-| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                   |
-| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).         |
-| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors were gone from Substrate or not in the suspended state. |
-| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                       |
+| Step line                                                                        | Meaning                                                                                                 |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Resumed the previous round's workspace and session                               | The round resumed warm.                                                                                 |
+| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                                                         |
+| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                                                        |
+| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                                                        |
+| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).                                              |
+| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors, or their template, were gone from Substrate, or the actors were not in the suspended state. |
+| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                                                            |
 
 A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
@@ -647,6 +660,7 @@ Known recovery steps:
 Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.md),
 [`substrate_capacity`](../help/errors/substrate-capacity.md),
 [`substrate_provisioning_failed`](../help/errors/substrate-provisioning-failed.md),
+[`substrate_template_missing`](../help/errors/substrate-template-missing.md),
 [`substrate_startup_timeout`](../help/errors/substrate-startup-timeout.md),
 [`substrate_collect_timeout`](../help/errors/substrate-collect-timeout.md),
 [`substrate_collect_failed`](../help/errors/substrate-collect-failed.md),

@@ -95,6 +95,15 @@ export class SubstrateExhaustedError extends Error {
 export class SubstrateUnavailableError extends Error {
   readonly code = "substrate_unavailable";
 }
+/**
+ * The actor's template does not exist (deleted, or never created): Substrate answers
+ * FailedPrecondition, not NotFound, for CreateActor from such a template and for ResumeActor of an
+ * actor whose template is gone. Distinct from SubstrateNotFoundError, which on resumeActor means the
+ * actor itself is gone.
+ */
+export class SubstrateTemplateMissingError extends Error {
+  readonly code = "substrate_template_missing";
+}
 
 export interface SubstrateApi {
   /** AlreadyExists is success. */
@@ -102,10 +111,16 @@ export interface SubstrateApi {
   getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined>;
   /** A missing template is success. */
   deleteActorTemplate(atespace: string, name: string): Promise<void>;
-  /** Throws SubstrateAlreadyExistsError, or SubstrateNotFoundError when the template is gone. */
+  /**
+   * Throws SubstrateAlreadyExistsError, or SubstrateTemplateMissingError (FailedPrecondition) or
+   * SubstrateNotFoundError when the template is gone.
+   */
   createActor(atespace: string, name: string, template: string): Promise<void>;
   getActor(atespace: string, name: string): Promise<ActorInfo | undefined>;
-  /** Throws SubstrateExhaustedError when no worker has room. */
+  /**
+   * Throws SubstrateExhaustedError when no worker has room, SubstrateNotFoundError when the actor is
+   * gone, SubstrateTemplateMissingError when its template is gone.
+   */
   resumeActor(atespace: string, name: string): Promise<void>;
   /**
    * Checkpoints a running actor and waits until its snapshot is in durable storage (warm rounds:

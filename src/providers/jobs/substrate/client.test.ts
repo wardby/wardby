@@ -26,6 +26,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -152,6 +153,34 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(error).toBeInstanceOf(SubstrateNotFoundError);
     expect((error as Error).message).toBe("substrate_not_found");
     expect(String((error as Error).message)).not.toContain(SECRET);
+  });
+
+  it("maps FAILED_PRECONDITION (a missing template) on createActor and resumeActor to SubstrateTemplateMissingError", async () => {
+    const api = control({
+      createActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+      resumeActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+    });
+    for (const attempt of [api.createActor("s", "a", "t"), api.resumeActor("s", "a")]) {
+      const error = await attempt.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SubstrateTemplateMissingError);
+      expect(error).not.toBeInstanceOf(SubstrateNotFoundError);
+      expect((error as SubstrateTemplateMissingError).code).toBe("substrate_template_missing");
+      expect((error as Error).message).toBe("substrate_template_missing");
+      expect(String((error as Error).message)).not.toContain(SECRET);
+    }
+  });
+
+  it("keeps NOT_FOUND on resumeActor (the actor is gone) apart from a missing template", async () => {
+    const api = control({
+      resumeActor: () => {
+        throw new ConnectError("x", Code.NotFound);
+      },
+    });
+    await expect(api.resumeActor("s", "a")).rejects.toBeInstanceOf(SubstrateNotFoundError);
   });
 
   it("never surfaces the server's message on UNAVAILABLE", async () => {

@@ -811,6 +811,44 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
+  it("starts fresh, cold for actor_missing, when a parked actor's template was removed (resume: FailedPrecondition)", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const spec2 = await followUp(h, "run-2");
+    // Removed while run-1 was parked; Substrate keeps the suspended actors, which can no longer resume.
+    const tool = toolTemplate(h.spec, { ...CONFIG, warmRounds: true });
+    await h.api.deleteActorTemplate(CONFIG.atespace, tool.name);
+    const handle = await h.launcher.launch(spec2);
+    expect(handle).toEqual(h.launcher.plannedHandle(spec2));
+    // Round 1 again under the inherited token, never failed as substrate_unavailable.
+    expect(await h.runs.get("run-2")).toMatchObject({
+      token: h.token,
+      phase: "running",
+      round: 1,
+      coldReason: "actor_missing",
+    });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
+    expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("adopted");
+    // The template is ensured again and fresh actors are created from it: a seed, no round record.
+    expect(h.api.templates.has(`${CONFIG.atespace}/${tool.name}`)).toBe(true);
+    expect(actorStates(h, h.token)).toEqual(["RUNNING", "RUNNING"]);
+    expect(await h.blobs.head(BLOB.seed(h.token))).not.toBeNull();
+    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_not_adopted")).toEqual([
+      {
+        event: "substrate_warm_not_adopted",
+        runId: "run-2",
+        runToken: h.token,
+        adoptedRunId: "run-1",
+        reason: "actor_missing",
+      },
+    ]);
+    expect(h.warmEvents.some((e) => e.event === "substrate_warm_adopted")).toBe(false);
+    await finishRound(h, h.token, "run-2", 1);
+    expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
+  });
+
   describe("a refused adopter whose cleanup could not delete the parked actors", () => {
     /** run-1 parked, run-2 refused for capacity while resuming, its cleanup's actor and round-record deletes failing. */
     async function refusedWithLeftovers(h: Harness, failingDeletes: number) {

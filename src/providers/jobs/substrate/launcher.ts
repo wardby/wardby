@@ -63,7 +63,12 @@
  *   SUBSTRATE_TEMPLATE_TTL_SEC (default 7 days, never under the longest coding run plus the park TTL
  *   plus an hour): the row first, only while still unused, then the Substrate template; a failed
  *   Substrate delete puts the row back. A launch whose template was removed between its ensure and
- *   its createActor ensures it once more and retries.
+ *   its createActor ensures it once more and retries. Substrate answers a missing template
+ *   FailedPrecondition (SubstrateTemplateMissingError); an adoption whose parked actor's template is
+ *   gone removes the park and starts the run fresh (cold reason actor_missing).
+ * - A create or resume Substrate refuses (Unavailable, typically once a broken image's golden actor
+ *   crashed) re-reads the template's status: a failed golden snapshot, or a status without a tag on
+ *   a template that never started an actor, counts as a golden-snapshot failure (goldenFailureAfter).
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -111,9 +116,11 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
   type SubstrateApi,
+  type TemplateInfo,
 } from "./api.js";
 import {
   BLOB,
@@ -436,11 +443,29 @@ function substrateErrorCode(error: unknown): string {
     error instanceof SubstrateAlreadyExistsError ||
     error instanceof SubstrateExhaustedError ||
     error instanceof SubstrateNotFoundError ||
+    error instanceof SubstrateTemplateMissingError ||
     error instanceof SubstrateUnavailableError
   ) {
     return error.code;
   }
   return "unexpected";
+}
+
+/** createActor's answer when the template is gone: FailedPrecondition from Substrate, or NotFound. */
+function isTemplateGone(error: unknown): boolean {
+  return error instanceof SubstrateTemplateMissingError || error instanceof SubstrateNotFoundError;
+}
+
+/**
+ * A Substrate call that failed with Substrate's own answer (not capacity, not a name clash): after a
+ * createActor or resumeActor, the template's status decides whether it is a golden-snapshot failure.
+ */
+function isSubstrateFailure(error: unknown): boolean {
+  return (
+    error instanceof SubstrateUnavailableError ||
+    error instanceof SubstrateNotFoundError ||
+    error instanceof SubstrateTemplateMissingError
+  );
 }
 
 function isPhaseConflict(error: unknown): boolean {
@@ -654,7 +679,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (!(await this.runs.get(spec.runId))) {
         if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
         const outcome = await this.adoptParked(spec, templates, specHash, deadline());
-        if (outcome?.adopted) return this.handleFor(spec.runId);
+        if (outcome?.adopted || outcome?.launched) return this.handleFor(spec.runId);
         coldReason = outcome?.reason;
       }
     }
@@ -893,6 +918,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     };
     // The template of the actor being resumed, so a refusal names the one refused (neverReady).
     let resuming: ActorTemplateSpec | undefined;
+    // The template of the actor being created or resumed: a Substrate failure there may be its
+    // golden snapshot failing (goldenFailureAfter).
+    let starting: ActorTemplateSpec | undefined;
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
@@ -934,21 +962,23 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
               await this.api.createActor(atespace, name, template.name);
             }
           },
-          retriable ? (error) => error instanceof SubstrateNotFoundError : undefined,
+          retriable ? isTemplateGone : undefined,
         );
       for (const name of actorNamesFor(token, shape)) {
         const template = templateOf(name);
+        starting = template;
         try {
           await createActor(name, template, true);
         } catch (error) {
           // The cleanup sweep removed the template between its ensure and here (its row went just
-          // before a concurrent bump): ensure it once more (recorded again) and retry, once. A second
-          // NotFound fails the launch.
-          if (!(error instanceof SubstrateNotFoundError)) throw error;
+          // before a concurrent bump): Substrate answers FailedPrecondition (or NotFound). Ensure it
+          // once more (recorded again) and retry, once. A second such answer fails the launch.
+          if (!isTemplateGone(error)) throw error;
           // Not reported above: only a failed retry is a failed Substrate call.
           await this.ensureTemplate(template, call);
           await createActor(name, template);
         }
+        starting = undefined;
       }
       // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Every
       // policy is in place before any actor resumes, so none ever runs without one. A single-shape
@@ -960,14 +990,20 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (shape === "pair") {
         await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
         // The tool first: the agent's first tool call needs it.
-        resuming = templates.tool;
+        resuming = starting = templates.tool;
         await call("resumeActor", () => this.api.resumeActor(atespace, tool));
       }
-      resuming = templates.agent;
+      resuming = starting = templates.agent;
       await call("resumeActor", () => this.api.resumeActor(atespace, agent));
-    } catch (error) {
+      starting = undefined;
+    } catch (caught) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
       await this.cleanup(token, 1, shape, repositoryNames(spec));
+      // A create or resume Substrate failed on a template whose golden snapshot failed (or was never
+      // built): counted as a golden-snapshot failure, so the run requeues or fails as
+      // substrate_image_unready by the same rules as at ensureTemplate, not substrate_unavailable.
+      const golden = starting && isSubstrateFailure(caught) ? await this.goldenFailureAfter(starting, call) : undefined;
+      const error: unknown = golden ?? caught;
       // A template that cannot start an actor: the run fails now (substrate_image_unready) and is
       // never requeued. The launch resolves with its handle; status() answers the recorded failure.
       if (
@@ -1111,6 +1147,68 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (info?.goldenSnapshotReady === true) await this.markTemplateReady(name);
       return;
     }
+    await this.countGoldenFailure(template, role, call);
+  }
+
+  /**
+   * After a createActor or resumeActor Substrate failed (provision): whether that was the actor's
+   * template failing its golden snapshot. Substrate answers such a launch Unavailable once the golden
+   * actor crashes, before its status reports the failure, so this re-reads the status: a failed
+   * golden snapshot, or a golden-snapshot status with no tag yet on a template that never started an
+   * actor (no readyAt), is counted as a golden-snapshot failure by ensureTemplate's rules. Returns the error the run ends
+   * with: TemplateRebuildingError (requeue: the same build, or a first failure, whose rebuild is
+   * started here) or TemplateUnreadyError (a second failure: substrate_image_unready). Undefined
+   * when it is not a golden failure (a ready or missing template, a status or row that cannot be
+   * read, a rebuild that failed): the call's own error stands.
+   */
+  private async goldenFailureAfter(
+    template: ActorTemplateSpec,
+    call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
+  ): Promise<TemplateUnreadyError | TemplateRebuildingError | undefined> {
+    const role = templateRoleOf(template.name);
+    if (!role) return undefined;
+    let info: TemplateInfo | undefined;
+    try {
+      info = await this.api.getActorTemplate(template.atespace, template.name);
+    } catch {
+      this.templateEvent({ event: "substrate_template_status_read_failed", name: template.name, role });
+      return undefined;
+    }
+    // Gone: a sweep removed it, not a failed build.
+    if (!info) return undefined;
+    if (!info.goldenSnapshotFailed) {
+      // Only a reported status without a tag: no status at all (undefined) says nothing either way.
+      if (info.goldenSnapshotReady !== false) return undefined;
+      try {
+        const row = await this.templates.get(template.name);
+        if (!row || row.readyAt !== undefined) return undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    try {
+      await this.countGoldenFailure(template, role, call);
+    } catch (error) {
+      if (error instanceof TemplateUnreadyError || error instanceof TemplateRebuildingError) return error;
+      // The rebuild failed (a failed delete took the count back): the call's own error stands.
+      return undefined;
+    }
+    // A first failure: rebuilt. The run waits for the rebuild in the queue.
+    return new TemplateRebuildingError();
+  }
+
+  /**
+   * Counts a golden-snapshot failure of `template` in its row's window and acts on it (see
+   * ensureTemplate): the same build throws TemplateRebuildingError; a second failure throws
+   * TemplateUnreadyError; a first one deletes the template and creates it again (a failed delete
+   * takes the count back and throws the delete's error).
+   */
+  private async countGoldenFailure(
+    template: ActorTemplateSpec,
+    role: SubstrateTemplateRole,
+    call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
+  ): Promise<void> {
+    const { name, atespace } = template;
     let count: GoldenFailureCount | undefined;
     try {
       count = await this.templates.recordGoldenFailure(
@@ -1843,14 +1941,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * round's files and the new capability are staged and both actors resume. Undefined for a spec
    * without `warm`. Otherwise why not (the caller launches cold); a park that does not fit is
    * removed, so no later round adopts state older than the branch. Undefined, too, when another
-   * launch of the same run got its row first (no event: that launch reports).
+   * launch of the same run got its row first (no event: that launch reports). `launched`: the
+   * adoption found a parked actor's template gone and this run was already launched cold
+   * (resumeAdopted), so the caller launches nothing.
    */
   private async adoptParked(
     spec: JobSpec,
     templates: RunTemplates,
     specHash: string,
     deadlineAt: Date,
-  ): Promise<WarmOutcome | undefined> {
+  ): Promise<(WarmOutcome & { launched?: true }) | undefined> {
     const warm = spec.warm;
     if (!warm) return undefined;
     const parked = await this.runs.get(warm.fromRunId);
@@ -1903,7 +2003,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       const expired = current?.phase === "parked" && current.deadlineAt.getTime() <= this.now();
       return expired ? notAdopted("expired", current, false) : notAdopted("not_parked");
     }
-    await this.resumeAdopted(spec, record, roundOf(record), parked.runId);
+    if (!(await this.resumeAdopted(spec, record, roundOf(record), parked.runId, templates))) {
+      return { adopted: false, reason: "actor_missing", launched: true };
+    }
     return { adopted: true };
   }
 
@@ -1911,9 +2013,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * Round `round` on adopted actors: stage its input and tool setup, record the round, hand the
    * per-run Secret the new run's capability, then resume the tool and the agent. Nothing is seeded:
    * the tool actor's /workspace is the previous round's, as collected. A failure cleans up every
-   * round's resources (the warm state is gone) and is recorded as on a cold launch.
+   * round's resources (the warm state is gone) and is recorded as on a cold launch. True when
+   * adopted. False when a parked actor's template is gone (Substrate answers its resume
+   * FailedPrecondition: a template removed while the run was parked): the parked actors are removed
+   * and the run starts fresh instead, cold at round 1 with cold reason actor_missing (relaunchCold).
    */
-  private async resumeAdopted(spec: JobSpec, record: SubstrateRunRecord, round: number, adoptedRunId: string) {
+  private async resumeAdopted(
+    spec: JobSpec,
+    record: SubstrateRunRecord,
+    round: number,
+    adoptedRunId: string,
+    templates: RunTemplates,
+  ): Promise<boolean> {
     const { atespace } = this.config;
     const token = record.token;
     const agent = agentActorName(token);
@@ -1968,6 +2079,17 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
       }
+      if (error instanceof SubstrateTemplateMissingError) {
+        this.warmEvent({
+          event: "substrate_warm_not_adopted",
+          runId: spec.runId,
+          runToken: token,
+          adoptedRunId,
+          reason: "actor_missing",
+        });
+        await this.relaunchCold(spec, token, templates, "actor_missing");
+        return false;
+      }
       await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
       throw error;
     }
@@ -1990,6 +2112,30 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       ms: Math.round(performance.now() - clock),
       steps,
     });
+    return true;
+  }
+
+  /**
+   * An adopter whose warm state is gone (its round's resources already cleaned up) starts fresh on
+   * the token its row holds: the row goes back to provisioning at round 1 with `coldReason` and a
+   * fresh deadline (through requeued, as a refused adopter's relaunch), then a cold provision. A row
+   * that moved on meanwhile (stopped, or another launch reclaimed it) is left to whoever moved it.
+   */
+  private async relaunchCold(
+    spec: JobSpec,
+    token: string,
+    templates: RunTemplates,
+    coldReason: WarmColdReason,
+  ): Promise<void> {
+    try {
+      await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]);
+    } catch (error) {
+      if (isPhaseConflict(error)) return;
+      throw error;
+    }
+    const deadlineAt = new Date(this.now() + spec.timeoutSec * 1000);
+    if (!(await this.runs.reclaim(spec.runId, deadlineAt, { coldReason }))) return;
+    await this.provision(spec, token, templates);
   }
 
   // -------------------------------------------------------------------------

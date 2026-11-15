@@ -58,6 +58,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorInfo,
   type ActorState,
@@ -110,6 +111,11 @@ function codeOf(error: unknown): Code | undefined {
 
 function unavailable(): SubstrateUnavailableError {
   return new SubstrateUnavailableError("substrate_unavailable");
+}
+
+/** Substrate's answer (FailedPrecondition) when an actor's template is gone; a fixed message. */
+function templateMissing(): never {
+  throw new SubstrateTemplateMissingError("substrate_template_missing");
 }
 
 const STATE_NAMES: Partial<Record<WireActorState, ActorState>> = {
@@ -299,7 +305,9 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.AlreadyExists]: () => {
           throw new SubstrateAlreadyExistsError("substrate_already_exists");
         },
-        // The actor's template is gone (a sweep removed it): the launcher ensures it again.
+        // The actor's template is gone (a sweep removed it, or it never existed): Substrate answers
+        // FailedPrecondition. The launcher ensures it again; NotFound is kept for the same case.
+        [Code.FailedPrecondition]: templateMissing,
         [Code.NotFound]: () => {
           throw new SubstrateNotFoundError("substrate_not_found");
         },
@@ -331,6 +339,8 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.ResourceExhausted]: () => {
           throw new SubstrateExhaustedError("substrate_resource_exhausted");
         },
+        // The actor's template is gone (deleted while the actor was suspended).
+        [Code.FailedPrecondition]: templateMissing,
         [Code.NotFound]: () => {
           throw new SubstrateNotFoundError("substrate_not_found");
         },
