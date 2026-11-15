@@ -5,6 +5,12 @@
  * proxy, starts the tool runner, relays each channel the agent opens into the runner's socket, and
  * uploads the workspace when the proxy asks for it.
  *
+ * Extra repositories (the setup's `repositories`): each one's seed is extracted into /repos/<name>
+ * after the /workspace seed and before the runner starts, a read one made read-only (the boundary is
+ * the proxy and the launcher, which never let a read repository's content out). At the collect, each
+ * writable one is uploaded first, then /workspace as before (its upload writes `done`); when any of
+ * them collects a result bundle, the runner's process group is ended first.
+ *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * Nothing secret is logged (see Logger in common.ts); the tool setup is never logged and only
  * reaches the tool runner's environment. This bridge sends no operator-diagnostics tail: model-run
@@ -38,13 +44,23 @@ import {
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
+  REPOSITORY_MOUNT_ROOT,
   WARM_ROUNDS_ENV,
 } from "./constants.js";
 import { waitAtMost } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
-import { collectWorkspace, extractSeed, fetchSetup, signalGroup } from "./workspace.js";
+import {
+  collectRepositories,
+  collectWorkspace,
+  extractRepositorySeeds,
+  extractSeed,
+  fetchSetup,
+  parseSetupRepositories,
+  signalGroup,
+  type SetupRepository,
+} from "./workspace.js";
 
 export { signalGroup as signalRunnerGroup, type GroupSignalTarget } from "./workspace.js";
 
@@ -78,6 +94,8 @@ export interface ToolOptions {
   env?: NodeJS.ProcessEnv;
   metadataDir?: string;
   workspace?: string;
+  /** Where the extra repositories are extracted, one folder each (default /repos). */
+  reposRoot?: string;
   socketPath?: string;
   /** 0 picks a free port (tests). */
   readyPort?: number;
@@ -157,6 +175,8 @@ interface SetupFile {
   collectExclude?: unknown;
   /** Set (true) only on a git-history run. */
   collectResultBundle?: unknown;
+  /** The run's extra repositories (names and access), only on a run that has them. */
+  repositories?: unknown;
 }
 
 /** The events of a 200 answer; undefined (a transient error to the caller) unless every event is an object with an integer seq. */
@@ -181,6 +201,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const env = options.env ?? process.env;
   const warmRounds = env[WARM_ROUNDS_ENV] === "1";
   const workspace = options.workspace ?? "/workspace";
+  const reposRoot = options.reposRoot ?? REPOSITORY_MOUNT_ROOT;
   const tar = options.tarCommand ?? "tar";
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
   // The readiness server first: Substrate's wake-up probe must answer for the golden actor too, which
@@ -229,15 +250,20 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   let exclusions: CollectExclusions;
   // A git-history run (#536): the upload carries only the root .git's result bundle (see collect).
   let collectResultBundle = false;
+  // The run's extra repositories (round 1 only: a run with them never has a later round).
+  let repositories: SetupRepository[] = [];
   try {
     const body = await fetchSetup(`${base}/tool-setup`, headers, policy, log, SETUP_DEADLINE_MS);
     const parsed = JSON.parse(body.toString("utf8")) as SetupFile;
     if (typeof parsed.toolSetup !== "string") return await abortStart("substrate_bridge_setup_invalid");
     const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
     if (!parsedExclusions) return await abortStart("substrate_bridge_exclude_invalid");
+    const parsedRepositories = parseSetupRepositories(parsed.repositories);
+    if (!parsedRepositories) return await abortStart("substrate_bridge_setup_invalid");
     toolSetup = parsed.toolSetup;
     exclusions = parsedExclusions;
     collectResultBundle = parsed.collectResultBundle === true;
+    repositories = parsedRepositories;
   } catch (error) {
     if (
       error instanceof BridgeError &&
@@ -249,9 +275,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   }
   log("substrate_bridge_setup_ready", { runToken: token });
 
-  // 2. The seed, checked and extracted into the workspace.
+  // 2. The seed, checked and extracted into the workspace; then each extra repository's, into its folder.
   try {
     await extractSeed({ url: `${base}/seed`, headers, workspace, stage, tar, policy, log });
+    await extractRepositorySeeds({ base, headers, reposRoot, repositories, stage, tar, policy, log });
   } catch (error) {
     if (
       error instanceof BridgeError &&
@@ -368,9 +395,25 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
 
   let round = 1;
   const collect = async (): Promise<"ok" | "rejected" | "failed"> => {
-    // A history run first ends the runner's whole process group, so no tool process is left to change
-    // the workspace while it is read (collectWorkspace then adds back only its result bundle).
-    if (collectResultBundle) await retireRunner();
+    // A history run (of the workspace or of any extra) first ends the runner's whole process group, so
+    // no tool process is left to change a folder while it is read (only its result bundle is added back).
+    if (collectResultBundle || repositories.some((r) => r.collectResultBundle)) await retireRunner();
+    // The writable extras first: the /workspace upload writes `done`, after which the proxy refuses them.
+    await collectRepositories({
+      base,
+      round,
+      token,
+      headers,
+      reposRoot,
+      repositories,
+      stage,
+      tar,
+      exclusions,
+      beforeResultBundleRecheck: options.beforeResultBundleRecheck,
+      policy,
+      log,
+      signal: shutdown.signal,
+    });
     return collectWorkspace({
       base,
       round,
@@ -496,6 +539,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       const parsed = JSON.parse(answer.body.toString("utf8")) as SetupFile;
       const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
       if (typeof parsed.toolSetup !== "string" || !parsedExclusions) throw new Error("invalid");
+      // A run with extra repositories always starts cold and never has a later round (W1).
+      if (parsed.repositories !== undefined) throw new Error("invalid");
       setup = parsed.toolSetup;
       exclusions = parsedExclusions;
       collectResultBundle = parsed.collectResultBundle === true;

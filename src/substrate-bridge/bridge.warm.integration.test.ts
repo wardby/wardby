@@ -429,6 +429,28 @@ describe("substrate bridges, warm rounds", () => {
     expect(JSON.stringify([logs, routeLogs])).not.toContain("rmt_placeholder_injected_by_gateway");
   });
 
+  it("refuses a later round whose setup lists extra repositories (such runs always start cold)", async () => {
+    const { setups } = await startBridges(true);
+    await agent!.uploaded;
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
+    // As stageRoundTwo, with the setup listing an extra (written before the round record).
+    const setup = JSON.parse(toolSetupBlob(REGISTRY_TOKEN_2).toString()) as Record<string, unknown>;
+    setup.repositories = [{ name: "extra-alpha", access: "write" }];
+    await blobs.delete(BLOB.seed(TOKEN));
+    currentRun = "run-2";
+    await blobs.put(BLOB.input(TOKEN, 2), Buffer.from(JSON.stringify({ runId: "run-2", task: "round two" })));
+    await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(JSON.stringify(setup)));
+    await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+    await waitFor(() =>
+      logs.some((line) => line.includes("substrate_bridge_setup_invalid") && line.includes('"round":2'))
+        ? true
+        : undefined,
+    );
+    // No round-2 runner was started.
+    expect(setups).toHaveLength(1);
+  });
+
   it("without the warm-rounds env, both bridges idle after round 1 exactly as before", async () => {
     const { stops } = await startBridges(false);
     expect(agent!.warmRounds).toBe(false);

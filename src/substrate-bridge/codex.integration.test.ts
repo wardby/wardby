@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +14,7 @@ import { MemoryRelayStore } from "../providers/coding-proxy/substrate/memory-rel
 import { createSubstrateRoutes } from "../providers/coding-proxy/substrate/routes.js";
 import type { ProxySession } from "../providers/coding-proxy/types.js";
 import { codexWorkerSetup } from "../providers/jobs/codex-worker-setup.js";
-import { BLOB, substrateRunToken } from "../providers/jobs/substrate/names.js";
+import { BLOB, REPO_BLOB, substrateRunToken } from "../providers/jobs/substrate/names.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
 import { run as runCodex, spawnCodexWorker, type CodexHandle } from "./codex.js";
@@ -116,6 +117,14 @@ describe("Codex bridge, end to end without Substrate", () => {
         await onRequest?.(method, path);
         if (RELAY.test(`/${path}`)) return response.writeHead(404).end('{"error":"not_found"}');
         if (key !== PLACEHOLDER_CAPABILITY) return response.writeHead(401).end();
+        // An extra repository's seed (`files` key `repos/<name>/seed`) and its upload, as the proxy routes them.
+        if (method === "GET" && /^repos\/[^/]+\/seed$/.test(path)) {
+          const file = files.get(path);
+          return file ? response.writeHead(200).end(file) : response.writeHead(404).end();
+        }
+        if (method === "POST" && /^repos\/[^/]+\/workspace$/.test(path)) {
+          return response.writeHead(200, { "content-type": "application/json" }).end("{}");
+        }
         if (method === "GET" && ["tool-setup", "seed", "input"].includes(path)) {
           const file = files.get(path);
           if (!file) return response.writeHead(404).end();
@@ -138,6 +147,8 @@ describe("Codex bridge, end to end without Substrate", () => {
     handle = undefined;
     proxy.closeAllConnections();
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    // A read extra was made read-only: writable again, so the folder can be removed.
+    await makeWritable(join(dir, "repos"));
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -181,6 +192,7 @@ describe("Codex bridge, end to end without Substrate", () => {
       env: { PATH: process.env.PATH, [WARM_ROUNDS_ENV]: "1", ...extraEnv },
       metadataDir: metadataDir ?? (await names()),
       workspace,
+      reposRoot: join(dir, "repos"),
       tempRoot: dir,
       tarCommand: await tarForTests(dir),
       readyPort: 0,
@@ -202,6 +214,94 @@ describe("Codex bridge, end to end without Substrate", () => {
   }
 
   const forbidden = [FAKE_CAP, REGISTRY_TOKEN, JSON.stringify(REGISTRY_TOKEN).slice(1, -1)];
+
+  /** A seed tar of `files` (paths relative to its root), built in `folder`. */
+  async function tarOf(folder: string, contents: Record<string, string>): Promise<Buffer> {
+    for (const [path, text] of Object.entries(contents)) {
+      await mkdir(join(folder, path, ".."), { recursive: true });
+      await writeFile(join(folder, path), text);
+    }
+    await exec("tar", ["-c", "-C", folder, "-f", `${folder}.tar`, "."], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
+    return readFile(`${folder}.tar`);
+  }
+
+  describe("extra repositories", () => {
+    const repos = (...parts: string[]) => join(dir, "repos", ...parts);
+    const extrasSetup = () =>
+      codexWorkerSetup(spec, FAKE_CAP, {
+        collectResultBundle: false,
+        repositories: [
+          { name: "extra-alpha", access: "write" },
+          { name: "extra-beta", access: "read" },
+        ],
+      });
+    const stageExtras = async (which: ("extra-alpha" | "extra-beta")[] = ["extra-alpha", "extra-beta"]) => {
+      const contents = { "extra-alpha": { "a.txt": "alpha\n" }, "extra-beta": { "b.txt": "beta\n" } };
+      for (const name of which) files.set(`repos/${name}/seed`, await tarOf(join(dir, `seed-${name}`), contents[name]));
+    };
+
+    it("seeds extras after the workspace and before the input, and uploads writable ones before the workspace", async () => {
+      await stage(extrasSetup());
+      await stageExtras();
+      let workerEnv: NodeJS.ProcessEnv | undefined;
+      let atLaunch: boolean[] | undefined;
+      handle = await start((env) => {
+        workerEnv = env;
+        atLaunch = [existsSync(repos("extra-alpha", "a.txt")), existsSync(repos("extra-beta", "b.txt"))];
+        return {
+          exited: (async () => {
+            await writeFile(repos("extra-alpha", "made.txt"), "made\n");
+            await writeFile(resultPath(), JSON.stringify({ summary: "done" }));
+            return 0;
+          })(),
+        };
+      });
+      expect(await handle.collected).toBe("ok");
+      expect(order()).toEqual([
+        "GET tool-setup",
+        "GET seed",
+        "GET repos/extra-alpha/seed",
+        "GET repos/extra-beta/seed",
+        "GET input",
+        "POST result",
+        "POST repos/extra-alpha/workspace",
+        "POST workspace",
+      ]);
+      expect(atLaunch).toEqual([true, true]);
+      expect(workerEnv).toMatchObject({
+        WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
+        WARDBY_CAPABILITY_HEADER: "x-api-key",
+        WARDBY_REGISTRY_TOKEN: REGISTRY_TOKEN,
+        WARDBY_PROXY_URL: proxyUrl,
+      });
+      if (process.getuid?.() !== 0) {
+        expect(statSync(repos("extra-beta", "b.txt")).mode & 0o777).toBe(0o444);
+        expect(statSync(repos("extra-beta")).mode & 0o777).toBe(0o555);
+      }
+      const tarPath = join(dir, "check-alpha.tar");
+      await writeFile(tarPath, posted("repos/extra-alpha/workspace")[0].body);
+      const entries = (await exec("tar", ["-t", "-f", tarPath])).stdout.split("\n").filter(Boolean);
+      expect(entries).toEqual(expect.arrayContaining(["./a.txt", "./made.txt"]));
+      for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
+    });
+
+    it("a failed extra seed fails the run before the worker starts", async () => {
+      await stage(extrasSetup());
+      await stageExtras(["extra-alpha"]);
+      let launched = false;
+      await expect(
+        start(() => {
+          launched = true;
+          return { exited: Promise.resolve(0) };
+        }),
+      ).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
+      expect(launched).toBe(false);
+      expect(order().slice(-2)).toEqual(["POST workspace-failed", "POST exit"]);
+      expect(order()).not.toContain("GET input");
+    });
+  });
 
   it("fetches setup, seed and input in order, runs the worker in header mode, then uploads result and workspace", async () => {
     await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
@@ -547,7 +647,7 @@ setTimeout(() => {
       },
       verifyActor: async () => ({ ok: false, code: "invalid" }),
       tokenForRun: substrateRunToken,
-      runLayoutForToken: async () => ({ shape: "single" }),
+      runLayoutForToken: async () => ({ shape: "single", repositories: [{ name: "extra-alpha", access: "write" }] }),
       limits: { resultBytes: 1 << 20, transcriptBytes: 1 << 20, workspaceBytes: 1 << 24 },
       pollWaitMs: 200,
       log: { info: (...args) => void routeLogs.push(args), warn: (...args) => void routeLogs.push(args) },
@@ -555,13 +655,20 @@ setTimeout(() => {
     proxy = createHttpServer((req, res) => void routes(req, res));
     await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
     proxyUrl = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
-    await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+    // The run has one writable extra: its seed is staged, and its upload lands in its own blob.
+    await stage(
+      codexWorkerSetup(spec, FAKE_CAP, {
+        collectResultBundle: false,
+        repositories: [{ name: "extra-alpha", access: "write" }],
+      }),
+    );
     for (const [key, name] of [
       [BLOB.toolSetup(TOKEN), "tool-setup"],
       [BLOB.seed(TOKEN), "seed"],
       [BLOB.input(TOKEN), "input"],
     ] as const)
       await blobs.put(key, files.get(name)!);
+    await blobs.put(REPO_BLOB.seed(TOKEN, "extra-alpha"), await tarOf(join(dir, "seed-alpha"), { "a.txt": "alpha\n" }));
     let workerEnv: NodeJS.ProcessEnv | undefined;
     handle = await start((env) => {
       workerEnv = env;
@@ -574,6 +681,15 @@ setTimeout(() => {
     expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
     expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"summary":"done"}');
     expect(await blobs.head(BLOB.toolSetup(TOKEN))).toBeFalsy();
+    expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeTruthy();
     expect(JSON.stringify(routeLogs)).not.toContain(REGISTRY_TOKEN);
   });
 });
+
+/** Makes every folder under `root` writable again (a read extra was made read-only); absent is fine. */
+async function makeWritable(root: string): Promise<void> {
+  const metadata = await lstat(root).catch(() => undefined);
+  if (!metadata?.isDirectory()) return;
+  await chmod(root, 0o755);
+  for (const name of await readdir(root)) await makeWritable(join(root, name));
+}

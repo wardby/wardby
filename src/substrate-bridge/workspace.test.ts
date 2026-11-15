@@ -1,8 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { endGroup, parseProcStat, readProcTable, type ProcEntry, type ProcessSeams } from "./workspace.js";
+import {
+  endGroup,
+  makeReadOnly,
+  parseProcStat,
+  parseSetupRepositories,
+  readProcTable,
+  type ProcEntry,
+  type ProcessSeams,
+} from "./workspace.js";
 
 const GROUP = 4242;
 
@@ -135,4 +143,82 @@ describe("endGroup", () => {
     expect(sent(seams.kills)).toEqual([[-1, "SIGKILL"]]);
     expect(logged).toEqual(["substrate_bridge_sweep_still_running"]);
   }, 10_000);
+});
+
+describe("parseSetupRepositories", () => {
+  it("reads an absent list as none, and a valid list field by field", () => {
+    expect(parseSetupRepositories(undefined)).toEqual([]);
+    expect(
+      parseSetupRepositories([
+        { name: "extra-alpha", access: "write", collectResultBundle: true },
+        { name: "extra-beta", access: "read" },
+      ]),
+    ).toEqual([
+      { name: "extra-alpha", access: "write", collectResultBundle: true },
+      { name: "extra-beta", access: "read", collectResultBundle: false },
+    ]);
+  });
+
+  it.each([
+    ["a string", "x"],
+    ["an object", {}],
+    ["17 entries", Array.from({ length: 17 }, (_, i) => ({ name: `extra-${i}`, access: "read" }))],
+    ["the reserved name", [{ name: "workspace", access: "write" }]],
+    ["a path", [{ name: "../x", access: "read" }]],
+    ["an upper-case name", [{ name: "Extra", access: "read" }]],
+    [
+      "a duplicate",
+      [
+        { name: "extra-alpha", access: "read" },
+        { name: "extra-alpha", access: "write" },
+      ],
+    ],
+    ["another key", [{ name: "extra-alpha", access: "read", hostPath: "/etc" }]],
+    ["a non-boolean bundle flag", [{ name: "extra-alpha", access: "write", collectResultBundle: "yes" }]],
+    ["a bundle flag on a read entry", [{ name: "extra-alpha", access: "read", collectResultBundle: true }]],
+  ])("refuses %s", (_label, value) => {
+    expect(parseSetupRepositories(value)).toBeUndefined();
+  });
+});
+
+describe.skipIf(process.getuid?.() === 0)("makeReadOnly", () => {
+  let dir: string;
+  afterEach(async () => {
+    // Writable again, so the folder can be removed.
+    for (const path of [join(dir, "tree", "sub"), join(dir, "tree")]) await chmod(path, 0o755).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const tree = async (): Promise<string> => {
+    dir = await mkdtemp(join(tmpdir(), "read-only-"));
+    const root = join(dir, "tree");
+    await mkdir(join(root, "sub"), { recursive: true });
+    await writeFile(join(root, "a.txt"), "a\n", { mode: 0o644 });
+    await writeFile(join(root, "sub", "b.txt"), "b\n", { mode: 0o644 });
+    await writeFile(join(dir, "outside.txt"), "outside\n", { mode: 0o644 });
+    await chmod(join(dir, "outside.txt"), 0o644);
+    await symlink(join(dir, "outside.txt"), join(root, "link"));
+    return root;
+  };
+
+  it("makes directories 0555 and files 0444, leaving a symlink and its target alone", async () => {
+    const root = await tree();
+    const linkBefore = await lstat(join(root, "link"));
+    await makeReadOnly(root, 10);
+    const mode = async (path: string) => (await stat(path)).mode & 0o777;
+    expect(await mode(root)).toBe(0o555);
+    expect(await mode(join(root, "sub"))).toBe(0o555);
+    expect(await mode(join(root, "a.txt"))).toBe(0o444);
+    expect(await mode(join(root, "sub", "b.txt"))).toBe(0o444);
+    expect(await mode(join(dir, "outside.txt"))).toBe(0o644);
+    const linkAfter = await lstat(join(root, "link"));
+    expect(linkAfter.mode).toBe(linkBefore.mode);
+    await expect(writeFile(join(root, "new.txt"), "x")).rejects.toMatchObject({ code: "EACCES" });
+  });
+
+  it("refuses a tree past its bound, before changing anything", async () => {
+    const root = await tree();
+    await expect(makeReadOnly(root, 2)).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
+    expect((await stat(root)).mode & 0o777).not.toBe(0o555);
+  });
 });
