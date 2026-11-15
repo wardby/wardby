@@ -1,12 +1,12 @@
 /**
  * What Claude Code's tool runner (the credential-free container that runs commands in the
  * repository) needs from the trusted launcher: the package-registry settings every Codex shell
- * gets, built from the run's registry-only token (deriveRegistryToken, never the capability), and
- * the run's service test variables, whether the run's dependency cache is on, and whether the
- * workspace is a resumed one (a Substrate warm round). Delivered as the
- * WARDBY_TOOL_SETUP environment variable (CLAUDE_TOOL_SETUP_ENV, docker-isolation.ts; a test keeps it
- * equal to the tool runner's TOOL_SETUP_ENV): a Kubernetes Secret key, or `docker create --env NAME`
- * with the value in the CLI's own environment.
+ * gets, built from the run's registry-only token (deriveRegistryToken, never the capability), the
+ * run's service test variables, whether the run's dependency cache is on, and whether the
+ * workspace is a resumed one (a Substrate warm round). Delivered as the WARDBY_TOOL_SETUP
+ * environment variable (CLAUDE_TOOL_SETUP_ENV, docker-isolation.ts; a test keeps it equal to the
+ * tool runner's TOOL_SETUP_ENV): a Kubernetes Secret key, or `docker create --env NAME` with the
+ * value in the CLI's own environment.
  */
 import { serviceEnvironment } from "../../coding-worker/driver.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
