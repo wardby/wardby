@@ -764,7 +764,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       } catch (error) {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
       }
-      // The fence already serialized launches of this run, so an existing actor is our own.
+      // A launch here is always cold (round 1), so it never takes over an actor it did not just
+      // create from the template: one already under this name was left by an earlier attempt whose
+      // cleanup failed (a refused adopter's may hold a used workspace). It is deleted, with its
+      // egress policy, and created again. If it cannot be deleted, or is still there after, the
+      // launch fails (substrate_already_exists) and nothing ever resumes it.
       const templateOf = (name: string) =>
         name !== agent && templates.shape === "pair" ? templates.tool.name : templates.agent.name;
       for (const name of actorNamesFor(token, shape)) {
@@ -774,6 +778,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
             await this.api.createActor(atespace, name, template);
           } catch (error) {
             if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
+            try {
+              await this.api.deleteEgressPolicy(atespace, name);
+              await this.api.deleteActor(atespace, name);
+            } catch {
+              throw error;
+            }
+            await this.api.createActor(atespace, name, template);
           }
         });
       }

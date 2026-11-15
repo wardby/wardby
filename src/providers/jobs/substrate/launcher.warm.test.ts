@@ -700,6 +700,77 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
+  describe("a refused adopter whose cleanup could not delete the parked actors", () => {
+    /** run-1 parked, run-2 refused for capacity while resuming, its cleanup's actor and round-record deletes failing. */
+    async function refusedWithLeftovers(h: Harness, failingDeletes: number) {
+      await parkedRoundOne(h);
+      const spec2 = await followUp(h, "run-2");
+      const toolKey = `wardby-runs/${toolActorName(h.token)}`;
+      const agentKey = `wardby-runs/${agentActorName(h.token)}`;
+      const parkedTool = h.api.actors.get(toolKey)!;
+      const parkedAgent = h.api.actors.get(agentKey)!;
+      const deleteActor = h.api.deleteActor.bind(h.api);
+      let failures = 0;
+      h.api.deleteActor = async (atespace, name) => {
+        if (failures < failingDeletes) {
+          failures += 1;
+          throw new Error("delete failed");
+        }
+        return deleteActor(atespace, name);
+      };
+      const deleteBlob = h.blobs.delete.bind(h.blobs);
+      h.blobs.delete = async (key) => {
+        if (key === roundBlob(h.token)) throw new Error("delete failed");
+        return deleteBlob(key);
+      };
+      h.api.options.workers = 0;
+      await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
+      expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "requeued" });
+      // Both deletes failed: the parked actors (and the round record) are still there.
+      expect(h.api.actors.get(toolKey)).toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).toBe(parkedAgent);
+      expect(await h.blobs.head(roundBlob(h.token))).not.toBeNull();
+      h.api.options.workers = 2;
+      return { spec2, toolKey, agentKey, parkedTool, parkedAgent };
+    }
+
+    it("the relaunch deletes them and creates fresh actors from the template, never reusing them", async () => {
+      const h = await warmHarness();
+      h.spec = { ...h.spec, dependencyCache: true };
+      // Cleanup tries each actor once: those are the two failed deletes.
+      const { spec2, toolKey, agentKey, parkedTool, parkedAgent } = await refusedWithLeftovers(h, 2);
+      const handle = await h.launcher.launch(spec2);
+      expect(await h.runs.get("run-2")).toMatchObject({ phase: "running", round: 1, coldReason: "capacity" });
+      expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "capacity" });
+      expect(h.api.actors.get(toolKey)).not.toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).not.toBe(parkedAgent);
+      expect(h.api.actors.get(toolKey)).toMatchObject({ state: "RUNNING" });
+      const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as { toolSetup: string };
+      const toolSetup = JSON.parse(setup.toolSetup) as Record<string, unknown>;
+      expect(toolSetup.dependencyCache).toBe(true);
+      expect(toolSetup).not.toHaveProperty("workspaceReused");
+    });
+
+    it("fails the relaunch (substrate_already_exists) when they still cannot be deleted, resuming neither", async () => {
+      const h = await warmHarness();
+      const { spec2, toolKey, agentKey, parkedTool, parkedAgent } = await refusedWithLeftovers(h, 1_000);
+      await expect(h.launcher.launch(spec2)).rejects.toThrow();
+      expect((await h.runs.get("run-2"))!.phase).toBe("provisioning_failed");
+      expect(h.callFailures).toContainEqual(
+        expect.objectContaining({
+          runId: "run-2",
+          substrateCall: "createActor",
+          errorCode: "substrate_already_exists",
+        }),
+      );
+      // Never resumed: the old actors stay suspended, whatever the cleanup could not delete.
+      expect(h.api.actors.get(toolKey)).toBe(parkedTool);
+      expect(h.api.actors.get(agentKey)).toBe(parkedAgent);
+      expect(parkedTool.state).toBe("SUSPENDED");
+      expect(parkedAgent.state).toBe("SUSPENDED");
+    });
+  });
+
   it("times out an adoption whose control plane stopped between the adoption and the phase write", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);

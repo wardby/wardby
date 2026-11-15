@@ -9,6 +9,7 @@ import { MemoryProxyLedger } from "../memory-ledger.js";
 import { CodingProxy } from "../proxy.js";
 import { PrismaRegistryStore } from "../registry/prisma-store.js";
 import { startCodingProxyServer } from "../server.js";
+import { PrismaSubstrateRunStore } from "../../jobs/substrate/run-store.js";
 import { PrismaDependencyCacheStore } from "./prisma-store.js";
 import { DependencyCacheService } from "./service.js";
 import { POLICY_ANY, type NewSnapshot } from "./store.js";
@@ -171,6 +172,35 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     // A reclaim starts the run again from a cold workspace.
     await db.substrateRun.update({ where: { runId }, data: { round: 1 } });
     expect(await cache.workspaceReused(runId)).toBe(false);
+  });
+
+  it("reads the round the Substrate run store writes: true for an adopter, false again after its reclaim", async () => {
+    // The two halves of the reused-workspace guard share SubstrateRun.round: the launcher's run
+    // store writes it (adopt, reclaim) and the cache reads it, so both run for real here.
+    const { runId: parkedRunId } = await seedRun();
+    const { runId: adopterRunId } = await seedRun();
+    const runs = new PrismaSubstrateRunStore(db);
+    const cache = new PrismaDependencyCacheStore(db);
+    const deadlineAt = new Date(Date.now() + 600_000);
+    await runs.claim({
+      runId: parkedRunId,
+      token: `wr-cache-adopt-${parkedRunId}`,
+      specHash: "x",
+      phase: "provisioning",
+      deadlineAt,
+      actorShape: "pair",
+    });
+    await runs.setPhase(parkedRunId, "running", ["provisioning"]);
+    expect(await cache.workspaceReused(parkedRunId)).toBe(false);
+    await runs.park(parkedRunId, { parkedAt: new Date(), round: 1, expiresAt: deadlineAt });
+    const adopted = await runs.adopt(parkedRunId, adopterRunId, deadlineAt, { specHash: "y" });
+    expect(adopted).toMatchObject({ runId: adopterRunId, round: 2, phase: "provisioning" });
+    expect(await cache.workspaceReused(adopterRunId)).toBe(true);
+    // Refused for capacity while resuming: requeued, then reclaimed cold at round 1.
+    await runs.setPhase(adopterRunId, "requeued", ["provisioning"]);
+    expect(await cache.workspaceReused(adopterRunId)).toBe(true);
+    expect(await runs.reclaim(adopterRunId, deadlineAt, { coldReason: "capacity" })).toMatchObject({ round: 1 });
+    expect(await cache.workspaceReused(adopterRunId)).toBe(false);
   });
 
   it("inserts a snapshot once, answering a concurrent duplicate as exists", async () => {
