@@ -3,7 +3,14 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BLOB, REPO_BLOB, roundBlob, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
+import {
+  BLOB,
+  BRIDGE_PROTOCOL_HEADER,
+  REPO_BLOB,
+  roundBlob,
+  substrateRunToken,
+  toolActorSubject,
+} from "../../jobs/substrate/names.js";
 import type { SubstrateRunLayout } from "../../jobs/substrate/run-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import { BlobStoreError } from "../../storage/types.js";
@@ -37,6 +44,12 @@ const sessionWithPins = (runId: string, mcpTools: unknown): ProxySession =>
 const wardbyHeaders = (res: Response): string[] => [...res.headers.keys()].filter((k) => k.startsWith("x-wardby-"));
 
 describe("substrate routes", () => {
+  // Every request names bridge protocol 1, as the bridges do; a case that needs it missing calls globalThis.fetch.
+  const fetch = (url: string, init: RequestInit = {}) =>
+    globalThis.fetch(url, {
+      ...init,
+      headers: { [BRIDGE_PROTOCOL_HEADER]: "1", ...(init.headers as Record<string, string> | undefined) },
+    });
   let dir: string;
   let blobs: LocalBlobStore;
   let relay: MemoryRelayStore;
@@ -189,10 +202,14 @@ describe("substrate routes", () => {
       ["workspace", AUTH],
     ] as const) {
       const status = await new Promise<number>((resolve, reject) => {
-        const req = httpRequest(`${base}/${name}`, { method: "POST", headers }, (res) => {
-          res.resume();
-          resolve(res.statusCode ?? 0);
-        });
+        const req = httpRequest(
+          `${base}/${name}`,
+          { method: "POST", headers: { ...headers, [BRIDGE_PROTOCOL_HEADER]: "1" } },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
         req.on("error", reject);
         req.write("abc");
         req.end();
@@ -385,6 +402,117 @@ describe("substrate routes", () => {
     expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 4 });
   });
 
+  describe("bridge protocol", () => {
+    const refusedBlob = async (): Promise<unknown> => {
+      const body = await blobs.get(BLOB.bridgeRefused(TOKEN));
+      return JSON.parse(body.toString());
+    };
+    const refusals = (): unknown[] =>
+      warnCalls.filter((call) => (call[0] as { event?: string }).event === "substrate.bridge_refused");
+
+    it.each([
+      ["missing", undefined, null],
+      ["2", "2", 2],
+      ["0", "0", 0],
+      ["not a number", "abc", null],
+      ["too long", "1234567", null],
+    ] as const)(
+      "refuses an authenticated agent request with protocol %s: 426, the blob, one warn",
+      async (_label, header, protocol) => {
+        await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+        await start();
+        const answer = await globalThis.fetch(`${base}/input`, {
+          headers: { "x-api-key": CAPABILITY, ...(header !== undefined ? { [BRIDGE_PROTOCOL_HEADER]: header } : {}) },
+        });
+        expect(answer.status).toBe(426);
+        expect(await answer.json()).toEqual({ error: { type: "substrate_bridge_incompatible" } });
+        expect(await refusedBlob()).toEqual({ protocol });
+        expect(warnCalls).toHaveLength(1);
+        expect(warnCalls[0][0]).toEqual({
+          event: "substrate.bridge_refused",
+          runToken: TOKEN,
+          route: "input",
+          protocol,
+        });
+        expect(await blobs.head(BLOB.started(TOKEN))).toBeNull();
+      },
+    );
+
+    it("refuses the tool side the same way", async () => {
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from('{"setup":true}'));
+      await start();
+      const answer = await globalThis.fetch(`${base}/tool-setup`, {
+        headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "2" },
+      });
+      expect(answer.status).toBe(426);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_bridge_incompatible" } });
+      expect(await refusedBlob()).toEqual({ protocol: 2 });
+      expect(refusals()).toEqual([
+        [{ event: "substrate.bridge_refused", runToken: TOKEN, route: "tool-setup", protocol: 2 }, expect.any(String)],
+      ]);
+    });
+
+    it("keeps the first refusal", async () => {
+      await start();
+      const first = await globalThis.fetch(`${base}/input`, {
+        headers: { "x-api-key": CAPABILITY, [BRIDGE_PROTOCOL_HEADER]: "2" },
+      });
+      const second = await globalThis.fetch(`${base}/input`, { headers: { "x-api-key": CAPABILITY } });
+      expect([first.status, second.status]).toEqual([426, 426]);
+      expect(await refusedBlob()).toEqual({ protocol: 2 });
+      expect(refusals()).toHaveLength(2);
+    });
+
+    it("never lets an unauthenticated request write it", async () => {
+      await start();
+      expect((await globalThis.fetch(`${base}/input`)).status).toBe(401);
+      expect(await blobs.head(BLOB.bridgeRefused(TOKEN))).toBeNull();
+      expect(warnCalls).toEqual([]);
+      const wrong = await globalThis.fetch(`${base}/input`, {
+        headers: { "x-api-key": "rrp_wrong", [BRIDGE_PROTOCOL_HEADER]: "2" },
+      });
+      expect(wrong.status).toBe(401);
+      expect(await blobs.head(BLOB.bridgeRefused(TOKEN))).toBeNull();
+      expect(refusals()).toEqual([]);
+    });
+
+    it("serves protocol 1 as before", async () => {
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      await start();
+      const answer = await globalThis.fetch(`${base}/input`, {
+        headers: { "x-api-key": CAPABILITY, [BRIDGE_PROTOCOL_HEADER]: "1" },
+      });
+      expect(answer.status).toBe(200);
+      expect(await answer.text()).toBe('{"task":"x"}');
+      expect(await blobs.head(BLOB.bridgeRefused(TOKEN))).toBeNull();
+    });
+
+    it("logs and stores nothing of a refused request", async () => {
+      await start();
+      const body = CAPABILITY.repeat(2);
+      const answer = await globalThis.fetch(`${base}/result`, {
+        method: "POST",
+        headers: {
+          "x-api-key": CAPABILITY,
+          [BRIDGE_PROTOCOL_HEADER]: "2",
+          // fetch sets Content-Length from the body.
+          "content-type": "application/json",
+        },
+        body,
+      });
+      expect(answer.status).toBe(426);
+      const text = await answer.text();
+      const stored = (await blobs.get(BLOB.bridgeRefused(TOKEN))).toString();
+      // Let the route's close line land.
+      await new Promise((r) => setTimeout(r, 20));
+      for (const out of [JSON.stringify(logCalls), JSON.stringify(warnCalls), text, stored]) {
+        expect(out).not.toContain(CAPABILITY);
+        expect(out).not.toContain("rrp_");
+      }
+      expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+    });
+  });
+
   describe("operator diagnostics", () => {
     const text = (body: string) => ({ method: "POST", body, headers: { "content-type": "text/plain" } });
     const allFiles = async (): Promise<string[]> =>
@@ -519,7 +647,7 @@ describe("substrate routes", () => {
       const status = await new Promise<number>((resolve, reject) => {
         const req = httpRequest(
           `${base}/diagnostics`,
-          { method: "POST", headers: { "x-api-key": CAPABILITY } },
+          { method: "POST", headers: { "x-api-key": CAPABILITY, [BRIDGE_PROTOCOL_HEADER]: "1" } },
           (res) => {
             res.resume();
             resolve(res.statusCode ?? 0);
@@ -1381,7 +1509,7 @@ describe("substrate routes", () => {
         const status = await new Promise<number>((resolve, reject) => {
           const req = httpRequest(
             `${base}/repos/${name}/workspace`,
-            { method: "POST", headers: { ...AUTH, "content-length": "40" } },
+            { method: "POST", headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "1", "content-length": "40" } },
             (res) => {
               res.resume();
               resolve(res.statusCode ?? 0);

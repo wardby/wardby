@@ -95,6 +95,8 @@ describe("substrate bridges, end to end without Substrate", () => {
   let mcpTools: ProxySession["mcpTools"] | undefined;
   /** The run row's layout (harness parameter): stage() sets it for a run with extra repositories. */
   let layout: SubstrateRunLayout | undefined;
+  /** The bridge protocol the test server passes the routes in place of the one received (harness parameter). */
+  let servedProtocol: string | undefined;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-it-"));
@@ -109,6 +111,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     proxyDelay = undefined;
     mcpTools = undefined;
     layout = undefined;
+    servedProtocol = undefined;
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -135,6 +138,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       log: { info: (...args) => void routeLogs.push(args), warn: (...args) => void routeWarns.push(args) },
     });
     proxy = createHttpServer((req, res) => {
+      if (servedProtocol !== undefined) req.headers["x-wardby-bridge-protocol"] = servedProtocol;
       const forced = proxyOverride?.(`${req.method} ${req.url}`);
       if (forced) {
         res.writeHead(forced, { "retry-after": "0" }).end(JSON.stringify({ error: { type: "relay_busy" } }));
@@ -298,6 +302,29 @@ describe("substrate bridges, end to end without Substrate", () => {
       ...overrides,
     });
   }
+
+  it("is refused by a proxy that serves another protocol, and posts nothing after", async () => {
+    const { workspace } = await stage();
+    servedProtocol = "9";
+    let launched = false;
+    await expect(
+      startTool(workspace, "", {
+        launchRunner: () => {
+          launched = true;
+          return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+        },
+      }),
+    ).rejects.toMatchObject({ code: "substrate_bridge_setup_failed" });
+    expect(launched).toBe(false);
+    expect(JSON.parse((await blobs.get(BLOB.bridgeRefused(TOKEN))).toString())).toEqual({ protocol: 9 });
+    // The bridge's workspace-failed post was refused too.
+    expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    const refusals = routeWarns.filter((call) => (call[0] as { event?: string }).event === "substrate.bridge_refused");
+    expect(refusals.length).toBeGreaterThan(0);
+    for (const [fields] of refusals) {
+      expect(Object.keys(fields as object).sort()).toEqual(["event", "protocol", "route", "runToken"]);
+    }
+  });
 
   it("relays an MCP round trip, then collects the workspace", async () => {
     const { workspace, toolSetup } = await stage();

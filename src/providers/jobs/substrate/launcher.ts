@@ -38,6 +38,10 @@
  *   setup says workspaceReused, so the tool runner skips it. Its snapshots live under
  *   `dependency-cache/` in the same blob store; the launcher never deletes them (it removes only the
  *   run's own `substrate/runs/<token>/` keys).
+ * - Bridge protocol: every bridge request names its protocol (BRIDGE_PROTOCOL_HEADER). A bridge from
+ *   another release is refused by the proxy, which records it once (BLOB.bridgeRefused), and the run
+ *   fails as substrate_bridge_incompatible (phase bridge_incompatible, actors deleted) before the
+ *   startup timeout.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -297,6 +301,11 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
     status: { state: "failed" },
     result: { exitCode: 1, reason: "failed", diagnostic: "substrate_startup_timeout" },
   },
+  // The proxy refused a bridge of another protocol (BLOB.bridgeRefused): an image from another release.
+  bridge_incompatible: {
+    status: { state: "failed" },
+    result: { exitCode: 1, reason: "failed", diagnostic: "substrate_bridge_incompatible" },
+  },
   // collect_timeout: its result carries the worker's exit report (see observe).
   // Warm rounds: a run whose parked actors another run took over had succeeded.
   adopted: { status: { state: "succeeded" }, result: { exitCode: 0, reason: "completed" } },
@@ -308,7 +317,12 @@ const OUTCOME_BLOBS: readonly ((token: string, round?: number) => string)[] = [B
 const OUTCOME_ROUND_BLOBS: readonly (typeof ROUND_BLOBS)[number][] = ["result", "exit", "done"];
 
 /** Outcomes whose actors are deleted when recorded: the run must not keep running. */
-const STOP_ACTORS_ON: readonly SubstratePhase[] = ["timed_out", "collect_timeout", "startup_timeout"];
+const STOP_ACTORS_ON: readonly SubstratePhase[] = [
+  "timed_out",
+  "collect_timeout",
+  "startup_timeout",
+  "bridge_incompatible",
+];
 
 /** The fixed code of a failed Substrate call; any other error is "unexpected" (its message is never read). */
 function substrateErrorCode(error: unknown): string {
@@ -986,7 +1000,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * proxy's `done` blob); the deadline; the actors; then the two fail-fast checks. An `exit` without
    * `done` is a collect still in flight, so the run stays running until `done`, collectGraceMs after
    * `exit` (collect_timeout) or the deadline; a run whose actors never reached the proxy fails after
-   * startupTimeoutMs (startup_timeout).
+   * startupTimeoutMs (startup_timeout). A run whose bridge the proxy refused (BLOB.bridgeRefused)
+   * fails as bridge_incompatible, checked before the actors and the startup timeout.
    */
   private async observe(record: SubstrateRunRecord): Promise<Observation> {
     if (record.phase === "removed") throw new Error("job_removed");
@@ -1026,6 +1041,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (this.now() > record.deadlineAt.getTime()) return this.settle(record, "timed_out");
     // Actors may not exist yet while a launch provisions them.
     if (record.phase === "provisioning") return { status: { state: "pending" } };
+    // The proxy refused a bridge of another protocol: before the startup timeout, and before the
+    // actors (a refused bridge may exit, which would read as lost or crashed).
+    if (await this.blobs.head(BLOB.bridgeRefused(record.token))) return this.settle(record, "bridge_incompatible");
     const { atespace } = this.config;
     const shape = shapeOf(record);
     const [agent, tool] = await Promise.all(

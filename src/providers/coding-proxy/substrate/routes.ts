@@ -47,6 +47,13 @@
  * is logged; the route line's `repository` field is the validated link name, set only once the caller
  * authenticated and the row lists that name. An upload that finishes after `done` was written is
  * refused (409) and its blob deleted.
+ *
+ * Bridge protocol: every authenticated request must name a protocol in BRIDGE_PROTOCOL_RANGE in
+ * BRIDGE_PROTOCOL_HEADER (1 to 6 digits; missing or malformed is no protocol). Any other is refused
+ * with 426 substrate_bridge_incompatible, checked after authentication (so an unauthenticated
+ * request can never record a refusal) and before any body is read, and recorded once per run in
+ * BLOB.bridgeRefused (`{"protocol": <int or null>}`), from which the launcher fails the run. The
+ * warn line carries the run token, route and the received integer or null, never a header or body.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -57,6 +64,8 @@ import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { isCodingRepositoryName } from "../../../coding/protocol.js";
 import {
   BLOB,
+  BRIDGE_PROTOCOL_HEADER,
+  BRIDGE_PROTOCOL_RANGE,
   MAX_ROUND,
   parseRound,
   REPO_BLOB,
@@ -594,6 +603,23 @@ export function createSubstrateRoutes(
       if (side === "agent") session = await agentSession(request, token);
       const allowed = side === "agent" ? session !== undefined : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
+      // Bridge protocol, only once authenticated: an unauthenticated request can never record a
+      // refusal and fail someone's run. Nothing else of the request is read.
+      const raw = request.headers[BRIDGE_PROTOCOL_HEADER];
+      const protocol = typeof raw === "string" && /^[0-9]{1,6}$/.test(raw) ? Number(raw) : null;
+      if (protocol === null || protocol < BRIDGE_PROTOCOL_RANGE.min || protocol > BRIDGE_PROTOCOL_RANGE.max) {
+        // Written only when absent; never the request's headers or body.
+        if (!(await options.blobs.head(BLOB.bridgeRefused(token)))) {
+          await options.blobs.put(BLOB.bridgeRefused(token), Buffer.from(JSON.stringify({ protocol })), {
+            contentType: "application/json",
+          });
+        }
+        log.warn(
+          { event: "substrate.bridge_refused", runToken: token, route: matched.name, protocol },
+          "substrate bridge refused",
+        );
+        throw new RouteError(426, "substrate_bridge_incompatible");
+      }
       if (matched.repository !== undefined && listed(layout, matched.repository, false)) {
         loggedRepository = matched.repository;
       }

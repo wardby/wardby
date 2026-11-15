@@ -1,7 +1,12 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer as createHttpServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type Server,
+} from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -76,6 +81,8 @@ interface Recorded {
   apiKey: string | undefined;
   /** The request's Authorization header, as sent (a cache request's registry token). */
   authorization?: string;
+  /** The request's headers, as received. */
+  headers: IncomingHttpHeaders;
   body: Buffer;
 }
 
@@ -121,6 +128,7 @@ describe("Codex bridge, end to end without Substrate", () => {
           path,
           apiKey: typeof key === "string" ? key : undefined,
           ...(typeof authorization === "string" ? { authorization } : {}),
+          headers: request.headers,
           body,
         });
         await onRequest?.(method, path);
@@ -303,6 +311,21 @@ describe("Codex bridge, end to end without Substrate", () => {
       for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
     });
 
+    it("names protocol 1 on every extra-repository request", async () => {
+      await stage(extrasSetup());
+      await stageExtras();
+      handle = await start(() => ({
+        exited: (async () => {
+          await writeFile(repos("extra-alpha", "made.txt"), "made\n");
+          await writeFile(resultPath(), JSON.stringify({ summary: "done" }));
+          return 0;
+        })(),
+      }));
+      expect(await handle.collected).toBe("ok");
+      expect(order()).toContain("POST repos/extra-alpha/workspace");
+      for (const request of requests) expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
+    });
+
     it("a failed extra seed fails the run before the worker starts", async () => {
       await stage(extrasSetup());
       await stageExtras(["extra-alpha"]);
@@ -357,6 +380,27 @@ describe("Codex bridge, end to end without Substrate", () => {
     for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
   });
 
+  it("names protocol 1 on every request", async () => {
+    await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+    handle = await start(() => ({
+      exited: (async () => {
+        await writeFile(resultPath(), JSON.stringify({ summary: "done" }));
+        return 0;
+      })(),
+    }));
+    expect(await handle.collected).toBe("ok");
+    expect(order()).toEqual(["GET tool-setup", "GET seed", "GET input", "POST result", "POST workspace"]);
+    for (const request of requests) expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
+  });
+
+  it("names protocol 1 on every request of a failed run (diagnostics and exit)", async () => {
+    await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+    handle = await start(() => ({ exited: Promise.resolve(3) }));
+    await handle.collected;
+    expect(order()).toContain("POST exit");
+    for (const request of requests) expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
+  });
+
   it("passes a cache run's input and registry token through unchanged", async () => {
     await stage(codexWorkerSetup({ ...spec, dependencyCache: true }, FAKE_CAP, { collectResultBundle: false }));
     files.set("input", Buffer.from(JSON.stringify({ task: "do the thing", dependencyCache: true, diskMb: 2048 })));
@@ -382,6 +426,10 @@ describe("Codex bridge, end to end without Substrate", () => {
     const seals = requests.filter((r) => r.method === "POST" && r.path === "/cache/npm/seal");
     expect(seals).toHaveLength(1);
     expect(seals[0].authorization).toBe(`Bearer ${REGISTRY_TOKEN}`);
+    // The seal is the worker's own cache request, not a bridge request; every bridge request names protocol 1.
+    for (const request of requests.filter((r) => !r.path.startsWith("/cache/"))) {
+      expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
+    }
     for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
   });
 

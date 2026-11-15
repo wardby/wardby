@@ -33,6 +33,11 @@ export function actorNamesFor(token: string, shape: SubstrateActorShape): string
  */
 export const TOOL_ACTOR_JWT_HEADER = "X-Wardby-Actor-Jwt";
 
+/** The header a bridge names its protocol in (substrate-bridge/constants.ts BRIDGE_PROTOCOL_HEADER). */
+export const BRIDGE_PROTOCOL_HEADER = "x-wardby-bridge-protocol";
+/** The bridge protocols this release's proxy serves, both ends included (ruling D4: a range, 1 to start). */
+export const BRIDGE_PROTOCOL_RANGE = { min: 1, max: 1 } as const;
+
 /** The header the agent actor sends its MCP token placeholder in; the egress gateway fills it (specs.ts agentEgress). */
 export const MCP_TOKEN_EGRESS_HEADER = "X-Wardby-Mcp-Token";
 
@@ -75,6 +80,12 @@ export const BLOB = {
   done: (t: string, round?: number) => perRound(t, "done", "json", round),
   /** Written by the proxy (if absent) on the agent's first successful input download: the run reached the proxy. */
   started: (t: string, round?: number) => perRound(t, "started", "json", round),
+  /**
+   * Written by the proxy (if absent) when an authenticated bridge request named a protocol outside
+   * BRIDGE_PROTOCOL_RANGE: `{"protocol": <int or null>}`. The launcher fails the run with
+   * substrate_bridge_incompatible. Once per run (not per round).
+   */
+  bridgeRefused: (t: string) => `substrate/runs/${t}/bridge-refused.json`,
 };
 
 /** An extra repository's name, refused unless it is a link name (never `workspace`, never a path). */

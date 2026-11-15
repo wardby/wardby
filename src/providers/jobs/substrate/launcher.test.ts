@@ -29,7 +29,7 @@ import {
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
-import { BLOB, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
+import { BLOB, BRIDGE_PROTOCOL_HEADER, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
 
 const BLOB_KINDS = [
@@ -42,6 +42,7 @@ const BLOB_KINDS = [
   "exit",
   "done",
   "started",
+  "bridgeRefused",
 ] as const;
 
 async function blobKeys(h: Harness): Promise<string[]> {
@@ -1340,10 +1341,14 @@ describe("Codex (single actor)", () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       try {
         const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/substrate/runs/${h.token}`;
-        const setup = await fetch(`${base}/tool-setup`, { headers: { "x-api-key": FAKE_CAP } });
+        const setup = await fetch(`${base}/tool-setup`, {
+          headers: { "x-api-key": FAKE_CAP, [BRIDGE_PROTOCOL_HEADER]: "1" },
+        });
         expect(setup.status).toBe(200);
         await setup.arrayBuffer();
-        const input = await fetch(`${base}/input`, { headers: { "x-api-key": FAKE_CAP } });
+        const input = await fetch(`${base}/input`, {
+          headers: { "x-api-key": FAKE_CAP, [BRIDGE_PROTOCOL_HEADER]: "1" },
+        });
         expect(input.status).toBe(200);
         await input.arrayBuffer();
       } finally {
@@ -2067,5 +2072,62 @@ describe("dependency cache", () => {
     await expect(failed.launcher.launch(failed.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
     expect((await failed.runs.get(failed.spec.runId))?.phase).toBe("provisioning_failed");
     await expectCacheKept(failed);
+  });
+});
+
+describe("bridge protocol", () => {
+  const START = 1_000_000;
+  const refuse = (h: Harness) => h.blobs.put(BLOB.bridgeRefused(h.token), Buffer.from('{"protocol":null}'));
+  const INCOMPATIBLE = { exitCode: 1, reason: "failed", diagnostic: "substrate_bridge_incompatible" };
+
+  it("fails a running run whose bridge was refused, and deletes its actors", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    expect(h.api.actors.size).toBe(2);
+    await refuse(h);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual(INCOMPATIBLE);
+    expect((await h.runs.get("run-1"))?.phase).toBe("bridge_incompatible");
+    expect(h.api.actors.size).toBe(0);
+    // Recorded: the same answer again, with the actors gone.
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual(INCOMPATIBLE);
+  });
+
+  it("decides before the startup timeout", async () => {
+    const h = await makeHarness({ startupTimeoutMs: 1_000 });
+    const handle = await h.launcher.launch(h.spec);
+    h.setNow(START + 5_000);
+    await refuse(h);
+    expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_bridge_incompatible");
+    expect((await h.runs.get("run-1"))?.phase).toBe("bridge_incompatible");
+  });
+
+  it("a reported success still wins", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finish(h);
+    await refuse(h);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+  });
+
+  it("remove deletes the refusal with the run's other files", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await refuse(h);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    await h.launcher.remove(handle);
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
+  });
+
+  it("fails a Codex run the same way, deleting its one actor", async () => {
+    const h = await makeHarness({ provider: "codex" });
+    const handle = await h.launcher.launch(h.spec);
+    expect(h.api.actors.size).toBe(1);
+    await refuse(h);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual(INCOMPATIBLE);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("bridge_incompatible");
+    expect(h.api.actors.size).toBe(0);
   });
 });

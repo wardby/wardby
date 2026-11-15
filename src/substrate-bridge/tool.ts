@@ -34,6 +34,7 @@ import {
   waitForRunToken,
   withRound,
   withoutMcpEnv,
+  proxyHeaders,
   type Logger,
 } from "./common.js";
 import {
@@ -218,7 +219,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     throw error;
   });
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
-  const headers = { [ACTOR_JWT_HEADER]: GATEWAY_ACTOR_JWT_PLACEHOLDER };
+  const headers = proxyHeaders({ [ACTOR_JWT_HEADER]: GATEWAY_ACTOR_JWT_PLACEHOLDER });
   const shutdown = new AbortController();
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
   const connections = new Map<string, { socket: Socket; relayClosed(): void }>();

@@ -148,3 +148,12 @@ it("matches the launcher's repository root and bounds", async () => {
   expect(bridge.REPOSITORY_NAME.source).toBe(protocol.CODING_REPOSITORY_NAME.source);
   expect(bridge.REPOSITORY_NAME.flags).toBe(protocol.CODING_REPOSITORY_NAME.flags);
 });
+
+it("matches the proxy's bridge protocol header and range", async () => {
+  const bridge = await import("./constants.js");
+  const names = await import("../providers/jobs/substrate/names.js");
+  expect(bridge.BRIDGE_PROTOCOL_HEADER).toBe(names.BRIDGE_PROTOCOL_HEADER);
+  expect(Number.isInteger(bridge.BRIDGE_PROTOCOL)).toBe(true);
+  expect(bridge.BRIDGE_PROTOCOL).toBe(names.BRIDGE_PROTOCOL_RANGE.max);
+  expect(bridge.BRIDGE_PROTOCOL).toBeGreaterThanOrEqual(names.BRIDGE_PROTOCOL_RANGE.min);
+});

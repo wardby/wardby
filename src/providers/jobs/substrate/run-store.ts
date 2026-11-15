@@ -8,7 +8,8 @@ import { retiredRunToken } from "./names.js";
  * `removed`: stopped (stop()), and the outcomes the launcher observed itself rather than read from a
  * reported result — timed_out, lost (an actor is gone), crashed (the agent actor), tool_failed (the
  * tool actor), provisioning_failed (launch failed after the fence), collect_timeout (the worker
- * exited but the workspace never arrived) and startup_timeout (an actor never reached the proxy).
+ * exited but the workspace never arrived), startup_timeout (an actor never reached the proxy) and
+ * bridge_incompatible (the proxy refused a bridge of another protocol, BRIDGE_PROTOCOL_RANGE).
  *
  * Warm rounds (SUBSTRATE_WARM_ROUNDS) only: parked (a succeeded run whose actors are suspended for a
  * follow-up; its deadlineAt is when the park expires) and adopted (a parked run another run took
@@ -27,6 +28,7 @@ export type SubstratePhase =
   | "provisioning_failed"
   | "collect_timeout"
   | "startup_timeout"
+  | "bridge_incompatible"
   | "parked"
   | "adopted";
 

@@ -28,6 +28,7 @@ import {
   DiagnosticsTail,
   mcpWorkerEnv,
   postCapped,
+  proxyHeaders,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
@@ -207,7 +208,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   });
   // 2. The placeholder: the egress gateway replaces it with the run's capability.
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
-  const headers = { "x-api-key": PLACEHOLDER_CAPABILITY };
+  const headers = proxyHeaders({ "x-api-key": PLACEHOLDER_CAPABILITY });
   const shutdown = new AbortController();
   const stage = await mkdtemp(join(options.tempRoot ?? tmpdir(), "wardby-bridge-"));
 

@@ -17,6 +17,7 @@ import {
   DiagnosticsTail,
   mcpWorkerEnv,
   postBestEffort,
+  proxyHeaders,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
@@ -188,7 +189,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     throw error;
   });
   const base = `${options.proxyUrl}/substrate/runs/${token}`;
-  const headers = { "x-api-key": PLACEHOLDER_CAPABILITY };
+  const headers = proxyHeaders({ "x-api-key": PLACEHOLDER_CAPABILITY });
   const shutdown = new AbortController();
   const sockets = new Set<Socket>();
 

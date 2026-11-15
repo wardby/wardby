@@ -43,6 +43,12 @@ describe("substrate names", () => {
   it("names the MCP egress header the proxy reads", () => {
     expect(MCP_TOKEN_EGRESS_HEADER.toLowerCase()).toBe(MCP_TOKEN_HEADER);
   });
+  it("keys the bridge refusal once per run", () => {
+    expect(BLOB.bridgeRefused("wr-00000000000000000000")).toBe(
+      "substrate/runs/wr-00000000000000000000/bridge-refused.json",
+    );
+    assertValidBlobKey(BLOB.bridgeRefused("wr-00000000000000000000"));
+  });
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");
     for (const key of Object.values(BLOB)) assertValidBlobKey(key(t));
@@ -67,7 +73,7 @@ describe("substrate names", () => {
       expect(() => REPO_BLOB.workspace(t, name)).toThrow("substrate_repository_name_invalid");
     });
 
-    it("leaves BLOB's keys unchanged", () => {
+    it("lists BLOB's keys", () => {
       expect(Object.keys(BLOB)).toEqual([
         "input",
         "toolSetup",
@@ -78,6 +84,7 @@ describe("substrate names", () => {
         "exit",
         "done",
         "started",
+        "bridgeRefused",
       ]);
     });
   });
