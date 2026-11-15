@@ -201,6 +201,29 @@ describe("workerDebugTracer", () => {
     expect(fallback.join("")).not.toContain(deriveRegistryToken(placeholder));
   });
 
+  it("redacts a given registry token that is not rrg_-shaped, so the exact-value wiring is proven", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const given = "plain-given-token-xyz";
+    const lines: string[] = [];
+    const tracer = workerDebugTracer(
+      { runId: "run_123", debugTrace: true },
+      placeholder,
+      (line) => lines.push(line),
+      [],
+      given,
+    );
+    tracer!.record("event", { text: `npm used ${given}`, [given]: given });
+    expect(lines.join("\n")).not.toContain(given);
+    expect(lines.join("\n")).toContain("[REDACTED]");
+    // Without the token passed in, the value is not recognised: the test fails if the wiring is dropped.
+    const unwired: string[] = [];
+    workerDebugTracer({ runId: "run_123", debugTrace: true }, placeholder, (line) => unwired.push(line))!.record(
+      "event",
+      { text: given },
+    );
+    expect(unwired.join("\n")).toContain(given);
+  });
+
   it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {
     const big = "x".repeat(15_000);
     const run = (debugTraceMaxMb?: number) => {
