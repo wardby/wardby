@@ -7,7 +7,7 @@ import type { PrismaClient } from "#prisma";
 export async function createSubstrateRunFixture(
   db: PrismaClient,
   token: string,
-  overrides: { phase?: string; specHash?: string; deadlineAt?: Date } = {},
+  overrides: { phase?: string; specHash?: string; deadlineAt?: Date; actorShape?: "pair" | "single" } = {},
 ): Promise<{ runId: string; agentId: string }> {
   const runId = `substrate-run-${token}`;
   const agentId = `substrate-agent-${token}`;
@@ -40,6 +40,7 @@ export async function createSubstrateRunFixture(
       specHash: overrides.specHash ?? "spec-hash",
       phase: overrides.phase ?? "provisioning",
       deadlineAt: overrides.deadlineAt ?? new Date(Date.now() + 60_000),
+      ...(overrides.actorShape ? { actorShape: overrides.actorShape } : {}),
     },
   });
   return { runId, agentId };

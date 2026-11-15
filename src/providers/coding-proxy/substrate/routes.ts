@@ -8,6 +8,14 @@
  * egress gateway); the tool actor with its Substrate actor JWT in `x-wardby-actor-jwt` (never
  * `Authorization`, which its package managers use for the registry-only token).
  *
+ * The workspace holder (`tool-setup`, `seed`, `workspace`, `workspace-failed`) is the actor that holds
+ * the run's workspace, by the run's actor shape (SubstrateRun.actorShape, looked up by the run token):
+ * for a pair run (Claude Code: agent + tool) the tool actor, by its actor JWT only; for a single run
+ * (Codex: one agent actor that runs the tools itself) that agent actor, by the run capability only.
+ * A single run has no tool actor, so its relay routes (`channels*`, `events`) answer 404 before any
+ * auth or relay call, `result` and `exit` queue no collect request, and its tool setup is deleted on
+ * the first input download (there is no events poll to delete it).
+ *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
  * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
  * The one exception is `POST diagnostics` (CLAUDE.md's operator-diagnostics exception): the agent
@@ -35,6 +43,7 @@ import {
   TOOL_ACTOR_JWT_HEADER,
   toolActorSubject,
 } from "../../jobs/substrate/names.js";
+import type { SubstrateActorShape } from "../../jobs/substrate/run-store.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
@@ -74,6 +83,10 @@ export interface SubstrateRouteOptions {
    */
   tokenForRun: (runId: string) => string | Promise<string>;
   /**
+   * The run's actor shape, by its token (SubstrateRun.actorShape). Absent: every run is `pair`.
+   */
+  actorShapeForToken?: (token: string) => Promise<SubstrateActorShape>;
+  /**
    * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): per-round files (`?round=n`, absent = 1) for the
    * round in the token's round record. Off: every request is round 1, exactly as before.
    */
@@ -90,7 +103,8 @@ export interface SubstrateRouteOptions {
   };
 }
 
-type Caller = "agent" | "tool";
+/** `holder`: the actor holding the workspace (the tool actor for a pair run, the agent actor for a single one). */
+type Caller = "agent" | "tool" | "holder";
 type RouteName =
   | "input"
   | "channels.open"
@@ -112,6 +126,17 @@ interface Matched {
   caller: Caller;
   channel?: string;
 }
+
+/** The routes between the agent and the tool actor: a single-shape run (no tool actor) has none. */
+const RELAY_ROUTES: ReadonlySet<RouteName> = new Set<RouteName>([
+  "channels.open",
+  "channels.send",
+  "channels.poll",
+  "channels.from-tool",
+  "events",
+]);
+/** Tokens known to be single-shape, oldest forgotten first past the cap. */
+const SINGLE_SHAPES_MAX = 10_000;
 
 const RUN_PATH = /^\/substrate\/runs\/(wr-[0-9a-f]{20})\/(.+)$/;
 const CHANNEL_PATH = /^channels\/(c[0-9]{1,9})\/(lines|from-tool)$/;
@@ -138,17 +163,17 @@ function match(method: string, rest: string): Matched | undefined {
     case "POST transcript":
       return { name: "transcript", caller: "agent" };
     case "GET tool-setup":
-      return { name: "tool-setup", caller: "tool" };
+      return { name: "tool-setup", caller: "holder" };
     case "GET seed":
-      return { name: "seed", caller: "tool" };
+      return { name: "seed", caller: "holder" };
     case "GET events":
       return { name: "events", caller: "tool" };
     case "POST workspace":
-      return { name: "workspace", caller: "tool" };
+      return { name: "workspace", caller: "holder" };
     case "POST exit":
       return { name: "exit", caller: "agent" };
     case "POST workspace-failed":
-      return { name: "workspace-failed", caller: "tool" };
+      return { name: "workspace-failed", caller: "holder" };
     case "POST diagnostics":
       return { name: "diagnostics", caller: "agent" };
     default:
@@ -253,6 +278,24 @@ export function createSubstrateRoutes(
   const setupKeyFor = (token: string, round: number): string => (options.warmRounds ? `${token}/${round}` : token);
   /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
+  /**
+   * Tokens whose run is single-shape: a token's shape never changes once claimed. A pair answer is not
+   * remembered, so a row not yet visible is never pinned to pair.
+   */
+  const singleShapes = new Set<string>();
+
+  async function shapeFor(token: string): Promise<SubstrateActorShape> {
+    if (!options.actorShapeForToken) return "pair";
+    if (singleShapes.has(token)) return "single";
+    const shape = await options.actorShapeForToken(token);
+    if (shape !== "single") return "pair";
+    singleShapes.add(token);
+    if (singleShapes.size > SINGLE_SHAPES_MAX) {
+      const oldest = singleShapes.values().next().value;
+      if (oldest !== undefined) singleShapes.delete(oldest);
+    }
+    return "single";
+  }
 
   /**
    * No live credential at rest: a capability works only while its session is active and in time, and
@@ -472,7 +515,9 @@ export function createSubstrateRoutes(
       if (matched.name === "diagnostics" && request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined) {
         throw new RouteError(403, "diagnostics_agent_only");
       }
-      const side = matched.caller;
+      const shape = await shapeFor(token);
+      if (shape === "single" && RELAY_ROUTES.has(matched.name)) throw new RouteError(404, "not_found");
+      const side = matched.caller === "holder" ? (shape === "single" ? "agent" : "tool") : matched.caller;
       const allowed = side === "agent" ? await agentAuth(request, token) : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
       const { relay, blobs, limits } = options;
@@ -481,17 +526,21 @@ export function createSubstrateRoutes(
         case "input": {
           // The agent reached the proxy: record it (if not yet recorded) before the input is sent, so
           // a failed write answers 500 and the agent asks again, and the launcher's startup timeout
-          // (no `started` record) never fires on a run that did start.
+          // (no `started` record) never fires on a run that did start. A single-shape run has no events
+          // poll, so its tool setup (read by the same actor before its input) is deleted here, best effort:
+          // the launcher's startup timeout also waits for that deletion.
           const round = await roundFor(url, token, "download");
           await sendBlob(response, BLOB.input(token, round), "application/json", counters, async () => {
             if (!(await blobs.head(BLOB.started(token, round)))) {
               await blobs.put(BLOB.started(token, round), Buffer.from("{}"), { contentType: "application/json" });
             }
+            if (shape === "single") await blobs.delete(BLOB.toolSetup(token)).catch(() => undefined);
           });
           return;
         }
         case "tool-setup":
-          // Not deleted here: a lost response would strand the run. The first events poll deletes it.
+          // Not deleted here: a lost response would strand the run. The first events poll (a single-shape
+          // run: the first input download) deletes it.
           await roundFor(url, token, "download");
           await sendBlob(response, BLOB.toolSetup(token), "application/json", counters);
           return;
@@ -551,7 +600,8 @@ export function createSubstrateRoutes(
         case "result": {
           const round = await roundFor(url, token, "upload");
           counters.bytes = await receiveBlob(request, BLOB.result(token, round), limits.resultBytes, clearBodyTimer);
-          await relay.requestCollect(token);
+          // A single-shape run has no tool actor to collect: the agent actor uploads its workspace itself.
+          if (shape !== "single") await relay.requestCollect(token);
           sendJson(response, 200, {});
           return;
         }
@@ -587,11 +637,13 @@ export function createSubstrateRoutes(
           const round = await roundFor(url, token, "upload");
           const report = await readExitReport(request);
           if (!(await blobs.head(BLOB.exit(token, round)))) {
-            try {
-              await relay.requestCollect(token);
-            } catch (error) {
-              // The relay was already dropped: the run was collected, so there is nothing left to queue.
-              if (!(error instanceof RelayUnknownError)) throw error;
+            if (shape !== "single") {
+              try {
+                await relay.requestCollect(token);
+              } catch (error) {
+                // The relay was already dropped: the run was collected, so there is nothing left to queue.
+                if (!(error instanceof RelayUnknownError)) throw error;
+              }
             }
             await blobs.put(BLOB.exit(token, round), Buffer.from(JSON.stringify(report)), {
               contentType: "application/json",

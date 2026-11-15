@@ -566,6 +566,225 @@ describe("substrate routes", () => {
     expect(serialized).toContain(TOKEN);
   });
 
+  describe("single actor shape", () => {
+    // fetch sends Content-Length for a string body.
+    const upload = (body: string) => ({ method: "POST", body });
+    const SETUP = JSON.stringify({ registryToken: deriveRegistryToken(CAPABILITY) });
+    const single = (): void => {
+      overrides = { ...overrides, actorShapeForToken: async () => "single" };
+    };
+    /** Every log line, info and warn, with nothing of a secret or a body in it. */
+    const expectNoSecretsLogged = async (bodies: string[] = []): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const logged = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [CAPABILITY, deriveRegistryToken(CAPABILITY), SETUP, "Bearer good", ...bodies])
+        expect(logged).not.toContain(secret);
+    };
+
+    it("authorizes the holder routes with the capability only, never the actor JWT", async () => {
+      single();
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("tar-bytes"));
+      const verifyActor = vi.fn(async () => ({ ok: true as const, subject: "x" }));
+      overrides.verifyActor = verifyActor;
+      await start();
+      const setup = await fetch(`${base}/tool-setup`, agent());
+      expect(setup.status).toBe(200);
+      expect(await setup.text()).toBe(SETUP);
+      expect(await (await fetch(`${base}/seed`, agent())).text()).toBe("tar-bytes");
+      for (const path of ["tool-setup", "seed"]) {
+        const refused = await fetch(`${base}/${path}`, tool());
+        expect(refused.status).toBe(401);
+        expect(await refused.json()).toEqual({ error: { type: "unauthorized" } });
+      }
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(401);
+      expect((await fetch(`${base}/workspace-failed`, tool({ method: "POST" }))).status).toBe(401);
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      // Another run's capability opens nothing.
+      expect((await fetch(`${base}/seed`, { headers: { "x-api-key": OTHER_CAPABILITY } })).status).toBe(401);
+      expect((await fetch(`${base}/workspace`, agent(upload("tar")))).status).toBe(200);
+      expect((await blobs.get(BLOB.workspace(TOKEN))).toString()).toBe("tar");
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+      // The actor JWT is never consulted for a single-shape run.
+      expect(verifyActor).not.toHaveBeenCalled();
+      await expectNoSecretsLogged(["tar-bytes"]);
+    });
+
+    it("records a failed workspace for the capability holder", async () => {
+      single();
+      await start();
+      expect((await fetch(`${base}/workspace-failed`, agent({ method: "POST" }))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+      expect((await fetch(`${base}/workspace`, agent(upload("late")))).status).toBe(409);
+      await expectNoSecretsLogged(["late"]);
+    });
+
+    it("keeps today's rule for a pair run: the holder is the tool actor, by its JWT only", async () => {
+      overrides = { actorShapeForToken: async () => "pair" };
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await start();
+      expect((await fetch(`${base}/tool-setup`, agent())).status).toBe(401);
+      expect((await fetch(`${base}/seed`, agent())).status).toBe(401);
+      expect((await fetch(`${base}/workspace`, agent(upload("w")))).status).toBe(401);
+      expect((await fetch(`${base}/workspace-failed`, agent({ method: "POST" }))).status).toBe(401);
+      expect((await fetch(`${base}/tool-setup`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(200);
+      await expectNoSecretsLogged();
+    });
+
+    it("answers 404 on every relay route before any auth or relay call", async () => {
+      single();
+      const findSession = vi.fn(async () => sessionFor("run-1"));
+      const verifyActor = vi.fn(async () => ({ ok: true as const, subject: "x" }));
+      overrides.ledger = { findSessionByCapabilityHash: findSession };
+      overrides.verifyActor = verifyActor;
+      const relayCalls: string[] = [];
+      overrides.relay = new Proxy(relay, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver) as unknown;
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            relayCalls.push(String(key));
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
+      await start();
+      for (const [path, init] of [
+        ["events?after=0", tool()],
+        ["events?after=0", agent()],
+        ["channels", agent({ method: "POST" })],
+        ["channels/c1/lines", agent(json({ seq: 1, line: CAPABILITY }))],
+        ["channels/c1/lines?after=0", agent()],
+        ["channels/c1/from-tool", tool(json({ seq: 1, line: CAPABILITY }))],
+        ["channels/c1/from-tool", agent(json({ close: true }))],
+      ] as const) {
+        const answer = await fetch(`${base}/${path}`, init);
+        expect([path, answer.status]).toEqual([path, 404]);
+        expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+      }
+      expect(relayCalls).toEqual([]);
+      expect(findSession).not.toHaveBeenCalled();
+      expect(verifyActor).not.toHaveBeenCalled();
+      await expectNoSecretsLogged();
+    });
+
+    it("deletes the tool setup on the first input download, after recording the start; the input stays", async () => {
+      single();
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await start();
+      // Not this run's capability: nothing recorded, nothing deleted.
+      expect((await fetch(`${base}/input`, { headers: { "x-api-key": OTHER_CAPABILITY } })).status).toBe(401);
+      expect(await blobs.head(BLOB.toolSetup(TOKEN))).not.toBeNull();
+      expect(await (await fetch(`${base}/input`, agent())).text()).toBe('{"task":"x"}');
+      // What the launcher's startup timeout reads: started, and no tool setup left.
+      expect(await blobs.head(BLOB.started(TOKEN))).not.toBeNull();
+      expect(await blobs.head(BLOB.toolSetup(TOKEN))).toBeNull();
+      const again = await fetch(`${base}/input`, agent());
+      expect(again.status).toBe(200);
+      expect(await again.text()).toBe('{"task":"x"}');
+      await expectNoSecretsLogged(['{"task":"x"}']);
+    });
+
+    it("answers the input even when the tool setup delete fails (best effort)", async () => {
+      single();
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      overrides.blobs = Object.assign(Object.create(blobs) as LocalBlobStore, {
+        delete: async () => {
+          throw new BlobStoreError("not_found", "not_found");
+        },
+      });
+      await start();
+      expect(await (await fetch(`${base}/input`, agent())).text()).toBe('{"task":"x"}');
+      expect(await blobs.head(BLOB.started(TOKEN))).not.toBeNull();
+    });
+
+    it("a pair run's input download leaves the tool setup for the tool's first events poll", async () => {
+      overrides = { actorShapeForToken: async () => "pair" };
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await start();
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      expect(await blobs.head(BLOB.started(TOKEN))).not.toBeNull();
+      expect(await blobs.head(BLOB.toolSetup(TOKEN))).not.toBeNull();
+    });
+
+    it("stores the result and the exit report without queuing a collect request", async () => {
+      single();
+      const collect = vi.spyOn(relay, "requestCollect");
+      await start();
+      expect((await fetch(`${base}/result`, agent(upload('{"final":"done"}')))).status).toBe(200);
+      expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"final":"done"}');
+      const exit = JSON.stringify({ code: 3 });
+      expect((await fetch(`${base}/exit`, agent(upload(exit)))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
+      expect(collect).not.toHaveBeenCalled();
+      await expectNoSecretsLogged(['{"final":"done"}']);
+    });
+
+    it("redacts the agent's diagnostics tail by exact value, escaped forms included, as for a pair run", async () => {
+      single();
+      await start();
+      const registry = deriveRegistryToken(CAPABILITY);
+      const raw = `key=${CAPABILITY}\nnpmrc ${registry}\njson ${JSON.stringify({ a: `"${CAPABILITY}"`, b: `"${registry}"` })}\n`;
+      expect((await fetch(`${base}/diagnostics`, agent(upload(raw)))).status).toBe(200);
+      expect(warnCalls).toHaveLength(1);
+      const [fields] = warnCalls[0] as [{ side: string; tail: string }];
+      expect(fields.side).toBe("agent");
+      expect(fields.tail).toContain("key=[REDACTED]");
+      expect(fields.tail).toContain("npmrc [REDACTED]");
+      await expectNoSecretsLogged();
+    });
+
+    it("refuses a diagnostics tail with a token shape it could not redact, and logs no tail", async () => {
+      single();
+      await start();
+      const answer = await fetch(`${base}/diagnostics`, agent(upload("before rrg_SOMETHING_ELSE after")));
+      expect(answer.status).toBe(400);
+      expect(warnCalls).toEqual([
+        [
+          { event: "substrate.diagnostics_rejected", runToken: TOKEN, side: "agent" },
+          "substrate actor diagnostics rejected",
+        ],
+      ]);
+      await expectNoSecretsLogged(["rrg_SOMETHING_ELSE", "before"]);
+    });
+
+    it("answers 500 with the fixed body when the shape lookup fails, and logs only the route line", async () => {
+      const failing = new Error(`lookup failed ${CAPABILITY}`);
+      overrides = { actorShapeForToken: async () => Promise.reject(failing) };
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await start();
+      const answer = await fetch(`${base}/tool-setup`, agent());
+      expect(answer.status).toBe(500);
+      expect(await answer.json()).toEqual({ error: { type: "internal_error" } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(logCalls).toHaveLength(1);
+      expect(logCalls[0]?.[0]).toMatchObject({ event: "substrate.route", route: "tool-setup", status: 500 });
+      expect(warnCalls).toEqual([]);
+      await expectNoSecretsLogged(["lookup failed"]);
+    });
+
+    it("remembers a single answer per token, but asks again for a pair one", async () => {
+      const lookup = vi.fn(async (): Promise<"pair" | "single"> => "single");
+      overrides = { actorShapeForToken: lookup };
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
+      await start();
+      expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
+      expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
+      expect(lookup).toHaveBeenCalledTimes(1);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      lookup.mockClear();
+      lookup.mockResolvedValue("pair");
+      await start();
+      expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
+      expect(lookup).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe("warm rounds", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });

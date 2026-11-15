@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
+import { createSubstrateRoutes } from "../../coding-proxy/substrate/routes.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
 import type { CodexWorkerSetup } from "../codex-worker-setup.js";
@@ -1160,6 +1162,48 @@ describe("Codex (single actor)", () => {
       await started(ok);
       ok.setNow(START + 599_000);
       expect(await ok.launcher.status(running)).toEqual({ state: "running" });
+    });
+
+    it("is not failed as startup_timeout once its agent fetched the input through the proxy's routes", async () => {
+      const h = await codex();
+      const handle = await h.launcher.launch(h.spec);
+      expect(await h.blobs.head(BLOB.toolSetup(h.token))).not.toBeNull();
+      // The proxy's routes on the same blob store, reading the shape from the run's row.
+      const routes = createSubstrateRoutes({
+        atespace: CONFIG.atespace,
+        relay: h.relay,
+        blobs: h.blobs,
+        ledger: {
+          findSessionByCapabilityHash: async () =>
+            ({ runId: h.spec.runId, status: "active", deadlineAt: new Date(Date.now() + 60_000) }) as never,
+        },
+        verifyActor: async () => ({ ok: false, code: "invalid" }),
+        tokenForRun: async (runId) => (await h.runs.get(runId))?.token ?? "",
+        actorShapeForToken: async (token) => {
+          const record = await h.runs.get(h.spec.runId);
+          return record?.token === token && record.actorShape === "single" ? "single" : "pair";
+        },
+        limits: { resultBytes: 1024, transcriptBytes: 1024, workspaceBytes: 1024 },
+        log: { info: () => undefined, warn: () => undefined },
+      });
+      const server = createServer((req, res) => void routes(req, res));
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/substrate/runs/${h.token}`;
+        const setup = await fetch(`${base}/tool-setup`, { headers: { "x-api-key": FAKE_CAP } });
+        expect(setup.status).toBe(200);
+        await setup.arrayBuffer();
+        const input = await fetch(`${base}/input`, { headers: { "x-api-key": FAKE_CAP } });
+        expect(input.status).toBe(200);
+        await input.arrayBuffer();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        server.closeAllConnections();
+      }
+      expect(await h.blobs.head(BLOB.started(h.token))).not.toBeNull();
+      expect(await h.blobs.head(BLOB.toolSetup(h.token))).toBeNull();
+      h.setNow(START + 599_000);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
     });
 
     it("succeeds on a reported result and collects the artifact", async () => {

@@ -420,6 +420,13 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       await expect(proxy.$executeRawUnsafe(`UPDATE "SubstrateRun" SET "phase" = 'x' WHERE false`)).rejects.toThrow(
         /permission denied/,
       );
+      // The Substrate routes read the run's actor shape by its token; the launcher alone sets it.
+      expect(
+        (await proxy.substrateRun.findUnique({ where: { token }, select: { actorShape: true } }))?.actorShape,
+      ).toBe("pair");
+      await expect(
+        proxy.$executeRawUnsafe(`UPDATE "SubstrateRun" SET "actorShape" = 'single' WHERE false`),
+      ).rejects.toThrow(/permission denied/);
       await expect(proxy.$executeRawUnsafe(`DELETE FROM "SubstrateRun" WHERE false`)).rejects.toThrow(
         /permission denied/,
       );
