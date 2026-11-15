@@ -1,4 +1,5 @@
 import { tmpdir } from "node:os";
+import type { RunStepSink } from "../../core/run-steps/types.js";
 import { resolve } from "node:path";
 import type { PrismaClient } from "#prisma";
 import {
@@ -128,6 +129,8 @@ export interface ConfiguredExecutorOptions {
   power?: Power;
   /** Decrypts agent secrets for transcript redaction (session resume). Absent: transcripts are never stored. */
   secretCipher?: Parameters<typeof loadAgentSecretValues>[1];
+  /** The process's run-steps writer (a continuation's warm-start step line). Absent: no such line. */
+  runSteps?: RunStepSink;
 }
 
 /**
@@ -347,6 +350,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   });
   const coding = new ContainerExecutor({
     transcripts,
+    ...(options.runSteps ? { runSteps: options.runSteps } : {}),
     store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
     jobs,
     vcs,

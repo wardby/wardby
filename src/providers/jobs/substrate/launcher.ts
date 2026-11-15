@@ -131,11 +131,14 @@ export interface WarmRoundsOptions {
 
 /** Why a park was removed to make room: for a launch (`capacity`) or for a newer park (`park_max`). */
 export type WarmEvictReason = "capacity" | "park_max";
+/** Why an agent's parks were removed (WorkspaceJobLauncher.removeParked): its caller's lifecycle event. */
+export type WarmRemoveReason = "agent";
 
 /**
  * A warm-round step, fixed fields only (never a capability, a commit, a fingerprint, a request or a
  * message). `ms` is the step's duration; `reason` a fixed code: a WarmColdReason on
- * substrate_warm_not_adopted, a WarmEvictReason on substrate_warm_evicted.
+ * substrate_warm_not_adopted, a WarmEvictReason on substrate_warm_evicted, a WarmRemoveReason on
+ * substrate_warm_removed.
  */
 export interface WarmEvent {
   event:
@@ -144,13 +147,14 @@ export interface WarmEvent {
     | "substrate_warm_adopted"
     | "substrate_warm_not_adopted"
     | "substrate_warm_evicted"
-    | "substrate_warm_expired";
+    | "substrate_warm_expired"
+    | "substrate_warm_removed";
   runId: string;
   /** The parked actors' token (absent when there was no park to name). */
   runToken?: string;
   round?: number;
   adoptedRunId?: string;
-  reason?: WarmColdReason | WarmEvictReason;
+  reason?: WarmColdReason | WarmEvictReason | WarmRemoveReason;
   ms?: number;
   steps?: Record<string, number>;
 }
@@ -539,7 +543,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
     // Warm rounds: a parked run is removed in full; one a continuation just adopted, as adopted.
     if (record.phase === "parked") {
-      if (!(await this.removeParked(record))) await this.remove(handle);
+      if (!(await this.removeParkedRun(record))) await this.remove(handle);
       return;
     }
     const observed = await this.observe(record);
@@ -985,6 +989,27 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     return roundOf(record) > 1 ? { adopted: true } : undefined;
   }
 
+  /**
+   * Removes every park of `filter.agentId`'s runs (WorkspaceJobLauncher.removeParked), each as an
+   * expired park is removed; how many went. Never throws: a park that cannot be removed now (or
+   * when the store cannot be read) is left to the sweep.
+   */
+  async removeParked(filter: { agentId: string }): Promise<number> {
+    if (!this.warm) return 0;
+    let removed = 0;
+    for (const park of await this.parks()) {
+      if (park.agentId !== filter.agentId) continue;
+      try {
+        if (!(await this.removeParkedRun(park))) continue;
+      } catch {
+        continue;
+      }
+      removed += 1;
+      this.warmEvent({ event: "substrate_warm_removed", runId: park.runId, runToken: park.token, reason: "agent" });
+    }
+    return removed;
+  }
+
   /** Start-up: removes the parks that expired while no control plane was sweeping. Never throws. */
   async warmUp(): Promise<void> {
     if (!this.warm) return;
@@ -1070,7 +1095,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   private async evict(park: SubstrateRunRecord, reason: WarmEvictReason): Promise<boolean> {
     try {
-      if (!(await this.removeParked(park))) return false;
+      if (!(await this.removeParkedRun(park))) return false;
     } catch {
       return false;
     }
@@ -1133,7 +1158,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * Its park is expired first, so no continuation adopts it while its actors go; false, with
    * nothing touched, when one adopted it already.
    */
-  private async removeParked(record: SubstrateRunRecord): Promise<boolean> {
+  private async removeParkedRun(record: SubstrateRunRecord): Promise<boolean> {
     try {
       await this.runs.setPhase(record.runId, "parked", ["parked"], new Date(0));
     } catch (error) {
@@ -1162,7 +1187,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     for (const record of await this.runs.listParked()) {
       if (record.deadlineAt.getTime() > this.now()) continue;
       try {
-        if (await this.removeParked(record)) {
+        if (await this.removeParkedRun(record)) {
           this.warmEvent({ event: "substrate_warm_expired", runId: record.runId, runToken: record.token });
         }
       } catch {
@@ -1196,7 +1221,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         adoptedRunId: warm.fromRunId,
         reason,
       });
-      if (park && removePark) await this.removeParked(park).catch(() => undefined);
+      if (park && removePark) await this.removeParkedRun(park).catch(() => undefined);
       return { adopted: false, reason };
     };
     if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return notAdopted("not_parked");

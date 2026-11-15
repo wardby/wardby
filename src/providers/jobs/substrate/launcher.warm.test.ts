@@ -818,6 +818,47 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.runs.get("run-2")).toMatchObject({ agentId: "agent-1", round: 2 });
   });
 
+  it("removeParked({ agentId }) removes that agent's parks only, in full, with substrate_warm_removed", async () => {
+    const h = await warmHarness();
+    const handle = await h.launcher.launch({ ...h.spec, agentId: "agent-1" });
+    await finishRound(h, h.token, "run-1", 1);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    const other = await otherRun(h, "run-2");
+    const otherHandle = await h.launcher.launch({ ...other, agentId: "agent-2" });
+    const otherToken = substrateRunToken("run-2");
+    await finishRound(h, otherToken, "run-2", 1);
+    expect(await h.launcher.retain(otherHandle, RETAIN)).toBe(true);
+    h.warmEvents.length = 0;
+
+    expect(await h.launcher.removeParked({ agentId: "agent-3" })).toBe(0);
+    expect(await h.launcher.removeParked({ agentId: "agent-1" })).toBe(1);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect((await h.runs.get("run-2"))!.phase).toBe("parked");
+    expect(h.api.actors.has(`wardby-runs/${agentActorName(h.token)}`)).toBe(false);
+    expect(actorStates(h, otherToken)).toEqual(["SUSPENDED", "SUSPENDED"]);
+    expect(h.warmEvents).toEqual([
+      { event: "substrate_warm_removed", runId: "run-1", runToken: h.token, reason: "agent" },
+    ]);
+    // Already gone: nothing more to remove.
+    expect(await h.launcher.removeParked({ agentId: "agent-1" })).toBe(0);
+  });
+
+  it("removeParked() is 0 with warm rounds off, and leaves a park it cannot remove to the sweep", async () => {
+    const off = await makeHarness();
+    expect(await off.launcher.removeParked({ agentId: "agent-1" })).toBe(0);
+    const h = await warmHarness();
+    const handle = await h.launcher.launch({ ...h.spec, agentId: "agent-1" });
+    await finishRound(h, h.token, "run-1", 1);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    const deleteActor = h.api.deleteActor.bind(h.api);
+    h.api.deleteActor = async () => {
+      throw new Error("substrate_down");
+    };
+    await expect(h.launcher.removeParked({ agentId: "agent-1" })).resolves.toBe(0);
+    h.api.deleteActor = deleteActor;
+    expect((await h.runs.get("run-1"))!.phase).toBe("parked");
+  });
+
   it("after a restart (a new launcher on the same store), adopts, then status, collect, retain and remove a warm round", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);

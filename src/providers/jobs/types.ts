@@ -269,4 +269,10 @@ export interface WorkspaceJobLauncher extends JobLauncher {
    * own record, so it answers after a control-plane restart too.
    */
   warmOutcome?(handle: JobHandle): Promise<WarmOutcome | undefined>;
+  /**
+   * Removes every sandbox retained for `filter.agentId`'s runs (the agent was deleted, changed what
+   * its fingerprint covers, or a run of it was stopped); how many went. Best effort: a park that
+   * could not be removed now is left to its expiry. Absent (Docker, Kubernetes): nothing is retained.
+   */
+  removeParked?(filter: { agentId: string }): Promise<number>;
 }

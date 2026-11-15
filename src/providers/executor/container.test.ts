@@ -29,11 +29,15 @@ import {
   JobCapacityError,
   type JobHandle,
   type JobResult,
+  type JobRetention,
   type JobSpec,
   type JobStatus,
   type MaterializeWorkspaceOptions,
+  type WarmOutcome,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
+import { systemPromptSha256, warmFingerprint, type WarmFingerprintInput } from "../jobs/warm-fingerprint.js";
+import type { RunStepBatch } from "../../core/run-steps/types.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -389,7 +393,7 @@ class FakeJobs implements WorkspaceJobLauncher {
     }),
   };
 
-  constructor(private readonly events: string[]) {}
+  constructor(readonly events: string[]) {}
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {
     return this.planned ? { ...this.planned, id: `${this.planned.id}-${spec.runId}` } : undefined;
@@ -6645,5 +6649,448 @@ describe("storedTests", () => {
       { command: "npm audit", outcome: "skipped" },
       { command: "npm run lint", outcome: "failed" },
     ]);
+  });
+});
+
+describe("ContainerExecutor warm rounds", () => {
+  /** The capability FakeSessions hands out, and a fake secret value for error paths. */
+  const FAKE_CAPABILITY = `rrp_${"x".repeat(32)}`;
+  const PROMPT_SHA = systemPromptSha256("You fix bugs.");
+  const claudeRun = {
+    provider: "claude-code",
+    model: "claude-sonnet-5",
+    workerImage: CLAUDE_IMAGE,
+    systemPromptSha256: PROMPT_SHA,
+  } as const;
+  const continuation = { ...claudeRun, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" } as const;
+  const fingerprintFor = (overrides: Partial<WarmFingerprintInput> = {}) =>
+    warmFingerprint({
+      agentId: "agent-1",
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      workerImage: CLAUDE_IMAGE,
+      toolImage: CLAUDE_TOOL_IMAGE,
+      cpu: 1,
+      memoryMb: 1024,
+      diskMb: 512,
+      systemPromptSha256: PROMPT_SHA,
+      repository: "openai/example",
+      ...overrides,
+    });
+
+  /** A launcher that retains (Substrate-like): records retain/warmOutcome/removeParked calls. */
+  function warmLauncher(jobs: FakeJobs) {
+    const calls = {
+      retains: [] as Array<{ handle: JobHandle; retention: JobRetention }>,
+      outcomes: [] as JobHandle[],
+      removedFor: [] as Array<{ agentId: string }>,
+    };
+    const extended = jobs as FakeJobs & Required<Pick<WorkspaceJobLauncher, "retain" | "warmOutcome" | "removeParked">>;
+    let outcome: WarmOutcome | undefined | Error = { adopted: true };
+    let retainAnswer: boolean | Error = true;
+    extended.retain = async (handle, retention) => {
+      calls.retains.push({ handle, retention });
+      jobs.events?.push("retain");
+      if (retainAnswer instanceof Error) throw retainAnswer;
+      return retainAnswer;
+    };
+    extended.warmOutcome = async (handle) => {
+      calls.outcomes.push(handle);
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    };
+    extended.removeParked = async (filter) => {
+      calls.removedFor.push(filter);
+      return 2;
+    };
+    return {
+      calls,
+      setOutcome: (value: WarmOutcome | undefined | Error) => (outcome = value),
+      setRetain: (value: boolean | Error) => (retainAnswer = value),
+    };
+  }
+
+  async function warmHarness(
+    overrides: Partial<ContainerRunSnapshot> = {},
+    options: { warm?: boolean; previous?: { runId: string; commitSha: string | null } | null } = {},
+  ) {
+    const steps: Array<{ runId: string; batch: RunStepBatch }> = [];
+    const created = await harness(
+      { ...claudeRun, ...overrides },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      {
+        runSteps: {
+          record: async (runId, batch) => {
+            steps.push({ runId, batch: structuredClone(batch) });
+          },
+        },
+      },
+    );
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Fixed it.",
+      tests: [],
+    });
+    const warm = options.warm === false ? undefined : warmLauncher(created.jobs);
+    const previousCalls: Array<[string, string]> = [];
+    const warmStarts: Array<[string, boolean]> = [];
+    const store = created.store as FakeStore &
+      Partial<Pick<ContainerExecutionStore, "previousRound" | "recordWarmStart">>;
+    store.previousRound = async (runId, rootRunId) => {
+      previousCalls.push([runId, rootRunId]);
+      return options.previous === undefined ? { runId: "run-0", commitSha: "e".repeat(40) } : options.previous;
+    };
+    store.recordWarmStart = async (runId, warmStart) => {
+      warmStarts.push([runId, warmStart]);
+    };
+    return { ...created, warm, steps, previousCalls, warmStarts };
+  }
+
+  describe("retain vs remove", () => {
+    it("retains a delivered Claude Code run with the pushed commit and its fingerprint, and does not remove it", async () => {
+      const created = await warmHarness();
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([
+        { handle: created.jobs.handle, retention: { headSha: "b".repeat(40), fingerprint: fingerprintFor() } },
+      ]);
+      expect(created.jobs.removals).toBe(0);
+      expect(created.events).toContain("retain");
+    });
+
+    it("retains a pushed branch (a local repository) too", async () => {
+      const created = await warmHarness();
+      created.vcs.pushBranchOnly = true;
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.warm!.calls.retains[0].retention.headSha).toBe("b".repeat(40));
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("removes a succeeded run that pushed nothing", async () => {
+      const created = await warmHarness();
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run the worker said changed nothing", async () => {
+      const created = await warmHarness();
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "no_changes",
+        summary: "Nothing to do.",
+        tests: [],
+      });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a failed job", async () => {
+      const created = await warmHarness();
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run whose push failed", async () => {
+      const created = await warmHarness();
+      created.vcs.onFinalize = () => {
+        throw new Error("vcs_push_failed");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a budget-stopped run, even one whose changes were pushed", async () => {
+      const created = await warmHarness();
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "budget_exhausted",
+        summary: "Ran out.",
+        tests: [],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a stopped run", async () => {
+      const created = await warmHarness({ status: "running", jobHandle: { backend: "fake", id: "job-1" } });
+      await created.executor.stop("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a Codex run on the same launcher", async () => {
+      const created = await warmHarness({ provider: "codex", model: "gpt-5.6-luna", workerImage: null });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run whose fingerprint is unknown (no system prompt hash)", async () => {
+      const created = await warmHarness({ systemPromptSha256: undefined });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes the job when retain throws", async () => {
+      const created = await warmHarness();
+      created.warm!.setRetain(new Error("substrate_down"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("does not remove again when retain declines (it removed the job itself)", async () => {
+      const created = await warmHarness();
+      created.warm!.setRetain(false);
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("never collects an ended run's handle on a retaining launcher's terminal cleanup", async () => {
+      const created = await warmHarness({ status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } });
+      await created.executor.start("run-1");
+      expect(created.events).not.toContain("collect");
+      expect(created.jobs.removals).toBe(1);
+      expect(created.jobs.materializations).toBe(0);
+    });
+
+    it("recovering an ended, retained run neither collects nor materializes it", async () => {
+      const created = await warmHarness({ status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } });
+      await expect(created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" })).resolves.toMatchObject({
+        state: "terminal",
+      });
+      expect(created.events).not.toContain("collect");
+      expect(created.jobs.materializations).toBe(0);
+    });
+  });
+
+  describe("launchers without retain (Docker, Kubernetes)", () => {
+    it("removes as before, asks for no previous round, and launches and probes without warm", async () => {
+      const created = await warmHarness(continuation, { warm: false });
+      created.jobs.capacity = true;
+      (created.store as { markQueued?: unknown }).markQueued = async () => undefined;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.removals).toBe(1);
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.steps).toEqual([]);
+      expect(created.warmStarts).toEqual([]);
+      expect(created.events).toContain("collect");
+    });
+
+    it("still collects an ended run's handle on terminal cleanup", async () => {
+      const created = await warmHarness(
+        { status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } },
+        { warm: false },
+      );
+      await created.executor.start("run-1");
+      expect(created.events).toContain("collect");
+      expect(created.jobs.removals).toBe(1);
+    });
+  });
+
+  describe("continuations", () => {
+    it("launches a continuation with warm naming the previous round, its prepared head and the fingerprint", async () => {
+      const created = await warmHarness(continuation);
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([["run-1", "root-run"]]);
+      expect(created.jobs.specs[0].warm).toEqual({
+        fromRunId: "run-0",
+        headSha: "a".repeat(40),
+        fingerprint: fingerprintFor(),
+      });
+    });
+
+    it("probes capacity with warm too, carrying the commit the previous round pushed", async () => {
+      const created = await warmHarness(continuation);
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.capacityChecks).toHaveLength(1);
+      expect(created.jobs.capacityChecks[0].warm).toEqual({
+        fromRunId: "run-0",
+        headSha: "e".repeat(40),
+        fingerprint: fingerprintFor(),
+      });
+    });
+
+    it("probes without warm when the previous round pushed nothing", async () => {
+      const created = await warmHarness(continuation, { previous: { runId: "run-0", commitSha: null } });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.jobs.specs[0].warm).toMatchObject({ fromRunId: "run-0", headSha: "a".repeat(40) });
+    });
+
+    it("sets no warm on a run that continues nothing", async () => {
+      const created = await warmHarness();
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.warm!.calls.outcomes).toEqual([]);
+      expect(created.steps).toEqual([]);
+      expect(created.warmStarts).toEqual([]);
+    });
+
+    it("sets no warm when there is no previous round", async () => {
+      const created = await warmHarness(continuation, { previous: null });
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.steps).toEqual([]);
+    });
+
+    it("sets no warm when prepare merged the target branch into the workspace", async () => {
+      const created = await warmHarness(continuation);
+      created.vcs.targetMerge = { ref: "main", targetCommit: "f".repeat(40), conflictedPaths: [] };
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("sets no warm for a Codex continuation", async () => {
+      const created = await warmHarness({
+        ...continuation,
+        provider: "codex",
+        model: "gpt-5.6-luna",
+        workerImage: null,
+      });
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("starts fresh (no warm) when the previous round cannot be read", async () => {
+      const created = await warmHarness(continuation);
+      (created.store as { previousRound?: unknown }).previousRound = async () => {
+        throw new Error(`db down ${FAKE_CAPABILITY}`);
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(JSON.stringify(logged)).not.toContain(FAKE_CAPABILITY);
+    });
+
+    it("a changed model changes the continuation's fingerprint", async () => {
+      const created = await warmHarness({ ...continuation, model: "claude-opus-5" });
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor({ model: "claude-opus-5" }));
+      expect(created.jobs.specs[0].warm?.fingerprint).not.toBe(fingerprintFor());
+    });
+
+    it("writes the resumed step line and records warmStart true", async () => {
+      const created = await warmHarness(continuation);
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", true]]);
+      expect(created.steps).toEqual([
+        {
+          runId: "run-1",
+          batch: {
+            steps: [
+              {
+                kind: "said",
+                callId: "said:wardby-warm-start",
+                text: "Resumed the previous round's workspace and session",
+                truncated: false,
+              },
+            ],
+            results: [],
+          },
+        },
+      ]);
+    });
+
+    it.each([
+      ["branch_moved", "Started a fresh workspace: the branch changed since the previous round"],
+      ["capacity", "Started a fresh workspace: there was no room to resume the previous round"],
+      ["not_parked", "Started a fresh workspace: the previous round was not kept"],
+    ] as const)("writes the fresh-workspace step line for %s and records warmStart false", async (reason, line) => {
+      const created = await warmHarness(continuation);
+      created.warm!.setOutcome({ adopted: false, reason });
+      await created.executor.start("run-1");
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      expect(created.steps.map((s) => s.batch.steps[0])).toEqual([
+        { kind: "said", callId: "said:wardby-warm-start", text: line, truncated: false },
+      ]);
+    });
+
+    it("writes nothing when the launcher reports no outcome, or fails to", async () => {
+      for (const outcome of [undefined, new Error(`boom ${FAKE_CAPABILITY}`)]) {
+        const created = await warmHarness(continuation);
+        created.warm!.setOutcome(outcome);
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.steps).toEqual([]);
+        expect(created.warmStarts).toEqual([]);
+      }
+      expect(JSON.stringify(logged)).not.toContain(FAKE_CAPABILITY);
+    });
+
+    it("still delivers the run when recording warmStart or the step fails", async () => {
+      const created = await warmHarness(continuation, {});
+      (created.store as { recordWarmStart?: unknown }).recordWarmStart = async () => {
+        throw new Error("db down");
+      };
+      (created.executor as unknown as { options: { runSteps: unknown } }).options.runSteps = {
+        record: async () => {
+          throw new Error("writer down");
+        },
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+    });
+
+    it("keeps secret values out of the step line, warmStart and the logs", async () => {
+      const created = await warmHarness(continuation);
+      created.warm!.setOutcome({ adopted: false, reason: "fingerprint_changed" });
+      await created.executor.start("run-1");
+      const published = JSON.stringify({ steps: created.steps, warmStarts: created.warmStarts, logged });
+      expect(published).not.toContain(FAKE_CAPABILITY);
+      expect(published).not.toContain(PROMPT_SHA);
+      expect(published).not.toContain(created.jobs.specs[0].warm!.fingerprint);
+    });
+  });
+
+  describe("removeRetainedRounds", () => {
+    it("asks the launcher to remove the agent's parks", async () => {
+      const created = await warmHarness();
+      await expect(created.executor.removeRetainedRounds("agent-1")).resolves.toBe(2);
+      expect(created.warm!.calls.removedFor).toEqual([{ agentId: "agent-1" }]);
+    });
+
+    it("is 0 on a launcher without removeParked, and never throws", async () => {
+      const plain = await warmHarness({}, { warm: false });
+      await expect(plain.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
+      const failing = await warmHarness();
+      (failing.jobs as { removeParked?: unknown }).removeParked = async () => {
+        throw new Error("substrate_down");
+      };
+      await expect(failing.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
+    });
   });
 });

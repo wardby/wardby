@@ -3,6 +3,7 @@ import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
 import { defaultRepositoryName } from "../../coding/repository-names.js";
+import { systemPromptSha256 } from "../jobs/warm-fingerprint.js";
 
 const db = createPrismaClient();
 const suffix = randomUUID();
@@ -32,6 +33,56 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.principal.deleteMany({ where: { id: principalId } });
     await db.$disconnect();
+  });
+
+  it("warm rounds: finds the round a continuation follows, records warmStart, and loads the prompt's hash", async () => {
+    const ids = ["root", "round2", "round3", "later"].map((name) => `container-warm-${name}-${randomUUID()}`);
+    const [root, round2, round3, later] = ids;
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 14, 12, 0, seconds));
+    const coding = (runId: string, rootCodingRunId: string | null, commitSha: string | null) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${root}`,
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+      result: commitSha ? { outcome: "pull_request_updated", commitSha } : undefined,
+    });
+    try {
+      for (const [index, id] of ids.entries()) {
+        await db.run.create({ data: { id, agentId, executionManaged: true, startedAt: at(index) } });
+      }
+      await db.codingRun.create({ data: coding(root, null, "1".repeat(40)) });
+      await db.codingRun.create({ data: coding(round2, root, "2".repeat(40)) });
+      await db.codingRun.create({ data: coding(round3, root, null) });
+      await db.codingRun.create({ data: coding(later, root, null) });
+      const store = new PrismaContainerExecutionStore(db);
+      // The newest other run of the tree dispatched before this one, never a later one.
+      await expect(store.previousRound(round2, root)).resolves.toEqual({ runId: root, commitSha: "1".repeat(40) });
+      await expect(store.previousRound(round3, root)).resolves.toEqual({ runId: round2, commitSha: "2".repeat(40) });
+      await expect(store.previousRound(later, root)).resolves.toEqual({ runId: round3, commitSha: null });
+      await expect(store.previousRound(root, root)).resolves.toBeNull();
+      await expect(store.previousRound("missing", root)).resolves.toBeNull();
+
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBeNull();
+      await store.recordWarmStart(round2, true);
+      await store.recordWarmStart(round3, false);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBe(true);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round3 } })).warmStart).toBe(false);
+
+      await expect(store.load(round2)).resolves.toMatchObject({
+        systemPromptSha256: systemPromptSha256("code safely"),
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
+    }
   });
 
   it("loads the agent's current profile repository and its authorization stamp with the run", async () => {

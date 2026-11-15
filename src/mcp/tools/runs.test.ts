@@ -43,6 +43,7 @@ interface FakeRunRow {
     queuedAt?: Date | null;
     resultBranch?: string | null;
     baseSha?: string | null;
+    warmStart?: boolean | null;
     dependencyCacheResult?: unknown;
     prDescriptionOutcome?: string | null;
     failureCategory?: string | null;
@@ -981,6 +982,41 @@ describe("run observability tools", () => {
     const r2 = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never) as any;
     expect(r2).toMatchObject({ resultBranch: "wardby/run-r2", baseSha: "a".repeat(40) });
     expect(r2).not.toHaveProperty("review");
+    await client.close();
+  });
+
+  it("get_run returns warmStart for a warm-rounds continuation, and nothing for any other run", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "warm", codingRun: { result: null, warmStart: true } },
+        { ...base, id: "cold", codingRun: { result: null, warmStart: false } },
+        { ...base, id: "none", codingRun: { result: null, warmStart: null } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const get = async (runId: string) =>
+      parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as Record<string, unknown>;
+    expect((await get("warm")).warmStart).toBe(true);
+    expect((await get("cold")).warmStart).toBe(false);
+    expect(await get("none")).not.toHaveProperty("warmStart");
     await client.close();
   });
 

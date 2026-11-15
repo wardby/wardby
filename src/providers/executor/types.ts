@@ -40,6 +40,13 @@ export interface Executor {
    */
   cleanupQueueTimeout?: (runId: string) => Promise<void>;
   /**
+   * Warm rounds: removes the coding sandboxes retained for the agent's runs (its job launcher's
+   * WorkspaceJobLauncher.removeParked), when the agent is deleted, changes what a retained round's
+   * fingerprint covers, or one of its runs is stopped; how many went. Best effort, never throws.
+   * Optional: an executor whose launcher retains nothing omits it.
+   */
+  removeRetainedRounds?: (agentId: string) => Promise<number>;
+  /**
    * Optional one-time startup. A durable backend connects and re-drives the
    * workflows it owned before the last restart. Composition roots call it
    * before starting the scheduler or MCP server.
