@@ -1617,17 +1617,17 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     // An "&" so the stored board holds it HTML-escaped ("&amp;").
     const late = `FAKE-late&design-${s.slice(0, 6)}`;
     const name = `ALD_LATE_${s.slice(0, 8)}`;
-    const docId = await linkedDesign(withMenuIntro(`The code is ${late.replace("&", "&amp;")} here.`));
+    const docId = await linkedDesign(withMenuIntro(`The code is ${late.replaceAll("&", "&amp;")} here.`));
     serve("main", coffee());
     const stored = (await currentFiles(docId)).files["boards/menu.html"];
-    expect(stored).toContain(late.replace("&", "&amp;"));
+    expect(stored).toContain(late.replaceAll("&", "&amp;"));
     const t = await menuThread(docId, `Drop ${late}`);
     await createSecret(name, late, owner.id, cipher, db);
     await attachSecret(agentId, name, owner.id, db);
     try {
       const task = await taskOf((await send(docId, [t.threadId])).runId);
       expect(task).not.toContain(late);
-      expect(task).not.toContain(late.replace("&", "&amp;"));
+      expect(task).not.toContain(late.replaceAll("&", "&amp;"));
       expect(task).toContain("The code is [REDACTED] here.");
       expect(task).toContain("Drop [REDACTED]");
     } finally {
@@ -1790,7 +1790,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
 
   it("redacts a value that became an agent secret from the design reconcile task, the earlier edit's files included", async () => {
     const late = `FAKE-late&reconcile-${s.slice(0, 6)}`;
-    const escaped = late.replace("&", "&amp;");
+    const escaped = late.replaceAll("&", "&amp;");
     const name = `ALD_REC_${s.slice(0, 8)}`;
     const docId = await linkedDesign();
     serve("main", coffee());

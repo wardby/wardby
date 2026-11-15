@@ -16,11 +16,11 @@ import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import {
   COMMIT_SHA,
   DEPENDENCY_CACHE_PATH,
-  isSafeFilePath,
   normalizeGitHubRepository,
   normalizeGitRef,
   truncateText,
 } from "../../coding/protocol.js";
+import { isSafeFilePath } from "../../coding/file-path.js";
 import {
   LATEST_RUN_MARKER_PREFIX,
   RELATED_SECTION_END,

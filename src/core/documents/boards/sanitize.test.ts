@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { sanitizeBoard, sanitizeFragment } from "./sanitize.js";
 
 const fixture = (p: string) => readFileSync(new URL(`./fixtures/${p}`, import.meta.url), "utf8");
+/** The hostile fixture without its one iframe line (exact text), for tests about the other elements. */
+const withoutIframe = (html: string) => html.split('<iframe src="https://evil.example/"></iframe>').join("");
 
 /** Structural check (ruling PF-M3): no script element, no on* attribute, no javascript: in any URL attribute. */
 function assertScriptFree(html: string): void {
@@ -43,7 +45,7 @@ describe("sanitizeBoard", () => {
   });
 
   it("removes scripts, handlers and javascript: URLs, and drops forbidden elements", () => {
-    const out = sanitizeBoard(fixture("hostile.html").replace(/<iframe[^>]*><\/iframe>/, ""));
+    const out = sanitizeBoard(withoutIframe(fixture("hostile.html")));
     expect(out.html).not.toMatch(/<base|http-equiv|<form|<input|<math|<noscript|<animate/i);
     assertScriptFree(out.html);
     expect(out.removed.scripts).toBe(1);
@@ -54,7 +56,7 @@ describe("sanitizeBoard", () => {
   });
 
   it("does not keep the text of noscript, template, math or SVG/MathML style elements", () => {
-    const out = sanitizeBoard(fixture("hostile.html").replace(/<iframe[^>]*><\/iframe>/, ""));
+    const out = sanitizeBoard(withoutIframe(fixture("hostile.html")));
     expect(out.html).not.toMatch(/onerror|alert/);
     expect(out.baseCss).toBe("body{background-color:#fff}");
     const svgStyle = sanitizeBoard(

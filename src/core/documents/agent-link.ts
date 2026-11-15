@@ -1,5 +1,6 @@
 import { normalizeHostedRepository } from "../../coding/code-host.js";
-import { isSafeFilePath, normalizeGitRef } from "../../coding/protocol.js";
+import { isSafeFilePath } from "../../coding/file-path.js";
+import { normalizeGitRef } from "../../coding/protocol.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../coding-override.js";
 
 /** The longest repository path a document may be linked to. */
