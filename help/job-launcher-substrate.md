@@ -14,9 +14,9 @@ appliesTo: ">=0.9.15"
 [Agent Substrate](https://github.com/agent-substrate) actors under gVisor: an
 agent actor (the worker) and a tool actor (the commands). A Codex coding run is
 one actor, which runs the worker and its commands and holds the workspace.
-Neither shape holds a Wardby secret; Substrate's egress gateway adds the run capability to the
-agent's requests, and the only destination either actor may reach is the coding
-proxy.
+Neither shape holds a Wardby secret; Substrate's egress gateway adds the run
+capability to the agent's requests, and the only destination either actor may
+reach is the coding proxy.
 
 ## Choose it when
 
@@ -26,7 +26,8 @@ proxy.
   tools, the dependency cache, extra repositories or a custom worker image
   (`workerImageRef`).
 
-Otherwise use `kubernetes` (or `docker`): they support every coding feature. A run that needs a feature the Substrate backend lacks fails with
+Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
+run that needs a feature the Substrate backend lacks fails with
 [substrate_feature_unsupported](errors/substrate-feature-unsupported.md).
 
 ## Set up
@@ -43,8 +44,7 @@ Otherwise use `kubernetes` (or `docker`): they support every coding feature. A r
    installed npm package. For Codex agents set `CODING_WORKER_IMAGE` to
    `substrateCodex` and, for the Node + Python toolchain,
    `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` to `substrateCodexNodePython`. For
-   your own images, build the bridge onto them from
-   a checkout (see Images in the
+   your own images, build the bridge onto them from a checkout (see Images in the
    [Substrate backend guide](../docs/substrate-backend.md#images)).
 3. Set one blob store (`BLOB_STORE`) on both the control plane and the coding
    proxy.
@@ -70,8 +70,7 @@ before the new control plane and proxy start.
 
 The agent actor runs a Substrate bridge image, not the plain worker image: set
 `CODING_CLAUDE_WORKER_IMAGE` for Claude Code and `CODING_WORKER_IMAGE` for
-Codex to the bridge images by digest (step 2 above). Run the coding proxy of the
-same release before sending Codex runs.
+Codex to the bridge images by digest (step 2 above).
 
 Every variable, default and limit is in the
 [Substrate backend guide](../docs/substrate-backend.md).

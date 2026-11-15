@@ -175,10 +175,10 @@ must arrive within ten minutes of being authenticated.
 A Codex run is a single actor: the Codex worker holds the workspace itself, so
 there is no tool actor and no workspace hand-off between two actors. The actor
 holds only a placeholder for the run capability; Substrate's egress gateway
-adds the real one to its requests to the coding proxy (see
-[Coding-worker isolation](coding-worker-isolation.md)).
+adds the real one to its requests to the coding proxy (see the
+[model request allowlist](coding-worker-isolation.md#model-request-allowlist)).
 Its commands run inside the same actor, under the same proxy allowlist and
-budget as on the other launchers. When the run stops, the bridge ends any
+budget as on the other launchers. When the run ends, the bridge ends any
 process the run's commands left behind.
 
 ### Git history

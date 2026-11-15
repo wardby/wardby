@@ -134,7 +134,8 @@ cannot be asked to reach somewhere else. Model APIs can do that on the
 caller's behalf: an OpenAI hosted `mcp` tool or a remote `input_image` URL
 makes OpenAI's servers contact any host, and hosted-tool fees and non-default
 service tiers are billed outside the metered tokens. Code in a Codex worker can
-read the run capability on the Docker and Kubernetes launchers, so the proxy validates every request body against an
+read the run capability on the Docker and Kubernetes launchers, so the proxy
+validates every request body against an
 allowlist before it resolves a credential, and refuses anything else with a
 `400` (`src/providers/coding-proxy/proxy.ts`). Each refusal is also written to
 the proxy audit log as `request.rejected` with the run id and the refusal
