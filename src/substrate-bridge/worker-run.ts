@@ -58,10 +58,11 @@ export function superviseWorker(
     ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
     ...(worker.stderr ? [tail.tail.follow(worker.stderr)] : []),
   ]);
-  // The transcript, then the result, once the worker has exited. The result (or the exit report)
-  // ends the round: the control plane may read the transcript and remove the run's blobs as soon as
-  // it lands, so nothing is uploaded after it. The transcript is best effort and bounded, and never
-  // blocks it.
+  // The transcript, then the result, once the worker has exited. Of what this supervision uploads,
+  // the result (or, on no usable result, the diagnostics tail and then the exit report) comes last:
+  // the control plane may read the transcript as soon as the result lands. The transcript is best
+  // effort and bounded, and never blocks it. A one-actor run's workspace upload (codex.ts) follows
+  // `uploaded`; the proxy writes the run's done record only then (workspace or workspace-failed).
   const uploaded = worker.exited.then(async (code) => {
     log("substrate_bridge_worker_exited", { runToken: token, code });
     if (options.transcriptPath !== undefined) {
@@ -84,8 +85,9 @@ export function superviseWorker(
       "result",
       signal,
     );
-    // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
-    // with the worker's own diagnostic code when it printed one.
+    // No usable result: the diagnostics tail, then the exit report that tells the proxy the worker is
+    // gone (for a pair run it also asks the tool actor for the workspace), with the worker's own
+    // diagnostic code when it printed one.
     if (outcome !== "ok") {
       await waitAtMost(drained, OUTPUT_DRAIN_MS);
       const diagnostic = findWorkerDiagnostic(output.lines());

@@ -7,8 +7,9 @@
  *
  * The worker holds only the placeholder capability (the egress gateway injects the real one on the
  * wire) and the run's registry-only token, which the setup carries because it cannot be derived from a
- * placeholder. The token is a secret value: it is never logged, and the diagnostics tail is redacted
- * against it and the placeholder. The setup body is never logged.
+ * placeholder. The token is a secret value: it is never logged, and the diagnostics tail and the
+ * worker's output passed on to the actor's log are redacted against it and the placeholder. The
+ * setup body is never logged.
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * There are no warm rounds here.
@@ -36,6 +37,7 @@ import {
   REGISTRY_TOKEN_ENV,
   REGISTRY_TOKEN_SHAPE,
 } from "./constants.js";
+import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
 import { superviseWorker, type WorkerHandle } from "./worker-run.js";
@@ -114,17 +116,23 @@ function parseSetup(body: Buffer, onSecret: (value: string) => void): CodexSetup
 
 /**
  * The worker in its own process group (so the bridge can end every process its tools started), with
- * its stdout and stderr piped through the bridge and passed on to the bridge's own, so the actor's log
- * is unchanged and the bridge can read its last lines.
+ * its stdout and stderr piped through the bridge so it can read their last lines, and passed on to the
+ * bridge's own (the actor's log) line by line, redacted by exact value against `secrets()` (read for
+ * every line: the placeholder and the registry token).
  */
-const spawnCodexWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
-  const child = spawn(process.execPath, [CODEX_WORKER_ENTRY], {
+export const spawnCodexWorker = (
+  env: NodeJS.ProcessEnv,
+  secrets: () => readonly string[],
+  entry: string = CODEX_WORKER_ENTRY,
+  out: { stdout: LineSink; stderr: LineSink } = process,
+): WorkerHandle => {
+  const child = spawn(process.execPath, [entry], {
     env,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
-  child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+  void pipeRedacted(child.stdout, out.stdout, secrets);
+  void pipeRedacted(child.stderr, out.stderr, secrets);
   return {
     stdout: child.stdout,
     stderr: child.stderr,
@@ -139,8 +147,8 @@ const spawnCodexWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
 
 export async function run(options: CodexOptions): Promise<CodexHandle> {
   // Every secret value this actor holds: the placeholder, and once the setup is read the run's
-  // registry-only token. The diagnostics tail (the worker's stderr and this bridge's events) is
-  // redacted against them by exact value.
+  // registry-only token. The diagnostics tail (the worker's stderr and this bridge's events) and the
+  // worker's output passed on to the actor's log are redacted against them by exact value.
   const secrets: string[] = [PLACEHOLDER_CAPABILITY];
   const diagnostics = new DiagnosticsTail(() => secrets);
   const log = diagnostics.logger(options.log ?? stderrLogger);
@@ -228,7 +236,8 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   log("substrate_bridge_input_ready", { runToken: token });
 
   // 6. The worker, in header mode.
-  const worker = (options.launchWorker ?? spawnCodexWorker)({
+  const launch = options.launchWorker ?? ((workerEnv: NodeJS.ProcessEnv) => spawnCodexWorker(workerEnv, () => secrets));
+  const worker = launch({
     ...env,
     WARDBY_PROXY_URL: options.proxyUrl,
     WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,

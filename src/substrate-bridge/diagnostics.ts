@@ -7,9 +7,12 @@
  *   they agree).
  * - On a failure, a bridge posts a bounded stderr tail (DIAGNOSTICS_TAIL) for the operator's logs,
  *   redacted line by line, by exact value, against every secret value delivered to that process.
+ * - A worker's stdout and stderr are passed on to the bridge's own (the actor's log) only through
+ *   `pipeRedacted`: line by line, redacted by exact value the same way.
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  */
+import { StringDecoder } from "node:string_decoder";
 import { MAX_CODING_OUTPUT_ISSUES, REDACTED, SAFE_CODING_OUTPUT_ISSUE, SAFE_WORKER_DIAGNOSTIC } from "./constants.js";
 
 /** Stands in for a line too long to keep: a piece of it is never kept, so a value is never cut in half. */
@@ -139,6 +142,50 @@ export function redactExact(text: string, values: readonly string[]): string {
     out = out.split(value).join(REDACTED);
   }
   return out;
+}
+
+/** The longest line `pipeRedacted` passes on; a longer one becomes LINE_OMITTED. */
+export const PASSTHROUGH_LINE_BYTES = 256 * 1024;
+
+/** Where `pipeRedacted` writes (process.stdout / process.stderr, or a test's capture). */
+export interface LineSink {
+  write(text: string): unknown;
+}
+
+/**
+ * Passes a child's stream on to `out` line by line, each complete line redacted by exact value
+ * against `secrets()` (read for every line, so a value learned later is covered from then on) and
+ * written with "\n". Lines are completed before redaction, so a value split across chunks is still
+ * seen whole; an unfinished last line is passed on (redacted) when the stream ends. A line longer
+ * than `maxLineBytes` is never buffered beyond it and is written as LINE_OMITTED. Resolves once the
+ * stream ended (or failed).
+ */
+export function pipeRedacted(
+  stream: NodeJS.ReadableStream,
+  out: LineSink,
+  secrets: () => readonly string[],
+  maxLineBytes: number = PASSTHROUGH_LINE_BYTES,
+): Promise<void> {
+  const feed = new LineFeed(maxLineBytes, (line) => {
+    out.write(`${line === LINE_OMITTED ? line : redactExact(line, secrets())}\n`);
+  });
+  // A multi-byte character split across chunks is decoded whole.
+  const decoder = new StringDecoder("utf8");
+  let ended = false;
+  return new Promise((resolve) => {
+    stream.on("data", (chunk: string | Buffer) => feed.push(typeof chunk === "string" ? chunk : decoder.write(chunk)));
+    const done = (): void => {
+      if (!ended) {
+        ended = true;
+        feed.push(decoder.end());
+        feed.end();
+      }
+      resolve();
+    };
+    stream.once("end", done);
+    stream.once("error", done);
+    stream.once("close", done);
+  });
 }
 
 export interface WorkerDiagnostic {

@@ -7,7 +7,7 @@
  * Nothing secret is logged (see Logger in common.ts); a setup body is never logged.
  */
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readdirSync, readFileSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { postCapped, stderrLogger, uploadFile, withRound, type Logger } from "./common.js";
@@ -65,11 +65,85 @@ export function signalGroup(
   }
 }
 
-/** Whether anything of ours is left in the child's process group (false once ESRCH or EPERM, or with no pid). */
-function groupAlive(child: GroupSignalTarget): boolean {
-  if (child.pid === undefined) return false;
+/** One process as /proc/<pid>/stat shows it. */
+export interface ProcEntry {
+  pid: number;
+  /** Its process group. */
+  pgid: number;
+  /** The one-letter state: `Z` is a zombie (exited, not yet reaped: it can no longer run or write). */
+  state: string;
+}
+
+/** The pid, state and process group of a /proc/<pid>/stat line, or undefined when it cannot be read. */
+export function parseProcStat(text: string): ProcEntry | undefined {
+  // "<pid> (<comm>) <state> <ppid> <pgrp> ...": comm may hold spaces and parentheses, so the fields
+  // after it are read from the last ")".
+  const open = text.indexOf(" (");
+  const close = text.lastIndexOf(")");
+  if (open <= 0 || close < open) return undefined;
+  const pid = Number(text.slice(0, open));
+  const [state, , pgrp] = text
+    .slice(close + 1)
+    .trim()
+    .split(/\s+/);
+  const pgid = Number(pgrp);
+  if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(pgid) || state === undefined || state === "")
+    return undefined;
+  return { pid, pgid, state };
+}
+
+/** Every process /proc shows, or undefined when there is no /proc to read (not Linux). */
+export function readProcTable(root = "/proc"): ProcEntry[] | undefined {
+  let names: string[];
   try {
-    process.kill(-child.pid, 0);
+    names = readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  const entries: ProcEntry[] = [];
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const entry = parseProcStat(readFileSync(join(root, name, "stat"), "utf8"));
+      if (entry) entries.push(entry);
+    } catch {
+      // Gone since the listing.
+    }
+  }
+  return entries;
+}
+
+/** What `endGroup` uses to signal and look at processes (a seam for tests). */
+export interface ProcessSeams {
+  kill: (pid: number, signal: NodeJS.Signals | 0) => unknown;
+  /** The process table, or undefined when it cannot be read (then liveness falls back to kill 0). */
+  procs: () => ProcEntry[] | undefined;
+  /** Whether this bridge is the actor's PID 1 (only then is everything else swept). */
+  isInit: () => boolean;
+  selfPid: number;
+}
+
+const defaultSeams = (): ProcessSeams => ({
+  kill: (pid, signal) => process.kill(pid, signal),
+  procs: () => readProcTable(),
+  isInit: () => process.pid === 1,
+  selfPid: process.pid,
+});
+
+/**
+ * Whether anything of ours that can still run is left in the child's process group. With /proc, a
+ * member counts only when it is not a zombie: as PID 1 the bridge is the parent of every orphan, and
+ * Node reaps only the children it spawned itself, so an orphan that exited stays a zombie (harmless:
+ * it can neither run nor write, and the actor ends with the run). Without /proc: kill(-pgid, 0),
+ * false once ESRCH or EPERM.
+ */
+function groupAlive(child: GroupSignalTarget, seams: ProcessSeams): boolean {
+  const pgid = child.pid;
+  if (pgid === undefined) return false;
+  const table = seams.procs();
+  if (table) return table.some((entry) => entry.pgid === pgid && entry.state !== "Z");
+  try {
+    seams.kill(-pgid, 0);
     return true;
   } catch (err) {
     const code = errnoOf(err);
@@ -77,29 +151,56 @@ function groupAlive(child: GroupSignalTarget): boolean {
   }
 }
 
+/** Whether any process but this bridge that can still run is left (false without /proc). */
+function othersAlive(seams: ProcessSeams): boolean {
+  return (seams.procs() ?? []).some((entry) => entry.pid !== seams.selfPid && entry.state !== "Z");
+}
+
 const GROUP_POLL_MS = 20;
-/** How long after the SIGKILL the group is waited for (it goes at once; this only bounds a stuck one). */
+/** How long after a SIGKILL its processes are waited for (they go at once; this only bounds a stuck one). */
 const GROUP_KILL_WAIT_MS = 2_000;
 
-async function waitGroupGone(child: GroupSignalTarget, ms: number): Promise<boolean> {
+async function waitUntil(gone: () => boolean, ms: number): Promise<boolean> {
   const until = Date.now() + ms;
   for (;;) {
-    if (!groupAlive(child)) return true;
+    if (gone()) return true;
     if (Date.now() >= until) return false;
     await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
   }
 }
 
 /**
- * Ends a child and every process it started (its process group): SIGTERM, up to `graceMs` for the
- * group to go, then SIGKILL to whatever is left, and a bounded wait for it to be gone.
+ * Ends a child and every process it started: SIGTERM to its process group, up to `graceMs` for the
+ * group to go, then SIGKILL to whatever is left, and a bounded wait for it to be gone. Then, only
+ * when this bridge is the actor's PID 1, a sweep: kill(-1, SIGKILL) reaches every process this bridge
+ * may signal but itself (POSIX), so a tool process that left the group (setsid/setpgid) cannot change
+ * the workspace while it is read either. Every process in the actor runs as the bridge's uid, and the
+ * actor holds nothing else that must survive (the bridge starts tar only after this). Never on a dev
+ * host or in tests, where -1 would reach the user's other processes.
  */
-export async function endGroup(child: GroupSignalTarget, graceMs: number, log: Logger): Promise<void> {
-  if (child.pid === undefined) return;
-  signalGroup(child, "SIGTERM", undefined, log);
-  if (await waitGroupGone(child, graceMs)) return;
-  signalGroup(child, "SIGKILL", undefined, log);
-  if (!(await waitGroupGone(child, GROUP_KILL_WAIT_MS))) log("substrate_bridge_group_still_running");
+export async function endGroup(
+  child: GroupSignalTarget,
+  graceMs: number,
+  log: Logger,
+  seams: ProcessSeams = defaultSeams(),
+): Promise<void> {
+  if (child.pid !== undefined) {
+    signalGroup(child, "SIGTERM", seams.kill, log);
+    if (!(await waitUntil(() => !groupAlive(child, seams), graceMs))) {
+      signalGroup(child, "SIGKILL", seams.kill, log);
+      if (!(await waitUntil(() => !groupAlive(child, seams), GROUP_KILL_WAIT_MS)))
+        log("substrate_bridge_group_still_running");
+    }
+  }
+  if (!seams.isInit()) return;
+  try {
+    seams.kill(-1, "SIGKILL");
+  } catch (err) {
+    // ESRCH: nothing else was left.
+    if (errnoOf(err) !== "ESRCH") log("substrate_bridge_sweep_failed", { errno: errnoOf(err) ?? "unknown" });
+    return;
+  }
+  if (!(await waitUntil(() => !othersAlive(seams), GROUP_KILL_WAIT_MS))) log("substrate_bridge_sweep_still_running");
 }
 
 /**

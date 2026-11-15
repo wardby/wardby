@@ -34,6 +34,7 @@ import {
   WARM_ROUNDS_ENV,
   WORKER_CONTEXT_ROOT,
 } from "./constants.js";
+import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 import { superviseWorker, TRANSCRIPT_DEADLINE_MS, type WorkerHandle } from "./worker-run.js";
@@ -93,13 +94,19 @@ export interface AgentHandle {
 }
 
 /**
- * The worker, with its stdout and stderr piped through the bridge (and passed on to the bridge's own,
- * so the actor's log is unchanged) so the bridge can read its last lines.
+ * The worker, with its stdout and stderr piped through the bridge so the bridge can read their last
+ * lines, and passed on to the bridge's own (the actor's log) line by line, redacted by exact value
+ * against `secrets` (the placeholder: the only secret value this actor holds).
  */
-const spawnWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
-  const child = spawn(process.execPath, [WORKER_ENTRY], { env, stdio: ["inherit", "pipe", "pipe"] });
-  child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
-  child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+export const spawnWorker = (
+  env: NodeJS.ProcessEnv,
+  secrets: () => readonly string[] = () => [PLACEHOLDER_CAPABILITY],
+  entry: string = WORKER_ENTRY,
+  out: { stdout: LineSink; stderr: LineSink } = process,
+): WorkerHandle => {
+  const child = spawn(process.execPath, [entry], { env, stdio: ["inherit", "pipe", "pipe"] });
+  void pipeRedacted(child.stdout, out.stdout, secrets);
+  void pipeRedacted(child.stderr, out.stderr, secrets);
   return {
     stdout: child.stdout,
     stderr: child.stderr,
