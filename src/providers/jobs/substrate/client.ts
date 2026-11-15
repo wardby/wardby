@@ -144,9 +144,10 @@ function volumeToWire(volume: ActorTemplateSpec["volumes"][number]): WireVolume 
       }),
     });
   }
-  // Relative to the volume; a fixed message, never the path.
-  if (volume.actorMetadata.path.startsWith("/")) throw new Error("substrate_template_invalid");
-  const dir = volume.actorMetadata.path.replace(/\/+$/, "");
+  // Relative to the volume and inside it (no `..` segment); a fixed message, never the path.
+  const path = volume.actorMetadata.path;
+  if (path.startsWith("/") || path.split("/").includes("..")) throw new Error("substrate_template_invalid");
+  const dir = path.replace(/\/+$/, "");
   const item = (field: ActorMetadataField, file: string) =>
     create(ActorMetadataItemSchema, { field, path: dir ? `${dir}/${file}` : file });
   return create(VolumeSchema, {

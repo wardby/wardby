@@ -54,7 +54,7 @@ const REPOS_SPEC: JobSpec = { ...fakeClaudeSpec(), repositories: REPOSITORIES };
 const REPOS_CODEX_SPEC: JobSpec = { ...fakeCodexSpec(), repositories: REPOSITORIES };
 
 describe("substrate spec builders", () => {
-  it("pins the tool and Codex template names (with the bridge command)", () => {
+  it("pins the agent, tool and Codex template names (with the bridge command)", () => {
     expect(agentTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-agent-e531f66094b4abb3");
     expect(toolTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-tool-4e75abf2e2df9092");
     expect(codexTemplate(fakeCodexSpec(), CONFIG).name).toBe("wardby-codex-43f51d8682886d7b");

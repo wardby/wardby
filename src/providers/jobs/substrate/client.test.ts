@@ -282,6 +282,31 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(called).toBe(false);
   });
 
+  it.each(["..", "../escape", "actor/../..", "actor/.."])(
+    "refuses an actorMetadata path with a .. segment before any call: %s",
+    async (path) => {
+      let called = false;
+      const api = control({
+        createActorTemplate: (req: CreateActorTemplateRequest) => {
+          called = true;
+          return req.actorTemplate;
+        },
+      });
+      const error = await api.ensureActorTemplate(metadataTemplate(path)).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("substrate_template_invalid");
+      expect(called).toBe(false);
+    },
+  );
+
+  it("accepts an actorMetadata path whose name only contains dots", async () => {
+    const api = control({ createActorTemplate: (req: CreateActorTemplateRequest) => req.actorTemplate });
+    await api.ensureActorTemplate(metadataTemplate("actor..d/meta"));
+  });
+
   it("puts the files at the volume root for an empty path", async () => {
     let template: CreateActorTemplateRequest | undefined;
     const api = control({
