@@ -3,6 +3,7 @@ import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
 import { defaultRepositoryName } from "../../coding/repository-names.js";
+import { systemPromptSha256 } from "../jobs/warm-fingerprint.js";
 
 const db = createPrismaClient();
 const suffix = randomUUID();
@@ -32,6 +33,140 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.principal.deleteMany({ where: { id: principalId } });
     await db.$disconnect();
+  });
+
+  it("warm rounds: finds the round a continuation follows, records warmStart, and loads the prompt's hash", async () => {
+    const ids = ["root", "round2", "round3", "later"].map((name) => `container-warm-${name}-${randomUUID()}`);
+    const [root, round2, round3, later] = ids;
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 14, 12, 0, seconds));
+    const coding = (runId: string, rootCodingRunId: string | null, commitSha: string | null) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${root}`,
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+      result: commitSha ? { outcome: "pull_request_updated", commitSha } : undefined,
+    });
+    try {
+      for (const [index, id] of ids.entries()) {
+        await db.run.create({ data: { id, agentId, executionManaged: true, startedAt: at(index) } });
+      }
+      await db.codingRun.create({ data: coding(root, null, "1".repeat(40)) });
+      await db.codingRun.create({ data: coding(round2, root, "2".repeat(40)) });
+      await db.codingRun.create({ data: coding(round3, root, null) });
+      await db.codingRun.create({ data: coding(later, root, null) });
+      const store = new PrismaContainerExecutionStore(db);
+      // The newest other run of the tree dispatched before this one, never a later one.
+      await expect(store.previousRound(round2, root)).resolves.toEqual({ runId: root, commitSha: "1".repeat(40) });
+      await expect(store.previousRound(round3, root)).resolves.toEqual({ runId: round2, commitSha: "2".repeat(40) });
+      await expect(store.previousRound(later, root)).resolves.toEqual({ runId: round3, commitSha: null });
+      await expect(store.previousRound(root, root)).resolves.toBeNull();
+      await expect(store.previousRound("missing", root)).resolves.toBeNull();
+
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBeNull();
+      await store.recordWarmStart(round2, true);
+      await store.recordWarmStart(round3, false);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBe(true);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round3 } })).warmStart).toBe(false);
+
+      await expect(store.load(round2)).resolves.toMatchObject({
+        systemPromptSha256: systemPromptSha256("code safely"),
+        warmStart: true,
+      });
+
+      // The launch fingerprint: absent until recorded, then loaded as written.
+      expect(await store.load(round3)).not.toHaveProperty("warmFingerprint");
+      const fingerprint = "d".repeat(64);
+      await store.recordWarmFingerprint(round3, fingerprint);
+      await expect(store.load(round3)).resolves.toMatchObject({ warmFingerprint: fingerprint, warmStart: false });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
+  it("warm rounds: loads the run's secrets as identity and version only, and a rotation changes the version", async () => {
+    const runId = `container-secrets-${randomUUID()}`;
+    const fakeValue = `sk-fake-${randomUUID()}`;
+    const secret = await db.secret.create({
+      data: { name: `API_KEY_${suffix}`, ciphertext: `ct:${fakeValue}`, keyId: "appkey:test", ownerId: principalId },
+    });
+    const server = await db.mcpServer.create({
+      data: {
+        ownerId: principalId,
+        name: `docs-${suffix}`,
+        url: "https://mcp.example/mcp",
+        secretNames: [secret.name, "MISSING"],
+      },
+    });
+    try {
+      await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: "API_KEY" } });
+      await db.agentMcpServer.create({
+        data: { agentId, serverId: server.id, allowedTools: ["search"], attachedById: principalId },
+      });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "claude-code",
+          model: "claude-sonnet-5",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      // Read only when something needs them: warm rounds, or a session-resume run's transcript.
+      expect((await new PrismaContainerExecutionStore(db).load(runId))!.secretVersions).toBeUndefined();
+      const store = new PrismaContainerExecutionStore(db, { warmRounds: true });
+      const loaded = await store.load(runId);
+      const at = secret.updatedAt.toISOString();
+      expect(loaded!.secretVersions).toEqual([
+        { id: secret.id, name: "API_KEY", updatedAt: at },
+        { id: secret.id, name: `mcp:${server.name}/${secret.name}`, updatedAt: at },
+      ]);
+      expect(JSON.stringify(loaded)).not.toContain(fakeValue);
+
+      await db.secret.update({ where: { id: secret.id }, data: { ciphertext: `ct:${fakeValue}-rotated` } });
+      const rotated = await store.load(runId);
+      expect(rotated!.secretVersions![0].updatedAt).not.toBe(at);
+
+      await db.agentSecret.deleteMany({ where: { agentId, secretId: secret.id } });
+      expect((await store.load(runId))!.secretVersions!.map((v) => v.name)).toEqual([
+        `mcp:${server.name}/${secret.name}`,
+      ]);
+
+      // Session resume with warm rounds off still reads them, and the launch versions round-trip
+      // as identity and version only (an extra field, such as a value, is never written).
+      await db.codingRun.update({ where: { runId }, data: { sessionResume: true } });
+      const resumeStore = new PrismaContainerExecutionStore(db);
+      const launched = (await resumeStore.load(runId))!.secretVersions!;
+      expect(launched).toHaveLength(1);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toBeUndefined();
+      await resumeStore.recordLaunchSecretVersions(runId, [{ ...launched[0], value: fakeValue } as never]);
+      const stored = await db.codingRun.findUnique({ where: { runId }, select: { launchSecretVersions: true } });
+      expect(stored!.launchSecretVersions).toEqual(launched);
+      expect(JSON.stringify(stored)).not.toContain(fakeValue);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toEqual(launched);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+      await db.agentMcpServer.deleteMany({ where: { agentId } });
+      await db.agentSecret.deleteMany({ where: { agentId } });
+      await db.mcpServer.deleteMany({ where: { id: server.id } });
+      await db.secret.deleteMany({ where: { id: secret.id } });
+    }
   });
 
   it("loads the agent's current profile repository and its authorization stamp with the run", async () => {

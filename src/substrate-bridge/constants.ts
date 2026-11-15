@@ -39,3 +39,15 @@ export const WORKER_OUTPUT_TAIL = { lines: 200, bytes: 64 * 1024 } as const;
 export const DIAGNOSTICS_TAIL = { lines: 40, bytes: 8 * 1024 } as const;
 /** What an exact secret value is replaced with in a diagnostics tail. */
 export const REDACTED = "[redacted]";
+
+/**
+ * Warm rounds (SUBSTRATE_WARM_ROUNDS on the control plane): the templates set this env to "1"
+ * (specs.ts WARM_ROUNDS_ENV), and the bridges then stay for a follow-up round instead of idling.
+ */
+export const WARM_ROUNDS_ENV = "WARDBY_SUBSTRATE_WARM_ROUNDS";
+/** The worker's native-mode context directory (claude-coding-worker/context.ts CONTEXT_ROOT): made afresh each round. */
+export const WORKER_CONTEXT_ROOT = "/tmp/wardby-context";
+/** The highest round (names.ts MAX_ROUND). */
+export const MAX_ROUND = 1000;
+/** How long a bridge waits between asks for the next round's file. */
+export const NEXT_ROUND_POLL_MS = 1_000;

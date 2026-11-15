@@ -111,7 +111,13 @@ import {
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { serviceRefusalSentence } from "../coding/services/wording.js";
-import { CONTINUATION_CLOSED_SENTENCE, isContinuationClosedError } from "../coding/continuation-wording.js";
+import {
+  CONTINUATION_CLOSED_SENTENCE,
+  CONTINUATION_REQUIRES_CODING_ERROR,
+  CONTINUATION_REQUIRES_CODING_MESSAGE,
+  CONTINUATION_SAME_OWNER_MESSAGE,
+  isContinuationClosedError,
+} from "../coding/continuation-wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus, pullRequestOutcome } from "./host-status.js";
 import {
@@ -355,7 +361,7 @@ export async function authorizeDelegation(
       (args.grantParentMemoryKeys?.length ?? 0) > 0
         ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
         : args.continuePriorRun !== undefined
-          ? "continuePriorRun is only allowed when the sub-agent has the same owner."
+          ? CONTINUATION_SAME_OWNER_MESSAGE
           : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
             ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
             : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
@@ -366,8 +372,8 @@ export async function authorizeDelegation(
   if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
     return {
       refusal: JSON.stringify({
-        error: "continuation_requires_coding_agent",
-        message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
+        error: CONTINUATION_REQUIRES_CODING_ERROR,
+        message: CONTINUATION_REQUIRES_CODING_MESSAGE,
       }),
     };
   }

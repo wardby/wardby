@@ -639,6 +639,17 @@ model CodingRun {
   dependencyCacheResult Json?
   /// Fixed at dispatch: the profile's packageAuditMode when its window was open, else null.
   packageAuditMode      PackageAuditMode?
+  /// Substrate warm rounds only: true when this round resumed the previous round's parked workspace
+  /// and session, false when it started fresh. Null = not a continuation on Substrate with warm rounds.
+  warmStart             Boolean?
+  /// Substrate warm rounds only: the agent fingerprint (SHA-256 hex) computed once when the run
+  /// launched; a delivered round is retained under it. Null = warm rounds off or not computed.
+  warmFingerprint       String?
+  /// Claude Code runs (warm rounds, or session resume): every secret delivered to the run when it
+  /// launched, as identity and version only ([{ id, name, updatedAt }], core/secret-versions.ts),
+  /// never a value or a hash of one. Transcript capture compares it with the versions current then
+  /// and stores nothing when they differ. Null = not recorded (then no transcript is stored).
+  launchSecretVersions  Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -2359,10 +2370,26 @@ model SubstrateRun {
   nextChannel Int                     @default(1)
   /// Undelivered relay line bytes (back-pressure).
   relayBytes  Int                     @default(0)
+  /// Warm rounds: the round this row's actors are on (1 for a cold launch; an adopter's is the parked run's + 1).
+  round       Int                     @default(1)
+  /// Warm rounds, set when parked: the commit the round pushed and the agent fingerprint it ran with.
+  headSha     String?
+  fingerprint String?
+  /// Warm rounds: when the run was parked (null unless it was).
+  parkedAt    DateTime?
+  /// The run's agent (from the JobSpec); null on rows from before warm rounds.
+  agentId     String?
+  /// Warm rounds: why this continuation launched cold (not_parked | expired | actor_missing |
+  /// actor_not_suspended | branch_moved | fingerprint_changed | capacity); null when it adopted or
+  /// continued nothing.
+  coldReason  String?
   createdAt   DateTime                @default(now())
   updatedAt   DateTime                @updatedAt
   channels    SubstrateRelayChannel[]
   events      SubstrateRelayEvent[]
+
+  @@index([phase, parkedAt])
+  @@index([agentId, phase])
 }
 
 /// One socket connection between a run's agent and tool bridges.

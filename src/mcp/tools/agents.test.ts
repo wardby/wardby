@@ -1724,6 +1724,77 @@ describe("agent CRUD tools", () => {
     },
   });
 
+  describe("warm rounds: an agent's retained coding sandboxes", () => {
+    async function withExecutor(fail = false) {
+      const removed: string[] = [];
+      const seed = codingAgentSeed();
+      // Every column a stored profile has (the fake keeps only what it is seeded with).
+      const codingProfile = {
+        ...seed.codingProfile,
+        toolchain: "node" as const,
+        toolchainVersion: null,
+        workerImageRef: null,
+        workspaceDiskMb: null,
+      };
+      const db = fakeDb([{ ...seed, codingProfile }]);
+      const providers = {
+        ...fakeProviders,
+        executor: {
+          removeRetainedRounds: async (agentId: string) => {
+            removed.push(agentId);
+            if (fail) throw new Error("substrate_down");
+            return 1;
+          },
+        },
+      } as unknown as import("../context.js").McpProviders;
+      const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"], [], providers));
+      registerAgentTools(mcp);
+      return { client: await connectClient(mcp), removed };
+    }
+
+    it.each([
+      ["systemPrompt", { systemPrompt: "Something else." }],
+      ["workspaceDiskMb", { codingProfile: { workspaceDiskMb: 1024 } }],
+      ["toolchainVersion", { codingProfile: { toolchainVersion: "22" } }],
+    ])("update_agent changing %s removes them", async (_field, change) => {
+      const { client, removed } = await withExecutor();
+      try {
+        const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", ...change } });
+        expect(result.isError).toBeFalsy();
+        expect(removed).toEqual(["a1"]);
+      } finally {
+        await client.close();
+      }
+    });
+
+    it("update_agent changing nothing a fingerprint covers keeps them", async () => {
+      const { client, removed } = await withExecutor();
+      try {
+        for (const change of [{ name: "renamed" }, { budgetUsd: 2 }, { codingProfile: { baseRef: "develop" } }]) {
+          const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", ...change } });
+          expect(result.isError).toBeFalsy();
+        }
+        expect(removed).toEqual([]);
+      } finally {
+        await client.close();
+      }
+    });
+
+    it("delete_agent removes them, and a failed removal never fails the tool", async () => {
+      for (const fail of [false, true]) {
+        const { client, removed } = await withExecutor(fail);
+        try {
+          const result = await client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
+          expect(result.isError).toBeFalsy();
+          expect(removed).toEqual(["a1"]);
+        } finally {
+          await client.close();
+        }
+      }
+    });
+  });
+
   it.each([
     [["agents:write"], false],
     [["agents:write", "packages:approve"], true],

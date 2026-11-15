@@ -86,6 +86,13 @@ Things to know:
   to build on that branch. A continuation of a run (a lead agent revising its
   earlier work) fast-forwards the same branch. If that branch has moved, or is
   checked out in your repository, the run fails with `local_branch_conflict`.
+- To keep working on a run's branch yourself, pass
+  `trigger_agent {"agentId", "continuePriorRun": "<run id>", "task"}`. The
+  run continues on the first run's `wardby/run-<id>` branch. It is refused with
+  `no_pushed_branch` when that branch was never pushed (help article
+  `continue-coding-run`). On the Substrate launcher with warm rounds on, the
+  continuation can also resume the previous round's workspace (help article
+  `substrate-warm-rounds`); the pushed branch is still what it continues.
 - Wardby never deletes result branches. Remove one you no longer need with
   `git branch -D wardby/run-<run id>`.
 - `.wardby/services.yaml` works for local runs. It is read from the committed

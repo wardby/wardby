@@ -116,6 +116,16 @@ changes during it:
   it continues. Without a choice the call is refused with
   `repository_required`.
 
+- `trigger_agent` takes `continuePriorRun` (owner only): the id of a finished
+  earlier run of the same coding agent. The new run continues that run's
+  branch (its pull request, or for a local repository its pushed
+  `wardby/run-<id>` branch) in its repositories, so leave `baseRef` and
+  `repositories` out. A refusal starts with a fixed code (`unknown_run`,
+  `other_agent_run`, `not_a_coding_run`, `run_not_finished`,
+  `other_repository`, `no_pull_request`, `no_pushed_branch`, `other_owner`);
+  see the help article `errors/continuation-refused`. On the Substrate
+  launcher with warm rounds on, the round can resume the previous round's
+  workspace and session; see `substrate-warm-rounds`.
 - `trigger_agent` also takes `repositories`, and a webhook body
   `wardbyRepositories`, to choose the extra repositories of one run; see
   [Several repositories in one run](#several-repositories-in-one-run).
@@ -1153,6 +1163,16 @@ session in its own in-memory scratch of up to 80 MiB, which counts toward the
 run's memory, and reads at most 64 MiB of it when the run ends. Each run
 records a status of `stored`, `too_large`, `not_captured` or `failed`, with a
 short reason code and no content.
+
+**Secrets that change mid-run.** When the run launches, the server records
+which secrets the agent is given and when each last changed (identity and
+change time only, never a value). When the run ends it compares them with the
+current ones. If any secret changed in between (a new value, an OAuth sign-in
+or token refresh, a broker change, or a secret attached or detached, directly
+or through an MCP server), the session may hold an old value that redaction
+no longer knows, so nothing is stored: the status is `not_captured` with
+reason `secrets_changed`. Avoid rotating an agent's secrets while a run you
+want to resume is in progress.
 
 The blob store settings must be present on the **server process** (the
 control plane that launches coding runs), not only on the coding proxy. The

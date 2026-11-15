@@ -76,6 +76,11 @@ export class RoutingExecutor implements Executor {
     return executor.recover(handle);
   }
 
+  /** Only coding runs have retained sandboxes, so only the coding executor is asked. */
+  async removeRetainedRounds(agentId: string): Promise<number> {
+    return (await this.coding.removeRetainedRounds?.(agentId)) ?? 0;
+  }
+
   /** Only coding runs wait in the coding queue, so only the coding executor is asked. */
   async cleanupQueueTimeout(runId: string): Promise<void> {
     await this.coding.cleanupQueueTimeout?.(runId);

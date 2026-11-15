@@ -6,6 +6,7 @@ import {
   CodingTaskInputSchema,
   normalizeGitRef,
   composeCodingTask,
+  publicCodingRunResult,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
@@ -409,13 +410,33 @@ interface CodingBranch {
   mergeOrder?: number | null;
 }
 
-export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
+/**
+ * Why a continuation is refused. Dispatch itself gives all but other_agent_run and not_a_coding_run;
+ * a caller that names the run directly (trigger_agent's continuePriorRun, see checkContinuePriorRun
+ * in mcp/tools/trigger.ts) gives every code, before any run exists, and checks run_not_finished
+ * with the same isRunUnfinished rule. run_not_finished comes only from a dispatch that continues
+ * a run (trigger_agent, delegation), never from review-fix or mentions (see checkContinuation).
+ * Every code has a help article under help/errors/.
+ */
+export type ContinuationRefusal =
+  | "unknown_run"
+  | "other_repository"
+  | "no_pull_request"
+  | "no_pushed_branch"
+  | "other_owner"
+  | "other_agent_run"
+  | "not_a_coding_run"
+  | "run_not_finished";
 
 const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   unknown_run: "Cannot continue an unknown coding run.",
   other_repository: "Cannot continue a coding run from a different repository.",
   no_pull_request: "Cannot continue a coding run that never opened a pull request.",
+  no_pushed_branch: "Cannot continue a local-repository coding run that never pushed a branch.",
   other_owner: "Cannot continue a coding run opened by a different owner's agent.",
+  other_agent_run: "Cannot continue a run of a different agent; name a prior run of the agent you trigger.",
+  not_a_coding_run: "Cannot continue a run that has no coding run; it ended before its coding run was created.",
+  run_not_finished: "Cannot continue a coding run that has not finished; wait until it ends.",
 };
 
 /** A continuation refused because of the run it names. Its message is fixed text, safe to show the model. */
@@ -455,6 +476,12 @@ export type ContinuationCheck =
  * let this dispatch push to a PR another owner's agent controls. `undefined`
  * skips the check for callers that only ask "does this deployment know this
  * run at all" (a user-facing refusal message, not a dispatch).
+ *
+ * `options.requireFinished` refuses (run_not_finished) a run that is still pending or running.
+ * Only a dispatch that actually continues the run sets it (continuationRoot: trigger_agent's and a
+ * delegation's continuePriorRun). Review-fix and mentions call this only to validate the pull
+ * request's marker run, which may legitimately still be going: they wait (in_flight,
+ * root_in_flight) or decline (follow_up_running) on their own, so they leave it off.
  */
 export async function checkContinuation(
   reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
@@ -468,6 +495,7 @@ export async function checkContinuation(
    * defaults to the repository id's.
    */
   pullRequest?: { provider?: string; number?: number },
+  options?: { requireFinished?: boolean },
 ): Promise<ContinuationCheck> {
   const resolved = await resolveRunPullRequest(reader, {
     markerRunId: runId,
@@ -475,6 +503,7 @@ export async function checkContinuation(
     repository,
     ...(pullRequest?.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
     ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
+    ...(options?.requireFinished ? { requireFinished: true } : {}),
   });
   if (!resolved.ok) return resolved;
   const { root, repo } = resolved;
@@ -538,7 +567,8 @@ async function continuationRoot(
   repository: string,
   ownerId: string | null,
 ): Promise<{ runId: string; baseRef: string; headRef: string }> {
-  const check = await checkContinuation(reader, runId, repository, ownerId);
+  // A run that is still going has no final branch or pull request to continue yet.
+  const check = await checkContinuation(reader, runId, repository, ownerId, undefined, { requireFinished: true });
   if (check.ok) {
     if (check.root.repo.kind !== "default") throw new ContinuationRefusedError("other_repository");
     return check.root;
@@ -553,17 +583,39 @@ async function continuationRoot(
   const root = rootId
     ? await reader.codingRun.findUnique({
         where: { runId: rootId },
-        select: { runId: true, repository: true, baseRef: true, headRef: true },
+        select: { runId: true, repository: true, baseRef: true, headRef: true, result: true },
       })
     : null;
-  if (
-    !root ||
-    !sameRepository(root.repository, repository) ||
-    (await rootPullRequests(reader, root.runId)).length === 0
-  ) {
+  if (!root || !sameRepository(root.repository, repository)) throw new ContinuationRefusedError("no_pull_request");
+  // A local repository has no pull requests: its runs push their branch (wardby/run-<root id>) into
+  // the repository instead, and a follow-up continues on that branch exactly as a pull request
+  // continuation does on the pull request's head branch.
+  if (codeProviderOf(root.repository) === "local") {
+    if (!(await pushedRootBranch(reader, root))) throw new ContinuationRefusedError("no_pushed_branch");
+  } else if ((await rootPullRequests(reader, root.runId)).length === 0) {
     throw new ContinuationRefusedError("no_pull_request");
   }
   return { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
+}
+
+/**
+ * Whether the root's branch was pushed: the root's own result, or any continuation's, is
+ * branch_pushed on the root's head branch (a continuation pushes to the same branch).
+ */
+async function pushedRootBranch(
+  reader: Pick<DispatchTx, "codingRun">,
+  root: { runId: string; headRef: string; result: unknown },
+): Promise<boolean> {
+  const pushed = (value: unknown) => {
+    const result = publicCodingRunResult(value);
+    return result?.outcome === "branch_pushed" && result.headRef === root.headRef;
+  };
+  if (pushed(root.result)) return true;
+  const continuations = await reader.codingRun.findMany({
+    where: { rootCodingRunId: root.runId },
+    select: { result: true },
+  });
+  return continuations.some((continuation) => pushed(continuation.result));
 }
 
 /**

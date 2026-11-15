@@ -276,6 +276,7 @@ export function buildMcpProviders(): McpProviderComposition {
     repoAccess,
     power,
     secretCipher: secrets,
+    runSteps,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
     nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
   });

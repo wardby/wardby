@@ -28,7 +28,9 @@
  * task manager — a caller who guesses or is handed someone else's taskId
  * gets 404, not another principal's final text/cost.
  */
-import { dispatchRun } from "../../core/dispatch.js";
+import { ContinuationRefusedError, dispatchRun, type ContinuationRefusal } from "../../core/dispatch.js";
+import { isRunUnfinished, sameRepository } from "../../core/run-pull-request.js";
+import { atLeast } from "../../core/grants.js";
 import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
 import {
@@ -37,6 +39,11 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
   type AttributionIntent,
 } from "../../core/attribution.js";
+import {
+  CONTINUATION_REQUIRES_CODING_ERROR,
+  CONTINUATION_REQUIRES_CODING_MESSAGE,
+  CONTINUATION_SAME_OWNER_MESSAGE,
+} from "../../coding/continuation-wording.js";
 import { CodingBaseRefSchema, CodingTaskOverrideSchema, isLocalRepository } from "../../coding/protocol.js";
 import { loadLocalRepoRoots, resolveLocalRepository, LocalRepoError } from "../../coding/local-repo.js";
 import { localRepoWarnings } from "../../coding/local-repo-status.js";
@@ -46,7 +53,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { requireOwnedTask } from "../auth/ownership.js";
-import { assertAgentAccess } from "../auth/access.js";
+import { agentAccess, assertAgentAccess } from "../auth/access.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
@@ -60,6 +67,7 @@ const TriggerAgentSchema = z
     baseRef: CodingBaseRefSchema.optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
+    continuePriorRun: z.string().trim().min(1).max(128).optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -184,6 +192,59 @@ async function requireTriggerable<A extends TriggerableAgent>(
   return agent;
 }
 
+/**
+ * trigger_agent's continuePriorRun, checked before any run exists. Every refusal is a 400 (403 for a
+ * non-owner) whose message starts with its fixed code and carries only fixed text: the run id and
+ * any repository the caller sent are never echoed. Dispatch then applies the checks every
+ * continuation gets, whichever way it was asked for and whichever launcher runs it (the root's
+ * owner, its pull request or, for a local repository, its pushed branch: checkContinuation).
+ */
+async function checkContinuePriorRun(
+  ctx: McpRequestContext,
+  agent: { id: string; ownerId: string | null; kind: string },
+  priorRunId: string,
+  args: { baseRef?: string; repository?: string },
+): Promise<void> {
+  if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+    throw new McpError(403, `Agent "${agent.id}": ${CONTINUATION_SAME_OWNER_MESSAGE}`);
+  }
+  if (agent.kind !== "coding") {
+    throw new McpError(400, `${CONTINUATION_REQUIRES_CODING_ERROR}: ${CONTINUATION_REQUIRES_CODING_MESSAGE}`);
+  }
+  if (args.baseRef !== undefined) {
+    throw new McpError(
+      400,
+      "Invalid trigger_agent arguments: baseRef: a continuation works on its root run's branch; leave baseRef out.",
+    );
+  }
+  const refuse = (reason: ContinuationRefusal): never => {
+    const err = new ContinuationRefusedError(reason);
+    throw new McpError(400, `${err.reason}: ${err.message}`);
+  };
+  const prior = await ctx.db.run.findUnique({
+    where: { id: priorRunId },
+    select: { agentId: true, status: true, codingRun: { select: { repository: true, rootCodingRunId: true } } },
+  });
+  if (!prior) return refuse("unknown_run");
+  if (prior.agentId !== agent.id) {
+    // Only a caller who can read the other agent learns that the run exists.
+    const other = await ctx.db.agent.findUnique({ where: { id: prior.agentId }, select: { id: true, ownerId: true } });
+    const readable = other !== null && atLeast("agent", await agentAccess(ctx, other), "read");
+    return refuse(readable ? "other_agent_run" : "unknown_run");
+  }
+  if (!prior.codingRun) return refuse("not_a_coding_run");
+  if (isRunUnfinished(prior.status)) return refuse("run_not_finished");
+  if (args.repository !== undefined) {
+    const root = prior.codingRun.rootCodingRunId
+      ? await ctx.db.codingRun.findUnique({
+          where: { runId: prior.codingRun.rootCodingRunId },
+          select: { repository: true },
+        })
+      : prior.codingRun;
+    if (!root || !sameRepository(root.repository, args.repository)) return refuse("other_repository");
+  }
+}
+
 export function registerTriggerTool(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "trigger_agent",
@@ -205,6 +266,14 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           items: { type: "string" },
           description:
             "Coding agents only: link names (list_repositories) of the extra repositories for this run, replacing the agent's default set. [] = the default repository only.",
+        },
+        continuePriorRun: {
+          type: "string",
+          description:
+            "Coding agents only, owner only: the id of a finished prior run of this agent to continue. The new run works on that run's branch " +
+            "(its pull request, or for a local: repository its pushed wardby/run-<id> branch) in its repositories, instead of starting fresh. " +
+            "Leave baseRef and repositories out. Refusals start with a fixed code: unknown_run, other_agent_run, not_a_coding_run, run_not_finished, " +
+            "other_repository, no_pull_request, no_pushed_branch, other_owner (see search_help).",
         },
         review: {
           type: "object",
@@ -250,6 +319,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         }
         review = await resolveLocalReview(ctx, agent.id, args.review);
       }
+      if (args.continuePriorRun !== undefined) await checkContinuePriorRun(ctx, agent, args.continuePriorRun, args);
       if (
         agent.kind !== "coding" &&
         (args.task !== undefined ||
@@ -271,6 +341,8 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       // requested value.
       const refused = (err: unknown): never => {
         if (err instanceof RepositoryChoiceRefusedError) throw new McpError(400, `${err.code}: ${err.message}`);
+        // Fixed text with its fixed reason code (see ContinuationRefusedError).
+        if (err instanceof ContinuationRefusedError) throw new McpError(400, `${err.reason}: ${err.message}`);
         // Both messages carry their code and never a caller-written value or a ref file's content.
         if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
           throw new McpError(400, err.message);
@@ -284,6 +356,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
                 agentId: agent.id,
                 profile: agent.codingProfile,
                 requested: args.repository,
+                continuesCodingRunId: args.continuePriorRun,
               }).catch(refused)
             ).repository
           : undefined;
@@ -335,6 +408,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           codingBaseRef: args.baseRef,
           codingRepository: args.repository,
           codingRepositories: args.repositories,
+          continuesCodingRunId: args.continuePriorRun,
           attribution,
           task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
           triggeredById: ctx.principal.id,

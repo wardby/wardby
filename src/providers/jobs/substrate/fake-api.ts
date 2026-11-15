@@ -22,6 +22,11 @@ export interface FakeSubstrateOptions {
   workerSize?: Room;
   /** Every worker's labels (default `{}`). */
   workerLabels?: Record<string, string>;
+  /**
+   * A suspended actor keeps the room it was placed on (default: it gives it back), for tests of a
+   * backend where parked actors still take capacity.
+   */
+  suspendedHoldRoom?: boolean;
 }
 
 interface FakeActor {
@@ -74,10 +79,22 @@ export class FakeSubstrateApi implements SubstrateApi {
     const actor = this.actors.get(`${atespace}/${name}`);
     if (!actor) throw new SubstrateNotFoundError("substrate_not_found");
     if (actor.state === "RUNNING") return;
+    // Still holding its room (suspendedHoldRoom): it resumes where it was.
+    if (actor.worker !== undefined) {
+      actor.state = "RUNNING";
+      return;
+    }
     const worker = pickWorker(this.free(), this.sizeOf(atespace, actor));
     if (worker === undefined) throw new SubstrateExhaustedError("no worker has room");
     actor.state = "RUNNING";
     actor.worker = worker;
+  }
+  /** Like Substrate: a running actor gives back its room; a suspended one is returned as it is. */
+  async suspendActor(atespace: string, name: string): Promise<void> {
+    const actor = this.actors.get(`${atespace}/${name}`);
+    if (!actor) throw new SubstrateNotFoundError("substrate_not_found");
+    actor.state = "SUSPENDED";
+    if (!this.options.suspendedHoldRoom) delete actor.worker;
   }
   async deleteActor(atespace: string, name: string): Promise<void> {
     this.actors.delete(`${atespace}/${name}`);
@@ -124,7 +141,8 @@ export class FakeSubstrateApi implements SubstrateApi {
     const rooms = Array.from({ length: this.options.workers }, () => ({ ...size }));
     for (const [key, actor] of this.actors) {
       const room = actor.worker === undefined ? undefined : rooms[actor.worker];
-      if (actor.state !== "RUNNING" || !room) continue;
+      const holds = actor.state === "RUNNING" || (actor.state === "SUSPENDED" && this.options.suspendedHoldRoom);
+      if (!holds || !room) continue;
       const used = this.sizeOf(key.slice(0, key.indexOf("/")), actor);
       room.cpuMillicores -= used.cpuMillicores;
       room.memoryBytes -= used.memoryBytes;

@@ -27,7 +27,14 @@ import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport
 import { logger } from "../../../core/logger.js";
 import { redactExactSecretValues, withEscapedForms } from "../../../core/secret-spans.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
-import { BLOB, TOOL_ACTOR_JWT_HEADER, toolActorSubject } from "../../jobs/substrate/names.js";
+import {
+  BLOB,
+  MAX_ROUND,
+  parseRound,
+  roundBlob,
+  TOOL_ACTOR_JWT_HEADER,
+  toolActorSubject,
+} from "../../jobs/substrate/names.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../../jobs/worker-diagnostic.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../capability-hash.js";
@@ -61,8 +68,16 @@ export interface SubstrateRouteOptions {
   ledger: Pick<ProxyLedger, "findSessionByCapabilityHash">;
   /** Given the tool actor's `x-wardby-actor-jwt` value (`Bearer <jwt>`). */
   verifyActor: (actorJwt: string | undefined, expectedSubject: string) => Promise<IdentityResult>;
-  /** substrateRunToken */
-  tokenForRun: (runId: string) => string;
+  /**
+   * The run's token: substrateRunToken, or with warm rounds the token on the run's SubstrateRun row
+   * (an adopting run holds the parked run's token).
+   */
+  tokenForRun: (runId: string) => string | Promise<string>;
+  /**
+   * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): per-round files (`?round=n`, absent = 1) for the
+   * round in the token's round record. Off: every request is round 1, exactly as before.
+   */
+  warmRounds?: boolean;
   limits: { resultBytes: number; transcriptBytes: number; workspaceBytes: number };
   /** Long-poll wait (default 20 s). */
   pollWaitMs?: number;
@@ -234,9 +249,25 @@ export function createSubstrateRoutes(
   /** Runs whose tool setup this replica already deleted (saves a blob call on every later poll). */
   const setupDeleted = new Set<string>();
   const SETUP_DELETED_MAX = 10_000;
-  /** `<run token>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
+  /** The setupDeleted key: the run token, and with warm rounds its round. */
+  const setupKeyFor = (token: string, round: number): string => (options.warmRounds ? `${token}/${round}` : token);
+  /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
 
+  /**
+   * No live credential at rest: a capability works only while its session is active and in time, and
+   * only for the token its run holds now. The executor cancels a run's session as the run ends, before
+   * its actors may be parked (warm rounds), so a finished round's capability is refused here (401) on
+   * every route, the next round's input included; its registry-only token stops working the same way
+   * (the registry looks it up through the same session).
+   *
+   * One place accepts the capability after cancel: the control plane's run-steps ingress
+   * (src/core/run-steps/ingress.ts) checks only the deadline, and accepts until the deadline plus its
+   * grace, so a cancelled session's last steps still land. That is safe for a parked round: only the
+   * coding proxy's run-steps relay reaches the ingress (in-cluster or on the run's isolated network,
+   * reachable from the proxy alone), and the proxy relays steps only from requests it accepted, which
+   * need an active session.
+   */
   async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
     const key = request.headers["x-api-key"];
     if (typeof key !== "string" || key === "") return false;
@@ -245,8 +276,44 @@ export function createSubstrateRoutes(
       !!session &&
       session.status === "active" &&
       session.deadlineAt.getTime() > Date.now() &&
-      options.tokenForRun(session.runId) === token
+      (await options.tokenForRun(session.runId)) === token
     );
+  }
+
+  /** The round the token's actors are on (warm rounds: the launcher's round record; else 1). */
+  async function currentRound(token: string): Promise<number> {
+    if (!options.warmRounds) return 1;
+    const key = roundBlob(token);
+    const info = await options.blobs.head(key);
+    if (!info || info.sizeBytes > 1024) return 1;
+    try {
+      return parseRound((await options.blobs.get(key)).toString("utf8")) ?? 1;
+    } catch (error) {
+      if (error instanceof BlobStoreError && error.code === "not_found") return 1;
+      throw error;
+    }
+  }
+
+  /**
+   * The round a request is for (`?round=n`, absent = 1), which must be the token's current round:
+   * a download for another round is not there yet (404, the bridge waits); an upload is refused (409).
+   * Without warm rounds every request is round 1 (as before rounds existed), and a request for a round
+   * above 1 is refused the same way (a control plane with warm rounds behind a proxy without them must
+   * stall a follow-up round, never re-serve round 1's input).
+   */
+  async function roundFor(url: URL, token: string, kind: "download" | "upload"): Promise<number> {
+    const raw = url.searchParams.get("round");
+    if (raw !== null && !/^[1-9][0-9]{0,3}$/.test(raw)) throw new RouteError(400, "bad_request");
+    const requested = raw === null ? 1 : Number(raw);
+    if (requested > MAX_ROUND) throw new RouteError(400, "bad_request");
+    if (!options.warmRounds) {
+      if (requested === 1) return 1;
+      throw kind === "download" ? new RouteError(404, "not_found") : new RouteError(409, "round_mismatch");
+    }
+    if (requested !== (await currentRound(token))) {
+      throw kind === "download" ? new RouteError(404, "not_found") : new RouteError(409, "round_mismatch");
+    }
+    return requested;
   }
 
   async function toolAuth(request: IncomingMessage, token: string): Promise<boolean> {
@@ -364,14 +431,14 @@ export function createSubstrateRoutes(
   }
 
   /** The run's outcome is fixed once `done` exists: a later workspace report is refused. */
-  async function refuseOnceCollected(token: string): Promise<void> {
-    if (await options.blobs.head(BLOB.done(token))) throw new RouteError(409, "substrate_run_collected");
+  async function refuseOnceCollected(token: string, round = 1): Promise<void> {
+    if (await options.blobs.head(BLOB.done(token, round))) throw new RouteError(409, "substrate_run_collected");
   }
 
-  /** Writes `done` unless it exists (then the post is refused: the first report stands). */
-  async function writeDoneOnce(token: string, workspace: "ok" | "failed"): Promise<void> {
-    await refuseOnceCollected(token);
-    await options.blobs.put(BLOB.done(token), Buffer.from(JSON.stringify({ workspace })), {
+  /** Writes the round's `done` unless it exists (then the post is refused: the first report stands). */
+  async function writeDoneOnce(token: string, round: number, workspace: "ok" | "failed"): Promise<void> {
+    await refuseOnceCollected(token, round);
+    await options.blobs.put(BLOB.done(token, round), Buffer.from(JSON.stringify({ workspace })), {
       contentType: "application/json",
     });
   }
@@ -411,18 +478,21 @@ export function createSubstrateRoutes(
       const { relay, blobs, limits } = options;
       const channel = matched.channel ?? "";
       switch (matched.name) {
-        case "input":
+        case "input": {
           // The agent reached the proxy: record it (if not yet recorded) before the input is sent, so
           // a failed write answers 500 and the agent asks again, and the launcher's startup timeout
           // (no `started` record) never fires on a run that did start.
-          await sendBlob(response, BLOB.input(token), "application/json", counters, async () => {
-            if (!(await blobs.head(BLOB.started(token)))) {
-              await blobs.put(BLOB.started(token), Buffer.from("{}"), { contentType: "application/json" });
+          const round = await roundFor(url, token, "download");
+          await sendBlob(response, BLOB.input(token, round), "application/json", counters, async () => {
+            if (!(await blobs.head(BLOB.started(token, round)))) {
+              await blobs.put(BLOB.started(token, round), Buffer.from("{}"), { contentType: "application/json" });
             }
           });
           return;
+        }
         case "tool-setup":
           // Not deleted here: a lost response would strand the run. The first events poll deletes it.
+          await roundFor(url, token, "download");
           await sendBlob(response, BLOB.toolSetup(token), "application/json", counters);
           return;
         case "seed":
@@ -455,9 +525,18 @@ export function createSubstrateRoutes(
           return;
         }
         case "events": {
-          if (!setupDeleted.has(token)) {
-            await blobs.delete(BLOB.toolSetup(token));
-            setupDeleted.add(token);
+          // Warm rounds: per round (a later round stages a new tool setup under the same key), and a
+          // tool setup already gone is fine. Without them, exactly as before: one key per run, and a
+          // failed delete answers its error.
+          const setupKey = setupKeyFor(token, await currentRound(token));
+          if (!setupDeleted.has(setupKey)) {
+            const deleted = blobs.delete(BLOB.toolSetup(token));
+            await (options.warmRounds
+              ? deleted.catch((error: unknown) => {
+                  if (!(error instanceof BlobStoreError && error.code === "not_found")) throw error;
+                })
+              : deleted);
+            setupDeleted.add(setupKey);
             if (setupDeleted.size > SETUP_DELETED_MAX) {
               const oldest = setupDeleted.values().next().value;
               if (oldest !== undefined) setupDeleted.delete(oldest);
@@ -470,36 +549,51 @@ export function createSubstrateRoutes(
           return;
         }
         case "result": {
-          counters.bytes = await receiveBlob(request, BLOB.result(token), limits.resultBytes, clearBodyTimer);
+          const round = await roundFor(url, token, "upload");
+          counters.bytes = await receiveBlob(request, BLOB.result(token, round), limits.resultBytes, clearBodyTimer);
           await relay.requestCollect(token);
           sendJson(response, 200, {});
           return;
         }
-        case "transcript":
-          counters.bytes = await receiveBlob(request, BLOB.transcript(token), limits.transcriptBytes, clearBodyTimer);
+        case "transcript": {
+          const round = await roundFor(url, token, "upload");
+          counters.bytes = await receiveBlob(
+            request,
+            BLOB.transcript(token, round),
+            limits.transcriptBytes,
+            clearBodyTimer,
+          );
           sendJson(response, 200, {});
           return;
+        }
         case "workspace": {
-          await refuseOnceCollected(token);
-          counters.bytes = await receiveBlob(request, BLOB.workspace(token), limits.workspaceBytes, clearBodyTimer);
-          await writeDoneOnce(token, "ok");
+          const round = await roundFor(url, token, "upload");
+          await refuseOnceCollected(token, round);
+          counters.bytes = await receiveBlob(
+            request,
+            BLOB.workspace(token, round),
+            limits.workspaceBytes,
+            clearBodyTimer,
+          );
+          await writeDoneOnce(token, round, "ok");
           await relay.dropRelay(token);
-          setupDeleted.delete(token);
+          setupDeleted.delete(setupKeyFor(token, round));
           sendJson(response, 200, {});
           return;
         }
         case "exit": {
           // The worker exited without a usable result: record its code (and its own safe diagnostic,
           // if it printed one) and still collect the workspace.
+          const round = await roundFor(url, token, "upload");
           const report = await readExitReport(request);
-          if (!(await blobs.head(BLOB.exit(token)))) {
+          if (!(await blobs.head(BLOB.exit(token, round)))) {
             try {
               await relay.requestCollect(token);
             } catch (error) {
               // The relay was already dropped: the run was collected, so there is nothing left to queue.
               if (!(error instanceof RelayUnknownError)) throw error;
             }
-            await blobs.put(BLOB.exit(token), Buffer.from(JSON.stringify(report)), {
+            await blobs.put(BLOB.exit(token, round), Buffer.from(JSON.stringify(report)), {
               contentType: "application/json",
             });
           }
@@ -510,6 +604,8 @@ export function createSubstrateRoutes(
           // Operator diagnostics (CLAUDE.md's exception): the agent bridge's bounded stderr tail after
           // a failure, redacted here by exact value whatever the bridge did. It goes to the operator
           // log only: never a blob, the database, an answer, MCP, the viewer or a run record.
+          // Per round (warm rounds): each round's tail is its own; another round's post is refused (409).
+          const round = await roundFor(url, token, "upload");
           const raw = await readDiagnostics(request);
           counters.bytes = Buffer.byteLength(raw);
           const tail = redactExactSecretValues(raw, withEscapedForms(agentSecretValues(request)));
@@ -520,24 +616,28 @@ export function createSubstrateRoutes(
             );
             throw new RouteError(400, "bad_request");
           }
-          const seenKey = `${token}/${side}`;
+          const seenKey = `${token}/${round}/${side}`;
           if (!diagnosticsSeen.has(seenKey)) {
             diagnosticsSeen.add(seenKey);
             if (diagnosticsSeen.size > DIAGNOSTICS_SEEN_MAX) {
               const oldest = diagnosticsSeen.values().next().value;
               if (oldest !== undefined) diagnosticsSeen.delete(oldest);
             }
-            log.warn({ event: "substrate.diagnostics", runToken: token, side, tail }, "substrate actor diagnostics");
+            log.warn(
+              { event: "substrate.diagnostics", runToken: token, side, ...(round > 1 ? { round } : {}), tail },
+              "substrate actor diagnostics",
+            );
           }
           sendJson(response, 200, {});
           return;
         }
         case "workspace-failed": {
           // The tool bridge could not produce the workspace tar: say so and end the relay.
-          await refuseOnceCollected(token);
-          await writeDoneOnce(token, "failed");
+          const round = await roundFor(url, token, "upload");
+          await refuseOnceCollected(token, round);
+          await writeDoneOnce(token, round, "failed");
           await relay.dropRelay(token);
-          setupDeleted.delete(token);
+          setupDeleted.delete(setupKeyFor(token, round));
           sendJson(response, 200, {});
           return;
         }

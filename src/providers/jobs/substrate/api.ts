@@ -97,6 +97,11 @@ export interface SubstrateApi {
   getActor(atespace: string, name: string): Promise<ActorInfo | undefined>;
   /** Throws SubstrateExhaustedError when no worker has room. */
   resumeActor(atespace: string, name: string): Promise<void>;
+  /**
+   * Checkpoints a running actor and waits until its snapshot is in durable storage (warm rounds:
+   * the actors of a parked run). A SUSPENDED actor is success. Throws SubstrateNotFoundError.
+   */
+  suspendActor(atespace: string, name: string): Promise<void>;
   /** A missing actor is success. */
   deleteActor(atespace: string, name: string): Promise<void>;
   /**

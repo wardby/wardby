@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { describeSubstrateRunStoreContract } from "./run-store.contract.test-support.js";
 import { MemorySubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";
 
 const record: SubstrateRunRecord = {
@@ -72,4 +73,10 @@ describe("MemorySubstrateRunStore", () => {
     now = 4_000;
     expect((await store.reclaim("r1", new Date(9_000)))?.updatedAt).toEqual(new Date(4_000));
   });
+});
+
+describeSubstrateRunStoreContract("MemorySubstrateRunStore", {
+  store: (now) => new MemorySubstrateRunStore(now),
+  runs: async () => undefined,
+  id: (name) => `run-${name}`,
 });

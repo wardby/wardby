@@ -397,7 +397,9 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two. " +
       "lastStep is the newest step; get_run_steps lists them all. A coding run over several repositories also has " +
       "repositories, the run's other repositories in order (name, access, repository, requestedRef, resolvedSha, pullRequestNumber, pullRequestUrl, resultBranch, outcome; null when absent); the default repository is in codingResult, not in this list. A coding run has packageCount (packages the registry " +
-      "served it), packagePlan and packageRefusals; use get_run_packages for the packages themselves. request, " +
+      "served it), packagePlan and packageRefusals; use get_run_packages for the packages themselves. A follow-up round " +
+      "of a coding run on a deployment with warm rounds has warmStart: true when it resumed the previous round's " +
+      "workspace and session, false when it started fresh (its steps say why). request, " +
       `taskOverride, finalText and error come whole up to ${RUN_TEXT_FIRST_PAGE_CHARS} characters. A longer one comes ` +
       `as its first ${RUN_TEXT_FIRST_PAGE_CHARS} characters, a first page, not a cut: <field>More ({ next, total }) ` +
       "says so, and get_run_text with that field and offset next returns the rest.",
@@ -425,6 +427,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           budgetBaseUsd: true,
           budgetReservedUsd: true,
           budgetLimitUsd: true,
+          warmStart: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -516,6 +519,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
         ...(dependencyCache ? { dependencyCache } : {}),
         ...(codingRun?.prDescriptionOutcome ? { prDescriptionOutcome: codingRun.prDescriptionOutcome } : {}),
+        // Warm rounds: whether this continuation resumed the previous round's workspace and session.
+        ...(codingRun?.warmStart != null ? { warmStart: codingRun.warmStart } : {}),
         ...(localPr
           ? {
               review: {

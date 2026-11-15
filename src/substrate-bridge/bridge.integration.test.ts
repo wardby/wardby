@@ -432,6 +432,9 @@ describe("substrate bridges, end to end without Substrate", () => {
     agent = await runAgent(await workerOptions({ launchWorker: worker(true) }));
     await agent.uploaded;
     expect(posts).toEqual(["transcript", "result"]);
+    // The result asks the tool for the workspace: let that collect finish before teardown (its
+    // outcome is not the point here: the first part already stored this token's workspace).
+    await tool.collected;
   });
 
   it("does not let a stuck transcript upload hold back the exit report", async () => {
@@ -507,6 +510,9 @@ describe("substrate bridges, end to end without Substrate", () => {
     );
     await agent.uploaded;
     expect(JSON.parse((await readBlob(BLOB.exit(TOKEN))).toString())).toEqual({ code: 3 });
+    // The exit report asks the tool for the workspace: let that collect finish before the test's
+    // directory (and the tar shim in it) is removed, or the tar it runs cannot be found.
+    expect(await tool.collected).toBe("ok");
   });
 
   /** The tail the proxy logged at warn for one side (CLAUDE.md operator diagnostics), or undefined. */

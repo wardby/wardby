@@ -75,6 +75,7 @@ import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
+import { removeRetainedRounds } from "./retained-rounds.js";
 import {
   authorizeRepositoryForSet,
   canonicalLocalRepository,
@@ -115,6 +116,41 @@ function requireDebugTraceScope(ctx: McpRequestContext): void {
 }
 
 const agentsLog = logger.child({ module: "mcp-agents" });
+
+/** What a coding agent's warm-round fingerprint covers (warm-fingerprint.ts), as an agent row has it. */
+interface WarmFingerprintSource {
+  kind: string;
+  model: string;
+  systemPrompt: string;
+  codingProfile: {
+    provider: string;
+    repository: string;
+    toolchain: string;
+    toolchainVersion: string | null;
+    workerImageRef: string | null;
+    workspaceDiskMb: number | null;
+  } | null;
+}
+
+/** Whether an update changed anything a retained round's fingerprint covers. */
+function warmFingerprintChanged(before: WarmFingerprintSource, after: WarmFingerprintSource): boolean {
+  if (before.kind !== "coding") return false;
+  const a = before.codingProfile;
+  const b = after.codingProfile;
+  return (
+    after.kind !== before.kind ||
+    after.model !== before.model ||
+    after.systemPrompt !== before.systemPrompt ||
+    !a ||
+    !b ||
+    a.provider !== b.provider ||
+    a.repository !== b.repository ||
+    a.toolchain !== b.toolchain ||
+    a.toolchainVersion !== b.toolchainVersion ||
+    a.workerImageRef !== b.workerImageRef ||
+    a.workspaceDiskMb !== b.workspaceDiskMb
+  );
+}
 
 const MAX_DEBUG_TRACE_MINUTES = 24 * 60;
 
@@ -1146,6 +1182,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
+      // Warm rounds: a change to what a retained round's fingerprint covers ends its retained sandboxes
+      // now (a later round would start fresh anyway).
+      if (warmFingerprintChanged(before, agent)) await removeRetainedRounds(ctx, agent.id);
       if (debugTraceUntil !== undefined || debugTraceMaxMb !== undefined) {
         agentsLog.info(
           {
@@ -1301,6 +1340,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         }
         throw err;
       }
+      // Warm rounds: a deleted agent's retained coding sandboxes go too (best effort; they expire anyway).
+      await removeRetainedRounds(ctx, args.id);
       return textResult({ deleted: args.id });
     },
   });

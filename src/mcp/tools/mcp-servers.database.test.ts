@@ -104,9 +104,22 @@ type Call = (name: string, a?: Record<string, unknown>) => Promise<{ isError: bo
 
 async function connect(
   p: Principal,
-  options: { scopes?: string[]; roles?: string[]; cipher?: SecretCipher } = {},
+  options: { scopes?: string[]; roles?: string[]; cipher?: SecretCipher; removed?: string[] } = {},
 ): Promise<Call> {
-  const providers = { secrets: options.cipher ?? cipher, sandboxFetch: fake.impl } as unknown as McpProviders;
+  const removed = options.removed;
+  const executor = removed
+    ? {
+        removeRetainedRounds: async (agentId: string) => {
+          removed.push(agentId);
+          return 1;
+        },
+      }
+    : undefined;
+  const providers = {
+    secrets: options.cipher ?? cipher,
+    sandboxFetch: fake.impl,
+    ...(executor ? { executor } : {}),
+  } as unknown as McpProviders;
   const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL } });
   const ctx: McpRequestContext = {
     principal: p,
@@ -383,6 +396,55 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
     ok(await call("delete_mcp_server", { id }));
     expect(await db.mcpServer.findUnique({ where: { id } })).toBeNull();
     expect(await db.agentMcpServer.count({ where: { agentId: a.id } })).toBe(0);
+  });
+
+  describe("warm rounds: kept rounds go when the secrets an agent gets through a server change", () => {
+    it("attach (new, with secrets), detach, a secretNames change and delete remove the affected agents' rounds", async () => {
+      const p = await principal();
+      const removed: string[] = [];
+      const call = await connect(p, { removed });
+      const { id } = await register(call);
+      const a = await agent(p, "coding", "claude-code");
+      const b = await agent(p, "coding", "claude-code");
+      ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      expect(removed).toEqual([a.id]);
+      // Re-attaching only changes the allowlist: the secrets delivered are the same.
+      ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search", "get_issue"] }));
+      expect(removed).toEqual([a.id]);
+      ok(await call("attach_mcp_server", { agentId: b.id, serverId: id, allowedTools: ["search"] }));
+      removed.length = 0;
+
+      // The same names in another order change nothing; a new list removes every attached agent's rounds.
+      ok(await call("update_mcp_server", { id, secretNames: ["MCP_TOKEN"] }));
+      expect(removed).toEqual([]);
+      ok(await call("update_mcp_server", { id, secretNames: [] }));
+      expect(removed.sort()).toEqual([a.id, b.id].sort());
+      removed.length = 0;
+      ok(await call("update_mcp_server", { id, secretNames: ["MCP_TOKEN"] }));
+      expect(removed.sort()).toEqual([a.id, b.id].sort());
+      removed.length = 0;
+      ok(await call("update_mcp_server", { id, url: "https://mcp.example.com/mcp?team=other" }));
+      expect(removed).toEqual([]);
+
+      expect(ok(await call("detach_mcp_server", { agentId: a.id, serverId: id }))).toEqual({ detached: true });
+      expect(removed).toEqual([a.id]);
+      ok(await call("detach_mcp_server", { agentId: a.id, serverId: id }));
+      expect(removed).toEqual([a.id]);
+      removed.length = 0;
+
+      ok(await call("delete_mcp_server", { id }));
+      expect(removed).toEqual([b.id]);
+    });
+
+    it("attaching a server with no secrets removes nothing", async () => {
+      const p = await principal();
+      const removed: string[] = [];
+      const call = await connect(p, { removed });
+      const { id } = await register(call, "plain", []);
+      const a = await agent(p, "coding", "claude-code");
+      ok(await call("attach_mcp_server", { agentId: a.id, serverId: id, allowedTools: ["search"] }));
+      expect(removed).toEqual([]);
+    });
   });
 
   describe("coding agents", () => {

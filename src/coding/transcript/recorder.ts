@@ -5,6 +5,7 @@ import type { PrismaClient } from "#prisma";
 import { BlobStoreError, type BlobStore } from "../../providers/storage/types.js";
 import { loadRetentionDays } from "../../core/retention-days.js";
 import { withEscapedForms } from "../../core/secret-spans.js";
+import { sameSecretVersions, type SecretVersion } from "../../core/secret-versions.js";
 import { REDACTED, redactSecrets } from "../redact.js";
 import { sanitizeClaudeTranscript } from "./claude-code.js";
 import {
@@ -57,6 +58,13 @@ export interface RunTranscriptRecorderDeps {
    * the capability or the MCP token by now.
    */
   secretValues: (agentId: string) => Promise<string[]>;
+  /**
+   * The identity and version (never the value) of every secret delivered to the agent's runs, now
+   * (core/secret-versions.ts agentSecretVersions); rejects when they can't be read. Compared with the
+   * versions the run launched with: when any secret changed while the run ran, the session may hold
+   * a value redaction no longer knows, so nothing is stored.
+   */
+  secretVersions: (agentId: string) => Promise<SecretVersion[]>;
   retentionDays: number;
   /** The largest transcript stored, before compression (loadTranscriptMaxBytes). */
   maxBytes: number;
@@ -67,6 +75,11 @@ export interface RecordTranscriptInput {
   runId: string;
   agentId: string;
   provider: string;
+  /**
+   * The secret versions the run launched with (CodingRun.launchSecretVersions). Absent = not recorded:
+   * the run is treated as if its secrets changed, and nothing is stored.
+   */
+  launchSecretVersions?: readonly SecretVersion[];
   read: (maxBytes: number) => Promise<string | undefined>;
 }
 
@@ -75,7 +88,10 @@ export interface RecordTranscriptInput {
  * sanitised again here, then every string in each record (values and object keys) is redacted by exact
  * value against the agent's attached secret values (and their JSON-escaped forms); the run capability
  * (rrp_), the registry token (rrg_) and the MCP token (rmt_) are removed by their fixed token shape. Only that copy is stored.
- * Rows carry fixed codes, never content. Never throws.
+ * Nothing is stored (not_captured / secrets_changed) when any delivered secret changed since the run
+ * launched (compared by identity and version only, after the values are loaded): the session may
+ * hold an old value, or a warm round's resumed session the previous round's, that the current values
+ * would not redact. Rows carry fixed codes, never content. Never throws.
  */
 export class RunTranscriptRecorder {
   constructor(private readonly deps: RunTranscriptRecorderDeps) {}
@@ -121,6 +137,19 @@ export class RunTranscriptRecorder {
       secrets = await this.deps.secretValues(input.agentId);
     } catch {
       return { status: "failed", reason: "secrets_unavailable" };
+    }
+    // Read after the values: a secret that changes after this check was loaded at its old value above,
+    // so it is still redacted; one that changed before it is caught here.
+    const launched = input.launchSecretVersions;
+    if (!launched) return { status: "not_captured", reason: "secrets_changed", sessionId: sanitized.sessionId };
+    let current: SecretVersion[];
+    try {
+      current = await this.deps.secretVersions(input.agentId);
+    } catch {
+      return { status: "failed", reason: "secrets_unavailable" };
+    }
+    if (!sameSecretVersions(launched, current)) {
+      return { status: "not_captured", reason: "secrets_changed", sessionId: sanitized.sessionId };
     }
     const escaped = withEscapedForms(secrets);
     let lines: string[];

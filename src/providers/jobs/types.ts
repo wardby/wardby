@@ -31,6 +31,20 @@ export interface JobRepositoryMount {
 export interface JobSpec {
   kind: "coding-agent";
   runId: string;
+  /**
+   * The run's agent. Metadata only: no launcher's job depends on it, and it is left out of every
+   * spec hash, so a run dispatched before it was set relaunches with the same hash. The Substrate
+   * launcher records it on the run's row (warm rounds remove an agent's parked runs by it).
+   */
+  agentId?: string;
+  /**
+   * Set by the executor on a continuation (Substrate warm rounds): the run it continues and what that
+   * run must have been retained with for this one to adopt its sandbox — `headSha`, the head of the
+   * branch prepared for this round (40 or 64 lowercase hex), and `fingerprint`, the agent's
+   * (WARM_FINGERPRINT: 64 lowercase hex). A hint only: a launcher without warm rounds ignores it, and
+   * like agentId it is left out of every spec hash.
+   */
+  warm?: JobWarmStart;
   /** Omitted specs are legacy Codex jobs and retain the single-worker topology. */
   provider?: "codex" | "claude-code";
   image: string;
@@ -75,6 +89,39 @@ export interface JobSpec {
    */
   repositories?: JobRepositoryMount[];
 }
+
+/** A commit id: SHA-1 (40) or SHA-256 (64) lowercase hex. */
+export const WARM_HEAD_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** An agent fingerprint: SHA-256, 64 lowercase hex. */
+export const WARM_FINGERPRINT = /^[0-9a-f]{64}$/;
+
+/** JobSpec.warm: see there. */
+export interface JobWarmStart {
+  fromRunId: string;
+  headSha: string;
+  fingerprint: string;
+}
+
+/** What a succeeded job was retained with (WorkspaceJobLauncher.retain): the same shapes as JobWarmStart. */
+export interface JobRetention {
+  headSha: string;
+  fingerprint: string;
+}
+
+/** Why a continuation started on a fresh sandbox instead of the retained one (a fixed list). */
+export const WARM_COLD_REASONS = [
+  "not_parked",
+  "expired",
+  "actor_missing",
+  "actor_not_suspended",
+  "branch_moved",
+  "fingerprint_changed",
+  "capacity",
+] as const;
+export type WarmColdReason = (typeof WARM_COLD_REASONS)[number];
+
+/** Whether a continuation's launch adopted the retained sandbox, and if not, why. */
+export type WarmOutcome = { adopted: true } | { adopted: false; reason: WarmColdReason };
 
 /** Opaque provider reference. Callers persist both fields exactly as given. */
 export interface JobHandle {
@@ -207,4 +254,32 @@ export interface WorkspaceJobLauncher extends JobLauncher {
    * Codex and Claude Code. Absent means no services at all.
    */
   supportsServicesFor?(provider: CodingProvider): boolean;
+  /**
+   * Whether this launcher has warm rounds on (Substrate, SUBSTRATE_WARM_ROUNDS): only then does the
+   * executor ask for a previous round, set JobSpec.warm, retain, read warmOutcome or remove parks.
+   * Absent or false: every run takes the plain path (launch, collect, remove), even on a launcher
+   * that implements retain.
+   */
+  readonly warmRounds?: boolean;
+  /**
+   * Keeps a succeeded job's sandbox for the next round; false = it was removed instead. Called in
+   * place of `remove` only for a run that finished successfully and whose branch push succeeded,
+   * with the pushed commit and the agent's fingerprint (a continuation adopts the sandbox only when
+   * its JobSpec.warm carries the same two). A job that cannot be kept (not succeeded, retention off
+   * or full, a failed step) is removed as by `remove`, which then throws as `remove` does. Absent
+   * (Docker, Kubernetes): never retained, so callers `remove`.
+   */
+  retain?(handle: JobHandle, retention: JobRetention): Promise<boolean>;
+  /**
+   * For a job launched with JobSpec.warm: whether it adopted the retained sandbox, and if not why;
+   * undefined for any other job (or when the launcher has warm rounds off). Read from the backend's
+   * own record, so it answers after a control-plane restart too.
+   */
+  warmOutcome?(handle: JobHandle): Promise<WarmOutcome | undefined>;
+  /**
+   * Removes every sandbox retained for `filter.agentId`'s runs (the agent was deleted, changed what
+   * its fingerprint covers, or a run of it was stopped); how many went. Best effort: a park that
+   * could not be removed now is left to its expiry. Absent (Docker, Kubernetes): nothing is retained.
+   */
+  removeParked?(filter: { agentId: string }): Promise<number>;
 }

@@ -17,7 +17,15 @@ export interface SubstrateLaunchConfig {
   proxyHost: string;
   proxyPort: number;
   workerSelector?: Record<string, string>;
+  /**
+   * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): the templates tell both bridges to stay for a
+   * follow-up round instead of idling after their uploads. Absent or false: templates are unchanged.
+   */
+  warmRounds?: boolean;
 }
+
+/** The template env that switches the bridges into warm rounds (substrate-bridge/constants.ts WARM_ROUNDS_ENV). */
+export const WARM_ROUNDS_ENV = "WARDBY_SUBSTRATE_WARM_ROUNDS";
 
 const READY_PORT = 8080;
 const ACTOR_METADATA_DIR = "/run/ate/actor";
@@ -26,7 +34,11 @@ const TOOL_JWT_SECONDS = 600;
 
 /** Env shared by both templates. Lives in the template, so it must never hold a per-run value. */
 export function workerEnv(config: SubstrateLaunchConfig): { name: string; value: string }[] {
-  return [{ name: "WARDBY_PROXY_URL", value: `http://${config.proxyHost}:${config.proxyPort}` }];
+  return [
+    { name: "WARDBY_PROXY_URL", value: `http://${config.proxyHost}:${config.proxyPort}` },
+    // Not a per-run value: the same for every run of a deployment with warm rounds on.
+    ...(config.warmRounds ? [{ name: WARM_ROUNDS_ENV, value: "1" }] : []),
+  ];
 }
 
 interface Size {
@@ -115,6 +127,7 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
   };
 }
 
+/** The agent's one rule: the proxy, its X-Api-Key filled from the per-run Secret (named after the token). */
 export function agentEgress(token: string, config: SubstrateLaunchConfig): EgressRule[] {
   return [
     {

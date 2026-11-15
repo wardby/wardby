@@ -138,6 +138,126 @@ collected archive's entries count toward the extraction limit of 100,000
 entries, the `.git` ones included. See
 [Git history in coding runs](../help/git-history.md).
 
+## Warm rounds
+
+By default every round of a coding run (a continuation made with
+`trigger_agent`'s `continuePriorRun`, a lead's follow-up, a review fix round)
+starts new actors and a new workspace. With `SUBSTRATE_WARM_ROUNDS=true`, a
+finished round's two actors are suspended and kept, and the next round of the
+same chain resumes them: the workspace (including installed packages and build
+output) and the Claude session are still there, so the round skips the checkout
+and install and continues the conversation. See
+[Warm rounds on Substrate](../help/substrate-warm-rounds.md).
+
+A round is kept only when it is a Claude Code run that succeeded, its push
+succeeded and pushed changes (a round with no changes is not kept), and its
+session was cancelled (its credentials revoked). Any other
+round is removed, as without warm rounds. Rounds with git history (an agent
+with `codingProfile.gitHistory` set) always start fresh: Wardby rewrites
+the agent's commits before it pushes them, so a kept workspace's history would
+not match the pushed branch.
+
+### Turn it on
+
+Set `SUBSTRATE_WARM_ROUNDS=true` on **both** the control plane and the coding
+proxy, with the same value, and restart both. With it on only for the control
+plane, a follow-up round waits for the proxy and then fails with the
+[startup timeout](../help/errors/substrate-startup-timeout.md). With it on only
+for the proxy, rounds simply start fresh.
+
+| Variable                 | Where                   | Default | Purpose                                                                                      |
+| ------------------------ | ----------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `SUBSTRATE_WARM_ROUNDS`  | Control plane and proxy | `false` | `true` keeps a succeeded round's actors for the next round. Must match on both.              |
+| `SUBSTRATE_PARK_TTL_SEC` | Control plane           | `3600`  | How long a kept round may wait for its next round (60 to 86400 seconds), then it is removed. |
+| `SUBSTRATE_PARK_MAX`     | Control plane           | `10`    | The most rounds kept at once (0 to 1000). `0` keeps none, so every round starts fresh.       |
+
+Also:
+
+- The **Substrate ServiceAccount** Wardby's API token belongs to needs
+  permission for `SuspendActor` (besides the calls it already needs). Without
+  it, a finished round cannot be kept and the next round starts fresh.
+- The actor **templates change name** when warm rounds are on, so the first run
+  after you turn it on rebuilds the golden snapshots, as after any template
+  change. Turning it off again changes them back.
+- **Turning it off** removes every kept round when the control plane next
+  starts (and on its regular sweep), expired or not, with all of each run's
+  per-round files. Nothing is kept or resumed while it is off.
+
+### When a round starts fresh
+
+A continuation that cannot resume the kept round starts a normal fresh round.
+When the launcher reports how a round started, the round gets one run step line
+saying so (`get_run` shows `warmStart: true` or `false` on the round):
+
+| Step line                                                                        | Meaning                                                            |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Resumed the previous round's workspace and session                               | The round resumed warm.                                            |
+| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                    |
+| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                   |
+| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                   |
+| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).         |
+| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors were gone from Substrate or not in the suspended state. |
+| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                       |
+
+A round whose branch preparation merged the target branch into the working
+branch (a pull request whose base moved) also starts fresh, because the kept
+workspace lacks that merge; it writes no step line.
+
+### What is kept and what is removed
+
+- **Kept:** the workspace, including installed packages, and the Claude
+  session.
+- **Not kept:** background processes (the tool runner restarts for each round,
+  so a dev server or watcher started by one round is gone in the next) and
+  credentials (the round's run capability is revoked when it ends; the next
+  round gets a new one).
+- `stop_run` removes all of that agent's kept rounds.
+- `update_agent` removes them when it changes the agent's kind, provider,
+  model, system prompt, repository, toolchain, toolchain version, worker image
+  (`workerImageRef`) or workspace disk (`workspaceDiskMb`). `delete_agent`
+  removes them too.
+- A change to the agent's secrets through the MCP tools removes them:
+  `attach_secret`, `detach_secret`, `create_secret` with a new value for a
+  secret the agent gets (entered in the call or in the browser, or an OAuth
+  sign-in confirmed with its code) and `set_secret_broker`. This also covers
+  secrets of an MCP server attached to the agent. `delete_secret`,
+  `detach_mcp_server`, `delete_mcp_server`, `attach_mcp_server` (a new
+  attachment of a server with secrets) and `update_mcp_server` changing
+  `secretNames` remove them for the agents concerned. Any other change (an
+  OAuth token refresh, say) is caught by the check below.
+- A secret that changes while a round runs means that round's transcript is
+  not stored (`not_captured`, reason `secrets_changed`): a resumed session
+  holds the previous round's raw content, which redaction against the new
+  value would miss. This applies to every Claude Code run with session resume,
+  warm or not.
+- Removed or not, a kept round is resumed only when everything the next round
+  launches with matches the kept round: the agent, provider, model, system
+  prompt, repository, worker and tool images, CPU, memory and disk limits, and
+  the secrets delivered to the run (which secrets, and the version of each, so
+  a rotated or refreshed value counts as a change). Otherwise it starts fresh
+  with "the agent's settings changed". Wardby compares secrets by identity and
+  last change time only, never by value. A kept round's session holds the
+  values it saw, so a round after a secret change always starts fresh.
+- A kept round is removed when `SUBSTRATE_PARK_TTL_SEC` passes.
+- When more than `SUBSTRATE_PARK_MAX` rounds are kept, the oldest is removed.
+- When the WorkerPool is short of room, kept rounds are removed oldest first,
+  stopping once a removal frees no room, and never the one being continued.
+
+### Storage cost
+
+A kept round costs snapshot storage in Substrate until it expires or is
+removed. It does not reserve worker capacity. Size `SUBSTRATE_PARK_MAX` and
+`SUBSTRATE_PARK_TTL_SEC` against your storage budget: keep the TTL short if
+rounds rarely follow each other, and use `SUBSTRATE_PARK_MAX=0` to turn keeping
+off without turning warm rounds off. If your Substrate deployment counts
+suspended actors against worker capacity, kept rounds are removed oldest first
+when the WorkerPool is short of room (see above).
+
+### Diagnostics
+
+The proxy's `substrate.diagnostics` warn line carries a `round` field on rounds
+after the first, so a tail can be matched to its round.
+
 ## What is not supported
 
 A run that needs one of these fails at launch with
@@ -152,8 +272,9 @@ Use the Docker or Kubernetes launcher for them.
 - A custom worker image (`codingProfile.workerImageRef`): it has no Substrate
   bridge. Only the configured tool-runner images run, so a run dispatched with
   a tool-runner image you have since replaced is refused the same way.
-- Suspend and resume between rounds: every round starts new actors, as on the
-  other launchers.
+- Suspend and resume between rounds is off by default: every round starts new
+  actors, as on the other launchers. Turn it on with
+  [warm rounds](#warm-rounds).
 
 ## Troubleshooting
 
@@ -190,6 +311,9 @@ Known recovery steps:
   Substrate's identity provider, or the proxy cannot fetch its signing keys
   because it does not trust Substrate's CA (`NODE_EXTRA_CA_CERTS`). Runs then
   fail with `substrate_startup_timeout`.
+- **Every continuation starts fresh with warm rounds on.** Check that the
+  Substrate ServiceAccount may call `SuspendActor`, that
+  `SUBSTRATE_PARK_MAX` is above 0, and the step line's reason.
 - **Every actor request answers `invalid_host`.** `SUBSTRATE_PROXY_HOST` or
   `SUBSTRATE_PROXY_PORT` differs between the control plane and the proxy.
 

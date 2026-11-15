@@ -118,12 +118,21 @@ import {
 } from "../../core/budget-events.js";
 import {
   JobCapacityError,
+  WARM_FINGERPRINT,
+  WARM_HEAD_SHA,
   type JobHandle,
   type JobRepositoryMount,
   type JobResourceLimits,
+  type JobRetention,
   type JobSpec,
+  type JobWarmStart,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
+import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
+import { agentSecretVersions, parseSecretVersions } from "../../core/secret-versions.js";
+import { RUN_ID } from "../jobs/kubernetes-isolation.js";
+import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
+import type { RunStepSink } from "../../core/run-steps/types.js";
 import type {
   ContinuationOutcome,
   ContinuationTarget,
@@ -233,6 +242,23 @@ function pushedRecord(finalized: Awaited<ReturnType<VcsProvider["finalizeChanges
 }
 
 type FinalizeResult = Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
+
+/**
+ * Warm rounds: the commit a continuation's prepared workspace starts at (the branch tip it fetched),
+ * which a retained round must have pushed for this one to resume it. Undefined when the workspace is
+ * not just that commit: prepare merged the target branch into it, which the retained sandbox lacks.
+ */
+function warmHeadOf(workspace: PreparedWorkspace): string | undefined {
+  return workspace.continuation && !workspace.targetMerge ? workspace.baseCommit : undefined;
+}
+
+/** An error's class name for a log line (never its message). */
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
+}
+
+/** Warm rounds: the round a continuation follows and the commit it pushed (null when none). */
+type PreviousRound = { runId: string; commitSha: string | null };
 
 /** The last step of a merge order: every writer keeps CodingRun.mergeOrder within 1-99. */
 const MAX_MERGE_ORDER = 99;
@@ -746,6 +772,31 @@ export interface ContainerRunSnapshot {
   /** The run's catalog entry recorded at dispatch (Run.pricingSnapshot); null on runs from before the catalog. */
   pricingVersion: string | null;
   pricingSnapshot: unknown;
+  /**
+   * SHA-256 hex of the agent's system prompt as loaded (warm rounds' fingerprint); absent = unknown,
+   * and the run is then never retained and never asks to resume a retained round.
+   */
+  systemPromptSha256?: string;
+  /**
+   * Warm rounds: the agent fingerprint computed once when the run launched (CodingRun.warmFingerprint),
+   * the value a delivered round is retained under. Absent = not computed (warm rounds off, or a run
+   * launched without one): never retained.
+   */
+  warmFingerprint?: string;
+  /** Warm rounds: CodingRun.warmStart (null until a continuation's outcome is recorded). */
+  warmStart?: boolean | null;
+  /**
+   * Warm rounds: identity and version of every secret delivered to the run (secret-guard.ts
+   * agentSecretVersions), never a value. Absent = unknown (not read, or the read failed): the run is
+   * then never retained and never asks to resume a retained round.
+   */
+  secretVersions?: WarmSecretVersion[];
+  /**
+   * The secret versions (identity and version, never a value) recorded when the run launched
+   * (CodingRun.launchSecretVersions). Transcript capture stores nothing when they differ from the
+   * versions current then, or when none were recorded.
+   */
+  launchSecretVersions?: WarmSecretVersion[];
 }
 
 /**
@@ -872,6 +923,27 @@ export interface ContainerExecutionStore {
    * and run tree have room (budget-topup.ts). Optional: without it a run stops at its base.
    */
   topUpBudget?(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }>;
+  /**
+   * Warm rounds: the round a continuation follows, i.e. the newest other coding run of the same pull
+   * request tree (the root `rootRunId` and its continuations) dispatched before `runId`, with the
+   * commit its result pushed (null when it pushed none). Null when there is none. Optional: without
+   * it no continuation asks to resume a retained round.
+   */
+  previousRound?(runId: string, rootRunId: string): Promise<{ runId: string; commitSha: string | null } | null>;
+  /** Warm rounds: records CodingRun.warmStart (whether the continuation resumed the retained round). */
+  recordWarmStart?(runId: string, warmStart: boolean): Promise<void>;
+  /**
+   * Warm rounds: records CodingRun.warmFingerprint, the fingerprint the run launches with, so the
+   * round is retained under that value even after a restart. Optional: without it only the process
+   * that launched the run knows the value.
+   */
+  recordWarmFingerprint?(runId: string, fingerprint: string): Promise<void>;
+  /**
+   * Records CodingRun.launchSecretVersions: the identity and version (never the value) of every
+   * secret the run launches with, for transcript capture to compare with. Optional: without it no
+   * transcript is stored for the run.
+   */
+  recordLaunchSecretVersions?(runId: string, versions: readonly WarmSecretVersion[]): Promise<void>;
 }
 
 export interface CodingFailureAudit {
@@ -886,6 +958,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxConcurrent?: number;
       /** Configured issue trackers: a coding run this store ends failed/lost/budget_exhausted files a self-defect. */
       issueTrackers?: IssueTrackerRegistry;
+      /** Warm rounds are on (WorkspaceJobLauncher.warmRounds): secret versions are read for the fingerprint. */
+      warmRounds?: boolean;
     } = {},
   ) {}
 
@@ -926,6 +1000,14 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         })
       : null;
     const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
+    // The run's secrets, identity and version only (one query): for warm rounds' fingerprint, and for
+    // the versions a Claude Code run with session resume launches with (transcript capture compares
+    // them). A failed read leaves them unknown: never warm, and no transcript stored.
+    const secretVersions =
+      row.codingRun.provider === "claude-code" && (this.options.warmRounds === true || row.codingRun.sessionResume)
+        ? await agentSecretVersions(this.db, row.agentId).catch(() => undefined)
+        : undefined;
+    const launchSecretVersions = parseSecretVersions(row.codingRun.launchSecretVersions);
     return {
       repositories,
       runId: row.id,
@@ -986,7 +1068,42 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       repositoryLinkAuthorizedVia: link?.authorizedVia ?? null,
       pricingVersion: row.pricingVersion,
       pricingSnapshot: row.pricingSnapshot,
+      systemPromptSha256: systemPromptSha256(row.agent.systemPrompt),
+      ...(row.codingRun.warmFingerprint ? { warmFingerprint: row.codingRun.warmFingerprint } : {}),
+      warmStart: row.codingRun.warmStart,
+      ...(secretVersions ? { secretVersions } : {}),
+      ...(launchSecretVersions ? { launchSecretVersions } : {}),
     };
+  }
+
+  async previousRound(runId: string, rootRunId: string): Promise<{ runId: string; commitSha: string | null } | null> {
+    const self = await this.db.run.findUnique({ where: { id: runId }, select: { startedAt: true } });
+    if (!self) return null;
+    const prior = await this.db.codingRun.findFirst({
+      where: {
+        runId: { not: runId },
+        OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }],
+        run: { startedAt: { lt: self.startedAt } },
+      },
+      orderBy: [{ run: { startedAt: "desc" } }, { runId: "desc" }],
+      select: { runId: true, result: true },
+    });
+    if (!prior) return null;
+    const commitSha = (prior.result as { commitSha?: unknown } | null)?.commitSha;
+    return { runId: prior.runId, commitSha: typeof commitSha === "string" ? commitSha : null };
+  }
+
+  async recordWarmStart(runId: string, warmStart: boolean): Promise<void> {
+    await this.db.codingRun.update({ where: { runId }, data: { warmStart } });
+  }
+
+  async recordWarmFingerprint(runId: string, fingerprint: string): Promise<void> {
+    await this.db.codingRun.update({ where: { runId }, data: { warmFingerprint: fingerprint } });
+  }
+
+  async recordLaunchSecretVersions(runId: string, versions: readonly WarmSecretVersion[]): Promise<void> {
+    const launchSecretVersions = versions.map(({ id, name, updatedAt }) => ({ id, name, updatedAt }));
+    await this.db.codingRun.update({ where: { runId }, data: { launchSecretVersions } });
   }
 
   /**
@@ -1584,6 +1701,11 @@ export class RunCapabilityVault {
 export interface ContainerExecutorOptions {
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
+  /**
+   * The run-steps writer: a continuation on a launcher with warm rounds gets one fixed step line
+   * saying whether it resumed the previous round (warm-start-wording.ts). Absent = no line.
+   */
+  runSteps?: Pick<RunStepSink, "record">;
   store: ContainerExecutionStore;
   jobs: WorkspaceJobLauncher;
   vcs: VcsProvider;
@@ -1851,6 +1973,8 @@ export class ContainerExecutor implements Executor {
     if (status.state === "pending" && status.capacityRefused && this.options.store.requeueAfterCapacityRefusal) {
       return this.finishCapacityRequeue(run, run.jobHandle);
     }
+    // A continuation whose launching process died before it reported the warm outcome reports it now.
+    await this.reportMissingWarmStart(run, run.jobHandle);
     if (status.state === "pending" || status.state === "running") {
       await this.options.store.heartbeat(run.runId);
       return { state: "active" };
@@ -1874,6 +1998,14 @@ export class ContainerExecutor implements Executor {
     let claimId: string | null = null;
     let planned: JobHandle | undefined;
     let spendEnabled = Boolean(sessionId);
+    const resumed = Boolean(handle);
+    // Warm rounds: the round this continuation follows (only with warm rounds on), read once and only
+    // when needed: by the capacity probe or the launch.
+    const launchRun = run;
+    let previousRead: Promise<PreviousRound | null> | undefined;
+    const previousRound = (): Promise<PreviousRound | null> => (previousRead ??= this.previousRoundOf(launchRun));
+    // Warm rounds: the fingerprint the run launched with; a delivered round is retained under it.
+    let launchFingerprint = run.warmFingerprint;
     try {
       // A launched run resumed after a restart is checked the way recover() checks it: its cost so
       // far may be past the limit (a reply can cost more than its hold), and it is still delivered.
@@ -1882,7 +2014,7 @@ export class ContainerExecutor implements Executor {
         if (run.provisioningClaim) return;
         // No room in the cluster yet (the namespace quota): wait in the queue rather than claim a
         // slot and then fail when the API server refuses the job.
-        if (!(await this.fitsCluster(run))) return;
+        if (!(await this.fitsCluster(run, previousRound))) return;
         claimId = randomUUID();
         // "queued": every slot is taken; the run stays pending and
         // drainCodingQueue starts it when one frees. "unavailable": another
@@ -1967,7 +2099,21 @@ export class ContainerExecutor implements Executor {
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        const spec = this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) });
+        // Computed once, here, from the values the run launches with (an agent edited mid-run does not
+        // change it), and recorded before the launch so a restarted control plane retains under it too.
+        launchFingerprint = this.warmFingerprintOf(run);
+        if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
+        // The secret versions the run launches with (identity and version only), for transcript
+        // capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
+        if (run.provider === "claude-code" && run.sessionResume && run.secretVersions) {
+          const versions = run.secretVersions;
+          if (await this.recordLaunchSecretVersions(runId, versions)) run = { ...run, launchSecretVersions: versions };
+        }
+        const warm = this.warmStartFor(await previousRound(), warmHeadOf(workspace), launchFingerprint);
+        const spec = {
+          ...this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) }),
+          ...(warm ? { warm } : {}),
+        };
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         planned = this.options.jobs.plannedHandle?.(spec);
@@ -1980,7 +2126,9 @@ export class ContainerExecutor implements Executor {
         this.capacityRefusedAt.delete(runId);
         this.options.capabilities.delete(runId);
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
+        if (warm) await this.reportWarmStart(run, handle);
       }
+      if (resumed) await this.reportMissingWarmStart(run, handle);
 
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
@@ -1990,7 +2138,8 @@ export class ContainerExecutor implements Executor {
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
-          await this.finishTerminal(run, handle, status.state, workspaces ?? workspace, sessionId);
+          const finishing = launchFingerprint ? { ...run, warmFingerprint: launchFingerprint } : run;
+          await this.finishTerminal(finishing, handle, status.state, workspaces ?? workspace, sessionId);
           return;
         }
         if (status.state === "running" && !observedRunning) {
@@ -2436,7 +2585,22 @@ export class ContainerExecutor implements Executor {
   ): Promise<void> {
     const existingWorkspace = isRunWorkspaces(heldWorkspaces) ? heldWorkspaces.main : heldWorkspaces;
     const sessionId = existingSessionId ?? run.proxySessionId;
-    if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
+    // No live credential at rest (warm rounds): cancelling the session revokes the run's capability
+    // and its registry-only token (the proxy and the registry accept either only while the session is
+    // active). It happens first, and a job is retained only once it succeeded: when it cannot be
+    // confirmed, the job is removed as before, never parked holding a credential that still works.
+    const credentialsRevoked = sessionId
+      ? await this.options.sessions.cancelSession(sessionId).then(
+          () => true,
+          (error: unknown) => {
+            containerLog.warn(
+              { runId: run.runId, event: "coding.session_cancel_failed", errorName: errorName(error) },
+              "could not cancel a finished run's proxy session; it lapses at its deadline, and its job is not retained",
+            );
+            return false;
+          },
+        )
+      : true;
     // For notifyContinuationFinished in the `finally` below -- defaults to
     // "failed" and is only flipped right before a success or out-of-budget return.
     let outcome: ContinuationOutcome = "failed";
@@ -2454,6 +2618,8 @@ export class ContainerExecutor implements Executor {
     let merged: { mergeSentence?: string } = {};
     // Set when a run stopped at its budget still pushed its changes so far; says so on the host.
     let changesPushed: { pullRequestNumber?: number; repository?: string } | undefined;
+    // Warm rounds: set only once a succeeded run's push succeeded; the job is then retained, not removed.
+    let retention: JobRetention | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -2609,6 +2775,9 @@ export class ContainerExecutor implements Executor {
       }
       this.terminal(pushed.current, "succeeded");
       outcome = "succeeded";
+      if (finalized.outcome !== "no_changes" && credentialsRevoked) {
+        retention = this.retentionFor(run, finalized.commitSha);
+      }
       overrun = this.overrunDetails(pushed.current);
       if (finalized.outcome === "pull_request_updated" && finalized.targetMerge) {
         merged = { mergeSentence: mergeSentence(finalized.targetMerge) };
@@ -2634,7 +2803,7 @@ export class ContainerExecutor implements Executor {
       }
     } finally {
       if (run.sessionResume) await this.recordTranscript(run, handle);
-      await this.options.jobs.remove(handle).catch(() => undefined);
+      await this.releaseJob(handle, outcome === "succeeded" ? retention : undefined);
       const workspace = await this.cleanupWorkspaces(run, heldWorkspaces);
       // A run another process launched has no workspace here; its pull request still gets the final status.
       const target = workspace ?? this.continuationTargetOf(run);
@@ -2658,6 +2827,34 @@ export class ContainerExecutor implements Executor {
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
       await this.notifyTerminal(run.runId);
     }
+  }
+
+  /**
+   * Warm rounds: what a delivered run's job is retained with (the commit it pushed and its agent
+   * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code.
+   */
+  private retentionFor(run: ContainerRunSnapshot, headSha: string): JobRetention | undefined {
+    if (!this.warmRounds || !this.options.jobs.retain || run.provider !== "claude-code") return undefined;
+    // A git-history run's pushed commit is the control plane's rewrite, which the kept actor's .git
+    // never had: such a round is never kept (the next starts fresh, from that commit).
+    if (gitHistoryOf(run)) return undefined;
+    // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
+    const fingerprint = run.warmFingerprint;
+    if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;
+    return { headSha, fingerprint };
+  }
+
+  /**
+   * A finished run's job: retained for the next round when `retention` is set (a delivered success
+   * on a launcher that retains), removed otherwise, exactly as before. Never throws.
+   */
+  private async releaseJob(handle: JobHandle, retention: JobRetention | undefined): Promise<void> {
+    const { jobs } = this.options;
+    if (retention && this.warmRounds && jobs.retain) {
+      await jobs.retain(handle, retention).catch(() => jobs.remove(handle).catch(() => undefined));
+      return;
+    }
+    await jobs.remove(handle).catch(() => undefined);
   }
 
   /** Whether the run's workspace merged its pull request's target branch (PreparedWorkspace.targetMerge). */
@@ -3893,6 +4090,20 @@ export class ContainerExecutor implements Executor {
     return { state: "active" };
   }
 
+  async removeRetainedRounds(agentId: string): Promise<number> {
+    const removeParked = this.options.jobs.removeParked?.bind(this.options.jobs);
+    if (!this.warmRounds || !removeParked) return 0;
+    try {
+      return await removeParked({ agentId });
+    } catch (error) {
+      containerLog.warn(
+        { agentId, event: "coding.warm_remove_failed", errorName: errorName(error) },
+        "could not remove an agent's retained rounds; they expire on their own",
+      );
+      return 0;
+    }
+  }
+
   /**
    * After drainCodingQueue failed a queued run (coding_queue_timeout): releases what an earlier
    * attempt the cluster refused left behind, as stop() does for a queued run. A refused
@@ -3931,17 +4142,186 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * Warm rounds (on: WorkspaceJobLauncher.warmRounds): the round a Claude Code continuation follows,
+   * or null. Never throws; a failed read is a fresh round.
+   */
+  private async previousRoundOf(run: ContainerRunSnapshot): Promise<PreviousRound | null> {
+    const { jobs, store } = this.options;
+    if (!this.warmRounds || !jobs.retain || !store.previousRound || run.provider !== "claude-code") return null;
+    if (!run.rootCodingRunId) return null;
+    try {
+      return await store.previousRound(run.runId, run.rootCodingRunId);
+    } catch (error) {
+      containerLog.warn(
+        { runId: run.runId, event: "coding.warm_previous_round_unknown", errorName: errorName(error) },
+        "could not read the round a continuation follows; it starts fresh",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * The agent fingerprint (warm-fingerprint.ts) of the job this run launches with: its resolved
+   * images and limits, model, agent, system prompt, repository and secrets (identity and version
+   * only). Undefined when any is unknown
+   * (then nothing is retained or resumed), and for a run with git history (never warm: see
+   * retentionFor).
+   */
+  private warmFingerprintOf(run: ContainerRunSnapshot): string | undefined {
+    if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
+    if (gitHistoryOf(run) || !run.secretVersions) return undefined;
+    try {
+      const spec = this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true });
+      if (!spec.toolImage) return undefined;
+      const fingerprint = warmFingerprint({
+        agentId: run.agentId,
+        provider: run.provider,
+        model: run.model,
+        workerImage: spec.image,
+        toolImage: spec.toolImage,
+        cpu: spec.limits.cpus,
+        memoryMb: spec.limits.memoryMb,
+        diskMb: spec.limits.diskMb,
+        systemPromptSha256: run.systemPromptSha256,
+        repository: run.repository,
+        secrets: run.secretVersions,
+      });
+      return WARM_FINGERPRINT.test(fingerprint) ? fingerprint : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * JobSpec.warm for a continuation that follows `previous` from the commit `headSha` with the
+   * agent `fingerprint`, or undefined.
+   */
+  private warmStartFor(
+    previous: { runId: string } | null,
+    headSha: string | undefined,
+    fingerprint: string | undefined,
+  ): JobWarmStart | undefined {
+    if (!previous || !RUN_ID.test(previous.runId) || !headSha || !WARM_HEAD_SHA.test(headSha)) return undefined;
+    return fingerprint ? { fromRunId: previous.runId, headSha, fingerprint } : undefined;
+  }
+
+  /** Warm rounds are on (WorkspaceJobLauncher.warmRounds); off, every run takes the plain path. */
+  private get warmRounds(): boolean {
+    return this.options.jobs.warmRounds === true;
+  }
+
+  /**
+   * Records the secret versions the run launches with (CodingRun.launchSecretVersions). Best effort:
+   * never fails the launch; unrecorded, the run's transcript is not stored.
+   */
+  private async recordLaunchSecretVersions(runId: string, versions: WarmSecretVersion[]): Promise<boolean> {
+    const { store } = this.options;
+    if (!store.recordLaunchSecretVersions) return false;
+    return store.recordLaunchSecretVersions(runId, versions).then(
+      () => true,
+      (error: unknown) => {
+        containerLog.warn(
+          { runId, event: "coding.launch_secret_versions_unrecorded", errorName: errorName(error) },
+          "could not record the secret versions a run launched with; its transcript will not be stored",
+        );
+        return false;
+      },
+    );
+  }
+
+  /** Records the run's launch fingerprint (CodingRun.warmFingerprint). Best effort: never fails the launch. */
+  private async recordLaunchFingerprint(runId: string, fingerprint: string): Promise<void> {
+    await this.options.store.recordWarmFingerprint?.(runId, fingerprint).catch((error: unknown) => {
+      containerLog.warn(
+        { runId, event: "coding.warm_fingerprint_unrecorded", errorName: errorName(error) },
+        "could not record a run's launch fingerprint; only this process can retain its round",
+      );
+    });
+  }
+
+  /**
+   * A launched continuation whose warm outcome was never recorded (its launching process stopped
+   * before reportWarmStart): reports it now. The step line has a fixed id, so a second report
+   * writes no second line (RunStepWriter keeps one step per callId).
+   */
+  private async reportMissingWarmStart(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
+    if (!this.warmRounds || run.provider !== "claude-code" || !run.rootCodingRunId) return;
+    if (run.warmStart !== null && run.warmStart !== undefined) return;
+    // A continuation launched cold with no round to follow has no warm outcome (and no step line):
+    // it is recorded as not resumed, once, so later recover passes stop asking the launcher.
+    if ((await this.reportWarmStart(run, handle)) === "none") await this.recordWarmStart(run.runId, false);
+  }
+
+  /** Records CodingRun.warmStart. Best effort: never fails the run. */
+  private async recordWarmStart(runId: string, warmStart: boolean): Promise<void> {
+    await this.options.store.recordWarmStart?.(runId, warmStart).catch((error: unknown) => {
+      containerLog.warn(
+        { runId, event: "coding.warm_start_unrecorded", errorName: errorName(error) },
+        "could not record whether a continuation resumed the previous round",
+      );
+    });
+  }
+
+  /**
+   * After a continuation launched with JobSpec.warm: records whether it resumed the retained round
+   * (CodingRun.warmStart) and writes the run's fixed step line saying so (warm-start-wording.ts).
+   * Best effort: never fails the run. Only fixed text and a boolean leave here. Says what it found:
+   * `reported`, `none` (the launcher has no warm outcome for the job, or a cold one whose reason has
+   * no wording: nothing to report, then or later) or `unknown` (not read: ask again later).
+   */
+  private async reportWarmStart(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+  ): Promise<"reported" | "none" | "unknown"> {
+    const { jobs, runSteps } = this.options;
+    if (!this.warmRounds || !jobs.warmOutcome) return "unknown";
+    let outcome: Awaited<ReturnType<NonNullable<WorkspaceJobLauncher["warmOutcome"]>>>;
+    try {
+      outcome = await jobs.warmOutcome(handle);
+    } catch (error) {
+      containerLog.warn(
+        { runId: run.runId, event: "coding.warm_start_unknown", errorName: errorName(error) },
+        "could not read whether a continuation resumed the previous round",
+      );
+      return "unknown";
+    }
+    if (!outcome) return "none";
+    const line = warmStartLine(outcome);
+    // Only a cold outcome can lack wording (a reason outside the fixed list): reading it again finds
+    // the same, so it counts as no outcome and recover stops asking.
+    if (!line) return "none";
+    await this.recordWarmStart(run.runId, outcome.adopted);
+    await runSteps
+      ?.record(run.runId, {
+        steps: [{ kind: "said", callId: WARM_START_STEP_ID, text: line, truncated: false }],
+        results: [],
+      })
+      .catch(() => undefined);
+    return "reported";
+  }
+
+  /**
    * False when the launcher reports this run's job would not fit the cluster right now; the run
    * is then queued and drainCodingQueue retries it. Launchers and stores without the hooks, and
    * any error, answer true: the launch stays the authority.
    */
-  private async fitsCluster(run: ContainerRunSnapshot): Promise<boolean> {
+  private async fitsCluster(
+    run: ContainerRunSnapshot,
+    previousRound: () => Promise<PreviousRound | null>,
+  ): Promise<boolean> {
     const { jobs, store } = this.options;
     if (!jobs.hasCapacityFor || !store.markQueued) return true;
     // Asked before any workspace is prepared: the probe counts resources, which repositories don't change.
-    const fits = await jobs
-      .hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }))
-      .catch(() => true);
+    // A continuation's probe names the round it follows (warm rounds), so making room never removes
+    // the retained sandbox it is about to resume; the branch is not fetched yet, so the probe carries
+    // the commit that round pushed.
+    const previous = await previousRound();
+    const warm = this.warmStartFor(previous, previous?.commitSha ?? undefined, this.warmFingerprintOf(run));
+    const probe = {
+      ...this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }),
+      ...(warm ? { warm } : {}),
+    };
+    const fits = await jobs.hasCapacityFor(probe).catch(() => true);
     if (fits) return true;
     await store.markQueued(run.runId);
     this.emit({ stage: "queued", runId: run.runId });
@@ -3977,6 +4357,7 @@ export class ContainerExecutor implements Executor {
     return {
       kind: "coding-agent",
       runId: run.runId,
+      agentId: run.agentId,
       provider,
       image,
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
@@ -4212,6 +4593,7 @@ export class ContainerExecutor implements Executor {
             runId: run.runId,
             agentId: run.agentId,
             provider: run.provider,
+            ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
             read: (maxBytes) =>
               jobs.readTranscript ? jobs.readTranscript(handle, maxBytes) : Promise.resolve(undefined),
           }),
@@ -4281,7 +4663,10 @@ export class ContainerExecutor implements Executor {
       if (status?.state === "pending" || status?.state === "running") {
         await this.options.jobs.stop(run.jobHandle, "terminal_cleanup").catch(() => undefined);
       }
-      await this.options.jobs.collect(run.jobHandle).catch(() => undefined);
+      // With warm rounds on, this ended run's sandbox may have gone to a later round: its handle then
+      // reads succeeded with nothing to collect, so it is never collected here (what collect returns
+      // is discarded anyway). With warm rounds off every launcher is collected, as before.
+      if (!this.warmRounds) await this.options.jobs.collect(run.jobHandle).catch(() => undefined);
       await this.options.jobs.remove(run.jobHandle).catch(() => undefined);
     }
     const input = this.preflightForCleanup(run);

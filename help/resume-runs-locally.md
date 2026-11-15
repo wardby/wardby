@@ -40,6 +40,12 @@ blob store nothing is stored, and `update_agent` warns you.
 - Redacted: the values of the agent's attached secrets, plus the run's
   capability and registry token by their token shape. If the agent's secrets
   cannot be loaded, nothing is stored.
+- Not stored when one of the agent's secrets changed while the run ran (a new
+  value, an OAuth sign-in or token refresh, a broker change, or a secret
+  attached or detached, directly or through an MCP server): the session may
+  hold the old value, which redaction no longer knows. The status is
+  `not_captured` with reason `secrets_changed`. Wardby compares the secrets by
+  identity and last change time only, never by value.
 - Stored for runs that finish, stop at their budget, or fail. Not stored for
   runs stopped with `stop_run` or ended by their timeout.
 - Stored gzip-compressed under the `run-transcripts/` prefix. When the run's

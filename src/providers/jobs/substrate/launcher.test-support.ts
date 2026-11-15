@@ -9,7 +9,7 @@ import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
-import { SubstrateJobLauncher, type SubstrateCallFailure } from "./launcher.js";
+import { SubstrateJobLauncher, type SubstrateCallFailure, type WarmEvent, type WarmRoundsOptions } from "./launcher.js";
 import { substrateRunToken } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
@@ -99,6 +99,9 @@ export interface Harness {
   setNow: (ms: number) => void;
   /** Every failed Substrate call the launcher reported. */
   callFailures: SubstrateCallFailure[];
+  /** Every warm-round event the launcher reported (warm rounds only). */
+  warmEvents: WarmEvent[];
+  root: string;
 }
 
 export async function makeHarness(
@@ -106,11 +109,15 @@ export async function makeHarness(
     workers?: number;
     workerSize?: FakeSubstrateOptions["workerSize"];
     workerLabels?: FakeSubstrateOptions["workerLabels"];
+    suspendedHoldRoom?: boolean;
     config?: Partial<SubstrateLaunchConfig>;
     runId?: string;
     runs?: SubstrateRunStore;
     collectGraceMs?: number;
     startupTimeoutMs?: number;
+    warmRounds?: WarmRoundsOptions;
+    /** The capability per run (default FAKE_CAP for every run). */
+    capabilityFor?: (runId: string) => string;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -124,11 +131,13 @@ export async function makeHarness(
     workers: options.workers ?? 2,
     ...(options.workerSize ? { workerSize: options.workerSize } : {}),
     ...(options.workerLabels ? { workerLabels: options.workerLabels } : {}),
+    ...(options.suspendedHoldRoom ? { suspendedHoldRoom: true } : {}),
   });
   let now = 1_000_000;
   const runs = options.runs ?? new MemorySubstrateRunStore(() => now);
   const secrets = new RecordingSecrets();
   const callFailures: SubstrateCallFailure[] = [];
+  const warmEvents: WarmEvent[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const relay = new MemoryRelayStore();
   relay.register(substrateRunToken(runId), 1 << 20);
@@ -141,11 +150,12 @@ export async function makeHarness(
     bridgeToolImages: [TOOL_IMAGE, PYTHON_TOOL_IMAGE],
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
-    resolveCapability: async () => FAKE_CAP,
+    resolveCapability: async (id) => options.capabilityFor?.(id) ?? FAKE_CAP,
     now: () => now,
     onSubstrateCallFailed: (failure) => callFailures.push(failure),
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
+    ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),
   });
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -173,5 +183,7 @@ export async function makeHarness(
       now = ms;
     },
     callFailures,
+    warmEvents,
+    root,
   };
 }

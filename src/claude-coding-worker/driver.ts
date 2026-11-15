@@ -161,6 +161,8 @@ export interface ClaudeQueryOptions {
   skills: boolean;
   /** Session resume runs only (CodingTaskInput.sessionResume): keep the SDK's session file. */
   persistSession: boolean;
+  /** Set only on a warm Substrate follow-up round (CodingTaskInput.resumeSessionId): the session to resume. */
+  resumeSessionId?: string;
   /** Set only on a traced run: receives Claude Code's own stderr output. */
   stderr?: (data: string) => void;
   /** Set only on a run with MCP tools: the proxy's /mcp route and the run's MCP token (sdk.ts adds wardby_mcp). */
@@ -471,7 +473,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     developerInstructions,
     contextDirectory: context?.directory ?? null,
     skills: context?.skills ?? false,
-    persistSession: options.input.sessionResume === true,
+    // A resumed session keeps growing its file, so a later round can resume it again.
+    persistSession: options.input.sessionResume === true || options.input.resumeSessionId !== undefined,
+    ...(options.input.resumeSessionId ? { resumeSessionId: options.input.resumeSessionId } : {}),
     ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
     ...(mcp ? { mcp } : {}),
   });

@@ -11,7 +11,10 @@ export type RunPullRequestTarget =
 
 export type ResolveRunPullRequestResult =
   | { ok: true; root: { runId: string; baseRef: string; headRef: string }; repo: RunPullRequestTarget }
-  | { ok: false; reason: "unknown_run" | "other_repository" | "no_pull_request" | "other_owner" };
+  | {
+      ok: false;
+      reason: "unknown_run" | "other_repository" | "no_pull_request" | "other_owner" | "run_not_finished";
+    };
 
 type RunPullRequestDb = Pick<PrismaClient, "codingRun" | "codingRunRepository">;
 
@@ -22,8 +25,13 @@ const ROOT_SELECT = {
   baseRef: true,
   headRef: true,
   result: true,
-  run: { select: { agent: { select: { ownerId: true } } } },
+  run: { select: { status: true, agent: { select: { ownerId: true } } } },
 } as const;
+
+/** Whether a run is still going: nothing of it can be continued yet (the one rule, shared by every continuation entry point). */
+export function isRunUnfinished(status: string): boolean {
+  return status === "pending" || status === "running";
+}
 
 /** Repository ids compare the way the host does; an id that is not a hosted one compares case-insensitively. */
 export function sameRepository(a: string, b: string): boolean {
@@ -102,6 +110,8 @@ export async function resolveRunPullRequest(
     repository: string;
     pullRequestNumber?: number;
     dispatchingOwnerId?: string | null;
+    /** Refuse (run_not_finished) when the named run is still pending or running, after the owner check. */
+    requireFinished?: boolean;
   },
 ): Promise<ResolveRunPullRequestResult> {
   const marked = await db.codingRun.findUnique({ where: { runId: input.markerRunId }, select: ROOT_SELECT });
@@ -115,6 +125,9 @@ export async function resolveRunPullRequest(
     if (input.dispatchingOwnerId === null || ownerId === null || ownerId !== input.dispatchingOwnerId) {
       return { ok: false, reason: "other_owner" };
     }
+  }
+  if (input.requireFinished && marked.run && isRunUnfinished(marked.run.status)) {
+    return { ok: false, reason: "run_not_finished" };
   }
   const base = { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
   const wanted = (number: number) => input.pullRequestNumber === undefined || input.pullRequestNumber === number;

@@ -741,6 +741,12 @@ export interface SubstrateJobConfig {
   collectGraceSec?: number;
   /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
   startupTimeoutSec?: number;
+  /**
+   * SUBSTRATE_WARM_ROUNDS=true (experimental spike): park a succeeded run's actors for a follow-up
+   * and let a continuation adopt them. SUBSTRATE_PARK_TTL_SEC (60..86400, default 3600) bounds the
+   * park; SUBSTRATE_PARK_MAX (0..1000, default 10; 0 = never park) bounds how many runs are parked at once.
+   */
+  warmRounds?: { parkTtlSec: number; parkMax: number };
 }
 
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
@@ -820,6 +826,18 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
     7_200,
   );
   if (startupTimeoutSec !== undefined) config.startupTimeoutSec = startupTimeoutSec;
+  const warm = env.SUBSTRATE_WARM_ROUNDS?.trim().toLowerCase();
+  if (warm !== undefined && warm !== "" && warm !== "true" && warm !== "false") {
+    throw new Error("SUBSTRATE_WARM_ROUNDS must be true or false.");
+  }
+  if (warm === "true") {
+    const parkTtlSec =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined, "SUBSTRATE_PARK_TTL_SEC", 60, 86_400) ??
+      3_600;
+    const parkMax =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_MAX?.trim() || undefined, "SUBSTRATE_PARK_MAX", 0, 1_000) ?? 10;
+    config.warmRounds = { parkTtlSec, parkMax };
+  }
   return config;
 }
 

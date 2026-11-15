@@ -3,7 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { AGENT_SUFFIX, DIAGNOSTICS_TAIL, RUN_TOKEN_PATTERN, TOOL_SUFFIX } from "./constants.js";
 import { LineTail, redactExact, type LineFeed } from "./diagnostics.js";
-import { BridgeError, send, withRetry, type RetryPolicy } from "./http.js";
+import { abortableSleep, BridgeError, send, withRetry, type HttpResult, type RetryPolicy } from "./http.js";
 
 /**
  * A bridge log call. `event` is a fixed code; fields are numbers, the run token, channel ids and
@@ -236,6 +236,39 @@ export class DiagnosticsTail {
       else log("substrate_bridge_post_rejected", { what: "diagnostics", status: result.status });
     } catch {
       log("substrate_bridge_post_failed", { what: "diagnostics" });
+    }
+  }
+}
+
+/** Appends a round to a URL that may already carry a query. */
+export function withRound(url: string, round: number): string {
+  if (round <= 1) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}round=${round}`;
+}
+
+/**
+ * Warm rounds: asks for a later round's file until it is there (200), however long that takes. Every
+ * other answer (404 while the round is not staged, 401 while the actor still runs on a finished
+ * run's capability, 5xx, a network error, a request cut by a suspend) means wait and ask again.
+ * Resolves with the 200 answer; rejects only when `signal` aborts.
+ */
+export async function waitForRound(
+  ask: () => Promise<HttpResult>,
+  options: { pollMs: number; signal?: AbortSignal; sleep?: (ms: number, signal?: AbortSignal) => Promise<void> },
+): Promise<HttpResult> {
+  const sleep = options.sleep ?? abortableSleep;
+  for (;;) {
+    if (options.signal?.aborted) throw new BridgeError("substrate_bridge_stopped");
+    try {
+      const result = await ask();
+      if (result.status === 200) return result;
+    } catch {
+      // A transient failure: ask again.
+    }
+    try {
+      await sleep(options.pollMs, options.signal);
+    } catch {
+      throw new BridgeError("substrate_bridge_stopped");
     }
   }
 }

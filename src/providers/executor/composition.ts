@@ -1,4 +1,5 @@
 import { tmpdir } from "node:os";
+import type { RunStepSink } from "../../core/run-steps/types.js";
 import { resolve } from "node:path";
 import type { PrismaClient } from "#prisma";
 import {
@@ -48,6 +49,7 @@ import {
   loadTranscriptRetentionDays,
 } from "../../coding/transcript/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
+import { agentSecretVersions } from "../../core/secret-versions.js";
 import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { loadMcpToolPins } from "../../core/mcp-tools.js";
@@ -128,6 +130,8 @@ export interface ConfiguredExecutorOptions {
   power?: Power;
   /** Decrypts agent secrets for transcript redaction (session resume). Absent: transcripts are never stored. */
   secretCipher?: Parameters<typeof loadAgentSecretValues>[1];
+  /** The process's run-steps writer (a continuation's warm-start step line). Absent: no such line. */
+  runSteps?: RunStepSink;
 }
 
 /**
@@ -211,6 +215,9 @@ export function buildSubstrateJobLauncher(options: {
     resolveCapability: options.resolveCapability,
     ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
     ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
+    ...(substrate.warmRounds
+      ? { warmRounds: { parkTtlMs: substrate.warmRounds.parkTtlSec * 1000, parkMax: substrate.warmRounds.parkMax } }
+      : {}),
   });
 }
 
@@ -339,12 +346,18 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       const named = await loadAgentSecretValues(options.db, cipher, agentId);
       return named.flatMap((entry) => entry.values);
     },
+    secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
     retentionDays: loadTranscriptRetentionDays(env),
     maxBytes: loadTranscriptMaxBytes(env),
   });
   const coding = new ContainerExecutor({
     transcripts,
-    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
+    ...(options.runSteps ? { runSteps: options.runSteps } : {}),
+    store: new PrismaContainerExecutionStore(options.db, {
+      maxConcurrent: concurrency.maxConcurrent,
+      issueTrackers,
+      warmRounds: jobs.warmRounds === true,
+    }),
     jobs,
     vcs,
     sessions,

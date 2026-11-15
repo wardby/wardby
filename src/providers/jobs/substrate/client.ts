@@ -38,6 +38,9 @@ import {
   ResourceRequirementsSchema,
   ResourcesSchema,
   ResumeActorRequestSchema,
+  DurabilityMode,
+  SuspendActorRequestSchema,
+  SuspendOptionsSchema,
   SelectorSchema,
   SnapshotConfigSchema,
   SnapshotFidelity,
@@ -318,6 +321,24 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.ResourceExhausted]: () => {
           throw new SubstrateExhaustedError("substrate_resource_exhausted");
         },
+        [Code.NotFound]: () => {
+          throw new SubstrateNotFoundError("substrate_not_found");
+        },
+      },
+    );
+  }
+
+  async suspendActor(atespace: string, name: string): Promise<void> {
+    await this.call(
+      async () => {
+        await this.control.suspendActor(
+          create(SuspendActorRequestSchema, {
+            actor: ref(atespace, name),
+            options: create(SuspendOptionsSchema, { mode: DurabilityMode.SYNCHRONOUS }),
+          }),
+        );
+      },
+      {
         [Code.NotFound]: () => {
           throw new SubstrateNotFoundError("substrate_not_found");
         },

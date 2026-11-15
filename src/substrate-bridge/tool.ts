@@ -25,7 +25,9 @@ import {
   startReadyServer,
   stderrLogger,
   uploadFile,
+  waitForRound,
   waitForRunToken,
+  withRound,
   type Logger,
 } from "./common.js";
 import {
@@ -34,7 +36,11 @@ import {
   DEFAULT_TOOL_SOCKET,
   ACTOR_JWT_HEADER,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
+  MAX_ROUND,
+  NEXT_ROUND_POLL_MS,
+  WARM_ROUNDS_ENV,
 } from "./constants.js";
+import { waitAtMost } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 import { checkTarFile, parseCollectExclusions, tarExcludeArgs, type CollectExclusions } from "./tar.js";
@@ -45,6 +51,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const SETUP_DEADLINE_MS = 5 * 60_000;
 const RUNNER_ENTRY = "/opt/wardby/claude-tool-runner/main.mjs";
 const READY_LINE = "wardby_tool_runner_ready";
+/** Warm rounds: how long, after the bridge ends a round's runner, it waits for the runner to exit. */
+const RUNNER_STOP_MS = 2_000;
 
 export interface RunnerHandle {
   /** Resolves when the runner is listening; rejects if it exits first. */
@@ -52,6 +60,14 @@ export interface RunnerHandle {
   exited: Promise<number>;
   /** The runner's stderr, when the bridge can read it (passed on to the actor's log only). */
   stderr?: NodeJS.ReadableStream;
+  /** Ends the runner (warm rounds: between rounds, before the next round's runner starts). */
+  stop?: () => void;
+  /**
+   * Force-ends the runner and every process it started (its process group), whether or not the
+   * runner itself already exited. Warm rounds call it after stop, so no process a round's tool started
+   * keeps that round's environment into the next round.
+   */
+  kill?: () => void;
 }
 
 export interface ToolOptions {
@@ -77,23 +93,84 @@ export interface ToolOptions {
   tarCommand?: string;
   /** Where the seed and the workspace tar are staged (outside the workspace). */
   tempRoot?: string;
+  /** Warm rounds: how long to wait between asks for the next round's tool setup (default 1 s). */
+  nextRoundPollMs?: number;
+  /** Warm rounds: called once a round's workspace upload is done, with its outcome. */
+  onRoundCollected?: (round: number, outcome: "ok" | "rejected" | "failed") => void;
+  /** Warm rounds: called once a later round's tool runner is ready. */
+  onRoundStarted?: (round: number) => void;
 }
 
 export interface ToolHandle {
   runToken: string;
   readyPort: number;
-  /** Resolves once the agent asked for the workspace and the upload finished (or was given up on). */
+  /** Resolves once the agent asked for the workspace and the upload finished (or was given up on): round 1's. */
   collected: Promise<"ok" | "rejected" | "failed">;
+  /** Whether the bridge stays for follow-up rounds (the template's WARDBY_SUBSTRATE_WARM_ROUNDS=1). */
+  warmRounds: boolean;
   /** Resolves with the tool runner's exit code if it ever exits. */
   runnerExited: Promise<number>;
   close(): Promise<void>;
+}
+
+/** The part of a child process the group signalling needs (a seam for tests). */
+export interface GroupSignalTarget {
+  pid?: number | undefined;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+const errnoOf = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
+
+/**
+ * Signals a runner's process group. ESRCH means nothing is left in the group; EPERM falls back to
+ * the runner process alone; anything else is logged as a fixed-field event, never thrown. A SIGKILL
+ * after the runner already exited is skipped once the group is gone, so a recycled pid is never hit.
+ */
+export function signalRunnerGroup(
+  child: GroupSignalTarget,
+  signal: NodeJS.Signals,
+  killFn: (pid: number, signal: NodeJS.Signals | 0) => unknown = (pid, sig) => process.kill(pid, sig),
+  log: Logger = stderrLogger,
+): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  const runnerExited = child.exitCode !== null || child.signalCode !== null;
+  if (signal === "SIGKILL" && runnerExited) {
+    try {
+      killFn(-pid, 0);
+    } catch (err) {
+      if (errnoOf(err) === "ESRCH") return;
+    }
+  }
+  try {
+    killFn(-pid, signal);
+  } catch (err) {
+    const code = errnoOf(err);
+    if (code === "ESRCH") return;
+    if (code === "EPERM") {
+      try {
+        child.kill(signal);
+      } catch {
+        // The runner itself is gone or not ours; nothing more to signal.
+      }
+      return;
+    }
+    log("substrate_bridge_runner_signal_failed", { signal, errno: code ?? "unknown" });
+  }
 }
 
 export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: string = RUNNER_ENTRY): RunnerHandle => {
   const child = spawn(process.execPath, [entry], {
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
     stdio: ["ignore", "pipe", "pipe"],
+    // Its own process group, so stop and kill reach every process the runner's tools started.
+    detached: true,
   });
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    signalRunnerGroup(child, signal);
+  };
   // Passed on unchanged to the actor's log.
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   const exited = new Promise<number>((resolve) => {
@@ -107,7 +184,13 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     });
     void exited.then(() => reject(new BridgeError("substrate_bridge_runner_exited")));
   });
-  return { ready, exited, stderr: child.stderr };
+  return {
+    ready,
+    exited,
+    stderr: child.stderr,
+    stop: () => signalGroup("SIGTERM"),
+    kill: () => signalGroup("SIGKILL"),
+  };
 };
 
 /**
@@ -142,6 +225,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   const policy = options.policy ?? DEFAULT_POLICY;
   const giveUpMs = options.giveUpMs ?? 60_000;
   const env = options.env ?? process.env;
+  const warmRounds = env[WARM_ROUNDS_ENV] === "1";
   const workspace = options.workspace ?? "/workspace";
   const tar = options.tarCommand ?? "tar";
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
@@ -185,7 +269,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     throw new BridgeError(code);
   };
 
-  // 1. The tool setup (before the first events poll, which deletes it on the proxy).
+  // 1. The tool setup (before the first events poll, which deletes it on the proxy). It carries the
+  // run's registry-only token; once the runner has started, the runner is its only holder (`current`).
   let toolSetup: string;
   let exclusions: CollectExclusions;
   try {
@@ -243,19 +328,34 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     await rm(seedPath, { force: true }).catch(() => undefined);
   }
 
-  // 3. The tool runner.
-  const runner = (options.launchRunner ?? spawnRunner)(toolSetup, env);
-  try {
-    await runner.ready;
-  } catch {
-    return abortStart("substrate_bridge_runner_failed");
-  }
+  // 3. The tool runner (warm rounds: one per round, each with its round's tool setup).
+  let resolveRunnerExited!: (code: number) => void;
+  const runnerExited = new Promise<number>((resolve) => (resolveRunnerExited = resolve));
+  /**
+   * The current round's runner, and whether the bridge itself is ending it (between rounds). It is
+   * the only holder of the round's tool setup (and so of its registry-only token) once started.
+   */
+  let current: { runner: RunnerHandle; retiring: boolean } | undefined;
+  const startRunner = async (setup: string): Promise<boolean> => {
+    const runner = (options.launchRunner ?? spawnRunner)(setup, env);
+    const entry = { runner, retiring: false };
+    current = entry;
+    try {
+      await runner.ready;
+    } catch {
+      return false;
+    }
+    // A runner that exits mid-run is a failure; its stderr is in the actor's log. Without warm rounds,
+    // every exit resolves runnerExited (main() then ends the actor), as before rounds existed.
+    void runner.exited.then((code) => {
+      if (warmRounds && (stopped || entry.retiring)) return;
+      if (!stopped) log("substrate_bridge_runner_exited", { runToken: token, code });
+      resolveRunnerExited(code);
+    });
+    return true;
+  };
+  if (!(await startRunner(toolSetup))) return abortStart("substrate_bridge_runner_failed");
   log("substrate_bridge_runner_ready", { runToken: token });
-  // A runner that exits mid-run is a failure; its stderr is in the actor's log.
-  const runnerExited = runner.exited.then((code) => {
-    if (!stopped) log("substrate_bridge_runner_exited", { runToken: token, code });
-    return code;
-  });
 
   // 4. Channels.
   const openChannel = (channel: string): void => {
@@ -332,7 +432,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   let resolveCollected!: (outcome: "ok" | "rejected" | "failed") => void;
   const collected = new Promise<"ok" | "rejected" | "failed">((resolve) => (resolveCollected = resolve));
 
-  const collect = async (): Promise<void> => {
+  let round = 1;
+  const collect = async (): Promise<"ok" | "rejected" | "failed"> => {
     const tarPath = join(stage, "workspace.tar");
     const code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(exclusions), "-f", tarPath, "."]);
     // 1: some files changed while being read; the tar is still usable.
@@ -340,7 +441,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       log("substrate_bridge_collect_failed", { code });
       await rm(tarPath, { force: true }).catch(() => undefined);
       await postCapped(
-        `${base}/workspace-failed`,
+        withRound(`${base}/workspace-failed`, round),
         headers,
         undefined,
         policy,
@@ -348,15 +449,22 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         "workspace-failed",
         shutdown.signal,
       );
-      resolveCollected("failed");
-      return;
+      return "failed";
     }
-    const outcome = await uploadFile(`${base}/workspace`, headers, tarPath, policy, log, "workspace", shutdown.signal);
+    const outcome = await uploadFile(
+      withRound(`${base}/workspace`, round),
+      headers,
+      tarPath,
+      policy,
+      log,
+      "workspace",
+      shutdown.signal,
+    );
     await rm(tarPath, { force: true }).catch(() => undefined);
     // A workspace that could not be stored: say so, so the launcher does not wait for it.
     if (outcome !== "ok")
       await postCapped(
-        `${base}/workspace-failed`,
+        withRound(`${base}/workspace-failed`, round),
         headers,
         undefined,
         policy,
@@ -364,10 +472,11 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         "workspace-failed",
         shutdown.signal,
       );
-    resolveCollected(outcome === "ok" ? "ok" : outcome === "rejected" ? "rejected" : "failed");
+    return outcome === "ok" ? "ok" : outcome === "rejected" ? "rejected" : "failed";
   };
 
-  const eventsLoop = async (): Promise<void> => {
+  /** One round's relay: polls events from 0 (the relay starts afresh each round) until the collect. */
+  const eventsLoop = async (): Promise<"ok" | "rejected" | "failed" | undefined> => {
     let cursor = 0;
     while (!stopped) {
       type ToolEvent = { seq: number; type: string; channel?: string; line?: string };
@@ -384,14 +493,14 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         if (result.status === 200) events = parseEvents(result.body);
         else rejected = result.status < 500 && result.status !== 429;
       } catch {
-        if (stopped) return;
+        if (stopped) return undefined;
       }
       if (!events) {
         // Retry forever; a refused poll (the run is over) backs off harder than a network blip.
         try {
           await policy.sleep(rejected ? policy.maxMs : policy.baseMs, shutdown.signal);
         } catch {
-          return;
+          return undefined;
         }
         continue;
       }
@@ -407,10 +516,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
           connection?.relayClosed();
           connection?.socket.end();
         } else if (event.type === "collect") {
-          // The relay is dropped once the workspace is uploaded: stop polling and idle.
-          stopped = true;
-          await collect();
-          return;
+          // The relay is dropped once the workspace is uploaded: stop polling (and idle, or with
+          // warm rounds wait for the next round).
+          if (!warmRounds) stopped = true;
+          return collect();
         }
       }
       // A non-empty answer that did not move the cursor would be polled again at once: wait first.
@@ -418,18 +527,114 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
         try {
           await policy.sleep(policy.baseMs, shutdown.signal);
         } catch {
-          return;
+          return undefined;
         }
       }
     }
+    return undefined;
   };
-  void eventsLoop();
+
+  /**
+   * Ends the round's runner and drops it. The round's registry-only token belongs to a finished run,
+   * and the runner is its only holder: once this returns, nothing of the bridge refers to it, so a
+   * suspended actor holds no copy. (Its own function, so no frame that waits for the next round keeps
+   * the runner alive.)
+   */
+  const retireRunner = async (): Promise<void> => {
+    const retired = current;
+    current = undefined;
+    if (!retired) return;
+    retired.retiring = true;
+    retired.runner.stop?.();
+    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    // Whatever is left of the runner's process group after the grace period (the runner itself if it
+    // ignored SIGTERM, or a process one of its tools started) holds round n's environment: end it.
+    retired.runner.kill?.();
+    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+  };
+
+  /**
+   * Warm rounds: after a round's workspace is stored, end its tool runner (its registry token belongs
+   * to a finished run) and wait, across the launcher's suspend and resume, for the next round's tool
+   * setup. /workspace stays as it is (repository, virtualenvs, installs): it is not seeded again.
+   */
+  const nextRound = async (): Promise<boolean> => {
+    await retireRunner();
+    for (const { socket } of connections.values()) socket.destroy();
+    connections.clear();
+    round += 1;
+    log("substrate_bridge_waiting_for_round", { runToken: token, round });
+    const answer = await waitForRound(
+      () =>
+        send(withRound(`${base}/tool-setup`, round), {
+          method: "GET",
+          headers,
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          signal: shutdown.signal,
+        }),
+      { pollMs: options.nextRoundPollMs ?? NEXT_ROUND_POLL_MS, signal: shutdown.signal },
+    );
+    let setup: string;
+    try {
+      const parsed = JSON.parse(answer.body.toString("utf8")) as { toolSetup?: unknown; collectExclude?: unknown };
+      const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
+      if (typeof parsed.toolSetup !== "string" || !parsedExclusions) throw new Error("invalid");
+      setup = parsed.toolSetup;
+      exclusions = parsedExclusions;
+    } catch {
+      log("substrate_bridge_setup_invalid", { runToken: token, round });
+      return false;
+    }
+    if (!(await startRunner(setup))) {
+      log("substrate_bridge_runner_failed", { runToken: token, round });
+      await postCapped(
+        withRound(`${base}/workspace-failed`, round),
+        headers,
+        undefined,
+        policy,
+        log,
+        "workspace-failed",
+        shutdown.signal,
+      ).catch(() => undefined);
+      return false;
+    }
+    log("substrate_bridge_runner_ready", { runToken: token, round });
+    options.onRoundStarted?.(round);
+    return true;
+  };
+
+  const rounds = async (): Promise<void> => {
+    for (;;) {
+      const outcome = await eventsLoop();
+      if (outcome === undefined) return;
+      if (round === 1) resolveCollected(outcome);
+      options.onRoundCollected?.(round, outcome);
+      // Without warm rounds (or after a failed collect, which the launcher never parks): idle.
+      if (!warmRounds || outcome !== "ok" || round >= MAX_ROUND) {
+        stopped = true;
+        return;
+      }
+      if (!(await nextRound())) {
+        stopped = true;
+        return;
+      }
+    }
+  };
+  void rounds().catch((error: unknown) => {
+    if (!shutdown.signal.aborted) {
+      log("substrate_bridge_round_failed", {
+        runToken: token,
+        code: error instanceof BridgeError ? error.code : "unexpected",
+      });
+    }
+  });
 
   return {
     runToken: token,
     readyPort: ready.port,
     collected,
     runnerExited,
+    warmRounds,
     close: async () => {
       stopped = true;
       shutdown.abort();

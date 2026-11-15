@@ -3,8 +3,9 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BLOB, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
+import { BLOB, roundBlob, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
 import { LocalBlobStore } from "../../storage/local.js";
+import { BlobStoreError } from "../../storage/types.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
@@ -440,6 +441,26 @@ describe("substrate routes", () => {
       expect(await allFiles()).toEqual([]);
     });
 
+    it("with warm rounds: logs each round's tail once (the seen key includes the round), and refuses another round's", async () => {
+      overrides = { warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      expect((await fetch(`${base}/diagnostics`, agent(text("round one tail")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("early")))).status).toBe(409);
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("round two tail")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("again")))).status).toBe(200);
+      expect(warnCalls).toEqual([
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "agent", tail: "round one tail" },
+          "substrate actor diagnostics",
+        ],
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "agent", round: 2, tail: "round two tail" },
+          "substrate actor diagnostics",
+        ],
+      ]);
+    });
+
     it("requires auth and a Content-Length within 8 KiB", async () => {
       await start();
       expect((await fetch(`${base}/diagnostics`, text("x"))).status).toBe(401);
@@ -543,5 +564,189 @@ describe("substrate routes", () => {
     expect(deniedBody).not.toContain(CAPABILITY);
     // What is logged: the run token, the route name and the numbers.
     expect(serialized).toContain(TOKEN);
+  });
+
+  describe("warm rounds", () => {
+    // fetch sends Content-Length for a string body.
+    const upload = (body: string) => ({ method: "POST", body });
+
+    it("without warm rounds: round 1 as before; a round above 1 is refused (input 404, uploads 409), nothing read or written", async () => {
+      await start();
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"round":1}'));
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
+      for (const query of ["", "?round=1"]) {
+        const answer = await fetch(`${base}/input${query}`, agent());
+        expect(answer.status).toBe(200);
+        expect(await answer.text()).toBe('{"round":1}');
+      }
+      expect((await fetch(`${base}/input?round=2`, agent())).status).toBe(404);
+      expect(await blobs.head(BLOB.started(TOKEN, 2))).toBeNull();
+      expect((await fetch(`${base}/result?round=2`, agent(upload('{"r":2}')))).status).toBe(409);
+      expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
+      expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/result`, agent(upload('{"r":1}')))).status).toBe(200);
+      expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"r":1}');
+      expect((await fetch(`${base}/transcript?round=x`, agent(upload("t")))).status).toBe(400);
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from('{"toolSetup":"{}"}'));
+      expect((await fetch(`${base}/tool-setup?round=3`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/tool-setup`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/workspace?round=2`, tool(upload("w")))).status).toBe(409);
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.done(TOKEN, 2))).toBeNull();
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+    });
+
+    it("without warm rounds, a failed tool-setup delete on the first events poll answers its error, as before", async () => {
+      const failing = (code: "not_found" | "blob_too_large") =>
+        Object.assign(Object.create(blobs) as LocalBlobStore, {
+          delete: async () => {
+            throw new BlobStoreError(code, code);
+          },
+        });
+      overrides = { blobs: failing("not_found") };
+      await start();
+      const answer = await fetch(`${base}/events?after=0`, tool());
+      expect(answer.status).toBe(404);
+      expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      // With warm rounds a tool setup already gone is fine (a later round stages it again).
+      overrides = { blobs: failing("not_found"), warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+    });
+
+    it("refuses a finished round's capability (its session was cancelled) on every agent route, the next round's input included", async () => {
+      // run-1 (round 1) finished: the executor cancelled its session before its actors were parked.
+      // run-2 adopted them and holds the token now.
+      let run1Status: "active" | "cancelled" = "active";
+      let holder = "run-1";
+      overrides = {
+        warmRounds: true,
+        ledger: {
+          findSessionByCapabilityHash: async (hash) =>
+            hash === capabilityHash(CAPABILITY)
+              ? { ...sessionFor("run-1"), status: run1Status }
+              : hash === capabilityHash(OTHER_CAPABILITY)
+                ? sessionFor("run-2")
+                : null,
+        },
+        tokenForRun: async (runId) => (runId === holder ? TOKEN : "wa-retired"),
+      };
+      await start();
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"round":1}'));
+      // While round 1 runs, its capability works.
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      run1Status = "cancelled";
+      const routes: Array<[string, RequestInit]> = [
+        ["input", {}],
+        ["input?round=2", {}],
+        ["channels", { method: "POST" }],
+        ["channels/c1/lines", json({ seq: 1, line: "x" })],
+        ["channels/c1/lines?after=0", {}],
+        ["result", upload("{}")],
+        ["result?round=2", upload("{}")],
+        ["transcript?round=2", upload("t")],
+        ["exit?round=2", upload(JSON.stringify({ code: 1 }))],
+        ["diagnostics?round=2", upload("tail")],
+      ];
+      // Before and after the adoption: refused, whatever round it names.
+      for (const adopted of [false, true]) {
+        if (adopted) {
+          holder = "run-2";
+          await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+          await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
+        }
+        for (const [path, init] of routes) {
+          const answer = await fetch(`${base}/${path}`, agent(init));
+          expect([path, answer.status]).toEqual([path, 401]);
+          expect(await answer.json()).toEqual({ error: { type: "unauthorized" } });
+        }
+      }
+      // The adopting run's own capability is served.
+      const input = await fetch(`${base}/input?round=2`, { headers: { "x-api-key": OTHER_CAPABILITY } });
+      expect(input.status).toBe(200);
+      // Nothing was written for the refused requests.
+      expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
+      expect(await blobs.head(BLOB.exit(TOKEN, 2))).toBeNull();
+      expect(warnCalls).toEqual([]);
+    });
+
+    it("serves and stores the current round's files, for the run holding the token", async () => {
+      // run-2 adopted run-1's actors: its row holds TOKEN; run-1's row moved to a retired token.
+      overrides = {
+        warmRounds: true,
+        tokenForRun: async (runId) => (runId === "run-2" ? TOKEN : "wa-retired"),
+      };
+      await start();
+      const run2 = (init: RequestInit = {}) => ({
+        ...init,
+        headers: { "x-api-key": OTHER_CAPABILITY, ...(init.headers as Record<string, string> | undefined) },
+      });
+      // Not staged yet: the bridge keeps waiting.
+      expect((await fetch(`${base}/input?round=2`, run2())).status).toBe(404);
+      await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
+      expect((await fetch(`${base}/input?round=2`, run2())).status).toBe(404);
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      const input = await fetch(`${base}/input?round=2`, run2());
+      expect(input.status).toBe(200);
+      expect(await input.text()).toBe('{"round":2}');
+      expect(await blobs.head(BLOB.started(TOKEN, 2))).not.toBeNull();
+      expect(await blobs.head(BLOB.started(TOKEN))).toBeNull();
+      // Round 1's request, and round 1's run (its capability), are refused.
+      expect((await fetch(`${base}/input`, run2())).status).toBe(404);
+      expect((await fetch(`${base}/input?round=2`, agent())).status).toBe(401);
+      // Uploads go to round 2's names; another round is a conflict.
+      expect((await fetch(`${base}/result?round=2`, run2(upload('{"r":2}')))).status).toBe(200);
+      expect((await blobs.get(BLOB.result(TOKEN, 2))).toString()).toBe('{"r":2}');
+      expect((await fetch(`${base}/result`, run2(upload("{}")))).status).toBe(409);
+      expect((await fetch(`${base}/transcript?round=2`, run2(upload("t")))).status).toBe(200);
+      expect(await blobs.head(BLOB.transcript(TOKEN, 2))).not.toBeNull();
+      const exit = JSON.stringify({ code: 3 });
+      expect((await fetch(`${base}/exit?round=2`, run2(upload(exit)))).status).toBe(200);
+      expect((await blobs.get(BLOB.exit(TOKEN, 2))).toString()).toBe(exit);
+      expect(await blobs.head(BLOB.exit(TOKEN))).toBeNull();
+      // The tool side: round 2's tool setup, deleted by round 2's first events poll, then the workspace.
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from('{"toolSetup":"{}"}'));
+      expect((await fetch(`${base}/tool-setup`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/tool-setup?round=2`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+      expect(await blobs.head(BLOB.toolSetup(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(409);
+      expect((await fetch(`${base}/workspace?round=2`, tool(upload("w")))).status).toBe(200);
+      expect(await blobs.head(BLOB.workspace(TOKEN, 2))).not.toBeNull();
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN, 2))).toString())).toEqual({ workspace: "ok" });
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    });
+
+    it("fixes each round's done once written: round 1's done does not refuse round 2, a second report does", async () => {
+      overrides = { warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      await blobs.put(BLOB.done(TOKEN), Buffer.from('{"workspace":"ok"}'));
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      expect((await fetch(`${base}/workspace-failed?round=2`, tool(upload("{}")))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN, 2))).toString())).toEqual({ workspace: "failed" });
+      const again = await fetch(`${base}/workspace?round=2`, tool(upload("w")));
+      expect(again.status).toBe(409);
+      expect(await again.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(await blobs.head(BLOB.workspace(TOKEN, 2))).toBeNull();
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN, 2))).toString())).toEqual({ workspace: "failed" });
+    });
+
+    it("logs no capability or tool setup while serving rounds", async () => {
+      overrides = { warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      await blobs.put(BLOB.input(TOKEN, 2), Buffer.from("{}"));
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(JSON.stringify({ toolSetup: REGISTRY_TOKEN })));
+      await fetch(`${base}/input?round=2`, agent());
+      await fetch(`${base}/tool-setup?round=2`, tool());
+      await fetch(`${base}/result?round=3`, agent(upload("{}")));
+      const logged = JSON.stringify([logCalls, warnCalls]);
+      for (const secret of [CAPABILITY, REGISTRY_TOKEN]) expect(logged).not.toContain(secret);
+    });
   });
 });

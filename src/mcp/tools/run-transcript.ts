@@ -30,7 +30,7 @@ const MEANINGS: Record<string, string> = {
   none: "No transcript was recorded for this run. Turn on codingProfile.sessionResume for the agent; it applies to runs started after that.",
   too_large: "The run's transcript was larger than RUN_TRANSCRIPT_MAX_BYTES, so it was not stored.",
   not_captured:
-    "No transcript was stored for this run (see reason): for example the server had no blob store, the run was stopped or timed out, or it never finished a turn.",
+    "No transcript was stored for this run (see reason): for example the server had no blob store, the run was stopped or timed out, it never finished a turn, or one of the agent's secrets changed while it ran (secrets_changed).",
   failed: "Storing this run's transcript failed (see reason). Nothing was stored.",
   expired: "The transcript was deleted after RUN_TRANSCRIPT_RETENTION_DAYS.",
   unavailable: "The transcript was stored, but this server has no blob store configured to serve it from.",

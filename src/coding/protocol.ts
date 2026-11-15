@@ -615,6 +615,15 @@ export const CodingTaskInputSchema = z
      */
     sessionResume: z.literal(true).optional(),
     /**
+     * Claude Code only, never written by the control plane: the Substrate agent bridge sets it on a warm
+     * follow-up round (SUBSTRATE_WARM_ROUNDS) to the previous round's session id, so the worker resumes
+     * that session. Absent on every other input, which is unchanged.
+     */
+    resumeSessionId: z
+      .string()
+      .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+      .optional(),
+    /**
      * The run's workspace volume size in MiB (the job's limits.diskMb), so the dependency cache can
      * stay inside it: on Kubernetes the emptyDir sizeLimit is invisible to statfs. Written only with
      * dependencyCache, so every other input is unchanged for workers that predate it.
