@@ -4,7 +4,7 @@
 // generated output already carries a marker recording the same pinned digest, so installs and
 // repeat builds need no network.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
@@ -16,7 +16,14 @@ const MARKER = `${OUT}/.proto-sha256`;
 const URL_ = `https://raw.githubusercontent.com/agent-substrate/substrate/${COMMIT}/api/ateapi/v1/ateapi.proto`;
 const dir = "build/substrate-proto/substrate/ateapi/v1";
 
-if (existsSync(MARKER) && readFileSync(MARKER, "utf8").trim() === SHA256) {
+const readMarker = () => {
+  try {
+    return readFileSync(MARKER, "utf8").trim();
+  } catch {
+    return undefined;
+  }
+};
+if (readMarker() === SHA256) {
   console.log("substrate client up to date");
   process.exit(0);
 }
