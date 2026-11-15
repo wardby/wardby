@@ -1891,6 +1891,43 @@ describe("dispatchRun", () => {
         });
       });
 
+      it("does not count a push to some other branch as the root's pushed branch", async () => {
+        const agent = localAgent();
+        const state = fakeDb(agent, [
+          localCodingRun("root_run", "no_changes"),
+          localCodingRun("cont_1", "branch_pushed", { rootCodingRunId: "root_run", headRef: "wardby/run-cont_1" }),
+        ]);
+
+        await expect(
+          dispatchRun({
+            db: state.db,
+            executor: { async start() {}, async stop() {} },
+            agentId: agent.id,
+            continuesCodingRunId: "root_run",
+          }),
+        ).rejects.toMatchObject({ reason: "no_pushed_branch" });
+      });
+
+      it("refuses a local run of a different repository with other_repository", async () => {
+        const agent = localAgent();
+        const elsewhere = "local:/srv/repos/other";
+        const state = fakeDb(agent, [
+          localCodingRun("root_run", "branch_pushed", {
+            repository: elsewhere,
+            result: { ...localCodingRun("root_run", "branch_pushed").result, repository: elsewhere },
+          }),
+        ]);
+
+        await expect(
+          dispatchRun({
+            db: state.db,
+            executor: { async start() {}, async stop() {} },
+            agentId: agent.id,
+            continuesCodingRunId: "root_run",
+          }),
+        ).rejects.toMatchObject({ reason: "other_repository" });
+      });
+
       it("still refuses another owner's local run", async () => {
         const agent = localAgent();
         const state = fakeDb(agent, [

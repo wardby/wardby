@@ -410,8 +410,21 @@ interface CodingBranch {
   mergeOrder?: number | null;
 }
 
+/**
+ * Why a continuation is refused. Dispatch itself gives the first five; a caller that names the run
+ * directly (trigger_agent's continuePriorRun, see checkContinuePriorRun in mcp/tools/trigger.ts)
+ * also gives the last three, before any run exists. Every code has a help article under
+ * help/errors/.
+ */
 export type ContinuationRefusal =
-  "unknown_run" | "other_repository" | "no_pull_request" | "no_pushed_branch" | "other_owner";
+  | "unknown_run"
+  | "other_repository"
+  | "no_pull_request"
+  | "no_pushed_branch"
+  | "other_owner"
+  | "other_agent_run"
+  | "not_a_coding_run"
+  | "run_not_finished";
 
 const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   unknown_run: "Cannot continue an unknown coding run.",
@@ -419,6 +432,9 @@ const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   no_pull_request: "Cannot continue a coding run that never opened a pull request.",
   no_pushed_branch: "Cannot continue a local-repository coding run that never pushed a branch.",
   other_owner: "Cannot continue a coding run opened by a different owner's agent.",
+  other_agent_run: "Cannot continue a run of a different agent; name a prior run of the agent you trigger.",
+  not_a_coding_run: "Cannot continue a run that has no coding run; it ended before its coding run was created.",
+  run_not_finished: "Cannot continue a coding run that has not finished; wait until it ends.",
 };
 
 /** A continuation refused because of the run it names. Its message is fixed text, safe to show the model. */

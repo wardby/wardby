@@ -25,16 +25,38 @@ const coding = (id = "a1"): Row => ({
   codingProfile: { provider: "codex", repository: "o/r", baseRef: "main", allowWebhookTaskOverride: false },
 });
 
-function setup(agents: Row[], runs: { id: string; agentId: string }[], principalId = "p1") {
+type RunRow = {
+  id: string;
+  agentId: string;
+  status?: string;
+  codingRun?: { repository: string; rootCodingRunId: string | null } | null;
+};
+
+function setup(agents: Row[], runs: RunRow[], principalId = "p1") {
+  const run = (r: RunRow) => ({
+    agentId: r.agentId,
+    status: r.status ?? "succeeded",
+    codingRun: r.codingRun === undefined ? { repository: "o/r", rootCodingRunId: null } : r.codingRun,
+  });
   const db: any = {
     resourceGrant: fakeResourceGrants([]),
     agent: {
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => agents.find((a) => a.id === where.id) ?? null,
     },
-    run: { findUnique: async ({ where }: { where: { id: string } }) => runs.find((r) => r.id === where.id) ?? null },
+    run: {
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        const found = runs.find((r) => r.id === where.id);
+        return found ? run(found) : null;
+      },
+    },
     agentRepository: { findMany: async () => [] },
-    codingRun: { findUnique: async () => null },
+    codingRun: {
+      findUnique: async ({ where }: { where: { runId: string } }) => {
+        const found = runs.find((r) => r.id === where.runId);
+        return found ? run(found).codingRun : null;
+      },
+    },
   };
   const ctx: McpRequestContext = {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
@@ -89,13 +111,83 @@ describe("trigger_agent continuePriorRun", () => {
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 
-  it("is refused when the run is unknown or belongs to another agent", async () => {
+  it("refuses an unknown run with unknown_run, without echoing the id", async () => {
+    const trigger = setup([coding()], []);
+    const result = await trigger({ agentId: "a1", continuePriorRun: "missing-run-id" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("unknown_run: Cannot continue an unknown coding run.");
+    expect(text(result)).not.toContain("missing-run-id");
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses another agent's run with other_agent_run when the caller can read that agent", async () => {
     const trigger = setup([coding(), coding("a2")], [{ id: "other", agentId: "a2" }]);
-    for (const id of ["missing", "other"]) {
-      const result = await trigger({ agentId: "a1", continuePriorRun: id });
+    const result = await trigger({ agentId: "a1", continuePriorRun: "other" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("other_agent_run: ");
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unreadable agent's run as unknown_run, so its existence never leaks", async () => {
+    const trigger = setup([coding(), { ...coding("a2"), ownerId: "someone-else" }], [{ id: "other", agentId: "a2" }]);
+    const result = await trigger({ agentId: "a1", continuePriorRun: "other" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("unknown_run: ");
+    expect(text(result)).not.toContain("other_agent_run");
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a run without a coding run with not_a_coding_run", async () => {
+    const trigger = setup([coding()], [{ id: "prior", agentId: "a1", status: "refused", codingRun: null }]);
+    const result = await trigger({ agentId: "a1", continuePriorRun: "prior" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("not_a_coding_run: ");
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a run that has not finished with run_not_finished", async () => {
+    for (const status of ["pending", "running"]) {
+      const trigger = setup([coding()], [{ id: "prior", agentId: "a1", status }]);
+      const result = await trigger({ agentId: "a1", continuePriorRun: "prior" });
       expect(result.isError).toBe(true);
-      expect(text(result)).toContain("prior run of agent");
+      expect(text(result)).toContain("run_not_finished: ");
     }
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("continues a run that ended in any terminal state", async () => {
+    for (const status of ["succeeded", "failed", "budget_exhausted", "cancelled", "lost"]) {
+      const trigger = setup([coding()], [{ id: "prior", agentId: "a1", status }]);
+      const result = await trigger({ agentId: "a1", continuePriorRun: "prior" });
+      expect(result.isError).toBeFalsy();
+    }
+    expect(dispatchRun).toHaveBeenCalledTimes(5);
+  });
+
+  it("refuses a repository other than the root run's with other_repository", async () => {
+    const trigger = setup(
+      [coding()],
+      [
+        { id: "root", agentId: "a1", codingRun: { repository: "o/r", rootCodingRunId: null } },
+        { id: "round", agentId: "a1", codingRun: { repository: "o/r", rootCodingRunId: "root" } },
+      ],
+    );
+    const refused = await trigger({ agentId: "a1", continuePriorRun: "round", repository: "o/elsewhere" });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("other_repository: ");
+    expect(text(refused)).not.toContain("o/elsewhere");
+    expect(dispatchRun).not.toHaveBeenCalled();
+
+    const same = await trigger({ agentId: "a1", continuePriorRun: "round", repository: "O/R" });
+    expect(same.isError).toBeFalsy();
+    expect(dispatchRun).toHaveBeenCalledWith(expect.objectContaining({ continuesCodingRunId: "round" }));
+  });
+
+  it("refuses baseRef with a continuation", async () => {
+    const trigger = setup([coding()], [{ id: "prior", agentId: "a1" }]);
+    const result = await trigger({ agentId: "a1", continuePriorRun: "prior", baseRef: "develop" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("leave baseRef out");
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 

@@ -116,6 +116,14 @@ changes during it:
   it continues. Without a choice the call is refused with
   `repository_required`.
 
+- `trigger_agent` takes `continuePriorRun` (owner only): the id of a finished
+  earlier run of the same coding agent. The new run continues that run's
+  branch (its pull request, or for a local repository its pushed
+  `wardby/run-<id>` branch) in its repositories, so leave `baseRef` and
+  `repositories` out. A refusal starts with a fixed code (`unknown_run`,
+  `other_agent_run`, `not_a_coding_run`, `run_not_finished`,
+  `other_repository`, `no_pull_request`, `no_pushed_branch`, `other_owner`);
+  see the help article `errors/continuation-refused`.
 - `trigger_agent` also takes `repositories`, and a webhook body
   `wardbyRepositories`, to choose the extra repositories of one run; see
   [Several repositories in one run](#several-repositories-in-one-run).

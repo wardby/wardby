@@ -1991,6 +1991,38 @@ describe("ContainerExecutor", () => {
     expect(created.store.completions[0]?.record).toEqual({ baseSha: "a".repeat(40) });
   });
 
+  it("continues a local-repository run on its pushed branch the same way on every launcher", async () => {
+    // A Docker-like launcher (handle known only after launch), a Kubernetes-like one (planned handle)
+    // and a Substrate-like one: the continuation is prepared, pushed and recorded identically.
+    for (const planned of [undefined, { backend: "kubernetes", id: "job" }, { backend: "substrate", id: "actor" }]) {
+      const created = await harness(
+        {
+          repository: LOCAL_REPOSITORY,
+          profileRepository: LOCAL_REPOSITORY,
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+        },
+        IMAGE,
+        undefined,
+        undefined,
+        // A stand-in gate: the real one resolves local paths against LOCAL_REPO_ROOTS on disk.
+        { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+      );
+      created.jobs.planned = planned;
+      created.vcs.pushBranchOnly = true;
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastPrepareInput).toMatchObject({
+        repository: LOCAL_REPOSITORY,
+        headRef: "wardby/run-root-run",
+        continuation: { rootRunId: "root-run" },
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "branch_pushed", headRef: "wardby/run-root-run" });
+      expect(created.store.completions[0]?.record).toMatchObject({ resultBranch: "wardby/run-root-run" });
+    }
+  });
+
   it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {
     const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
     await created.executor.start("run-1");
