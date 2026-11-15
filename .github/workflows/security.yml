@@ -63,6 +63,8 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run prisma:migrate
+      # The Substrate bridge integration test runs the tool runner, which has its own dependencies.
+      - run: npm ci --prefix src/claude-tool-runner
       # The one browser test runs in browser-tests, in Playwright's image, so this job needs no
       # browser or its system libraries (installing those from apt took up to 10 minutes a run).
       - run: npm test -- --exclude src/mcp/auth/self-hosted/browser.test.ts
@@ -179,7 +181,7 @@ jobs:
       # The runtime images inherit protocol.js from the pinned driver; a protocol change needs a new
       # driver-v* pinned, or every rebuilt worker keeps validating with the old protocol.
       - if: matrix.kind == 'runtime'
-        run: npx tsc -p tsconfig.build.json && node scripts/check-worker-protocol.mjs wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
+        run: npm run build:substrate && npx tsc -p tsconfig.build.json && node scripts/check-worker-protocol.mjs wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
       - if: matrix.tag-suffix == 'node'
         run: npm run test:docker-isolation
         env:
