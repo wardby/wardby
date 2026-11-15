@@ -18,6 +18,7 @@ import {
 import type { Room } from "./placement.js";
 import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
+import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cache/key.js";
 import {
   BLOB,
   REPO_BLOB,
@@ -1177,13 +1178,22 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       await logged.launch({ ...(await followUp(h, "run-3", { from: "run-2", headSha: SHA_2 })), mcpTools: true });
       // A run with extra repositories (cold, never adopting), whose setup and seeds are blobs too.
       await logged.launch(await withExtras(h, await otherRun(h, "run-4")));
+      // A dependency-cache chain: run-5 parks, and run-6 adopts it (its tool setup says workspaceReused).
+      const cacheFirst = await logged.launch({ ...(await otherRun(h, "run-5")), dependencyCache: true });
+      await finishRound(h, substrateRunToken("run-5"), "run-5", 1);
+      expect(await logged.retain(cacheFirst, RETAIN)).toBe(true);
+      const cacheSecond = await logged.launch({
+        ...(await followUp(h, "run-6", { from: "run-5" })),
+        dependencyCache: true,
+      });
+      expect(await logged.warmOutcome(cacheSecond)).toEqual({ adopted: true });
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
       setLogLineFilter((line) => line);
     }
     const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_", FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3, "rmt_"];
-    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4"].map((id) => h.runs.get(id)));
+    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"].map((id) => h.runs.get(id)));
     expect(rows[3]?.repositories).toEqual(EXTRAS);
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),
@@ -1206,6 +1216,76 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.stringify(h.warmEvents)).not.toContain(SHA_1);
     // The logged events reached the log (so the check above saw them).
     if (logger.isLevelEnabled("info")) expect(stdout.join("")).toContain("substrate_warm_not_adopted");
+  });
+});
+
+describe("warm rounds and the dependency cache", () => {
+  const CACHE_KEY = newBlobKey(
+    deriveSnapshotKey({
+      repository: "owner/repo",
+      projectPath: ".",
+      lockHash: "c".repeat(64),
+      workerImage: TOOL_IMAGE,
+    }),
+  );
+
+  async function toolSetupOf(h: Harness): Promise<Record<string, unknown>> {
+    const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as { toolSetup: string };
+    return JSON.parse(setup.toolSetup) as Record<string, unknown>;
+  }
+
+  /** Round 1 of a cache run, parked; its tool setup read before the park deletes it. */
+  async function parkedCacheRoundOne(h: Harness): Promise<Record<string, unknown>> {
+    const handle = await h.launcher.launch(h.spec);
+    const setup = await toolSetupOf(h);
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    return setup;
+  }
+
+  it("an adopted round's tool setup says workspaceReused; round 1's does not", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    const first = await parkedCacheRoundOne(h);
+    expect(first.dependencyCache).toBe(true);
+    expect(first).not.toHaveProperty("workspaceReused");
+    const spec2 = { ...(await followUp(h, "run-2")), dependencyCache: true as const };
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: true });
+    expect((await h.runs.get("run-2"))!.round).toBe(2);
+    const setup = await toolSetupOf(h);
+    expect(setup.workspaceReused).toBe(true);
+    expect(setup.dependencyCache).toBe(true);
+    expect(setup.diskMb).toBe(64);
+  });
+
+  it("a cold fallback (branch_moved) gets a normal cache setup", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    await parkedCacheRoundOne(h);
+    const spec2 = { ...(await followUp(h, "run-2", { headSha: SHA_2 })), dependencyCache: true as const };
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "branch_moved" });
+    const row = await h.runs.get("run-2");
+    expect(row).toMatchObject({ round: 1, coldReason: "branch_moved" });
+    const setup = JSON.parse(
+      JSON.parse((await h.blobs.get(BLOB.toolSetup(row!.token))).toString()).toolSetup as string,
+    ) as Record<string, unknown>;
+    expect(setup.dependencyCache).toBe(true);
+    expect(setup).not.toHaveProperty("workspaceReused");
+  });
+
+  it("park and the parked run's removal never delete a dependency-cache object", async () => {
+    const h = await warmHarness();
+    h.spec = { ...h.spec, dependencyCache: true, agentId: "agent-1" };
+    await h.blobs.put(CACHE_KEY, Buffer.from("snapshot"));
+    await parkedCacheRoundOne(h);
+    expect((await h.blobs.get(CACHE_KEY)).toString()).toBe("snapshot");
+    expect(await h.launcher.removeParked({ agentId: "agent-1" })).toBe(1);
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    expect((await h.blobs.get(CACHE_KEY)).toString()).toBe("snapshot");
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
   });
 });
 
