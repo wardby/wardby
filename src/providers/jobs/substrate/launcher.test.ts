@@ -788,7 +788,7 @@ describe("SubstrateJobLauncher", () => {
         gitHistory: { bundleDestination, maxBundleBytes: 1024 },
       }),
     ).rejects.toThrow("vcs_result_bundle_too_large");
-    await expect(lstat(bundleDestination)).rejects.toThrow(/ENOENT/);
+    await expect(readFile(bundleDestination)).rejects.toThrow(/ENOENT/);
     expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# hello\n");
     // A configured limit far above the archive is capped at its size, and a bundle within it is taken.
     const taken = await h.launcher.materializeWorkspace(handle, destination, undefined, {

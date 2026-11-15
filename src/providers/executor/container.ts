@@ -4090,12 +4090,6 @@ export class ContainerExecutor implements Executor {
     return { state: "active" };
   }
 
-  /**
-   * After drainCodingQueue failed a queued run (coding_queue_timeout): releases what an earlier
-   * attempt the cluster refused left behind, as stop() does for a queued run. A refused
-   * continuation already marked its pull request as being worked on; that check is finished
-   * here. Best effort; the artifact is removed only where this process wrote it.
-   */
   async removeRetainedRounds(agentId: string): Promise<number> {
     const removeParked = this.options.jobs.removeParked?.bind(this.options.jobs);
     if (!this.warmRounds || !removeParked) return 0;
@@ -4110,6 +4104,12 @@ export class ContainerExecutor implements Executor {
     }
   }
 
+  /**
+   * After drainCodingQueue failed a queued run (coding_queue_timeout): releases what an earlier
+   * attempt the cluster refused left behind, as stop() does for a queued run. A refused
+   * continuation already marked its pull request as being worked on; that check is finished
+   * here. Best effort; the artifact is removed only where this process wrote it.
+   */
   async cleanupQueueTimeout(runId: string): Promise<void> {
     this.capacityRefusedAt.delete(runId);
     this.options.capabilities.delete(runId);
