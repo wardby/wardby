@@ -16,11 +16,9 @@ import { pathToFileURL } from "node:url";
 import {
   DiagnosticsTail,
   postBestEffort,
-  postCapped,
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
-  uploadFile,
   waitForRound,
   waitForRunToken,
   withRound,
@@ -35,24 +33,18 @@ import {
   PLACEHOLDER_CAPABILITY,
   WARM_ROUNDS_ENV,
   WORKER_CONTEXT_ROOT,
-  WORKER_OUTPUT_TAIL,
 } from "./constants.js";
-import { findWorkerDiagnostic, LineTail, waitAtMost } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
+import { superviseWorker, TRANSCRIPT_DEADLINE_MS, type WorkerHandle } from "./worker-run.js";
+
+export { TRANSCRIPT_DEADLINE_MS, type WorkerHandle } from "./worker-run.js";
 
 const MAX_LINE_CHARS = 4 * 1024 * 1024;
 const POLL_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const INPUT_DEADLINE_MS = 5 * 60_000;
 const WORKER_ENTRY = "/opt/wardby/claude-coding-worker/main.js";
-
-export interface WorkerHandle {
-  exited: Promise<number>;
-  /** The worker's output, when the bridge can read it (kept in memory only; see diagnostics.ts). */
-  stdout?: NodeJS.ReadableStream;
-  stderr?: NodeJS.ReadableStream;
-}
 
 export interface AgentOptions {
   proxyUrl: string;
@@ -117,11 +109,6 @@ const spawnWorker = (env: NodeJS.ProcessEnv): WorkerHandle => {
     }),
   };
 };
-
-/** How long, after the worker exits, the bridge waits for its output streams to end. */
-const OUTPUT_DRAIN_MS = 2_000;
-/** The transcript is best effort: it never holds the result back for longer than this. */
-export const TRANSCRIPT_DEADLINE_MS = 2 * 60_000;
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** The transcript header is one short JSON line; anything longer is not read. */
@@ -376,57 +363,19 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
     });
     log("substrate_bridge_worker_started", { runToken: token, ...(round > 1 ? { round } : {}) });
-    // The worker's last lines, in memory only: nothing of them leaves the actor except the one fixed
-    // diagnostic findWorkerDiagnostic accepts.
-    const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
-    const drained = Promise.all([
-      ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
-      ...(worker.stderr ? [tail.tail.follow(worker.stderr)] : []),
-    ]);
-    // The transcript, then the result, once the worker has exited. The result (or the exit report)
-    // ends the round: the control plane may read the transcript and remove the run's blobs as soon as
-    // it lands, so nothing is uploaded after it. The transcript is best effort and bounded, and never
-    // blocks it.
-    const uploaded = worker.exited.then(async (code) => {
-      log("substrate_bridge_worker_exited", { runToken: token, code });
-      await uploadFile(
-        withRound(`${base}/transcript`, round),
-        headers,
-        transcriptPath,
-        policy,
-        log,
-        "transcript",
-        AbortSignal.any([shutdown.signal, AbortSignal.timeout(transcriptDeadlineMs)]),
-      );
-      const outcome = await uploadFile(
-        withRound(`${base}/result`, round),
-        headers,
-        resultPath,
-        policy,
-        log,
-        "result",
-        shutdown.signal,
-      );
-      // No usable result: tell the proxy the worker is gone (it also asks the tool for the workspace),
-      // with the worker's own diagnostic code when it printed one.
-      if (outcome !== "ok") {
-        await waitAtMost(drained, OUTPUT_DRAIN_MS);
-        const diagnostic = findWorkerDiagnostic(output.lines());
-        // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log, before the
-        // exit report that ends the round.
-        await tail.post(withRound(`${base}/diagnostics`, round), headers, policy, log, shutdown.signal);
-        await postCapped(
-          withRound(`${base}/exit`, round),
-          headers,
-          { code, ...diagnostic },
-          policy,
-          log,
-          "exit",
-          shutdown.signal,
-        );
-      }
+    return superviseWorker(worker, {
+      base,
+      round,
+      token,
+      headers,
+      resultPath,
+      transcriptPath,
+      transcriptDeadlineMs,
+      tail,
+      policy,
+      log,
+      signal: shutdown.signal,
     });
-    return { exited: worker.exited, uploaded };
   };
   const first = startRound(1);
 
