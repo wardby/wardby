@@ -36,12 +36,12 @@ export interface SubstrateTemplateStore {
   touchNames(names: readonly string[], at: Date): Promise<void>;
   get(name: string): Promise<SubstrateTemplateRecord | undefined>;
   /**
-   * Records a golden-snapshot failure seen at `at`, atomically. With no failure yet, or the window's
-   * first failure more than `windowMs` before `at`: a new window (goldenFailures 1, lastFailureAt = at,
-   * readyAt cleared). Otherwise goldenFailures + 1 (lastFailureAt unchanged). Returns goldenFailures;
-   * 0 when the row does not exist.
+   * Records a golden-snapshot failure seen at `at`, atomically (see nextGoldenFailure): a new window,
+   * the same build as the window's first failure (seen within `sameBuildMs` of it: not counted again),
+   * or one more failure. Returns the window's count and whether it was the same build; failures 0 when
+   * the row does not exist.
    */
-  recordGoldenFailure(name: string, at: Date, windowMs: number): Promise<number>;
+  recordGoldenFailure(name: string, at: Date, windowMs: number, sameBuildMs: number): Promise<GoldenFailureCount>;
   /** Sets readyAt = at on each named row whose readyAt is null. */
   markReady(names: readonly string[], at: Date): Promise<void>;
   /** Rows with lastUsedAt < cutoff, least recently used first, at most `limit`. */
@@ -50,6 +50,45 @@ export interface SubstrateTemplateStore {
   deleteIfUnusedBefore(name: string, cutoff: Date): Promise<boolean>;
   /** Inserts the row as given unless one with its name exists (undo a sweep's row delete). */
   restore(record: SubstrateTemplateRecord): Promise<void>;
+}
+
+/** What recordGoldenFailure saw. */
+export interface GoldenFailureCount {
+  /** The golden-snapshot failures in the window, this one included (0: no row). */
+  failures: number;
+  /**
+   * The failure was seen within sameBuildMs of the window's first failure: the build that failure
+   * already counted (another launch saw it too, before the template was rebuilt), so not counted again.
+   */
+  sameBuild: boolean;
+}
+
+/**
+ * One golden-snapshot failure at `at` against a row's window. No failure yet, or the window's first
+ * failure more than `windowMs` before `at`: a new window (goldenFailures 1, lastFailureAt = at, readyAt
+ * cleared). Within `sameBuildMs` of the window's first failure (or before it, on a skewed clock): the
+ * same build, nothing written. Otherwise goldenFailures + 1, lastFailureAt unchanged. A rebuild takes a
+ * fresh golden snapshot build, so a distinct build's failure comes later than `sameBuildMs`; one that
+ * comes sooner is taken as the same build, which requeues rather than fails (fails safe).
+ */
+function nextGoldenFailure(
+  row: { goldenFailures: number; lastFailureAt?: Date },
+  at: Date,
+  windowMs: number,
+  sameBuildMs: number,
+): { result: GoldenFailureCount; data?: { goldenFailures: number; lastFailureAt?: Date; readyAt?: null } } {
+  const first = row.lastFailureAt?.getTime();
+  if (first === undefined || first < at.getTime() - windowMs) {
+    return {
+      result: { failures: 1, sameBuild: false },
+      data: { goldenFailures: 1, lastFailureAt: new Date(at), readyAt: null },
+    };
+  }
+  if (at.getTime() - first < sameBuildMs) return { result: { failures: row.goldenFailures, sameBuild: true } };
+  return {
+    result: { failures: row.goldenFailures + 1, sameBuild: false },
+    data: { goldenFailures: row.goldenFailures + 1 },
+  };
 }
 
 interface Row {
@@ -111,17 +150,28 @@ export class PrismaSubstrateTemplateStore implements SubstrateTemplateStore {
     return row ? toRecord(row) : undefined;
   }
 
-  async recordGoldenFailure(name: string, at: Date, windowMs: number): Promise<number> {
-    const cutoff = new Date(at.getTime() - windowMs);
-    // One statement: Postgres evaluates every SET against the old row, so concurrent failures each count once.
-    const rows = await this.db.$queryRaw<{ goldenFailures: number }[]>`
-      UPDATE "SubstrateTemplate" SET
-        "goldenFailures" = CASE WHEN "lastFailureAt" IS NULL OR "lastFailureAt" < ${cutoff} THEN 1 ELSE "goldenFailures" + 1 END,
-        "lastFailureAt"  = CASE WHEN "lastFailureAt" IS NULL OR "lastFailureAt" < ${cutoff} THEN ${at} ELSE "lastFailureAt" END,
-        "readyAt"        = CASE WHEN "lastFailureAt" IS NULL OR "lastFailureAt" < ${cutoff} THEN NULL ELSE "readyAt" END
-      WHERE "name" = ${name}
-      RETURNING "goldenFailures"`;
-    return rows[0]?.goldenFailures ?? 0;
+  async recordGoldenFailure(
+    name: string,
+    at: Date,
+    windowMs: number,
+    sameBuildMs: number,
+  ): Promise<GoldenFailureCount> {
+    // Under the row's lock: concurrent observers of one failure are serialized, so the first opens the
+    // window and the others see it (the same build), however many replicas record at once.
+    return this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<{ goldenFailures: number; lastFailureAt: Date | null }[]>`
+        SELECT "goldenFailures", "lastFailureAt" FROM "SubstrateTemplate" WHERE "name" = ${name} FOR UPDATE`;
+      const row = locked[0];
+      if (!row) return { failures: 0, sameBuild: false };
+      const next = nextGoldenFailure(
+        { goldenFailures: row.goldenFailures, ...(row.lastFailureAt ? { lastFailureAt: row.lastFailureAt } : {}) },
+        at,
+        windowMs,
+        sameBuildMs,
+      );
+      if (next.data) await tx.substrateTemplate.update({ where: { name }, data: next.data });
+      return next.result;
+    });
   }
 
   async markReady(names: readonly string[], at: Date): Promise<void> {
@@ -200,18 +250,21 @@ export class MemorySubstrateTemplateStore implements SubstrateTemplateStore {
     return row ? structuredClone(row) : undefined;
   }
 
-  async recordGoldenFailure(name: string, at: Date, windowMs: number): Promise<number> {
+  async recordGoldenFailure(
+    name: string,
+    at: Date,
+    windowMs: number,
+    sameBuildMs: number,
+  ): Promise<GoldenFailureCount> {
     const row = this.rows.get(name);
-    if (!row) return 0;
-    const cutoff = at.getTime() - windowMs;
-    if (row.lastFailureAt === undefined || row.lastFailureAt.getTime() < cutoff) {
-      row.goldenFailures = 1;
-      row.lastFailureAt = new Date(at);
-      delete row.readyAt;
-    } else {
-      row.goldenFailures += 1;
+    if (!row) return { failures: 0, sameBuild: false };
+    const next = nextGoldenFailure(row, at, windowMs, sameBuildMs);
+    if (next.data) {
+      row.goldenFailures = next.data.goldenFailures;
+      if (next.data.lastFailureAt) row.lastFailureAt = next.data.lastFailureAt;
+      if (next.data.readyAt === null) delete row.readyAt;
     }
-    return row.goldenFailures;
+    return next.result;
   }
 
   async markReady(names: readonly string[], at: Date): Promise<void> {

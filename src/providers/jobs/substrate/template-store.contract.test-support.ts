@@ -13,6 +13,8 @@ const T0 = Date.parse("2026-11-15T12:00:00Z");
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const at = (ms: number) => new Date(ms);
+/** A failure this soon after the window's first is the same build. */
+const SAME = 30_000;
 const FIELDS = [
   "atespace",
   "createdAt",
@@ -59,8 +61,8 @@ export function describeSubstrateTemplateStoreContract(name: string, setup: Temp
       const store = setup.store();
       const n = setup.id("fields");
       await store.touch(template(n), at(T0));
-      await store.recordGoldenFailure(n, at(T0), 10 * MINUTE);
-      await store.recordGoldenFailure(n, at(T0 + MINUTE), 10 * MINUTE);
+      await store.recordGoldenFailure(n, at(T0), 10 * MINUTE, SAME);
+      await store.recordGoldenFailure(n, at(T0 + MINUTE), 10 * MINUTE, SAME);
       await store.markReady([n], at(T0 + 2 * MINUTE));
       const record = (await store.get(n))!;
       for (const key of Object.keys(record)) expect(FIELDS).toContain(key);
@@ -72,16 +74,51 @@ export function describeSubstrateTemplateStoreContract(name: string, setup: Temp
       const n = setup.id("window");
       const window = 10 * MINUTE;
       await store.touch(template(n), at(T0));
-      expect(await store.recordGoldenFailure(n, at(T0), window)).toBe(1);
+      expect(await store.recordGoldenFailure(n, at(T0), window, SAME)).toEqual({ failures: 1, sameBuild: false });
       expect((await store.get(n))?.lastFailureAt).toEqual(at(T0));
-      expect(await store.recordGoldenFailure(n, at(T0 + 5 * MINUTE), window)).toBe(2);
-      expect(await store.recordGoldenFailure(n, at(T0 + 9 * MINUTE), window)).toBe(3);
+      expect(await store.recordGoldenFailure(n, at(T0 + 5 * MINUTE), window, SAME)).toEqual({
+        failures: 2,
+        sameBuild: false,
+      });
+      expect(await store.recordGoldenFailure(n, at(T0 + 9 * MINUTE), window, SAME)).toEqual({
+        failures: 3,
+        sameBuild: false,
+      });
       expect(await store.get(n)).toMatchObject({ goldenFailures: 3, lastFailureAt: at(T0) });
       const later = T0 + 10 * MINUTE + 1000;
-      expect(await store.recordGoldenFailure(n, at(later), window)).toBe(1);
+      expect(await store.recordGoldenFailure(n, at(later), window, SAME)).toEqual({ failures: 1, sameBuild: false });
       expect(await store.get(n)).toMatchObject({ goldenFailures: 1, lastFailureAt: at(later) });
-      expect(await store.recordGoldenFailure(setup.id("unknown"), at(T0), window)).toBe(0);
+      expect(await store.recordGoldenFailure(setup.id("unknown"), at(T0), window, SAME)).toEqual({
+        failures: 0,
+        sameBuild: false,
+      });
       expect(await store.get(setup.id("unknown"))).toBeUndefined();
+    });
+
+    it("takes a failure soon after the window's first as that same build, counted once", async () => {
+      const store = setup.store();
+      const n = setup.id("same");
+      const window = 10 * MINUTE;
+      await store.touch(template(n), at(T0));
+      expect(await store.recordGoldenFailure(n, at(T0), window, SAME)).toEqual({ failures: 1, sameBuild: false });
+      await store.markReady([n], at(T0 + 1000));
+      expect(await store.recordGoldenFailure(n, at(T0), window, SAME)).toEqual({ failures: 1, sameBuild: true });
+      expect(await store.recordGoldenFailure(n, at(T0 + SAME - 1), window, SAME)).toEqual({
+        failures: 1,
+        sameBuild: true,
+      });
+      // A skewed clock (a failure seen "before" the first): still that build.
+      expect(await store.recordGoldenFailure(n, at(T0 - 5000), window, SAME)).toEqual({
+        failures: 1,
+        sameBuild: true,
+      });
+      // Nothing was written: the window, its anchor and readyAt are as the first failure left them.
+      expect(await store.get(n)).toMatchObject({ goldenFailures: 1, lastFailureAt: at(T0), readyAt: at(T0 + 1000) });
+      expect(await store.recordGoldenFailure(n, at(T0 + SAME), window, SAME)).toEqual({
+        failures: 2,
+        sameBuild: false,
+      });
+      expect(await store.get(n)).toMatchObject({ goldenFailures: 2, lastFailureAt: at(T0) });
     });
 
     it("a new window clears readyAt", async () => {
@@ -90,7 +127,7 @@ export function describeSubstrateTemplateStoreContract(name: string, setup: Temp
       await store.touch(template(n), at(T0));
       await store.markReady([n], at(T0));
       expect((await store.get(n))?.readyAt).toEqual(at(T0));
-      await store.recordGoldenFailure(n, at(T0 + HOUR), 10 * MINUTE);
+      await store.recordGoldenFailure(n, at(T0 + HOUR), 10 * MINUTE, SAME);
       expect(await store.get(n)).not.toHaveProperty("readyAt");
     });
 
@@ -156,7 +193,7 @@ export function describeSubstrateTemplateStoreContract(name: string, setup: Temp
       const store = setup.store();
       const n = setup.id("restore");
       await store.touch(template(n), at(T0));
-      await store.recordGoldenFailure(n, at(T0 + MINUTE), 10 * MINUTE);
+      await store.recordGoldenFailure(n, at(T0 + MINUTE), 10 * MINUTE, SAME);
       await store.markReady([n], at(T0 + 2 * MINUTE));
       const record = (await store.get(n))!;
       expect(await store.deleteIfUnusedBefore(n, at(T0 + HOUR))).toBe(true);

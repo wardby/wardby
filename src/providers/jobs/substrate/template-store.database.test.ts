@@ -41,17 +41,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateTemplateStore (Postgr
     ]);
   });
 
-  it("counts concurrent failures once each", async () => {
+  it("counts concurrent observers of one failed build once", async () => {
     const store = new PrismaSubstrateTemplateStore(db);
     const name = id();
     const at = new Date("2026-11-15T12:00:00Z");
     await store.touch({ name, atespace: ATESPACE, role: "tool", image: CUSTOM_TOOL_IMAGE }, at);
-    const results = await Promise.all([
-      store.recordGoldenFailure(name, at, 600_000),
-      store.recordGoldenFailure(name, at, 600_000),
-    ]);
-    expect([...results].sort()).toEqual([1, 2]);
-    expect((await store.get(name))?.goldenFailures).toBe(2);
+    const results = await Promise.all(
+      [0, 1, 2, 3].map((i) => store.recordGoldenFailure(name, new Date(at.getTime() + i * 1000), 600_000, 60_000)),
+    );
+    // One opens the window; the others are that same build, whatever order the row lock gave them.
+    expect(results.filter((r) => !r.sameBuild)).toEqual([{ failures: 1, sameBuild: false }]);
+    expect(results.filter((r) => r.sameBuild)).toEqual(Array(3).fill({ failures: 1, sameBuild: true }));
+    expect((await store.get(name))?.goldenFailures).toBe(1);
   });
 
   it("retries a concurrent first touch as an update", async () => {

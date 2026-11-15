@@ -130,7 +130,7 @@ import {
   toolTemplate,
   type SubstrateLaunchConfig,
 } from "./specs.js";
-import type { SubstrateTemplateRole, SubstrateTemplateStore } from "./template-store.js";
+import type { GoldenFailureCount, SubstrateTemplateRole, SubstrateTemplateStore } from "./template-store.js";
 
 export interface SubstrateJobLauncherOptions {
   api: SubstrateApi;
@@ -189,6 +189,7 @@ export interface TemplateEvent {
   event:
     | "substrate_template_golden_failed"
     | "substrate_template_unready"
+    | "substrate_template_record_failed"
     | "substrate_template_removed"
     | "substrate_template_remove_failed";
   name: string;
@@ -203,11 +204,24 @@ export interface TemplateEvent {
 
 export const DEFAULT_TEMPLATE_READY_MS = 900_000;
 export const DEFAULT_TEMPLATE_RETRY_MS = 600_000;
+/**
+ * A golden-snapshot failure seen within this of the window's first failure is that same build, seen
+ * by another launch before the template was rebuilt: counted once, and that launch requeues (a
+ * rebuild takes a fresh golden snapshot build, so a distinct build's failure comes later).
+ */
+export const TEMPLATE_SAME_BUILD_MS = 60_000;
 
 /** A run's template cannot start an actor (see ensureTemplate and neverReady): the run fails, never requeues. */
 class TemplateUnreadyError extends Error {
   constructor() {
     super("substrate_image_unready");
+  }
+}
+
+/** Another launch is rebuilding the template whose failed build this launch also saw: the run requeues. */
+class TemplateRebuildingError extends Error {
+  constructor() {
+    super("substrate_template_rebuilding");
   }
 }
 
@@ -493,11 +507,6 @@ type RunTemplates =
 /** The templates of every actor of the run. */
 function actorTemplates(templates: RunTemplates): ActorTemplateSpec[] {
   return templates.shape === "pair" ? [templates.agent, templates.tool] : [templates.agent];
-}
-
-/** The run's templates in the order its actors resume (the tool first), so the first refused is first. */
-function resumeOrder(templates: RunTemplates): ActorTemplateSpec[] {
-  return templates.shape === "pair" ? [templates.tool, templates.agent] : [templates.agent];
 }
 
 /** Whether every actor of the run can be placed in `free`; true when the room is unknown (the launch decides). */
@@ -833,6 +842,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         throw error;
       }
     };
+    // The template of the actor being resumed, so a refusal names the one refused (neverReady).
+    let resuming: ActorTemplateSpec | undefined;
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
@@ -884,8 +895,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (shape === "pair") {
         await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
         // The tool first: the agent's first tool call needs it.
+        resuming = templates.tool;
         await call("resumeActor", () => this.api.resumeActor(atespace, tool));
       }
+      resuming = templates.agent;
       await call("resumeActor", () => this.api.resumeActor(atespace, agent));
     } catch (error) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
@@ -894,7 +907,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // never requeued. The launch resolves with its handle; status() answers the recorded failure.
       if (
         error instanceof TemplateUnreadyError ||
-        (error instanceof SubstrateExhaustedError && (await this.neverReady(templates)))
+        (error instanceof SubstrateExhaustedError && resuming && (await this.neverReady(templates, resuming)))
       ) {
         await this.runs.setPhase(spec.runId, "image_unready", ["provisioning"]).catch(() => undefined);
         return;
@@ -902,6 +915,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
+      }
+      if (error instanceof TemplateRebuildingError) {
+        await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
+        throw new JobCapacityError("substrate_capacity: template rebuilding", { cause: error });
       }
       await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
       throw error;
@@ -930,28 +947,26 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * Whether a refused resume is an image that never becomes ready rather than a full cluster: the
-   * workers have room for the run, and one of its templates (in resume order) has never started an
-   * actor (no readyAt) and has been building (since it was created, or since its window's first
-   * golden-snapshot failure) for longer than templateReadyMs. Reports that template. Any store
-   * error: false (the run requeues, as before).
+   * workers are known to have room for the run (a worker list that cannot be read is not room), and
+   * the refused actor's template has never started an actor (no readyAt) and has been building (since
+   * it was created, or since its window's first golden-snapshot failure) for longer than
+   * templateReadyMs. Reports that template. Any store error: false (the run requeues, as before).
    */
-  private async neverReady(templates: RunTemplates): Promise<boolean> {
+  private async neverReady(templates: RunTemplates, refused: ActorTemplateSpec): Promise<boolean> {
     try {
-      if (!(await this.fits(templates))) return false;
-      for (const template of resumeOrder(templates)) {
-        const row = await this.templates.get(template.name);
-        if (!row || row.readyAt !== undefined) continue;
-        const since = (row.lastFailureAt ?? row.createdAt).getTime();
-        if (this.now() - since <= this.templateReadyMs) continue;
-        this.templateEvent({
-          event: "substrate_template_unready",
-          name: row.name,
-          role: row.role,
-          reason: "never_ready",
-        });
-        return true;
-      }
-      return false;
+      const free = await this.freeRoom();
+      if (free === undefined || !placeable(free, templates)) return false;
+      const row = await this.templates.get(refused.name);
+      if (!row || row.readyAt !== undefined) return false;
+      const since = (row.lastFailureAt ?? row.createdAt).getTime();
+      if (this.now() - since <= this.templateReadyMs) return false;
+      this.templateEvent({
+        event: "substrate_template_unready",
+        name: row.name,
+        role: row.role,
+        reason: "never_ready",
+      });
+      return true;
     } catch {
       return false;
     }
@@ -964,7 +979,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * the row's window (SUBSTRATE_TEMPLATE_RETRY_SEC, anchored at its first failure). The first one in
    * a window deletes the template and creates it again, once per launch (a fresh golden snapshot
    * build follows); a second one within the window fails the run (TemplateUnreadyError:
-   * substrate_image_unready) without rebuilding, since the image itself is broken. A template's
+   * substrate_image_unready) without rebuilding, since the image itself is broken. A failure seen
+   * within TEMPLATE_SAME_BUILD_MS of the window's first is that same build, seen by a concurrent
+   * launch: not counted again, and this launch requeues (TemplateRebuildingError) without deleting
+   * the template the other launch is rebuilding. A record that cannot be written is logged
+   * (substrate_template_record_failed) and counts as no earlier failure (rebuilt). A template's
    * name is derived from its image, size and settings, so the one deleted is this same spec.
    * Substrate's failure message is never read (the client maps only goldenSnapshotFailed).
    */
@@ -973,19 +992,28 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
   ): Promise<void> {
     const { name, atespace } = template;
-    const role = templateRoleOf(name)!;
+    const role = templateRoleOf(name);
+    // Every name templatesFor builds has a role; one without is a broken invariant, never a Prisma write.
+    if (!role) throw new Error("substrate_template_name_invalid");
     await this.templates.touch({ name, atespace, role, image: template.containers[0].image }, new Date(this.now()));
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
     const info = await call("getActorTemplate", () => this.api.getActorTemplate(atespace, name));
     if (!info?.goldenSnapshotFailed) return;
-    // A record that cannot be written counts as no earlier failure: the template is rebuilt, as before.
-    const failures = await this.templates
-      .recordGoldenFailure(name, new Date(this.now()), this.templateRetryMs)
-      .catch(() => undefined);
-    if (failures !== undefined) {
-      this.templateEvent({ event: "substrate_template_golden_failed", name, role, failures });
+    let count: GoldenFailureCount | undefined;
+    try {
+      count = await this.templates.recordGoldenFailure(
+        name,
+        new Date(this.now()),
+        this.templateRetryMs,
+        TEMPLATE_SAME_BUILD_MS,
+      );
+    } catch {
+      // Counts as no earlier failure: the template is rebuilt, as before. Fixed fields only.
+      this.templateEvent({ event: "substrate_template_record_failed", name, role });
     }
-    if (failures !== undefined && failures > 1) {
+    if (count?.sameBuild) throw new TemplateRebuildingError();
+    if (count) this.templateEvent({ event: "substrate_template_golden_failed", name, role, failures: count.failures });
+    if (count && count.failures > 1) {
       this.templateEvent({ event: "substrate_template_unready", name, role, reason: "golden_failed" });
       throw new TemplateUnreadyError();
     }

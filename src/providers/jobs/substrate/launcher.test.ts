@@ -2452,7 +2452,48 @@ describe("template record and readiness", () => {
     await h.launcher.launch(h.spec);
     expect(deletes.names).toEqual([agent.name]);
     expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
-    expect(h.templateEvents).toEqual([]);
+    // One warn line, fixed fields only: readiness counting is off while the store cannot be written.
+    expect(h.templateEvents).toEqual([{ event: "substrate_template_record_failed", name: agent.name, role: "agent" }]);
+  });
+
+  it("counts one failed build once when two launches see it: one rebuilds, the other requeues", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    const deletes = countTemplateDeletes(h);
+    // Both launches read the failed build before either deletes it (the race after a release).
+    const getActorTemplate = h.api.getActorTemplate.bind(h.api);
+    let readers = 0;
+    let release!: () => void;
+    const bothRead = new Promise<void>((resolve) => (release = resolve));
+    h.api.getActorTemplate = async (atespace, name) => {
+      const info = await getActorTemplate(atespace, name);
+      if (name === agent.name && info?.goldenSnapshotFailed) {
+        if (++readers === 2) release();
+        await bothRead;
+      }
+      return info;
+    };
+    const run2 = await secondRun(h, "run-2");
+    h.setNow(T0 + 2000);
+    const results = await Promise.allSettled([h.launcher.launch(h.spec), h.launcher.launch(run2)]);
+    expect(readers).toBe(2);
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(JobCapacityError);
+    const phases = [(await h.runs.get(h.spec.runId))?.phase, (await h.runs.get("run-2"))?.phase].sort();
+    expect(phases).toEqual(["requeued", "running"]);
+    expect(deletes.names).toEqual([agent.name]);
+    expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0 + 2000) });
+    expect(h.templateEvents).toEqual([
+      { event: "substrate_template_golden_failed", name: agent.name, role: "agent", failures: 1 },
+    ]);
+    // The requeued run relaunches on the rebuilt template and runs.
+    const requeued = (await h.runs.get(h.spec.runId))?.phase === "requeued" ? h.spec : run2;
+    await h.launcher.launch(requeued);
+    expect((await h.runs.get(requeued.runId))?.phase).toBe("running");
+    expect(deletes.names).toEqual([agent.name]);
   });
 
   /** run-1 on a template whose golden snapshot failed (recreated, running), then failed again. */
@@ -2542,6 +2583,42 @@ describe("template record and readiness", () => {
       { event: "substrate_template_unready", name: tool, role: "tool", reason: "never_ready" },
     ]);
     await noTraceOf(h, h.spec.runId);
+  });
+
+  it("names the template of the actor whose resume was refused", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    const original = h.api.resumeActor.bind(h.api);
+    h.api.resumeActor = async (atespace, name) => {
+      if (name.endsWith("-agent")) throw new SubstrateExhaustedError("no worker has room");
+      return original(atespace, name);
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.setNow(T0 + 61_000);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_unready");
+    // The tool template never got a readyAt either (the run never reached running), but it resumed.
+    expect(await h.templates.get(toolTemplate(h.spec, CONFIG).name)).not.toHaveProperty("readyAt");
+    expect(h.templateEvents).toEqual([
+      {
+        event: "substrate_template_unready",
+        name: agentTemplate(h.spec, CONFIG).name,
+        role: "agent",
+        reason: "never_ready",
+      },
+    ]);
+  });
+
+  it("still requeues a never-ready template when the worker list cannot be read", async () => {
+    const h = await makeHarness({ templateReadyMs: 60_000 });
+    refuseToolResume(h);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    h.api.listWorkers = async () => {
+      throw new Error("unreachable");
+    };
+    h.setNow(T0 + 61_000);
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    expect(h.templateEvents).toEqual([]);
   });
 
   it("still requeues an old template that once ran", async () => {
