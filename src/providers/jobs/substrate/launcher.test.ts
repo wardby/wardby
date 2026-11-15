@@ -19,10 +19,14 @@ import { inputGitHistory } from "./launcher.js";
 import { agentEgress, agentTemplate, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   allBlobs,
+  ATESPACE,
   CODEX_IMAGE,
   CONFIG,
+  CUSTOM_CODEX_IMAGE,
+  CUSTOM_TOOL_IMAGE,
   FAKE_CAP,
   FAKE_MCP,
+  LOCAL_IMAGE_ID,
   makeHarness,
   PYTHON_TOOL_IMAGE,
   SMALL_WORKER,
@@ -821,8 +825,7 @@ describe("SubstrateJobLauncher", () => {
       [{ image: "registry.example/agent:latest" }, "substrate_image_not_digest"],
       [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
-      // An agent's custom tool image (workerImageRef) is a digest but carries no bridge.
-      [{ toolImage: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
+      [{ toolImage: LOCAL_IMAGE_ID }, "substrate_image_not_digest"],
     ];
     for (const [change, code] of cases) {
       await expect(h.launcher.launch({ ...h.spec, ...change })).rejects.toThrow(code);
@@ -830,7 +833,7 @@ describe("SubstrateJobLauncher", () => {
     }
     expect(await h.runs.get(h.spec.runId)).toBeUndefined();
     expect(h.api.templates.size).toBe(0);
-    // Session resume is accepted, and so is another configured (per-toolchain) bridge tool image.
+    // Session resume is accepted, and so is another configured (per-toolchain) tool image.
     expect(h.launcher.plannedHandle({ ...h.spec, toolImage: PYTHON_TOOL_IMAGE })).toBeDefined();
     await expect(h.launcher.launch({ ...h.spec, sessionResume: true })).resolves.toBeDefined();
   });
@@ -1381,8 +1384,7 @@ describe("Codex (single actor)", () => {
     const cases: [Partial<JobSpec>, string][] = [
       [{ toolImage: `registry.example/tool@sha256:${"b".repeat(64)}` }, "substrate_spec_invalid"],
       [{ image: "registry.example/substrate-codex:latest" }, "substrate_image_not_digest"],
-      // An agent's custom Codex image (workerImageRef) is a digest but carries no bridge.
-      [{ image: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
+      [{ image: LOCAL_IMAGE_ID }, "substrate_image_not_digest"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
       [{ provider: "other" as JobSpec["provider"] }, "substrate_provider_unsupported"],
     ];
@@ -2221,5 +2223,80 @@ describe("image self-check", () => {
     fail = false;
     await h.launcher.remove(handle);
     expect(await blobKeys(h)).toEqual([]);
+  });
+});
+
+describe("custom images (workerImageRef)", () => {
+  it("launches a Claude Code run on a custom tool image, the agent on the configured one", async () => {
+    const h = await makeHarness();
+    const standard = h.spec;
+    h.spec = { ...h.spec, toolImage: CUSTOM_TOOL_IMAGE };
+    const handle = await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    const tool = h.api.actors.get(`${ATESPACE}/${toolActorName(h.token)}`);
+    expect(tool?.templateName).toBe(toolTemplate(h.spec, CONFIG).name);
+    expect(h.api.templates.get(`${ATESPACE}/${tool!.templateName}`)?.containers[0]?.image).toBe(CUSTOM_TOOL_IMAGE);
+    // The agent actor never takes the custom image: its template is the unchanged spec's.
+    const agent = h.api.actors.get(`${ATESPACE}/${agentActorName(h.token)}`);
+    const expectedAgent = agentTemplate(standard, CONFIG);
+    expect(agent?.templateName).toBe(expectedAgent.name);
+    expect(h.api.templates.get(`${ATESPACE}/${agent!.templateName}`)).toEqual(expectedAgent);
+    expect(expectedAgent.containers[0]?.image).toBe(`registry.example/agent@sha256:${"a".repeat(64)}`);
+    await putWorkspaceTar(h, { "README.md": "# custom\n" });
+    await finish(h);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    const destination = join(h.workspaceRoot, h.spec.runId, "workspace");
+    await h.launcher.materializeWorkspace(handle, destination);
+    expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# custom\n");
+  });
+
+  it("launches a Codex run on a custom image", async () => {
+    const h = await makeHarness({ provider: "codex" });
+    h.spec = { ...h.spec, image: CUSTOM_CODEX_IMAGE };
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    expect(h.api.actors.size).toBe(1);
+    const actor = h.api.actors.get(`${ATESPACE}/${agentActorName(h.token)}`);
+    expect(actor?.templateName).toBe(codexTemplate(h.spec, CONFIG).name);
+    expect(h.api.templates.get(`${ATESPACE}/${actor!.templateName}`)?.containers[0]?.image).toBe(CUSTOM_CODEX_IMAGE);
+  });
+
+  it.each([
+    ["Claude Code toolImage", "claude-code", { toolImage: LOCAL_IMAGE_ID }],
+    ["Claude Code image", "claude-code", { image: LOCAL_IMAGE_ID }],
+    ["Codex image", "codex", { image: LOCAL_IMAGE_ID }],
+  ] as const)("refuses a local image ID: %s", async (_label, provider, change) => {
+    const h = await makeHarness(provider === "codex" ? { provider: "codex" } : {});
+    const spec: JobSpec = { ...h.spec, ...change };
+    await expect(h.launcher.launch(spec)).rejects.toThrow("substrate_image_not_digest");
+    expect(h.launcher.plannedHandle(spec)).toBeUndefined();
+    expect(await h.runs.get(spec.runId)).toBeUndefined();
+    expect(h.api.templates.size).toBe(0);
+  });
+
+  it("launches a run dispatched on a tool image the deployment no longer configures", async () => {
+    for (const toolImage of [PYTHON_TOOL_IMAGE, `registry.example/old-tool@sha256:${"7".repeat(64)}`]) {
+      const h = await makeHarness();
+      h.spec = { ...h.spec, toolImage };
+      await expect(h.launcher.launch(h.spec)).resolves.toBeDefined();
+      expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    }
+  });
+
+  it("capacity is the same for a custom image", async () => {
+    const small = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
+    const smallCustom = { ...small.spec, toolImage: CUSTOM_TOOL_IMAGE };
+    expect(await small.launcher.hasCapacityFor(smallCustom)).toBe(await small.launcher.hasCapacityFor(small.spec));
+    expect(await small.launcher.hasCapacityFor(smallCustom)).toBe(false);
+    const h = await makeHarness();
+    const custom = { ...h.spec, toolImage: CUSTOM_TOOL_IMAGE };
+    expect(await h.launcher.hasCapacityFor(custom)).toBe(await h.launcher.hasCapacityFor(h.spec));
+    expect(await h.launcher.hasCapacityFor(custom)).toBe(true);
+  });
+
+  it("nothing emits the workerImage refusal", async () => {
+    const source = await readFile(new URL("./launcher.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("substrate_feature_unsupported:workerImage");
+    expect(source).not.toContain(":workerImage");
   });
 });

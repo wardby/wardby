@@ -8,6 +8,7 @@ import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } fro
 import {
   allBlobs,
   CONFIG,
+  CUSTOM_TOOL_IMAGE,
   FAKE_CAP,
   FAKE_MCP,
   FAKE_MCP_2,
@@ -145,7 +146,6 @@ function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null = WA
     blobs: h.blobs,
     secrets: h.secrets,
     relay: h.relay,
-    bridgeToolImages: [TOOL_IMAGE],
     config: CONFIG,
     workspaceRoot: h.workspaceRoot,
     resolveCapability: async (runId) => CAPS[runId] ?? FAKE_CAP,
@@ -456,6 +456,33 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.launcher.launch(spec2)).toEqual(handle);
     // After a restart, the outcome is read from the row.
     expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: true });
+  });
+
+  it("adopts on the same custom digest and starts fresh on a new one", async () => {
+    const h = await warmHarness();
+    h.spec.toolImage = CUSTOM_TOOL_IMAGE;
+    await parkedRoundOne(h);
+    const second = await h.launcher.launch({ ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE });
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "running", round: 2 });
+    await finishRound(h, h.token, "run-2", 2);
+    expect((await h.launcher.status(second)).state).toBe("succeeded");
+    expect(await h.launcher.retain(second, RETAIN)).toBe(true);
+    expect((await h.runs.get("run-2"))!.phase).toBe("parked");
+    // A new custom digest changes the executor's fingerprint (warm-fingerprint.ts hashes toolImage).
+    const newDigest = "registry.example/byo-tool@sha256:" + "8".repeat(64);
+    const spec3: JobSpec = {
+      ...(await followUp(h, "run-3", { from: "run-2", fingerprint: "e".repeat(64) })),
+      toolImage: newDigest,
+    };
+    const third = await h.launcher.launch(spec3);
+    expect(await h.launcher.warmOutcome(third)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    const token3 = substrateRunToken("run-3");
+    expect(await h.runs.get("run-3")).toMatchObject({ token: token3, round: 1, coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-2"))!.phase).toBe("removed");
+    const tool3 = h.api.actors.get(`${CONFIG.atespace}/${toolActorName(token3)}`);
+    expect(tool3?.templateName).toBe(toolTemplate(spec3, { ...CONFIG, warmRounds: true }).name);
+    expect(h.api.templates.get(`${CONFIG.atespace}/${tool3!.templateName}`)?.containers[0]?.image).toBe(newDigest);
   });
 
   it("adopts with MCP tools: the fresh Secret holds the new run's MCP token; no policy is re-put", async () => {
@@ -809,7 +836,6 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       blobs: s.blobs,
       secrets: s.secrets,
       relay: s.relay,
-      bridgeToolImages: [TOOL_IMAGE],
       config: CONFIG,
       workspaceRoot: s.workspaceRoot,
       resolveCapability: async () => FAKE_CAP,

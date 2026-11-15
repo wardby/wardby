@@ -47,6 +47,10 @@
  *   enum item, recorded once by the proxy (BLOB.imageIncomplete). The run fails as
  *   substrate_image_incomplete:<item> (phase image_incomplete, actors deleted); the item is re-checked
  *   here, so nothing but a SUBSTRATE_IMAGE_ITEMS value reaches the run's result.
+ * - Custom images (workerImageRef): any registry digest runs; Claude Code's custom image is the tool
+ *   actor's only, Codex's the one actor's. The image must carry this release's bridge; the proxy's
+ *   protocol check, the bridge's image check and the template readiness rules turn a broken one into
+ *   a fixed code.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -128,18 +132,6 @@ export interface SubstrateJobLauncherOptions {
   /** The proxy's tool relay: a removed run's channels and queued lines are deleted with it. */
   relay: Pick<RelayStore, "purgeRelay">;
   config: SubstrateLaunchConfig;
-  /**
-   * The tool-runner images the deployment configures (CODING_CLAUDE_TOOL_RUNNER_IMAGE and its
-   * per-toolchain variants), which carry the Substrate tool bridge. Any other tool image is an
-   * agent's custom image (workerImageRef), which has no bridge: refused.
-   */
-  bridgeToolImages: readonly string[];
-  /**
-   * The Codex images the deployment configures (CODING_WORKER_IMAGE and its per-toolchain variants),
-   * built on the Substrate Codex bridge. Any other Codex image is an agent's custom image
-   * (workerImageRef), which has no bridge: refused. Absent: none, so every Codex run is refused.
-   */
-  bridgeCodexImages?: readonly string[];
   /** Same root the VCS provider prepares workspaces under (as the Kubernetes launcher's). */
   workspaceRoot: string;
   resolveCapability: (runId: string) => Promise<string>;
@@ -375,9 +367,10 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
 }
 
 /**
- * Substrate runs Claude Code (two actors) and Codex (one), without the features that need more
- * actors or extra secrets, and only on the configured bridge images (a custom image has no bridge):
- * Claude Code's tool image among the tool images, Codex's image among the Codex images. MCP tools
+ * Substrate runs Claude Code (two actors) and Codex (one) on any registry-digest images (a custom
+ * workerImageRef included: it must carry this release's bridge, which the proxy's protocol check and
+ * the bridge's own image check verify at run time), without the features that need more actors or
+ * extra secrets. A local image ID or a tag is refused (substrate_image_not_digest). MCP tools
  * are supported: the run's MCP token is a key of the per-run Secret, injected by the agent's egress
  * rule (never in a template, an env or a blob). Extra repositories are supported on both shapes: the
  * list must be well formed (jobRepositoriesValid, so every name is a link name before the claim);
@@ -385,7 +378,7 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
  * dependency cache is supported on both shapes: the cache lives behind the coding proxy and the blob
  * store, keyed by the run's recorded image; an adopted round skips it (`workspaceReused`).
  */
-function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: readonly string[] }): void {
+function validateSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
   validateWarm(spec);
   if (!jobRepositoriesValid(spec)) throw new Error("substrate_spec_invalid");
@@ -394,13 +387,11 @@ function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: r
       throw new Error("substrate_image_not_digest");
     }
     refuseUnsupportedFeatures(spec);
-    if (!images.tool.includes(spec.toolImage)) throw new Error("substrate_feature_unsupported:workerImage");
   } else if (spec.provider === "codex") {
     if (!isRepositoryDigest(spec.image)) throw new Error("substrate_image_not_digest");
     // One actor: a tool image has nowhere to run.
     if (spec.toolImage !== undefined) throw new Error("substrate_spec_invalid");
     refuseUnsupportedFeatures(spec);
-    if (!images.codex.includes(spec.image)) throw new Error("substrate_feature_unsupported:workerImage");
   } else {
     throw new Error("substrate_provider_unsupported");
   }
@@ -726,7 +717,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // Launch
 
   private templatesFor(spec: JobSpec): RunTemplates {
-    validateSpec(spec, { tool: this.options.bridgeToolImages, codex: this.options.bridgeCodexImages ?? [] });
+    validateSpec(spec);
     if (spec.provider === "codex") return { shape: "single", agent: codexTemplate(spec, this.config) };
     return { shape: "pair", agent: agentTemplate(spec, this.config), tool: toolTemplate(spec, this.config) };
   }

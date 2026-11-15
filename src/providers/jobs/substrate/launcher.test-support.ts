@@ -18,11 +18,16 @@ export const FAKE_CAP = "rrp_fake_capability_value_000001";
 /** Fake MCP tokens, isMcpToken-shaped (`rmt_` + 43 characters). */
 export const FAKE_MCP = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "1".repeat(19);
 export const FAKE_MCP_2 = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "2".repeat(19);
-/** The configured bridge tool images (the default toolchain's and a per-toolchain one). */
+/** The configured tool images (the default toolchain's and a per-toolchain one). */
 export const TOOL_IMAGE = `registry.example/tool@sha256:${"b".repeat(64)}`;
 export const PYTHON_TOOL_IMAGE = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
-/** The configured Codex bridge image (the Codex worker built on the Substrate Codex bridge). */
+/** The configured Codex image (the Codex worker built on the Substrate Codex bridge). */
 export const CODEX_IMAGE = `registry.example/substrate-codex@sha256:${"d".repeat(64)}`;
+/** An agent's custom images (workerImageRef): registry digests the deployment does not configure. */
+export const CUSTOM_TOOL_IMAGE = `registry.example/byo-tool@sha256:${"e".repeat(64)}`;
+export const CUSTOM_CODEX_IMAGE = `registry.example/byo-codex@sha256:${"9".repeat(64)}`;
+/** Docker's content-addressed local image ID: no registry to pull it from, so Substrate refuses it. */
+export const LOCAL_IMAGE_ID = `sha256:${"f".repeat(64)}`;
 export const ATESPACE = "wardby-runs";
 export const CONFIG: SubstrateLaunchConfig = {
   atespace: ATESPACE,
@@ -168,8 +173,6 @@ export async function makeHarness(
     blobs,
     secrets,
     relay,
-    bridgeToolImages: [TOOL_IMAGE, PYTHON_TOOL_IMAGE],
-    bridgeCodexImages: [CODEX_IMAGE],
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async (id) => options.capabilityFor?.(id) ?? FAKE_CAP,

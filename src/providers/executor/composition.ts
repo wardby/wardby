@@ -136,32 +136,6 @@ export interface ConfiguredExecutorOptions {
 }
 
 /**
- * Every Claude tool-runner image the deployment configures (the default and the per-toolchain ones):
- * on Substrate, the images that carry the tool bridge. An agent's workerImageRef is not among them.
- */
-export function configuredClaudeToolImages(
-  config: Pick<ReturnType<typeof loadContainerExecutorConfig>, "claudeToolRunnerImage" | "claudeToolRunnerImages">,
-): string[] {
-  return [
-    ...(config.claudeToolRunnerImage !== undefined ? [config.claudeToolRunnerImage] : []),
-    ...Object.values(config.claudeToolRunnerImages).flatMap((versions) => Object.values(versions)),
-  ];
-}
-
-/**
- * Every Codex worker image the deployment configures (CODING_WORKER_IMAGE and the per-toolchain
- * ones): on Substrate, the images that carry the Codex bridge. An agent's workerImageRef is not among them.
- */
-export function configuredCodexWorkerImages(
-  config: Pick<ContainerExecutorConfig, "workerImage" | "additionalWorkerImages">,
-): string[] {
-  return [
-    ...(config.workerImage !== undefined ? [config.workerImage] : []),
-    ...Object.values(config.additionalWorkerImages).flatMap((versions) => Object.values(versions)),
-  ];
-}
-
-/**
  * Substrate only: every Codex worker image of a toolchain (CODING_WORKER_IMAGE_<TOOLCHAIN>_<VERSION>)
  * is pulled by the Substrate Codex bridge too, so each must be a digest (the Kubernetes launcher
  * checks only the images it pulls itself).
@@ -215,10 +189,6 @@ export function buildSubstrateJobLauncher(options: {
   resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   substrateApi?: SubstrateApi;
   kubernetesApi?: KubernetesApi;
-  /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
-  bridgeToolImages: readonly string[];
-  /** The configured Codex worker images (they carry the Substrate Codex bridge). */
-  bridgeCodexImages: readonly string[];
 }): SubstrateJobLauncher {
   const substrate = loadSubstrateJobConfig(options.env);
   const blobStoreConfig = loadBlobStoreConfig(options.env);
@@ -234,8 +204,6 @@ export function buildSubstrateJobLauncher(options: {
       }),
     runs: new PrismaSubstrateRunStore(options.db),
     relay: new PrismaRelayStore(options.db),
-    bridgeToolImages: options.bridgeToolImages,
-    bridgeCodexImages: options.bridgeCodexImages,
     blobs: createBlobStore(blobStoreConfig),
     secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
     config: {
@@ -344,8 +312,6 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       resolveMcpToken: (runId) => capabilities.mcpToken(runId),
       substrateApi: options.substrateApi,
       kubernetesApi: options.kubernetesApi,
-      bridgeToolImages: configuredClaudeToolImages(config),
-      bridgeCodexImages: configuredCodexWorkerImages(config),
     });
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));
