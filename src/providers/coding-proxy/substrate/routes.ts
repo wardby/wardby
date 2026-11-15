@@ -12,12 +12,14 @@
  * the run's workspace, by the run's actor shape (SubstrateRun.actorShape, looked up by the run token):
  * for a pair run (Claude Code: agent + tool) the tool actor, by its actor JWT only; for a single run
  * (Codex: one agent actor that runs the tools itself) that agent actor, by the run capability only.
- * A single run has no tool actor, so its relay routes (`channels*`, `events`) answer 404 before any
- * auth or relay call, `result` and `exit` queue no collect request, and its tool setup is deleted on
+ * A request with neither credential header is refused (401) before the shape is looked up. A single
+ * run has no tool actor, so its relay routes (`channels*`, `events`) answer 404 before any auth or
+ * relay call, `result` and `exit` queue no collect request, and its tool setup is deleted on
  * the first input download (there is no events poll to delete it).
  *
  * Secrets: no header, body, line or token is ever logged or echoed. A log line carries the run token,
- * the route name, the status, byte counts and a duration (and, on a 500, an error kind); an error answer carries one fixed code.
+ * the route name, the status, byte counts and a duration (and, on a 500, an error kind; on a single
+ * run's input, whether it deleted the setup); an error answer carries one fixed code.
  * The one exception is `POST diagnostics` (CLAUDE.md's operator-diagnostics exception): the agent
  * bridge's bounded stderr tail, redacted here (trusted code) by exact value against every secret
  * value delivered to the run's actors that the proxy can know (the capability the request
@@ -83,9 +85,10 @@ export interface SubstrateRouteOptions {
    */
   tokenForRun: (runId: string) => string | Promise<string>;
   /**
-   * The run's actor shape, by its token (SubstrateRun.actorShape). Absent: every run is `pair`.
+   * The run's actor shape, by its token (SubstrateRun.actorShape); undefined when the token has no row
+   * (treated as `pair`, and asked again next time). Absent: every run is `pair`.
    */
-  actorShapeForToken?: (token: string) => Promise<SubstrateActorShape>;
+  actorShapeForToken?: (token: string) => Promise<SubstrateActorShape | undefined>;
   /**
    * Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental): per-round files (`?round=n`, absent = 1) for the
    * round in the token's round record. Off: every request is round 1, exactly as before.
@@ -135,8 +138,8 @@ const RELAY_ROUTES: ReadonlySet<RouteName> = new Set<RouteName>([
   "channels.from-tool",
   "events",
 ]);
-/** Tokens known to be single-shape, oldest forgotten first past the cap. */
-const SINGLE_SHAPES_MAX = 10_000;
+/** Tokens whose shape is known (their row exists), oldest forgotten first past the cap. */
+const KNOWN_SHAPES_MAX = 10_000;
 
 const RUN_PATH = /^\/substrate\/runs\/(wr-[0-9a-f]{20})\/(.+)$/;
 const CHANNEL_PATH = /^channels\/(c[0-9]{1,9})\/(lines|from-tool)$/;
@@ -279,23 +282,32 @@ export function createSubstrateRoutes(
   /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
   /**
-   * Tokens whose run is single-shape: a token's shape never changes once claimed. A pair answer is not
-   * remembered, so a row not yet visible is never pinned to pair.
+   * The shape of every token whose row was found: a token's shape is set when its row is created and
+   * never changes. A token with no row is not remembered, so a row not yet visible is never pinned.
    */
-  const singleShapes = new Set<string>();
+  const knownShapes = new Map<string, SubstrateActorShape>();
 
   async function shapeFor(token: string): Promise<SubstrateActorShape> {
     if (!options.actorShapeForToken) return "pair";
-    if (singleShapes.has(token)) return "single";
-    const shape = await options.actorShapeForToken(token);
-    if (shape !== "single") return "pair";
-    singleShapes.add(token);
-    if (singleShapes.size > SINGLE_SHAPES_MAX) {
-      const oldest = singleShapes.values().next().value;
-      if (oldest !== undefined) singleShapes.delete(oldest);
+    const known = knownShapes.get(token);
+    if (known) return known;
+    const found = await options.actorShapeForToken(token);
+    if (found === undefined) return "pair";
+    const shape: SubstrateActorShape = found === "single" ? "single" : "pair";
+    knownShapes.set(token, shape);
+    if (knownShapes.size > KNOWN_SHAPES_MAX) {
+      const oldest = knownShapes.keys().next().value;
+      if (oldest !== undefined) knownShapes.delete(oldest);
     }
-    return "single";
+    return shape;
   }
+
+  /** Whether the request carries either credential header (a request with neither is refused unread). */
+  const hasCredential = (request: IncomingMessage): boolean => {
+    const key = request.headers["x-api-key"];
+    const jwt = request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()];
+    return (typeof key === "string" && key !== "") || (typeof jwt === "string" && jwt !== "");
+  };
 
   /**
    * No live credential at rest: a capability works only while its session is active and in time, and
@@ -495,6 +507,8 @@ export function createSubstrateRoutes(
     const route = matched?.name ?? "unmatched";
     const counters = { bytes: 0 };
     let errorKind: string | undefined;
+    /** A single-shape input: whether this request deleted the run's setup (fixed true/false). */
+    let inputDeletedSetup: boolean | undefined;
     response.once("close", () => {
       log.info(
         {
@@ -505,6 +519,7 @@ export function createSubstrateRoutes(
           bytes: counters.bytes,
           durationMs: Math.round(performance.now() - startedAt),
           ...(errorKind ? { errorKind } : {}),
+          ...(inputDeletedSetup !== undefined ? { setupDeleted: inputDeletedSetup } : {}),
         },
         "coding proxy substrate route",
       );
@@ -515,6 +530,8 @@ export function createSubstrateRoutes(
       if (matched.name === "diagnostics" && request.headers[TOOL_ACTOR_JWT_HEADER.toLowerCase()] !== undefined) {
         throw new RouteError(403, "diagnostics_agent_only");
       }
+      // No credential at all: refused before the shape lookup (no database read for it).
+      if (!hasCredential(request)) throw new RouteError(401, "unauthorized");
       const shape = await shapeFor(token);
       if (shape === "single" && RELAY_ROUTES.has(matched.name)) throw new RouteError(404, "not_found");
       const side = matched.caller === "holder" ? (shape === "single" ? "agent" : "tool") : matched.caller;
@@ -534,7 +551,12 @@ export function createSubstrateRoutes(
             if (!(await blobs.head(BLOB.started(token, round)))) {
               await blobs.put(BLOB.started(token, round), Buffer.from("{}"), { contentType: "application/json" });
             }
-            if (shape === "single") await blobs.delete(BLOB.toolSetup(token)).catch(() => undefined);
+            if (shape === "single") {
+              inputDeletedSetup = await blobs.delete(BLOB.toolSetup(token)).then(
+                () => true,
+                () => false,
+              );
+            }
           });
           return;
         }

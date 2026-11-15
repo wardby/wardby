@@ -766,22 +766,79 @@ describe("substrate routes", () => {
       await expectNoSecretsLogged(["lookup failed"]);
     });
 
-    it("remembers a single answer per token, but asks again for a pair one", async () => {
-      const lookup = vi.fn(async (): Promise<"pair" | "single"> => "single");
+    it("remembers the shape of a token whose row exists, and asks again while there is none", async () => {
+      for (const shape of ["single", "pair"] as const) {
+        const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => shape);
+        overrides = { actorShapeForToken: lookup };
+        await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
+        await start();
+        const holder = shape === "single" ? agent : tool;
+        expect((await fetch(`${base}/seed`, holder())).status).toBe(200);
+        expect((await fetch(`${base}/seed`, holder())).status).toBe(200);
+        expect(lookup).toHaveBeenCalledTimes(1);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        server.closeAllConnections();
+      }
+      // No row yet: treated as pair, and not remembered (the row may appear).
+      const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => undefined);
       overrides = { actorShapeForToken: lookup };
-      await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
-      await start();
-      expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
-      expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
-      expect(lookup).toHaveBeenCalledTimes(1);
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      server.closeAllConnections();
-      lookup.mockClear();
-      lookup.mockResolvedValue("pair");
       await start();
       expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
       expect((await fetch(`${base}/seed`, tool())).status).toBe(200);
       expect(lookup).toHaveBeenCalledTimes(2);
+      lookup.mockResolvedValue("single");
+      expect((await fetch(`${base}/seed`, agent())).status).toBe(200);
+      expect((await fetch(`${base}/seed`, tool())).status).toBe(401);
+      expect(lookup).toHaveBeenCalledTimes(3);
+    });
+
+    it("refuses a request with neither credential header before the shape lookup", async () => {
+      const lookup = vi.fn(async (): Promise<"pair" | "single" | undefined> => "single");
+      const verifyActor = vi.fn(async () => ({ ok: true as const, subject: "x" }));
+      overrides = { actorShapeForToken: lookup, verifyActor };
+      await blobs.put(BLOB.seed(TOKEN), Buffer.from("s"));
+      await start();
+      for (const [path, init] of [
+        ["seed", {}],
+        ["input", {}],
+        ["events?after=0", {}],
+        ["channels", { method: "POST" }],
+        ["workspace", upload("w")],
+        ["seed", { headers: { "x-api-key": "" } }],
+      ] as const) {
+        const answer = await fetch(`${base}/${path}`, init);
+        expect(answer.status).toBe(401);
+        expect(await answer.json()).toEqual({ error: { type: "unauthorized" } });
+      }
+      expect(lookup).not.toHaveBeenCalled();
+      expect(verifyActor).not.toHaveBeenCalled();
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    });
+
+    it("logs whether a single run's input deleted its setup, as a fixed field", async () => {
+      single();
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from(SETUP));
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"t"}'));
+      await start();
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const inputLines = () =>
+        logCalls.map((call) => call[0] as Record<string, unknown>).filter((line) => line.route === "input");
+      expect(inputLines()).toEqual([
+        expect.objectContaining({ event: "substrate.route", status: 200, setupDeleted: true }),
+      ]);
+      await expectNoSecretsLogged(['{"task":"t"}']);
+    });
+
+    it("logs no setupDeleted field on a pair run's input", async () => {
+      overrides = { actorShapeForToken: async () => "pair" };
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"t"}'));
+      await start();
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const line = logCalls.map((call) => call[0] as Record<string, unknown>).find((l) => l.route === "input");
+      expect(line).toBeDefined();
+      expect(line).not.toHaveProperty("setupDeleted");
     });
   });
 

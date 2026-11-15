@@ -149,7 +149,7 @@ describe("configured coding proxy runtime", () => {
     expect(await lookup("wr-single")).toBe("single");
     expect(await lookup("wr-pair")).toBe("pair");
     expect(await lookup("wr-odd")).toBe("pair");
-    expect(await lookup("wr-missing")).toBe("pair");
+    expect(await lookup("wr-missing")).toBeUndefined();
     expect(findUnique).toHaveBeenCalledWith({ where: { token: "wr-single" }, select: { actorShape: true } });
   });
 

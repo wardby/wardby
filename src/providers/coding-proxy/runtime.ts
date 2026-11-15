@@ -155,15 +155,17 @@ export interface SubstrateProxyConfig {
  */
 /**
  * A run's actor shape by its token, from its SubstrateRun row (wardby_proxy has SELECT on it): `single`
- * only when the row says so; no row, or any other value, is `pair` (today's behaviour).
+ * only when the row says so, any other value `pair` (today's behaviour), and undefined when there is
+ * no row (the routes treat it as `pair` without remembering it).
  */
 export function substrateActorShapeLookup(
   db: Pick<PrismaClient, "substrateRun">,
-): (token: string) => Promise<SubstrateActorShape> {
-  return async (token) =>
-    (await db.substrateRun.findUnique({ where: { token }, select: { actorShape: true } }))?.actorShape === "single"
-      ? "single"
-      : "pair";
+): (token: string) => Promise<SubstrateActorShape | undefined> {
+  return async (token) => {
+    const row = await db.substrateRun.findUnique({ where: { token }, select: { actorShape: true } });
+    if (!row) return undefined;
+    return row.actorShape === "single" ? "single" : "pair";
+  };
 }
 
 export function substrateExpectedHosts(config: Pick<SubstrateProxyConfig, "proxyHost" | "proxyPort">): string[] {
