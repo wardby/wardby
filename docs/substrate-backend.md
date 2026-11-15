@@ -326,7 +326,7 @@ workspace lacks that merge; it writes no step line.
   with "the agent's settings changed". Wardby compares secrets by identity and
   last change time only, never by value. A kept round's session holds the
   values it saw, so a round after a secret change always starts fresh.
-- `detach_mcp_server` removes the kept rounds (listed above). Any other change
+- The MCP changes that remove kept rounds are listed above. Any other change
   to an agent's MCP tools (`attach_mcp_server` with another `allowedTools` or
   for a server without secrets, or `refresh_mcp_server` dropping a tool) is
   caught by the check above, and the next round starts fresh.

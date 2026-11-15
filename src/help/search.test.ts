@@ -383,6 +383,7 @@ describe("Substrate MCP help", () => {
       expect(top3(query), query).toContain("job-launcher-substrate");
     }
     expect(top3("X-Wardby-Mcp-Token")).toContain("mcp-servers");
+    expect(top3("mcp server")).toContain("mcp-servers");
   });
 });
 

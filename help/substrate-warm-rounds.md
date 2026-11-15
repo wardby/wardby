@@ -77,7 +77,7 @@ with no step line.
   Any rotated or refreshed secret also makes the next round start fresh ("the
   agent's settings changed"), because a kept session holds the old value.
   Secrets are compared by identity and last change time, never by value.
-- `detach_mcp_server` removes the kept rounds (listed above). Any other change
+- The MCP changes that remove kept rounds are listed above. Any other change
   to an agent's MCP tools (`attach_mcp_server` with another `allowedTools` or
   for a server without secrets, or `refresh_mcp_server` dropping a tool) does
   not remove them: the next round starts fresh ("the agent's settings
