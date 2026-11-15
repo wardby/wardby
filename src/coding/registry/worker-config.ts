@@ -1,22 +1,23 @@
 /**
  * Builds the full worker environment/file setup for every registry adapter
- * at once, from the run's derived registry-only token -- never the run
- * capability itself. The driver calls this once per coding run and applies
- * the result before the agent starts.
+ * at once, from the run's registry-only token -- never the run capability
+ * itself. Callers pass the token: deriveRegistryToken(capability) on
+ * Docker/Kubernetes, or the token a Substrate worker was handed (its
+ * capability is only the gateway's placeholder). The driver calls this once
+ * per coding run and applies the result before the agent starts.
  */
 import { REGISTRY_ADAPTERS } from "./adapters.js";
-import { deriveRegistryToken } from "./token.js";
 
 /** The URL the worker's package manager is pointed at for one ecosystem. */
 export function registryUrlFor(proxyBaseUrl: string, ecosystem: string): string {
   return `${proxyBaseUrl.replace(/\/$/, "")}/registry/${ecosystem}/`;
 }
 
-export function registryWorkerSetup(input: { proxyBaseUrl: string; capability: string; cacheRoot: string }): {
+export function registryWorkerSetup(input: { proxyBaseUrl: string; token: string; cacheRoot: string }): {
   env: Record<string, string>;
   files: { path: string; content: string; mode: number }[];
 } {
-  const token = deriveRegistryToken(input.capability);
+  const token = input.token;
   const env: Record<string, string> = {};
   const files: { path: string; content: string; mode: number }[] = [];
   for (const adapter of REGISTRY_ADAPTERS.values()) {

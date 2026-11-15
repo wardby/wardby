@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
+import { readWorkerCredentials } from "./credentials.js";
 import { describeError, workerDebugTracer, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
@@ -12,7 +13,7 @@ const WORKSPACE_PATH = "/workspace";
 /** Where the extra repositories are mounted; a run with git history bundles each one there (#536). */
 const REPOS_PATH = "/repos";
 
-function required(name: "WARDBY_PROXY_URL" | "WARDBY_RUN_CAPABILITY"): string {
+function required(name: "WARDBY_PROXY_URL"): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name.toLowerCase()}_missing`);
   return value;
@@ -28,10 +29,13 @@ try {
   const input = await readCodingInput(INPUT_PATH);
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
-  const capability = required("WARDBY_RUN_CAPABILITY");
+  // WARDBY_RUN_CAPABILITY, plus on Substrate the header mode and the registry token (credentials.ts).
+  const { capability, capabilityHeader, registryToken } = readWorkerCredentials(process.env);
   // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
   const mcpToken = readMcpToken();
-  trace = workerDebugTracer(input, capability, (line) => process.stdout.write(line), mcpToken ? [mcpToken] : []);
+  // An unset registryToken takes the parameter's default: the token derived from the capability.
+  const write = (line: string) => process.stdout.write(line);
+  trace = workerDebugTracer(input, capability, write, mcpToken ? [mcpToken] : [], registryToken);
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
@@ -39,6 +43,8 @@ try {
     proxyBaseUrl,
     capability,
     ...(mcpToken ? { mcpToken } : {}),
+    ...(registryToken ? { registryToken } : {}),
+    ...(capabilityHeader ? { capabilityHeader } : {}),
     signal: controller.signal,
     createClient: createCodexSdkClient,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),

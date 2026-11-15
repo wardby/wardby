@@ -119,11 +119,13 @@ export function workerDebugTracer(
   write: (line: string) => void,
   /** Other values the worker holds, redacted the same way: the run's MCP token, when it has one. */
   otherSecrets: readonly string[] = [],
+  /** The run's registry token: the one the worker was handed (Substrate), else derived from the capability. */
+  registryToken: string = deriveRegistryToken(capability),
 ): DebugTracer | undefined {
   if (input.debugTrace !== true) return undefined;
   return createDebugTracer({
     runId: input.runId,
-    secrets: [capability, deriveRegistryToken(capability), ...otherSecrets],
+    secrets: [capability, registryToken, ...otherSecrets],
     write,
     ...(input.debugTraceMaxMb ? { maxTotalBytes: input.debugTraceMaxMb * 1024 * 1024 } : {}),
   });

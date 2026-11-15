@@ -21,6 +21,7 @@ import {
   toolActorName,
 } from "../providers/jobs/substrate/names.js";
 import { tarExcludeArgs as bridgeTarExcludeArgs } from "./tar.js";
+import { INJECTED_CAPABILITY_PLACEHOLDER } from "../coding-worker/credentials.js";
 import { collectExclusions, tarExcludeArgs } from "../coding/collect-exclude.js";
 import {
   MAX_CODING_OUTPUT_ISSUES as PROTOCOL_MAX_CODING_OUTPUT_ISSUES,
@@ -35,6 +36,8 @@ import { parseWorkerDiagnosticLine as bridgeParseWorkerDiagnosticLine } from "./
 
 it("matches the launcher's names", () => {
   expect(PLACEHOLDER_CAPABILITY).toBe(LAUNCHER_CAPABILITY);
+  // The Codex worker checks for this exact placeholder before it goes into header mode.
+  expect(INJECTED_CAPABILITY_PLACEHOLDER).toBe(PLACEHOLDER_CAPABILITY);
   const token = substrateRunToken("run-1");
   expect(RUN_TOKEN_PATTERN.test(token)).toBe(true);
   expect(agentActorName(token)).toBe(`${token}${AGENT_SUFFIX}`);

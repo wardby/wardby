@@ -1,4 +1,5 @@
 import { Codex } from "@openai/codex-sdk";
+import { INJECTED_CAPABILITY_PLACEHOLDER } from "./credentials.js";
 import { MCP_TOKEN_ENV, WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS, wardbyMcpUrl } from "./mcp-config.js";
 import type { WorkerClientConfig, WorkerClientFactory } from "./types.js";
 
@@ -46,6 +47,11 @@ type WardbyProxyProvider = {
 } & ({ env_key: "CODEX_API_KEY" } | { http_headers: Record<string, string> });
 
 function wardbyProxyProvider(config: WorkerClientConfig): WardbyProxyProvider {
+  // Header mode puts the capability in Codex's `-c` command-line config, readable by every process
+  // in the container: only the gateway's placeholder may ever go there. No value in the message.
+  if (config.capabilityHeader && config.capability !== INJECTED_CAPABILITY_PLACEHOLDER) {
+    throw new Error("worker_capability_header_needs_placeholder");
+  }
   return {
     name: "Wardby per-run proxy",
     base_url: `${config.proxyBaseUrl.replace(/\/$/, "")}/v1`,

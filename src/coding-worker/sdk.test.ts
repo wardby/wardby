@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codexSdkOptions } from "./sdk.js";
+import { codexSdkOptions, createCodexSdkClient } from "./sdk.js";
 
 const baseConfig = {
   proxyBaseUrl: "http://proxy:8080/",
@@ -53,6 +53,24 @@ describe("codexSdkOptions", () => {
       "x-api-key": "rrp_placeholder_injected_by_gateway",
     });
     expect(JSON.stringify(options.config.shell_environment_policy)).not.toContain("rrp_placeholder");
+  });
+
+  it("header mode refuses any capability but the gateway's placeholder, naming no value", () => {
+    const real = `rrp_${"R".repeat(43)}`;
+    for (const capability of [real, "rrp_worker_capability", ""]) {
+      let error: unknown;
+      try {
+        codexSdkOptions({ ...baseConfig, capability, capabilityHeader: "x-api-key" });
+      } catch (caught) {
+        error = caught;
+      }
+      expect((error as Error).message).toBe("worker_capability_header_needs_placeholder");
+      if (capability) expect(String(error)).not.toContain(capability);
+    }
+    // The client factory builds the same options first, so a real capability never reaches Codex's argv.
+    expect(() => createCodexSdkClient({ ...baseConfig, capability: real, capabilityHeader: "x-api-key" })).toThrow(
+      "worker_capability_header_needs_placeholder",
+    );
   });
 
   it("without header mode the options are exactly today's", () => {

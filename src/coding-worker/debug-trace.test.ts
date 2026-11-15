@@ -170,6 +170,37 @@ describe("workerDebugTracer", () => {
     }
   });
 
+  it("redacts a given registry token and the placeholder capability, raw and JSON-escaped", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const registryToken = "rrg_FAKE_REGISTRY_TOKEN_NOT_REAL_000000000000000";
+    const lines: string[] = [];
+    const tracer = workerDebugTracer(
+      { runId: "run_123", debugTrace: true },
+      placeholder,
+      (line) => lines.push(line),
+      [],
+      registryToken,
+    );
+    const values = [registryToken, placeholder];
+    const escaped = values.map((value) => JSON.stringify(value).slice(1, -1));
+    tracer!.record("event", {
+      text: `npm used ${registryToken}; codex sent x-api-key ${placeholder}`,
+      nested: { json: JSON.stringify({ token: registryToken, capability: placeholder }) },
+      escaped,
+      [registryToken]: placeholder,
+    });
+    const written = lines.join("\n");
+    for (const value of [...values, ...escaped]) expect(written).not.toContain(value);
+    expect(written).toContain("[REDACTED]");
+    // The derived token of the placeholder is still redacted without a given one.
+    const fallback: string[] = [];
+    workerDebugTracer({ runId: "run_123", debugTrace: true }, placeholder, (line) => fallback.push(line))!.record(
+      "event",
+      deriveRegistryToken(placeholder),
+    );
+    expect(fallback.join("")).not.toContain(deriveRegistryToken(placeholder));
+  });
+
   it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {
     const big = "x".repeat(15_000);
     const run = (debugTraceMaxMb?: number) => {
