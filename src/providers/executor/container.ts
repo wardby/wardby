@@ -3977,6 +3977,7 @@ export class ContainerExecutor implements Executor {
     return {
       kind: "coding-agent",
       runId: run.runId,
+      agentId: run.agentId,
       provider,
       image,
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.

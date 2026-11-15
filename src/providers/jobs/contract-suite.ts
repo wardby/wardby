@@ -36,6 +36,13 @@ export function jobLauncherContract(
       expect(second).toEqual(first);
     });
 
+    it("treats agentId as metadata: a relaunch that gains or changes it is the same job", async () => {
+      const { launcher, spec } = await createHarness();
+      const first = await launcher.launch(spec);
+      expect(await launcher.launch({ ...structuredClone(spec), agentId: "agent-1" })).toEqual(first);
+      expect(await launcher.launch({ ...structuredClone(spec), agentId: "agent-2" })).toEqual(first);
+    });
+
     it("rejects a conflicting duplicate launch", async () => {
       const { launcher, spec } = await createHarness();
       await launcher.launch(spec);

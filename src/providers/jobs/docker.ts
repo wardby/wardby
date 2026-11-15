@@ -491,9 +491,11 @@ function hash(value: string): string {
 }
 
 function stableSpecHash(spec: JobSpec): string {
+  // agentId is metadata (see JobSpec), never part of the job's identity.
+  const { agentId: _agentId, ...job } = spec;
   return hash(
     JSON.stringify({
-      ...spec,
+      ...job,
       labels: Object.fromEntries(Object.entries(spec.labels).sort(([left], [right]) => left.localeCompare(right))),
     }),
   );

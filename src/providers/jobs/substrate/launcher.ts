@@ -17,9 +17,10 @@
  *   are written to the row's phase, so a terminal state never changes afterwards.
  * - Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike; off by default, and then nothing below
  *   applies): remove() of a succeeded run suspends its actors and parks it; a continuation of it
- *   adopts them (its row takes the parked token, per-round files `-<n>`, the Secret gets the new
- *   capability, both actors resume) and the bridges run the next round on the same workspace and
- *   the same Claude Code session. Handles are then `<atespace>/<token>/<runId>`.
+ *   adopts them (its row takes the parked token and the next round, per-round files `-<n>`, the
+ *   Secret gets the new capability, both actors resume) and the bridges run the next round on the
+ *   same workspace and the same Claude Code session. Handles are then `<atespace>/<runId>`: the
+ *   token, and the round, are always read from the run's row (never derived from the run id).
  */
 import { lstat, readFile, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -64,8 +65,6 @@ import {
   BLOB,
   ROUND_BLOBS,
   agentActorName,
-  parseRound,
-  retiredRunToken,
   roundBlob,
   runSecretName,
   substrateRunToken,
@@ -189,6 +188,11 @@ const MAX_MARKER_BYTES = 4096;
 const MAX_EXIT_BYTES = 8 * 1024;
 const ACTIVE_PHASES: readonly SubstratePhase[] = ["provisioning", "running", "requeued"];
 const LIVE_PHASES: SubstratePhase[] = ["provisioning", "running"];
+
+/** The round a row's actors are on (the row records it; round.json is the bridges' and the proxy's copy). */
+function roundOf(record: SubstrateRunRecord): number {
+  return record.round ?? 1;
+}
 
 interface Observation {
   status: JobStatus;
@@ -321,11 +325,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {
-    // Warm rounds: an adopting run's token is the parked run's, known only at launch.
-    if (this.warm) return undefined;
     try {
       this.templatesFor(spec);
-      return this.handleFor(substrateRunToken(spec.runId), spec.runId);
+      return this.handleFor(spec.runId);
     } catch {
       // An invalid spec has no handle; launch() rejects with the real reason.
       return undefined;
@@ -361,8 +363,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const deadline = () => new Date(this.now() + spec.timeoutSec * 1000);
     if (this.warm) {
       await this.sweepParkedSometimes();
-      const adopted = await this.adoptParked(spec, templates, specHash, deadline());
-      if (adopted) return this.handleFor(adopted, spec.runId);
+      if (await this.adoptParked(spec, templates, specHash, deadline())) return this.handleFor(spec.runId);
     }
     const claimed = await this.runs.claim({
       runId: spec.runId,
@@ -370,17 +371,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       specHash,
       phase: "provisioning",
       deadlineAt: deadline(),
+      ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
     });
-    // An adopting run's row carries the parked run's token (warm rounds); every other row, its own.
-    const handle = this.handleFor(claimed.record.token, spec.runId);
+    const handle = this.handleFor(spec.runId);
     if (!claimed.created) {
       if (claimed.record.specHash !== specHash) throw new Error("job_spec_conflict");
       // Any phase but requeued: another launch owns (or owned) this run; never relaunch it. A
       // still-provisioning row whose launch crashed is left to its deadline, as on Kubernetes.
       if (claimed.record.phase !== "requeued") return handle;
-      // Refused for capacity before: provision afresh, unless another replica just did.
+      // Refused for capacity before: provision afresh (round 1), unless another replica just did.
       if (!(await this.runs.reclaim(spec.runId, deadline()))) return handle;
     }
+    // An adopter refused for capacity keeps the parked run's token on its row (warm rounds).
     await this.provision(spec, claimed.record.token, templates);
     return handle;
   }
@@ -415,7 +417,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
       throw new Error("substrate_workspace_destination_invalid");
     }
-    const key = BLOB.workspace(record.token, await this.roundOf(record.token));
+    const key = BLOB.workspace(record.token, roundOf(record));
     const info = await this.blobs.head(key);
     if (!info) throw new Error("substrate_workspace_missing");
     // The archive holds every extracted byte plus headers, so its size bounds the tree.
@@ -453,7 +455,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
     const record = await this.recordFor(handle);
     if (!record || record.phase === "removed") return undefined;
-    const key = BLOB.transcript(record.token, await this.roundOf(record.token));
+    const key = BLOB.transcript(record.token, roundOf(record));
     const info = await this.blobs.head(key);
     if (!info) return undefined;
     if (info.sizeBytes > maxBytes) throw new Error("transcript_too_large");
@@ -499,7 +501,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
     // Every deletion is tried even when one fails; the first failure is reported and the run is
     // not marked removed, so a later remove() tries again.
-    await this.removeInFull(record.token);
+    await this.removeInFull(record.token, roundOf(record));
     // The row stays as the tombstone, so the run is never relaunched.
     await this.runs.setPhase(record.runId, "removed");
   }
@@ -513,13 +515,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * `<atespace>/<token>`; with warm rounds `<atespace>/<token>/<runId>`, because an adopted run's token
-   * is not derived from its own run id and moves on to the next adopter.
+   * `<atespace>/<token>` (Phase A, unchanged); with warm rounds `<atespace>/<runId>`, because an
+   * adopter's token is the parked run's, which only its row records.
    */
-  private handleFor(token: string, runId: string): JobHandle {
+  private handleFor(runId: string): JobHandle {
     return {
       backend: BACKEND,
-      id: this.warm ? `${this.config.atespace}/${token}/${runId}` : `${this.config.atespace}/${token}`,
+      id: this.warm ? `${this.config.atespace}/${runId}` : `${this.config.atespace}/${substrateRunToken(runId)}`,
     };
   }
 
@@ -681,20 +683,22 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Observation
 
+  /**
+   * The row a handle names. Both forms are read whether or not warm rounds are on, so a run keeps
+   * its handle across a change of the setting: `<atespace>/<token>` (Phase A) is the row holding its
+   * own token, `<atespace>/<runId>` (warm rounds) the run's row, whatever token it holds.
+   */
   private async recordFor(handle: JobHandle): Promise<SubstrateRunRecord | undefined> {
     if (handle.backend !== BACKEND || typeof handle.id !== "string") return undefined;
-    const [atespace, token, runId, ...rest] = handle.id.split("/");
-    if (rest.length > 0 || atespace !== this.config.atespace || !token || !TOKEN.test(token)) return undefined;
-    if (runId !== undefined) {
-      // `<atespace>/<token>/<runId>` (warm rounds): the run's own row, while it still holds the token
-      // (a run whose parked actors were adopted no longer does: its handle names nothing).
-      if (!RUN_ID.test(runId)) return undefined;
-      const record = await this.runs.get(runId);
-      return record?.token === token ? record : undefined;
+    const [atespace, name, ...rest] = handle.id.split("/");
+    if (rest.length > 0 || atespace !== this.config.atespace || !name) return undefined;
+    if (TOKEN.test(name)) {
+      const record = await this.runs.getByToken(name);
+      // A row holding another run's token is an adopter (warm rounds), never this handle's run.
+      if (record && record.token === substrateRunToken(record.runId)) return record;
     }
-    const record = await this.runs.getByToken(token);
-    // A row holding another run's token is an adopter (warm rounds), never this handle's run.
-    return record && record.token === substrateRunToken(record.runId) ? record : undefined;
+    if (!RUN_ID.test(name)) return undefined;
+    return this.runs.get(name);
   }
 
   private async requireRecord(handle: JobHandle): Promise<SubstrateRunRecord> {
@@ -714,7 +718,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (record.phase === "removed") throw new Error("job_removed");
     const recorded = RECORDED[record.phase];
     if (recorded) return structuredClone(recorded);
-    const round = await this.roundOf(record.token);
+    const round = roundOf(record);
     if (record.phase === "parked") {
       // Succeeded and suspended for a follow-up: still the succeeded run it was.
       const artifact = await this.resultArtifact(record, round);
@@ -794,7 +798,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /** The outcome the actors reported through the proxy, once the proxy has written `done`. */
   private async reported(record: SubstrateRunRecord, round?: number): Promise<Observation | undefined> {
-    round ??= await this.roundOf(record.token);
+    round ??= roundOf(record);
     const done = await this.readJson(BLOB.done(record.token, round), MAX_MARKER_BYTES);
     if (done === undefined) return undefined;
     const workspace = typeof done === "object" && done !== null ? (done as { workspace?: unknown }).workspace : null;
@@ -891,13 +895,6 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Warm rounds (SUBSTRATE_WARM_ROUNDS, experimental spike)
 
-  /** The round the token's actors are on: 1 without warm rounds or a round record. */
-  private async roundOf(token: string): Promise<number> {
-    if (!this.warm) return 1;
-    const body = await this.readBlob(roundBlob(token), MAX_MARKER_BYTES);
-    return (body && parseRound(body.toString("utf8"))) || 1;
-  }
-
   private warmEvent(event: WarmEvent): void {
     try {
       if (this.options.onWarmEvent) this.options.onWarmEvent(event);
@@ -931,8 +928,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       return false;
     }
     const ms = Math.round(performance.now() - clock);
-    await this.runs.setPhase(record.runId, "parked", ["running"], new Date(startedAt + this.warm!.parkTtlMs));
-    const round = await this.roundOf(record.token);
+    const round = roundOf(record);
+    await this.runs.park(record.runId, {
+      parkedAt: new Date(startedAt),
+      round,
+      expiresAt: new Date(startedAt + this.warm!.parkTtlMs),
+    });
     await settleAll([
       () => this.deleteBlob(BLOB.seed(record.token)),
       () => this.deleteBlob(BLOB.workspace(record.token, round)),
@@ -944,7 +945,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /** Removes a parked run in full (an expired park, or one a continuation could not adopt). */
   private async removeParked(record: SubstrateRunRecord): Promise<void> {
-    await this.removeInFull(record.token);
+    await this.removeInFull(record.token, roundOf(record));
     await this.runs.setPhase(record.runId, "removed", ["parked"]);
   }
 
@@ -957,7 +958,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /** Removes every parked run past its expiry (deadlineAt). */
   async sweepParked(): Promise<void> {
     if (!this.warm) return;
-    for (const record of await this.runs.listByPhase("parked")) {
+    for (const record of await this.runs.listParked()) {
       if (record.deadlineAt.getTime() > this.now()) continue;
       try {
         await this.removeParked(record);
@@ -996,6 +997,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const input = await this.inputSummary(spec.inputArtifact);
     if (!input.root || !RUN_ID.test(input.root)) return undefined;
     const parked = await this.runs.getByToken(substrateRunToken(input.root));
+    // Spike behaviour, kept until the continued run is named in the spec: the root's token leads to
+    // the latest round's row.
     if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return undefined;
     const notAdopted = async (reason: string): Promise<undefined> => {
       this.warmEvent({
@@ -1019,19 +1022,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (agent.templateName !== templates.agent.name || tool.templateName !== templates.tool.name) {
       return notAdopted("template_changed");
     }
-    const previous = await this.roundOf(parked.token);
-    const before = await this.readBlob(BLOB.input(parked.token, previous), MAX_CODING_INPUT_BYTES);
+    const before = await this.readBlob(BLOB.input(parked.token, roundOf(parked)), MAX_CODING_INPUT_BYTES);
     if (!before || summarizeInput(before).model !== input.model) return notAdopted("model_changed");
-    const record = await this.runs.adopt(parked.runId, retiredRunToken(parked.runId), {
-      runId: spec.runId,
-      token: parked.token,
+    const record = await this.runs.adopt(parked.runId, spec.runId, deadlineAt, {
       specHash,
-      phase: "provisioning",
-      deadlineAt,
+      ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
     });
-    // Another launch adopted it first, or this run got a row meanwhile: launch as usual.
+    // Another launch adopted it first, it expired meanwhile, or this run got a row: launch as usual.
     if (!record) return undefined;
-    await this.resumeAdopted(spec, record, previous + 1, parked.runId);
+    await this.resumeAdopted(spec, record, roundOf(record), parked.runId);
     return record.token;
   }
 
@@ -1093,7 +1092,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await timed("resumeTool", () => call("resumeActor", () => this.api.resumeActor(atespace, tool)));
       await timed("resumeAgent", () => call("resumeActor", () => this.api.resumeActor(atespace, agent)));
     } catch (error) {
-      await this.cleanup(token);
+      await this.cleanup(token, round);
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -1105,7 +1104,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
       if (!isPhaseConflict(error)) {
-        await this.cleanup(token);
+        await this.cleanup(token, round);
         await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
         throw error;
       }
@@ -1181,8 +1180,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * round record after that: until every other deletion has succeeded, a later status() still reads
    * the run's real outcome rather than a lost run.
    */
-  private async removeInFull(token: string): Promise<void> {
-    const rounds = await this.roundOf(token);
+  private async removeInFull(token: string, rounds: number): Promise<void> {
     await settleAll(this.deletions(token, rounds, { outcome: false }));
     await this.options.relay.purgeRelay(token);
     const outcome: (() => Promise<void>)[] = [];
@@ -1211,9 +1209,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  /** Best effort after a failed launch: nothing of the attempt is left behind. */
-  private async cleanup(token: string): Promise<void> {
-    const rounds = await this.roundOf(token).catch(() => 1);
+  /** Best effort after a failed launch: nothing of the attempt (every round up to `rounds`) is left behind. */
+  private async cleanup(token: string, rounds = 1): Promise<void> {
     await settleAll(this.deletions(token, rounds)).catch(() => undefined);
     await this.options.relay.purgeRelay(token).catch(() => undefined);
   }

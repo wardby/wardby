@@ -3315,6 +3315,7 @@ describe("ContainerExecutor", () => {
       allowedModels: ["claude-sonnet-5"],
     });
     expect(created.jobs.lastSpec).toMatchObject({
+      agentId: "agent-1",
       provider: "claude-code",
       image: CLAUDE_IMAGE,
       toolImage: CLAUDE_TOOL_IMAGE,

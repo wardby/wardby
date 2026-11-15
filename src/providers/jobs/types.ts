@@ -31,6 +31,12 @@ export interface JobRepositoryMount {
 export interface JobSpec {
   kind: "coding-agent";
   runId: string;
+  /**
+   * The run's agent. Metadata only: no launcher's job depends on it, and it is left out of every
+   * spec hash, so a run dispatched before it was set relaunches with the same hash. The Substrate
+   * launcher records it on the run's row (warm rounds remove an agent's parked runs by it).
+   */
+  agentId?: string;
   /** Omitted specs are legacy Codex jobs and retain the single-worker topology. */
   provider?: "codex" | "claude-code";
   image: string;

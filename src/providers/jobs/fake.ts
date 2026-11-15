@@ -82,7 +82,10 @@ export class FakeJobLauncher implements WorkspaceJobLauncher {
     if (existingId) {
       const existing = this.jobs.get(existingId);
       if (!existing) throw new Error("job_state_corrupt");
-      if (!isDeepStrictEqual(existing.spec, spec)) throw new Error("job_spec_conflict");
+      // agentId is metadata (see JobSpec), never part of the job's identity.
+      const { agentId: _existingAgent, ...existingJob } = existing.spec;
+      const { agentId: _agent, ...job } = spec;
+      if (!isDeepStrictEqual(existingJob, job)) throw new Error("job_spec_conflict");
       return clone(existing.handle);
     }
 
