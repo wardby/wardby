@@ -127,7 +127,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
           budgetReservedUsd: 1,
         },
       });
-      const store = new PrismaContainerExecutionStore(db);
+      // Read only when something needs them: warm rounds, or a session-resume run's transcript.
+      expect((await new PrismaContainerExecutionStore(db).load(runId))!.secretVersions).toBeUndefined();
+      const store = new PrismaContainerExecutionStore(db, { warmRounds: true });
       const loaded = await store.load(runId);
       const at = secret.updatedAt.toISOString();
       expect(loaded!.secretVersions).toEqual([
@@ -144,6 +146,19 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       expect((await store.load(runId))!.secretVersions!.map((v) => v.name)).toEqual([
         `mcp:${server.name}/${secret.name}`,
       ]);
+
+      // Session resume with warm rounds off still reads them, and the launch versions round-trip
+      // as identity and version only (an extra field, such as a value, is never written).
+      await db.codingRun.update({ where: { runId }, data: { sessionResume: true } });
+      const resumeStore = new PrismaContainerExecutionStore(db);
+      const launched = (await resumeStore.load(runId))!.secretVersions!;
+      expect(launched).toHaveLength(1);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toBeUndefined();
+      await resumeStore.recordLaunchSecretVersions(runId, [{ ...launched[0], value: fakeValue } as never]);
+      const stored = await db.codingRun.findUnique({ where: { runId }, select: { launchSecretVersions: true } });
+      expect(stored!.launchSecretVersions).toEqual(launched);
+      expect(JSON.stringify(stored)).not.toContain(fakeValue);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toEqual(launched);
     } finally {
       await db.codingRun.deleteMany({ where: { runId } });
       await db.run.deleteMany({ where: { id: runId } });

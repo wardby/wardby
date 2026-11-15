@@ -49,6 +49,7 @@ import {
   loadTranscriptRetentionDays,
 } from "../../coding/transcript/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
+import { agentSecretVersions } from "../../core/secret-versions.js";
 import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { loadMcpToolPins } from "../../core/mcp-tools.js";
@@ -345,13 +346,18 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       const named = await loadAgentSecretValues(options.db, cipher, agentId);
       return named.flatMap((entry) => entry.values);
     },
+    secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
     retentionDays: loadTranscriptRetentionDays(env),
     maxBytes: loadTranscriptMaxBytes(env),
   });
   const coding = new ContainerExecutor({
     transcripts,
     ...(options.runSteps ? { runSteps: options.runSteps } : {}),
-    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
+    store: new PrismaContainerExecutionStore(options.db, {
+      maxConcurrent: concurrency.maxConcurrent,
+      issueTrackers,
+      warmRounds: jobs.warmRounds === true,
+    }),
     jobs,
     vcs,
     sessions,

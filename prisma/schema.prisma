@@ -645,6 +645,11 @@ model CodingRun {
   /// Substrate warm rounds only: the agent fingerprint (SHA-256 hex) computed once when the run
   /// launched; a delivered round is retained under it. Null = warm rounds off or not computed.
   warmFingerprint       String?
+  /// Claude Code runs (warm rounds, or session resume): every secret delivered to the run when it
+  /// launched, as identity and version only ([{ id, name, updatedAt }], core/secret-versions.ts),
+  /// never a value or a hash of one. Transcript capture compares it with the versions current then
+  /// and stores nothing when they differ. Null = not recorded (then no transcript is stored).
+  launchSecretVersions  Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?

@@ -82,7 +82,17 @@ import {
   type ProvisioningClaim,
   storedTests,
 } from "./container.js";
-import type { RecordResult, RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
+import {
+  RunTranscriptRecorder,
+  transcriptBlobKey,
+  type RecordResult,
+  type RecordTranscriptInput,
+  type RunTranscriptRecorderDeps,
+  type TranscriptStatus,
+} from "../../coding/transcript/recorder.js";
+import { sanitizeClaudeTranscript } from "../../coding/transcript/claude-code.js";
+import { formatTranscriptFile } from "../../coding/transcript/format.js";
+import { LocalBlobStore } from "../storage/local.js";
 
 /**
  * The executor's operator log, captured. The persisted run error is a bare
@@ -6792,7 +6802,17 @@ describe("ContainerExecutor warm rounds", () => {
     const warmStarts: Array<[string, boolean]> = [];
     const fingerprints: Array<[string, string]> = [];
     const store = created.store as FakeStore &
-      Partial<Pick<ContainerExecutionStore, "previousRound" | "recordWarmStart" | "recordWarmFingerprint">>;
+      Partial<
+        Pick<
+          ContainerExecutionStore,
+          "previousRound" | "recordWarmStart" | "recordWarmFingerprint" | "recordLaunchSecretVersions"
+        >
+      >;
+    const launchVersions: Array<[string, WarmSecretVersion[]]> = [];
+    store.recordLaunchSecretVersions = async (runId, versions) => {
+      launchVersions.push([runId, structuredClone([...versions])]);
+      store.run.launchSecretVersions = structuredClone([...versions]);
+    };
     store.recordWarmFingerprint = async (runId, fingerprint) => {
       fingerprints.push([runId, fingerprint]);
       store.run.warmFingerprint = fingerprint;
@@ -6805,7 +6825,7 @@ describe("ContainerExecutor warm rounds", () => {
       warmStarts.push([runId, warmStart]);
       store.run.warmStart = warmStart;
     };
-    return { ...created, warm, steps, previousCalls, warmStarts, fingerprints };
+    return { ...created, warm, steps, previousCalls, warmStarts, fingerprints, launchVersions };
   }
 
   describe("retain vs remove", () => {
@@ -7289,6 +7309,125 @@ describe("ContainerExecutor warm rounds", () => {
       const { next } = await secondRound([V2], first.warm!.calls.retains[0].retention.fingerprint);
       const published = JSON.stringify({ steps: next.steps, logged });
       for (const text of [OLD_VALUE, NEW_VALUE, V1.updatedAt, V2.updatedAt]) expect(published).not.toContain(text);
+    });
+  });
+
+  describe("a secret rotated while an adopted round runs", () => {
+    const S1 = "sk-fake-rotated-secret-value-000001";
+    const S2 = "sk-fake-rotated-secret-value-000002";
+    const V1: WarmSecretVersion = { id: "secret-1", name: "API_KEY", updatedAt: "2026-11-14T10:00:00.000Z" };
+    const V2: WarmSecretVersion = { ...V1, updatedAt: "2026-11-14T10:30:00.000Z" };
+    const FIXTURE = readFileSync(
+      new URL("../../coding/transcript/fixtures/claude-session.jsonl", import.meta.url),
+      "utf8",
+    );
+
+    /** A worker transcript whose tool output holds `text` (round 1's raw output, resumed). */
+    function workerTranscript(text: string): string {
+      const sanitized = sanitizeClaudeTranscript(FIXTURE)!;
+      const lines = sanitized.lines.map((line) => {
+        const record = JSON.parse(line) as { message?: { content?: unknown } };
+        const content = record.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content as Array<Record<string, unknown>>) {
+            if (block.type === "tool_result") block.content = text;
+          }
+        }
+        return JSON.stringify(record);
+      });
+      return formatTranscriptFile(
+        {
+          type: "wardby-transcript",
+          version: 1,
+          provider: "claude-code",
+          sessionId: sanitized.sessionId,
+          status: "ok",
+        },
+        lines,
+      );
+    }
+
+    /**
+     * Round 2 adopting round 1's kept session, with a real RunTranscriptRecorder whose secret values
+     * and versions are the vault's current ones. `rotate` rotates S1 to S2 once the round launched.
+     */
+    async function adoptedRound(rotate: boolean) {
+      const dir = await mkdtemp(join(tmpdir(), "warm-rotate-"));
+      const rows = new Map<string, Record<string, unknown>>();
+      const vault = { value: S1, version: V1 };
+      const db = {
+        runTranscript: {
+          upsert: async (args: { where: { runId: string }; create: Record<string, unknown> }) => {
+            rows.set(args.where.runId, args.create);
+            return args.create;
+          },
+          findMany: async () => [],
+          deleteMany: async () => ({ count: 0 }),
+        },
+      } as unknown as RunTranscriptRecorderDeps["db"];
+      const recorder = new RunTranscriptRecorder({
+        db,
+        blobs: new LocalBlobStore(dir),
+        secretValues: async () => [vault.value],
+        secretVersions: async () => [vault.version],
+        retentionDays: 30,
+        maxBytes: 10 * 1024 * 1024,
+      });
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const retained = first.warm!.calls.retains[0].retention.fingerprint;
+      const next = await warmHarness(
+        { ...continuation, sessionResume: true, secretVersions: [V1] },
+        { extra: { transcripts: recorder } },
+      );
+      next.jobs.onLaunch = () => {
+        expect(next.jobs.lastSpec?.warm?.fingerprint).toBe(retained);
+        next.warm!.setOutcome({ adopted: true });
+        if (rotate) {
+          vault.value = S2;
+          vault.version = V2;
+          next.store.run.secretVersions = [V2];
+        }
+      };
+      // The resumed session still holds round 1's raw tool output, with the value it saw (S1).
+      next.jobs.readTranscript = async () => workerTranscript(`round 1 tool output: ${S1}`);
+      await next.executor.start("run-1");
+      const stored = await readFile(join(dir, transcriptBlobKey("run-1"))).catch(() => undefined);
+      return { next, rows, stored, dir };
+    }
+
+    it("stores no transcript, and neither value appears anywhere", async () => {
+      const { next, rows, stored, dir } = await adoptedRound(true);
+      try {
+        expect(next.warmStarts).toEqual([["run-1", true]]);
+        expect(next.launchVersions).toEqual([["run-1", [V1]]]);
+        expect(stored).toBeUndefined();
+        expect(rows.get("run-1")).toMatchObject({ status: "not_captured", reason: "secrets_changed", blobKey: null });
+        const published = JSON.stringify({ rows: [...rows.values()], steps: next.steps, logged, run: next.store.run });
+        for (const value of [S1, S2]) expect(published).not.toContain(value);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("without a rotation, the adopted round's transcript is stored with the value redacted", async () => {
+      const { rows, stored, dir } = await adoptedRound(false);
+      try {
+        expect(rows.get("run-1")).toMatchObject({ status: "stored" });
+        expect(stored).toBeDefined();
+        const { gunzipSync } = await import("node:zlib");
+        const text = gunzipSync(stored!).toString("utf8");
+        expect(text).toContain("round 1 tool output: [REDACTED]");
+        expect(text).not.toContain(S1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("records no launch versions for a run without session resume", async () => {
+      const created = await warmHarness({ secretVersions: [V1] });
+      await created.executor.start("run-1");
+      expect(created.launchVersions).toEqual([]);
     });
   });
 

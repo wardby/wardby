@@ -129,7 +129,7 @@ import {
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
 import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
-import { agentSecretVersions } from "../../core/secret-versions.js";
+import { agentSecretVersions, parseSecretVersions } from "../../core/secret-versions.js";
 import { RUN_ID } from "../jobs/kubernetes-isolation.js";
 import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
 import type { RunStepSink } from "../../core/run-steps/types.js";
@@ -791,6 +791,12 @@ export interface ContainerRunSnapshot {
    * then never retained and never asks to resume a retained round.
    */
   secretVersions?: WarmSecretVersion[];
+  /**
+   * The secret versions (identity and version, never a value) recorded when the run launched
+   * (CodingRun.launchSecretVersions). Transcript capture stores nothing when they differ from the
+   * versions current then, or when none were recorded.
+   */
+  launchSecretVersions?: WarmSecretVersion[];
 }
 
 /**
@@ -932,6 +938,12 @@ export interface ContainerExecutionStore {
    * that launched the run knows the value.
    */
   recordWarmFingerprint?(runId: string, fingerprint: string): Promise<void>;
+  /**
+   * Records CodingRun.launchSecretVersions: the identity and version (never the value) of every
+   * secret the run launches with, for transcript capture to compare with. Optional: without it no
+   * transcript is stored for the run.
+   */
+  recordLaunchSecretVersions?(runId: string, versions: readonly WarmSecretVersion[]): Promise<void>;
 }
 
 export interface CodingFailureAudit {
@@ -946,6 +958,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxConcurrent?: number;
       /** Configured issue trackers: a coding run this store ends failed/lost/budget_exhausted files a self-defect. */
       issueTrackers?: IssueTrackerRegistry;
+      /** Warm rounds are on (WorkspaceJobLauncher.warmRounds): secret versions are read for the fingerprint. */
+      warmRounds?: boolean;
     } = {},
   ) {}
 
@@ -986,12 +1000,14 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         })
       : null;
     const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
-    // Warm rounds' fingerprint covers the run's secrets (identity and version only); only Claude Code
-    // rounds are ever kept. A failed read leaves it unknown, which is never warm.
+    // The run's secrets, identity and version only (one query): for warm rounds' fingerprint, and for
+    // the versions a Claude Code run with session resume launches with (transcript capture compares
+    // them). A failed read leaves them unknown: never warm, and no transcript stored.
     const secretVersions =
-      row.codingRun.provider === "claude-code"
+      row.codingRun.provider === "claude-code" && (this.options.warmRounds === true || row.codingRun.sessionResume)
         ? await agentSecretVersions(this.db, row.agentId).catch(() => undefined)
         : undefined;
+    const launchSecretVersions = parseSecretVersions(row.codingRun.launchSecretVersions);
     return {
       repositories,
       runId: row.id,
@@ -1056,6 +1072,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(row.codingRun.warmFingerprint ? { warmFingerprint: row.codingRun.warmFingerprint } : {}),
       warmStart: row.codingRun.warmStart,
       ...(secretVersions ? { secretVersions } : {}),
+      ...(launchSecretVersions ? { launchSecretVersions } : {}),
     };
   }
 
@@ -1082,6 +1099,11 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   async recordWarmFingerprint(runId: string, fingerprint: string): Promise<void> {
     await this.db.codingRun.update({ where: { runId }, data: { warmFingerprint: fingerprint } });
+  }
+
+  async recordLaunchSecretVersions(runId: string, versions: readonly WarmSecretVersion[]): Promise<void> {
+    const launchSecretVersions = versions.map(({ id, name, updatedAt }) => ({ id, name, updatedAt }));
+    await this.db.codingRun.update({ where: { runId }, data: { launchSecretVersions } });
   }
 
   /**
@@ -2081,6 +2103,12 @@ export class ContainerExecutor implements Executor {
         // change it), and recorded before the launch so a restarted control plane retains under it too.
         launchFingerprint = this.warmFingerprintOf(run);
         if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
+        // The secret versions the run launches with (identity and version only), for transcript
+        // capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
+        if (run.provider === "claude-code" && run.sessionResume && run.secretVersions) {
+          const versions = run.secretVersions;
+          if (await this.recordLaunchSecretVersions(runId, versions)) run = { ...run, launchSecretVersions: versions };
+        }
         const warm = this.warmStartFor(await previousRound(), warmHeadOf(workspace), launchFingerprint);
         const spec = {
           ...this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) }),
@@ -4182,6 +4210,25 @@ export class ContainerExecutor implements Executor {
     return this.options.jobs.warmRounds === true;
   }
 
+  /**
+   * Records the secret versions the run launches with (CodingRun.launchSecretVersions). Best effort:
+   * never fails the launch; unrecorded, the run's transcript is not stored.
+   */
+  private async recordLaunchSecretVersions(runId: string, versions: WarmSecretVersion[]): Promise<boolean> {
+    const { store } = this.options;
+    if (!store.recordLaunchSecretVersions) return false;
+    return store.recordLaunchSecretVersions(runId, versions).then(
+      () => true,
+      (error: unknown) => {
+        containerLog.warn(
+          { runId, event: "coding.launch_secret_versions_unrecorded", errorName: errorName(error) },
+          "could not record the secret versions a run launched with; its transcript will not be stored",
+        );
+        return false;
+      },
+    );
+  }
+
   /** Records the run's launch fingerprint (CodingRun.warmFingerprint). Best effort: never fails the launch. */
   private async recordLaunchFingerprint(runId: string, fingerprint: string): Promise<void> {
     await this.options.store.recordWarmFingerprint?.(runId, fingerprint).catch((error: unknown) => {
@@ -4546,6 +4593,7 @@ export class ContainerExecutor implements Executor {
             runId: run.runId,
             agentId: run.agentId,
             provider: run.provider,
+            ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
             read: (maxBytes) =>
               jobs.readTranscript ? jobs.readTranscript(handle, maxBytes) : Promise.resolve(undefined),
           }),

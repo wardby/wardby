@@ -220,8 +220,16 @@ workspace lacks that merge; it writes no step line.
   `attach_secret`, `detach_secret`, `create_secret` with a new value for a
   secret the agent gets (entered in the call or in the browser, or an OAuth
   sign-in confirmed with its code) and `set_secret_broker`. This also covers
-  secrets of an MCP server attached to the agent. Any other change (an OAuth
-  token refresh, say) is caught by the check below.
+  secrets of an MCP server attached to the agent. `delete_secret`,
+  `detach_mcp_server`, `delete_mcp_server`, `attach_mcp_server` (a new
+  attachment of a server with secrets) and `update_mcp_server` changing
+  `secretNames` remove them for the agents concerned. Any other change (an
+  OAuth token refresh, say) is caught by the check below.
+- A secret that changes while a round runs means that round's transcript is
+  not stored (`not_captured`, reason `secrets_changed`): a resumed session
+  holds the previous round's raw content, which redaction against the new
+  value would miss. This applies to every Claude Code run with session resume,
+  warm or not.
 - Removed or not, a kept round is resumed only when everything the next round
   launches with matches the kept round: the agent, provider, model, system
   prompt, repository, worker and tool images, CPU, memory and disk limits, and

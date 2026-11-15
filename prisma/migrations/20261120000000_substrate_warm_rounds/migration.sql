@@ -3,7 +3,9 @@
 -- instead of adopting the parked one (a fixed code; null for a run that adopted, or that continued
 -- nothing). A coding run records whether it resumed a parked round and the agent fingerprint it
 -- launched with, so a delivered round is retained under the value it ran with and a restarted
--- control plane reads the same value (null = warm rounds off or not computed).
+-- control plane reads the same value (null = warm rounds off or not computed). A Claude Code run
+-- also records the identity and version (never the value) of every secret it launched with, so
+-- transcript capture can tell a secret changed while it ran.
 ALTER TABLE "SubstrateRun" ADD COLUMN "headSha" TEXT;
 ALTER TABLE "SubstrateRun" ADD COLUMN "fingerprint" TEXT;
 ALTER TABLE "SubstrateRun" ADD COLUMN "parkedAt" TIMESTAMP(3);
@@ -16,3 +18,4 @@ CREATE INDEX "SubstrateRun_agentId_phase_idx" ON "SubstrateRun"("agentId", "phas
 
 ALTER TABLE "CodingRun" ADD COLUMN "warmStart" BOOLEAN;
 ALTER TABLE "CodingRun" ADD COLUMN "warmFingerprint" TEXT;
+ALTER TABLE "CodingRun" ADD COLUMN "launchSecretVersions" JSONB;
