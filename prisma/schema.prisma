@@ -2383,6 +2383,9 @@ model SubstrateRun {
   /// actor_not_suspended | branch_moved | fingerprint_changed | capacity); null when it adopted or
   /// continued nothing.
   coldReason  String?
+  /// The run's actors: pair (agent + tool: Claude Code) | single (one agent actor that also holds
+  /// the workspace: Codex). Read by the launcher and the coding proxy's Substrate routes.
+  actorShape  String                  @default("pair")
   createdAt   DateTime                @default(now())
   updatedAt   DateTime                @updatedAt
   channels    SubstrateRelayChannel[]

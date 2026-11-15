@@ -101,6 +101,36 @@ export function describeSubstrateRunStoreContract(name: string, setup: RunStoreC
       expect((await s.get(r2))!.coldReason).toBeUndefined();
     });
 
+    it("records the actor shape on claim (single or pair) and keeps it through reclaim and setPhase", async () => {
+      now = NOW;
+      const single = setup.id("shape-single");
+      const pair = setup.id("shape-pair");
+      await setup.runs(single, pair);
+      const s = store();
+      expect((await s.claim(record(single, { actorShape: "single" }))).record.actorShape).toBe("single");
+      expect((await s.claim(record(pair))).record.actorShape).toBe("pair");
+      expect((await s.get(single))?.actorShape).toBe("single");
+      expect((await s.getByToken(substrateRunToken(single)))?.actorShape).toBe("single");
+      expect((await s.get(pair))?.actorShape).toBe("pair");
+      expect((await s.setPhase(single, "requeued", ["provisioning"])).actorShape).toBe("single");
+      expect((await s.reclaim(single, new Date(NOW + HOUR)))?.actorShape).toBe("single");
+      expect((await s.setPhase(single, "running", ["provisioning"])).actorShape).toBe("single");
+    });
+
+    it("gives an adopter the pair shape", async () => {
+      now = NOW;
+      const r1 = setup.id("shape-adopt-1");
+      const r2 = setup.id("shape-adopt-2");
+      await setup.runs(r1, r2);
+      const s = store();
+      await s.claim(record(r1, { actorShape: "single" }));
+      await s.setPhase(r1, "running", ["provisioning"]);
+      await park(s, r1, NOW);
+      const adopted = await s.adopt(r1, r2, new Date(NOW + HOUR), { specHash: "h2" });
+      expect(adopted?.actorShape).toBe("pair");
+      expect((await s.getByToken(substrateRunToken(r1)))?.actorShape).toBe("pair");
+    });
+
     it("parks only a running run, with what it was parked with", async () => {
       now = NOW;
       const r1 = setup.id("park");
