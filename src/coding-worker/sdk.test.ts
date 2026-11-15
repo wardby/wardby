@@ -40,6 +40,46 @@ describe("codexSdkOptions", () => {
     });
   });
 
+  it("header mode: the placeholder goes in x-api-key and nothing sets Authorization", () => {
+    const options = codexSdkOptions({
+      ...baseConfig,
+      capability: "rrp_placeholder_injected_by_gateway",
+      capabilityHeader: "x-api-key",
+    });
+    expect("apiKey" in options).toBe(false);
+    const provider = options.config.model_providers.wardby_proxy;
+    expect("env_key" in provider).toBe(false);
+    expect("http_headers" in provider && provider.http_headers).toEqual({
+      "x-api-key": "rrp_placeholder_injected_by_gateway",
+    });
+    expect(JSON.stringify(options.config.shell_environment_policy)).not.toContain("rrp_placeholder");
+  });
+
+  it("without header mode the options are exactly today's", () => {
+    const options = codexSdkOptions(baseConfig);
+    expect(options).toEqual({
+      apiKey: "rrp_worker_capability",
+      env: baseConfig.environment,
+      config: {
+        developer_instructions: "trusted instructions",
+        skills: { config: baseConfig.disabledSkills.map((name) => ({ name, enabled: false })) },
+        shell_environment_policy: { inherit: "none", ignore_default_excludes: false, set: baseConfig.environment },
+        model_provider: "wardby_proxy",
+        model_providers: {
+          wardby_proxy: {
+            name: "Wardby per-run proxy",
+            base_url: "http://proxy:8080/v1",
+            env_key: "CODEX_API_KEY",
+            wire_api: "responses",
+            request_max_retries: 3,
+            stream_max_retries: 3,
+            supports_websockets: false,
+          },
+        },
+      },
+    });
+  });
+
   describe("with MCP tools (the run's MCP token is set)", () => {
     const TOKEN = "rmt_fake_token_for_codex_sdk_options_test_0001";
 

@@ -352,14 +352,21 @@ export async function startCodingProxyServer(
       const requestKeyHeader = request.headers["idempotency-key"];
       const apiKeyHeader = request.headers["x-api-key"];
       const anthropicBetaHeader = request.headers["anthropic-beta"];
+      // The capability travels in exactly one header. Claude sends x-api-key; Codex sends a Bearer,
+      // except on Substrate, where the egress gateway injects the run's capability as X-Api-Key and
+      // Codex (header mode, src/coding-worker/sdk.ts) sends no Authorization at all. A request with
+      // both headers is refused on either route, whatever the Authorization holds.
+      const authorization = request.headers.authorization;
       const capability =
         protocol === "anthropic-messages"
-          ? request.headers.authorization === undefined && typeof apiKeyHeader === "string"
+          ? authorization === undefined && typeof apiKeyHeader === "string"
             ? apiKeyHeader
             : ""
           : apiKeyHeader === undefined
-            ? bearer(request.headers.authorization)
-            : "";
+            ? bearer(authorization)
+            : authorization === undefined && typeof apiKeyHeader === "string"
+              ? apiKeyHeader
+              : "";
       await proxy.execute(
         {
           bearer: capability,

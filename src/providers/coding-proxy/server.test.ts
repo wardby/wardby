@@ -18,7 +18,8 @@ import {
   type RegistryResponse,
 } from "./registry/service.js";
 import { MemoryRegistryStore } from "./registry/store.js";
-import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
+import { setLogLineFilter } from "../../core/logger.js";
+import { logProxyAudit, startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 
 /** A minimal CodingProxy wired only well enough to start the HTTP server;
  *  the registry-routing tests never exercise the LLM proxy path. Mirrors
@@ -36,6 +37,8 @@ describe("coding proxy HTTP boundary", () => {
   const observedRequests: Array<{ protocol: string; status: number }> = [];
   let session: CreatedCodingProxySession;
   let anthropicSession: CreatedCodingProxySession;
+  let proxyForLogging: CodingProxy;
+  let loggingSession: CreatedCodingProxySession;
   const upstream = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     return Response.json(
@@ -74,6 +77,21 @@ describe("coding proxy HTTP boundary", () => {
       host: "127.0.0.1",
       port: 0,
       onRequest: (event) => observedRequests.push(event),
+    });
+    proxyForLogging = new CodingProxy({
+      ledger: new MemoryProxyLedger(),
+      credentials: { resolve: async () => "UPSTREAM_SECRET" },
+      fetch: upstream,
+      pricing: () => ({ encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 }),
+      audit: (event) => logProxyAudit(event),
+    });
+    loggingSession = await proxyForLogging.createSession({
+      runId: "http-logging-run",
+      credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["test-model"],
+      deadlineAt: new Date(Date.now() + 60_000),
+      budgetUsd: 1,
     });
   });
 
@@ -184,15 +202,89 @@ describe("coding proxy HTTP boundary", () => {
         })
       ).status,
     ).toBe(401);
-    expect(
-      (
-        await call("/v1/responses", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": session.capability },
-          body: JSON.stringify({ model: "test-model", input: "x", stream: false }),
-        })
-      ).status,
-    ).toBe(401);
+  });
+
+  describe("openai-responses with the capability in x-api-key (Substrate's gateway injects it)", () => {
+    let sent = 0;
+    // A fresh input each time: the proxy refuses a replayed identical body.
+    const responsesBody = () => JSON.stringify({ model: "test-model", input: `x-api-key ${++sent}`, stream: false });
+    const responses = (headers: Record<string, string>) =>
+      call("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: responsesBody(),
+      });
+
+    it("openai-responses: accepts the capability in x-api-key when Authorization is absent", async () => {
+      const response = await responses({ "x-api-key": session.capability });
+      expect(response.status).toBe(200);
+      const headers = new Headers((upstream.mock.calls.at(-1)![1] as RequestInit).headers);
+      expect(headers.get("authorization")).toBe("Bearer UPSTREAM_SECRET");
+      expect(headers.get("x-api-key")).toBeNull();
+    });
+
+    it("openai-responses: refuses x-api-key together with a real Bearer", async () => {
+      const upstreamCalls = upstream.mock.calls.length;
+      const response = await responses({
+        "x-api-key": session.capability,
+        authorization: `Bearer ${session.capability}`,
+      });
+      expect(response.status).toBe(401);
+      expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
+    });
+
+    it("openai-responses: refuses x-api-key beside any other Authorization, the placeholder Bearer included", async () => {
+      for (const authorization of ["Bearer rrp_placeholder_injected_by_gateway", "Bearer rrp_OTHER_FAKE", ""]) {
+        expect((await responses({ "x-api-key": session.capability, authorization })).status).toBe(401);
+      }
+    });
+
+    it("openai-responses: refuses a wrong x-api-key", async () => {
+      expect((await responses({ "x-api-key": "rrp_OTHER_FAKE" })).status).toBe(401);
+    });
+
+    it("openai-responses: Bearer alone is unchanged", async () => {
+      expect((await responses({ authorization: `Bearer ${session.capability}` })).status).toBe(200);
+    });
+
+    it("never logs either header value", async () => {
+      const lines: string[] = [];
+      setLogLineFilter((line) => {
+        lines.push(line);
+        return line;
+      });
+      const events: unknown[] = [];
+      const logged = await startCodingProxyServer(proxyForLogging, {
+        host: "127.0.0.1",
+        port: 0,
+        onRequest: (event) => events.push(event),
+      });
+      try {
+        const send = (headers: Record<string, string>) =>
+          fetch(`http://127.0.0.1:${logged.port}/v1/responses`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...headers },
+            body: responsesBody(),
+          });
+        expect((await send({ "x-api-key": loggingSession.capability })).status).toBe(200);
+        expect(
+          (
+            await send({
+              "x-api-key": loggingSession.capability,
+              authorization: "Bearer rrp_placeholder_injected_by_gateway",
+            })
+          ).status,
+        ).toBe(401);
+        expect((await send({ "x-api-key": "rrp_placeholder_injected_by_gateway" })).status).toBe(401);
+      } finally {
+        await logged.close();
+        setLogLineFilter((line) => line);
+      }
+      expect(lines.length).toBeGreaterThan(0);
+      const seen = JSON.stringify(events) + lines.join("\n");
+      expect(seen).not.toContain(loggingSession.capability);
+      expect(seen).not.toContain("rrp_placeholder_injected_by_gateway");
+    });
   });
 
   it("rejects malformed Claude requests before they can reach the credential holder", async () => {

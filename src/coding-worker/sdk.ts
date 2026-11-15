@@ -34,9 +34,39 @@ function wardbyMcpServers(config: WorkerClientConfig): Record<string, never> | {
   };
 }
 
+/** The wardby_proxy model provider. Header mode (Substrate) sends the placeholder capability in its own
+ *  header for the egress gateway to replace, and sets no env_key, so Codex sends no Authorization. */
+type WardbyProxyProvider = {
+  name: string;
+  base_url: string;
+  wire_api: "responses";
+  request_max_retries: number;
+  stream_max_retries: number;
+  supports_websockets: false;
+} & ({ env_key: "CODEX_API_KEY" } | { http_headers: Record<string, string> });
+
+function wardbyProxyProvider(config: WorkerClientConfig): WardbyProxyProvider {
+  return {
+    name: "Wardby per-run proxy",
+    base_url: `${config.proxyBaseUrl.replace(/\/$/, "")}/v1`,
+    ...(config.capabilityHeader
+      ? { http_headers: { [config.capabilityHeader]: config.capability } }
+      : { env_key: "CODEX_API_KEY" as const }),
+    wire_api: "responses",
+    // One failed request (a 5xx, a connection reset) or a dropped
+    // stream would otherwise end the whole run and its spend. Every
+    // retry is a new request through the proxy, so it passes the run's
+    // budget reservation again; a budget refusal (429) retried is
+    // refused again at no cost.
+    request_max_retries: 3,
+    stream_max_retries: 3,
+    supports_websockets: false,
+  };
+}
+
 export function codexSdkOptions(config: WorkerClientConfig) {
   return {
-    apiKey: config.capability,
+    ...(config.capabilityHeader ? {} : { apiKey: config.capability }),
     // The Codex process env. The shells' own env is only shell_environment_policy.set, which never holds
     // the MCP token, but a shell can still read Codex's env (and the token) through /proc.
     env: config.mcpToken ? { ...config.environment, [MCP_TOKEN_ENV]: config.mcpToken } : config.environment,
@@ -49,22 +79,7 @@ export function codexSdkOptions(config: WorkerClientConfig) {
         set: config.environment,
       },
       model_provider: "wardby_proxy",
-      model_providers: {
-        wardby_proxy: {
-          name: "Wardby per-run proxy",
-          base_url: `${config.proxyBaseUrl.replace(/\/$/, "")}/v1`,
-          env_key: "CODEX_API_KEY",
-          wire_api: "responses",
-          // One failed request (a 5xx, a connection reset) or a dropped
-          // stream would otherwise end the whole run and its spend. Every
-          // retry is a new request through the proxy, so it passes the run's
-          // budget reservation again; a budget refusal (429) retried is
-          // refused again at no cost.
-          request_max_retries: 3,
-          stream_max_retries: 3,
-          supports_websockets: false,
-        },
-      },
+      model_providers: { wardby_proxy: wardbyProxyProvider(config) },
       ...wardbyMcpServers(config),
     },
   } as const;

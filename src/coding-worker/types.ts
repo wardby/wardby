@@ -64,6 +64,8 @@ export interface WorkerClientConfig {
   disabledSkills: string[];
   /** The run's MCP token, set only when the run has MCP tools: sdk.ts then adds the wardby_mcp server. */
   mcpToken?: string;
+  /** Substrate: the capability is a placeholder the egress gateway replaces; it goes in this header, never Authorization. */
+  capabilityHeader?: "x-api-key";
 }
 
 export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentClient;
