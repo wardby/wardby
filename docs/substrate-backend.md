@@ -185,9 +185,9 @@ Also:
 
 ### When a round starts fresh
 
-A continuation that cannot resume the kept round starts a normal fresh round
-and writes one run step line saying why (`get_run` shows `warmStart: true` or
-`false` on the round):
+A continuation that cannot resume the kept round starts a normal fresh round.
+When the launcher reports how a round started, the round gets one run step line
+saying so (`get_run` shows `warmStart: true` or `false` on the round):
 
 | Step line                                                                        | Meaning                                                            |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
@@ -195,7 +195,7 @@ and writes one run step line saying why (`get_run` shows `warmStart: true` or
 | Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                    |
 | Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                   |
 | Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                   |
-| Started a fresh workspace: the agent's settings changed since the previous round | The agent's model, prompt, images or limits changed.               |
+| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).         |
 | Started a fresh workspace: the previous round's sandbox was no longer available  | The actors were gone from Substrate or not in the suspended state. |
 | Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                       |
 
@@ -212,9 +212,24 @@ workspace lacks that merge; it writes no step line.
   credentials (the round's run capability is revoked when it ends; the next
   round gets a new one).
 - `stop_run` removes all of that agent's kept rounds.
-- `update_agent` removes them when it changes any setting the round was
-  launched with (provider, model, prompt, repository, toolchain, images, limits
-  or disk). `delete_agent` removes them too.
+- `update_agent` removes them when it changes the agent's kind, provider,
+  model, system prompt, repository, toolchain, toolchain version, worker image
+  (`workerImageRef`) or workspace disk (`workspaceDiskMb`). `delete_agent`
+  removes them too.
+- A change to the agent's secrets through the MCP tools removes them:
+  `attach_secret`, `detach_secret`, `create_secret` with a new value for a
+  secret the agent gets (entered in the call or in the browser, or an OAuth
+  sign-in confirmed with its code) and `set_secret_broker`. This also covers
+  secrets of an MCP server attached to the agent. Any other change (an OAuth
+  token refresh, say) is caught by the check below.
+- Removed or not, a kept round is resumed only when everything the next round
+  launches with matches the kept round: the agent, provider, model, system
+  prompt, repository, worker and tool images, CPU, memory and disk limits, and
+  the secrets delivered to the run (which secrets, and the version of each, so
+  a rotated or refreshed value counts as a change). Otherwise it starts fresh
+  with "the agent's settings changed". Wardby compares secrets by identity and
+  last change time only, never by value. A kept round's session holds the
+  values it saw, so a round after a secret change always starts fresh.
 - A kept round is removed when `SUBSTRATE_PARK_TTL_SEC` passes.
 - When more than `SUBSTRATE_PARK_MAX` rounds are kept, the oldest is removed.
 - When the WorkerPool is short of room, kept rounds are removed oldest first,

@@ -47,7 +47,8 @@ never resumes. See [Git history](git-history.md).
 ## Did the next round resume?
 
 `get_run` shows `warmStart: true` when a round resumed and `false` when it
-started fresh. The run's steps carry one line either way:
+started fresh. When the launcher reports how the round started, the run's steps
+carry one line saying so:
 
 - "Resumed the previous round's workspace and session".
 - "Started a fresh workspace: " followed by the previous round was not kept; its
@@ -61,9 +62,16 @@ with no step line.
 ## What is removed
 
 - `stop_run` removes all of that agent's kept rounds.
-- `update_agent` removes them when it changes any setting the round was
-  launched with (provider, model, prompt, repository, toolchain, images, limits
-  or disk). `delete_agent` removes them too.
+- `update_agent` removes them when it changes the agent's kind, provider,
+  model, system prompt, repository, toolchain, toolchain version, worker image
+  (`workerImageRef`) or workspace disk (`workspaceDiskMb`). `delete_agent`
+  removes them too.
+- `attach_secret`, `detach_secret`, `create_secret` with a new value (or a
+  confirmed OAuth sign-in) and `set_secret_broker` remove the kept rounds of
+  every agent the secret reaches, including through an attached MCP server.
+  Any rotated or refreshed secret also makes the next round start fresh ("the
+  agent's settings changed"), because a kept session holds the old value.
+  Secrets are compared by identity and last change time, never by value.
 - A kept round expires after `SUBSTRATE_PARK_TTL_SEC`.
 - Turning warm rounds off removes every kept round when the control plane next
   starts.
