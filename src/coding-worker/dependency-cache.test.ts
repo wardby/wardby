@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -16,7 +16,7 @@ import {
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   archiveLimit,
@@ -156,7 +156,10 @@ interface ProxyState {
     scanVersion: string | undefined;
     entries: string | undefined;
     unpackedBytes: string | undefined;
+    archiveSha256: string | undefined;
   }[];
+  /** Answers the upload (PUT) instead of 201 when set. */
+  uploadAnswer?: { status: number; body: unknown };
   sealed: boolean;
   hang?: string;
   /** Delays the plan answer (a slow proxy with a cold package-fact cache). */
@@ -261,7 +264,9 @@ function startProxy(): Promise<void> {
           scanVersion: request.headers["x-wardby-archive-scan-version"] as string | undefined,
           entries: request.headers["x-wardby-archive-entries"] as string | undefined,
           unpackedBytes: request.headers["x-wardby-archive-unpacked-bytes"] as string | undefined,
+          archiveSha256: request.headers["x-wardby-archive-sha256"] as string | undefined,
         });
+        if (state.uploadAnswer) return json(state.uploadAnswer.status, state.uploadAnswer.body);
         json(201, { stored: true, sha256: sha256(body), sizeBytes: body.length });
         return;
       }
@@ -517,6 +522,7 @@ describe("prepareDependencies", () => {
       entries: expect.any(String),
       unpackedBytes: expect.any(String),
     });
+    expect(state.uploads[0].archiveSha256).toBe(sha256(state.uploads[0].body));
     expect(result.sizeBytes).toBe(state.uploads[0].body.length);
     expect(state.calls.slice(-2)).toEqual(["PUT /cache/npm/blob", "POST /cache/npm/seal"]);
     expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
@@ -2056,5 +2062,61 @@ describe("snapshot packing limit", () => {
       true,
     );
     expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "timeout")).toBe(false);
+  });
+});
+
+describe("archive digest", () => {
+  it("scanArchive's digest covers the whole file, bytes after the end-of-archive marker included", async () => {
+    const blob = gzipSync(
+      Buffer.concat([
+        gunzipSync(
+          rawTar([
+            { name: "node_modules/", type: "5" },
+            { name: "node_modules/a.js", body: "x" },
+          ]),
+        ),
+        randomBytes(256 * 1024),
+      ]),
+    );
+    const file = join(root, "trailing.tgz");
+    await writeFile(file, blob);
+    const digested = await scanArchive(file, { budgetBytes: 1024 * 1024, digest: true });
+    expect(digested.sha256).toBe(sha256(blob));
+    const plain = await scanArchive(file, { budgetBytes: 1024 * 1024 });
+    expect(plain).not.toHaveProperty("sha256");
+    expect(plain.entries).toBe(digested.entries);
+    await rm(file);
+  });
+
+  it("scanArchive's digest matches a real tar of an installed tree", async () => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    const file = join(root, "real.tgz");
+    await writeFile(file, blob);
+    expect((await scanArchive(file, { budgetBytes: Number.MAX_SAFE_INTEGER, digest: true })).sha256).toBe(sha256(blob));
+    await rm(file);
+  });
+
+  it("an upload refused with digest_mismatch keeps the tree and reports no snapshot", async () => {
+    state.uploadAnswer = { status: 400, body: { error: "digest_mismatch" } };
+    const result = await prepare();
+    expect(result).toMatchObject({ result: "cold" });
+    expect(result.sizeBytes).toBeUndefined();
+    expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
+    expect(events.some((entry) => entry.event === "snapshot" && entry.code === "digest_mismatch")).toBe(true);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("never puts the registry token in a snapshot archive", async () => {
+    const ARCHIVE_TOKEN = "rrg_fake_archive_token_0000000001";
+    const port = new URL(base).port;
+    const npmrc = join(workspace, ".cache", "npm", "npmrc");
+    await mkdir(join(workspace, ".cache", "npm"), { recursive: true });
+    await writeFile(npmrc, `//127.0.0.1:${port}/registry/npm/:_authToken=${ARCHIVE_TOKEN}\n`);
+    const result = await prepare({ env: { ...env, npm_config_userconfig: npmrc } });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(state.authorizations).toContain(`Bearer ${ARCHIVE_TOKEN}`);
+    expect(state.uploads).toHaveLength(1);
+    expect(gunzipSync(state.uploads[0].body).includes(Buffer.from(ARCHIVE_TOKEN))).toBe(false);
+    expect(state.uploads[0].body.includes(Buffer.from(ARCHIVE_TOKEN))).toBe(false);
   });
 });

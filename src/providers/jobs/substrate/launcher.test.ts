@@ -11,7 +11,8 @@ import { hostTarArchive } from "../kubernetes.js";
 import { createSubstrateRoutes } from "../../coding-proxy/substrate/routes.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
-import type { CodexWorkerSetup } from "../codex-worker-setup.js";
+import { codexWorkerSetup, type CodexWorkerSetup } from "../codex-worker-setup.js";
+import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cache/key.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
 import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
 import { inputGitHistory } from "./launcher.js";
@@ -25,6 +26,7 @@ import {
   makeHarness,
   PYTHON_TOOL_IMAGE,
   SMALL_WORKER,
+  TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
 import { BLOB, REPO_BLOB, agentActorName, toolActorName } from "./names.js";
@@ -199,6 +201,70 @@ jobLauncherContract(
     return {
       launcher: h.launcher,
       spec: { ...h.spec, mcpTools: true },
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+jobLauncherContract(
+  "substrate with the dependency cache",
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, dependencyCache: true },
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness();
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, dependencyCache: true },
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+jobLauncherContract(
+  "substrate codex with the dependency cache",
+  async () => {
+    const h = await makeHarness({ provider: "codex" });
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, dependencyCache: true },
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await makeHarness({ provider: "codex" });
+    return {
+      launcher: h.launcher,
+      spec: { ...h.spec, dependencyCache: true },
       destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
       finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
@@ -753,7 +819,6 @@ describe("SubstrateJobLauncher", () => {
       [{ image: "registry.example/agent:latest" }, "substrate_image_not_digest"],
       [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
-      [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
       // An agent's custom tool image (workerImageRef) is a digest but carries no bridge.
       [{ toolImage: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
     ];
@@ -1313,7 +1378,6 @@ describe("Codex (single actor)", () => {
       // An agent's custom Codex image (workerImageRef) is a digest but carries no bridge.
       [{ image: `registry.example/byo@sha256:${"e".repeat(64)}` }, "substrate_feature_unsupported:workerImage"],
       [{ services: [] }, "substrate_feature_unsupported:services"],
-      [{ dependencyCache: true }, "substrate_feature_unsupported:dependencyCache"],
       [{ provider: "other" as JobSpec["provider"] }, "substrate_provider_unsupported"],
     ];
     for (const [change, code] of cases) {
@@ -1918,5 +1982,90 @@ describe("extra repositories", () => {
       expect(event).toMatchObject({ runId: "run-1" });
       expect(JSON.stringify(event)).not.toContain("extra-");
     }
+  });
+});
+
+describe("dependency cache", () => {
+  const CACHE_KEY = newBlobKey(
+    deriveSnapshotKey({
+      repository: "owner/repo",
+      projectPath: ".",
+      lockHash: "c".repeat(64),
+      workerImage: TOOL_IMAGE,
+    }),
+  );
+
+  async function cacheHarness(): Promise<Harness> {
+    const h = await makeHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    await h.blobs.put(CACHE_KEY, Buffer.from("snapshot"));
+    return h;
+  }
+
+  async function expectCacheKept(h: Harness): Promise<void> {
+    expect((await h.blobs.get(CACHE_KEY)).toString()).toBe("snapshot");
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
+  }
+
+  it("launches a Claude Code cache run: the tool setup carries dependencyCache and diskMb, never workspaceReused", async () => {
+    const h = await makeHarness();
+    h.spec = { ...h.spec, dependencyCache: true };
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    const setup = JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString()) as { toolSetup: string };
+    const toolSetup = JSON.parse(setup.toolSetup) as Record<string, unknown>;
+    expect(toolSetup.dependencyCache).toBe(true);
+    expect(toolSetup.diskMb).toBe(64);
+    expect(toolSetup).not.toHaveProperty("workspaceReused");
+    expect(setup.toolSetup).toContain(deriveRegistryToken(FAKE_CAP));
+    expect(setup.toolSetup).not.toContain(FAKE_CAP);
+  });
+
+  it("the cache changes no template", async () => {
+    const claude = await makeHarness();
+    const codex = await makeHarness({ provider: "codex" });
+    expect(agentTemplate({ ...claude.spec, dependencyCache: true }, CONFIG)).toEqual(
+      agentTemplate(claude.spec, CONFIG),
+    );
+    expect(toolTemplate({ ...claude.spec, dependencyCache: true }, CONFIG)).toEqual(toolTemplate(claude.spec, CONFIG));
+    expect(codexTemplate({ ...codex.spec, dependencyCache: true }, CONFIG)).toEqual(codexTemplate(codex.spec, CONFIG));
+  });
+
+  it("launches a Codex cache run: setup and input unchanged", async () => {
+    const h = await makeHarness({ provider: "codex" });
+    const withoutCache = h.spec;
+    h.spec = { ...h.spec, dependencyCache: true };
+    const input = JSON.stringify({ schemaVersion: 1, task: "say hello", dependencyCache: true, diskMb: 64 });
+    await writeFile(h.spec.inputArtifact, input);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+    expect(withoutCache).not.toHaveProperty("dependencyCache");
+    expect((await h.blobs.get(BLOB.toolSetup(h.token))).toString()).toBe(
+      codexWorkerSetup(withoutCache, FAKE_CAP, { collectResultBundle: false }),
+    );
+    expect((await h.blobs.get(BLOB.input(h.token))).toString()).toBe(await readFile(h.spec.inputArtifact, "utf8"));
+    expect((await h.blobs.get(BLOB.input(h.token))).toString()).toBe(input);
+  });
+
+  it("never deletes a dependency-cache object: remove, stop then remove, and a failed launch's cleanup", async () => {
+    const removed = await cacheHarness();
+    const removedHandle = await removed.launcher.launch(removed.spec);
+    await finish(removed);
+    await removed.launcher.remove(removedHandle);
+    await expectCacheKept(removed);
+
+    const stopped = await cacheHarness();
+    const stoppedHandle = await stopped.launcher.launch(stopped.spec);
+    await stopped.launcher.stop(stoppedHandle);
+    await stopped.launcher.remove(stoppedHandle);
+    await expectCacheKept(stopped);
+
+    const failed = await cacheHarness();
+    failed.api.resumeActor = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(failed.launcher.launch(failed.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect((await failed.runs.get(failed.spec.runId))?.phase).toBe("provisioning_failed");
+    await expectCacheKept(failed);
   });
 });

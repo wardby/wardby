@@ -3,7 +3,7 @@ id: substrate-warm-rounds
 title: Warm rounds on Substrate (resume a round)
 summary: SUBSTRATE_WARM_ROUNDS keeps a succeeded coding round's Substrate actors suspended so the next round (continuePriorRun, a lead follow-up, a review fix round) resumes its workspace and Claude session; settings, step lines, eviction and storage cost.
 audience: operator
-tags: [substrate, warm rounds, resume round, continuePriorRun, SuspendActor]
+tags: [substrate, dependency cache, reused_workspace, warm rounds, resume round, continuePriorRun, SuspendActor]
 appliesTo: ">=0.9.15"
 ---
 
@@ -95,6 +95,9 @@ with no step line.
 
 Kept: the workspace and the Claude session. Not kept: background processes (the
 tool runner restarts each round) and credentials (each round gets new ones).
+A resumed round skips the dependency cache (`reused_workspace`): its workspace
+already has the previous round's `node_modules`. See
+[Dependency cache](dependency-cache.md).
 
 ## Storage cost
 

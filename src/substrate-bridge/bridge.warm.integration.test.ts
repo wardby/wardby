@@ -90,8 +90,17 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
   return shim;
 }
 
-function toolSetupBlob(registryToken: string): Buffer {
-  const setup = JSON.parse(claudeToolSetup(spec, CAPABILITY)) as { env: Record<string, string> };
+interface SetupExtra {
+  dependencyCache?: true;
+  workspaceReused?: true;
+}
+
+function toolSetupBlob(registryToken: string, extra: SetupExtra = {}): Buffer {
+  const setup = JSON.parse(
+    claudeToolSetup({ ...spec, ...(extra.dependencyCache ? { dependencyCache: true as const } : {}) }, CAPABILITY, {
+      workspaceReused: extra.workspaceReused === true,
+    }),
+  ) as { env: Record<string, string> };
   setup.env.FAKE_REGISTRY_TOKEN = registryToken;
   return Buffer.from(
     JSON.stringify({ toolSetup: JSON.stringify(setup), collectExclude: { names: ["node_modules"], paths: [] } }),
@@ -178,7 +187,7 @@ describe("substrate bridges, warm rounds", () => {
     return metadata;
   };
 
-  async function stageRoundOne(): Promise<string> {
+  async function stageRoundOne(setupExtra: SetupExtra = {}): Promise<string> {
     const seedDir = join(dir, "seed");
     await mkdir(join(seedDir, "src"), { recursive: true });
     await writeFile(join(seedDir, "src", "hello.txt"), "seed\n");
@@ -186,17 +195,17 @@ describe("substrate bridges, warm rounds", () => {
       env: { ...process.env, COPYFILE_DISABLE: "1" },
     });
     await blobs.put(BLOB.input(TOKEN), Buffer.from(JSON.stringify({ runId: "run-1", task: "round one" })));
-    await blobs.put(BLOB.toolSetup(TOKEN), toolSetupBlob(REGISTRY_TOKEN_1));
+    await blobs.put(BLOB.toolSetup(TOKEN), toolSetupBlob(REGISTRY_TOKEN_1, setupExtra));
     await blobs.put(BLOB.seed(TOKEN), await readFile(join(dir, "seed.tar")));
     return join(dir, "workspace");
   }
 
   /** What the launcher's adoption stages: the next round's input, tool setup and round record. */
-  async function stageRoundTwo(): Promise<void> {
+  async function stageRoundTwo(setupExtra: SetupExtra = {}): Promise<void> {
     await blobs.delete(BLOB.seed(TOKEN));
     currentRun = "run-2";
     await blobs.put(BLOB.input(TOKEN, 2), Buffer.from(JSON.stringify({ runId: "run-2", task: "round two" })));
-    await blobs.put(BLOB.toolSetup(TOKEN), toolSetupBlob(REGISTRY_TOKEN_2));
+    await blobs.put(BLOB.toolSetup(TOKEN), toolSetupBlob(REGISTRY_TOKEN_2, setupExtra));
     await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
   }
 
@@ -207,6 +216,10 @@ describe("substrate bridges, warm rounds", () => {
       failRound?: number;
       /** Called before staging round one (a cold continuation names its own run). */
       beforeStage?: () => void;
+      /** Round one's tool setup extras. */
+      setup?: { dependencyCache?: true };
+      /** The round whose stub worker calls the prepare tool and records the reply. */
+      prepareInRound?: number;
     } = {},
   ): Promise<{
     workspace: string;
@@ -219,9 +232,11 @@ describe("substrate bridges, warm rounds", () => {
     exits: Array<(code: number) => void>;
     /** Each round's worker environment, in order. */
     envs: NodeJS.ProcessEnv[];
+    /** The parsed replies of the prepare calls (prepareInRound). */
+    prepares: unknown[];
   }> {
     options.beforeStage?.();
-    const workspace = await stageRoundOne();
+    const workspace = await stageRoundOne(options.setup);
     const env = { PATH: "/usr/bin", ...(warm ? { [WARM_ROUNDS_ENV]: "1" } : {}) };
     const socketPath = join(dir, "tool", "runner.sock");
     const runnerUrl = new URL("../claude-tool-runner/main.mjs", import.meta.url).href;
@@ -272,6 +287,7 @@ describe("substrate bridges, warm rounds", () => {
     const inputs: unknown[] = [];
     const toolLists: string[][] = [];
     const envs: NodeJS.ProcessEnv[] = [];
+    const prepares: unknown[] = [];
     agent = await runAgent({
       proxyUrl,
       env,
@@ -326,6 +342,12 @@ describe("substrate bridges, warm rounds", () => {
             });
             const listed = (await call(2, "tools/list", {})).result?.tools?.map((t) => t.name) ?? [];
             toolLists.push(listed);
+            if (round === options.prepareInRound) {
+              const reply = (await call(3, "tools/call", { name: "wardby_prepare_dependencies", arguments: {} })) as {
+                result?: { content?: { text: string }[] };
+              };
+              prepares.push(JSON.parse(reply.result?.content?.[0]?.text ?? "null"));
+            }
             socket.end();
             await mkdir(join(dir, "out"), { recursive: true });
             if (round === options.failRound) return 1;
@@ -343,7 +365,7 @@ describe("substrate bridges, warm rounds", () => {
         };
       },
     });
-    return { workspace, inputs, setups, toolLists, stops, kills, exits, envs };
+    return { workspace, inputs, setups, toolLists, stops, kills, exits, envs, prepares };
   }
 
   it("runs round 2 on the same bridges: next input, resumed session, fresh tool runner, same workspace", async () => {
@@ -383,6 +405,25 @@ describe("substrate bridges, warm rounds", () => {
     // Not seeded again.
     expect(requests.filter((r) => r.includes("/seed"))).toHaveLength(1);
     // No secret value in any bridge log or route log line.
+    const logged = JSON.stringify([logs, routeLogs]);
+    for (const secret of [CAPABILITY, REGISTRY_TOKEN_1, REGISTRY_TOKEN_2]) expect(logged).not.toContain(secret);
+  });
+
+  it("an adopted round's tool runner gets workspaceReused and answers reused_workspace", async () => {
+    const { setups, toolLists, prepares } = await startBridges(true, {
+      setup: { dependencyCache: true },
+      prepareInRound: 2,
+    });
+    await agent!.uploaded;
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
+    await stageRoundTwo({ dependencyCache: true, workspaceReused: true });
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));
+    expect(parseToolSetup(setups[0])).toMatchObject({ dependencyCache: true });
+    expect(parseToolSetup(setups[0]).workspaceReused).toBeUndefined();
+    expect(parseToolSetup(setups[1]).workspaceReused).toBe(true);
+    expect(toolLists[1]).toContain("wardby_prepare_dependencies");
+    expect(prepares).toEqual([{ projects: [], reason: "reused_workspace" }]);
     const logged = JSON.stringify([logs, routeLogs]);
     for (const secret of [CAPABILITY, REGISTRY_TOKEN_1, REGISTRY_TOKEN_2]) expect(logged).not.toContain(secret);
   });

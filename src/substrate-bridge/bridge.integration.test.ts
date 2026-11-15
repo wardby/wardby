@@ -6,6 +6,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseToolSetup } from "../claude-tool-runner/command.mjs";
@@ -178,6 +179,8 @@ describe("substrate bridges, end to end without Substrate", () => {
       repositories?: StagedRepository[];
       /** Written as the setup's `repositories` as is, in place of the staged list (a malformed one). */
       setupRepositories?: unknown;
+      /** A dependency-cache run: the tool setup carries dependencyCache and diskMb. */
+      dependencyCache?: true;
     } = {},
   ): Promise<{ workspace: string; toolSetup: string; setupText: string }> {
     const seedDir = join(dir, "seed");
@@ -191,7 +194,9 @@ describe("substrate bridges, end to end without Substrate", () => {
     await exec("tar", ["-c", "-C", seedDir, "-f", join(dir, "seed.tar"), "."], {
       env: { ...process.env, COPYFILE_DISABLE: "1" },
     });
-    const setup = JSON.parse(claudeToolSetup(spec, CAPABILITY)) as { env: Record<string, string> };
+    const setup = JSON.parse(
+      claudeToolSetup(options.dependencyCache ? { ...spec, dependencyCache: true } : spec, CAPABILITY),
+    ) as { env: Record<string, string> };
     setup.env.FAKE_REGISTRY_TOKEN = REGISTRY_TOKEN;
     const toolSetup = JSON.stringify(setup);
     const put = (key: string, data: Buffer) => blobs.put(key, data);
@@ -250,9 +255,13 @@ describe("substrate bridges, end to end without Substrate", () => {
   async function startTool(
     workspace: string,
     toolSetup: string,
-    extra: Partial<Parameters<typeof runTool>[0]> & { onStop?: (signal: "stop" | "kill") => void } = {},
+    extra: Partial<Parameters<typeof runTool>[0]> & {
+      onStop?: (signal: "stop" | "kill") => void;
+      /** The tool runner's dependency cache module (a fake), in place of the image's. */
+      dependencyCacheModule?: object;
+    } = {},
   ): Promise<ToolHandle> {
-    const { onStop, ...overrides } = extra;
+    const { onStop, dependencyCacheModule, ...overrides } = extra;
     const socketPath = join(dir, "tool", "runner.sock");
     sockets.push(socketPath);
     const runnerUrl = new URL("../claude-tool-runner/main.mjs", import.meta.url).href;
@@ -260,7 +269,7 @@ describe("substrate bridges, end to end without Substrate", () => {
       startToolRunner: (
         socketPath: string,
         setup: unknown,
-        options: { workspacePath: string },
+        options: { workspacePath: string; loadDependencyCache?: () => Promise<object> },
       ) => Promise<{ close(cb?: () => void): void }>;
     };
     return runTool({
@@ -275,7 +284,10 @@ describe("substrate bridges, end to end without Substrate", () => {
       policy: FAST,
       log,
       launchRunner: (setupText) => {
-        const server = runner.startToolRunner(socketPath, parseToolSetup(setupText), { workspacePath: workspace });
+        const server = runner.startToolRunner(socketPath, parseToolSetup(setupText), {
+          workspacePath: workspace,
+          ...(dependencyCacheModule ? { loadDependencyCache: async () => dependencyCacheModule } : {}),
+        });
         void toolSetup;
         return {
           ready: server.then(() => undefined),
@@ -489,6 +501,139 @@ describe("substrate bridges, end to end without Substrate", () => {
     await writeFile(tarPath, await readBlob(BLOB.workspace(TOKEN)));
     return (await exec("tar", ["-t", "-f", tarPath])).stdout.split("\n").filter(Boolean);
   }
+
+  /**
+   * A fake dependency cache module: prepare restores node_modules/alpha after `delayMs`; seals are
+   * counted. Both calls read the run's registry token from the command environment they are given
+   * (the setup's YARN_NPM_AUTH_TOKEN, the same token as its npmrc's, and FAKE_REGISTRY_TOKEN), as
+   * the real module does, so the tokens are in use while the logs are checked for them.
+   */
+  function fakeCacheModule({ delayMs = 0 }: { delayMs?: number } = {}) {
+    const counts = { seals: 0 };
+    const tokensSeen: string[] = [];
+    const report = { projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 1, restoreMs: 1 }] };
+    const useTokens = (env: Record<string, string | undefined>) => {
+      const derived = env.YARN_NPM_AUTH_TOKEN;
+      if (derived === undefined || env.FAKE_REGISTRY_TOKEN === undefined) throw new Error("no registry token");
+      tokensSeen.push(derived, env.FAKE_REGISTRY_TOKEN);
+    };
+    const module = {
+      BUDGET_MEASURE_TIMEOUT_MS: 1_000,
+      dependencyCacheTimeLimit: () => 60_000,
+      dependencyCacheBudget: async () => ({ budgetBytes: 1024 * 1024 * 1024, usedBytes: 0 }),
+      prepareDependencies: async ({
+        workspace,
+        env,
+      }: {
+        workspace: string;
+        env: Record<string, string | undefined>;
+      }) => {
+        useTokens(env);
+        await delay(delayMs);
+        await mkdir(join(workspace, "node_modules", "alpha"), { recursive: true });
+        await writeFile(join(workspace, "node_modules", "alpha", "index.js"), "x\n");
+        return report;
+      },
+      sealUploadWindow: async ({ env }: { env: Record<string, string | undefined> }) => {
+        useTokens(env);
+        counts.seals += 1;
+        return { status: 200, confirmed: true };
+      },
+    };
+    return { module, counts, report, tokensSeen };
+  }
+
+  /**
+   * A cache run's stub worker, through both bridges: wardby_prepare_dependencies, then run_command
+   * `true`. Returns the prepare reply's JSON and the seal count seen right after the command.
+   */
+  async function cacheRun(cache: ReturnType<typeof fakeCacheModule>) {
+    const { workspace, toolSetup } = await stage({ dependencyCache: true });
+    tool = await startTool(workspace, toolSetup, { dependencyCacheModule: cache.module });
+    const agentSocket = join(dir, "agent", "runner.sock");
+    let prepared: unknown;
+    let sealsAfterCommand = -1;
+    let commandText = "";
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            const socket = connect(agentSocket);
+            socket.setEncoding("utf8");
+            const replies = new Map<number, (m: Record<string, unknown>) => void>();
+            let pending = "";
+            socket.on("data", (chunk: string) => {
+              pending += chunk;
+              let end: number;
+              while ((end = pending.indexOf("\n")) >= 0) {
+                const message = JSON.parse(pending.slice(0, end)) as { id?: number };
+                pending = pending.slice(end + 1);
+                if (message.id !== undefined) replies.get(message.id)?.(message);
+              }
+            });
+            const call = (id: number, method: string, params: unknown) =>
+              new Promise<Record<string, unknown>>((resolve) => {
+                replies.set(id, resolve);
+                socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+              });
+            await new Promise<void>((resolve, reject) => socket.once("connect", resolve).once("error", reject));
+            await call(1, "initialize", {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "stub-worker", version: "1" },
+            });
+            socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+            type ToolReply = { result: { content: { text: string }[] } };
+            const prepare = (await call(2, "tools/call", {
+              name: "wardby_prepare_dependencies",
+              arguments: {},
+            })) as ToolReply;
+            prepared = JSON.parse(prepare.result.content[0].text);
+            const command = (await call(3, "tools/call", {
+              name: "run_command",
+              arguments: { command: "true" },
+            })) as ToolReply;
+            commandText = command.result.content[0].text;
+            sealsAfterCommand = cache.counts.seals;
+            socket.end();
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "result.json"), JSON.stringify({ ok: true }));
+            return 0;
+          })(),
+        }),
+      }),
+    );
+    expect(await agent.workerExited).toBe(0);
+    await agent.uploaded;
+    return { prepared, sealsAfterCommand, commandText, toolSetup, workspace };
+  }
+
+  it("relays the worker's prepare call to the tool runner and back, before any command", async () => {
+    const cache = fakeCacheModule();
+    const { prepared, sealsAfterCommand, commandText, toolSetup, workspace } = await cacheRun(cache);
+    expect(prepared).toEqual(cache.report);
+    // Prepare ran in the tool actor's workspace.
+    expect(await readFile(join(workspace, "node_modules", "alpha", "index.js"), "utf8")).toBe("x\n");
+    expect(commandText).toContain("exit_code=0");
+    expect(sealsAfterCommand).toBe(1);
+    // The restored node_modules stays out of the upload (the setup's exclusions).
+    const entries = await collectedEntries();
+    expect(entries.some((entry) => entry.includes("node_modules"))).toBe(false);
+    expect(entries.some((entry) => entry.includes("src/hello.txt"))).toBe(true);
+    // Both calls used the run's registry token (the npmrc's, derived from the capability).
+    const derived = deriveRegistryToken(CAPABILITY);
+    expect(cache.tokensSeen).toEqual([derived, REGISTRY_TOKEN, derived, REGISTRY_TOKEN]);
+    const logged = [...logs, ...routeLogs.map((line) => JSON.stringify(line))].join("\n");
+    for (const secret of [REGISTRY_TOKEN, derived, CAPABILITY, toolSetup]) expect(logged).not.toContain(secret);
+  });
+
+  it("a prepare call that takes longer than several relay polls still answers", async () => {
+    const cache = fakeCacheModule({ delayMs: 1_500 });
+    const { prepared, sealsAfterCommand } = await cacheRun(cache);
+    expect(prepared).toEqual(cache.report);
+    expect(sealsAfterCommand).toBe(1);
+    expect(await tool!.collected).toBe("ok");
+  });
 
   it("uploads only the result bundle from .git on a git-history run (#536)", async () => {
     const { workspace, toolSetup } = await stage({ collectResultBundle: true });

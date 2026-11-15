@@ -58,6 +58,12 @@ export interface DependencyCacheStore {
   findByIdentity(identity: SnapshotIdentity): Promise<SnapshotRow | null>;
   /** The most recent snapshot in the scope whose lockHash differs (ties broken by id), or null. */
   findNearest(scope: SnapshotScope, excludeLockHash: string): Promise<SnapshotRow | null>;
+  /**
+   * Whether the run's execution environment was resumed from an earlier run (Substrate warm rounds:
+   * its SubstrateRun row is past round 1). Such a run may not read or write the cache. False with
+   * no row: Docker, Kubernetes, Codex, and every cold or round-1 launch.
+   */
+  workspaceReused(runId: string): Promise<boolean>;
   /** Whether the run already created a snapshot for this project. */
   hasUploaded(runId: string, ecosystem: string, projectPath: string): Promise<boolean>;
   /** "exists" when a snapshot with the same identity (or blob key) is already stored. */
@@ -85,6 +91,9 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
   /** Runs whose agent has the cache off (sealForModelRequest leaves them alone). */
   readonly cacheOff = new Set<string>();
 
+  /** Runs whose environment is reused (workspaceReused answers true for them). */
+  readonly reusedRuns = new Set<string>();
+
   constructor(readonly sessions = new Map<string, DependencyCacheSessionState>()) {}
 
   async session(runId: string): Promise<DependencyCacheSessionState | null> {
@@ -99,6 +108,10 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
 
   async sealForModelRequest(runId: string, now: Date): Promise<void> {
     if (!this.cacheOff.has(runId)) await this.seal(runId, now);
+  }
+
+  async workspaceReused(runId: string): Promise<boolean> {
+    return this.reusedRuns.has(runId);
   }
 
   async findByIdentity(identity: SnapshotIdentity): Promise<SnapshotRow | null> {
