@@ -525,6 +525,25 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
+  it("times out an adoption whose control plane stopped between the adoption and the phase write", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    // The adoption committed, then the process died: no resume, no phase write.
+    const adopted = await h.runs.adopt("run-1", "run-2", new Date(1_000_000 + 600_000), { specHash: "x" });
+    expect(adopted).toMatchObject({ runId: "run-2", token: h.token, phase: "provisioning" });
+    const handle: JobHandle = { backend: "substrate", id: "wardby-runs/run-2" };
+    expect((await h.launcher.status(handle)).state).toBe("pending");
+    h.setNow(1_000_000 + 600_001);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect((await h.runs.get("run-2"))!.phase).toBe("timed_out");
+    // Cleaned up like any startup failure: the actors stop now, the rest goes on removal.
+    expect([...h.api.actors.keys()].filter((key) => key.includes(h.token))).toEqual([]);
+    await h.launcher.remove(handle);
+    expect((await h.runs.get("run-2"))!.phase).toBe("removed");
+    expect(h.api.egressPolicies.size).toBe(0);
+    for (const key of (await allBlobs(h)).keys()) expect(key).not.toContain(h.token);
+  });
+
   it("sweeps a parked run past its expiry, and once at start-up (warmUp)", async () => {
     const h = await warmHarness();
     await parkedRoundOne(h);

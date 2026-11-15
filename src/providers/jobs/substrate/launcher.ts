@@ -779,8 +779,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         result: { exitCode: 0, reason: "completed", ...(artifact !== undefined ? { resultArtifact: artifact } : {}) },
       };
     }
-    // An adopting run while it provisions: the token's files are still the previous round's.
+    // An adopting run while it provisions: the token's files are still the previous round's. Its
+    // deadline still holds: a control plane that stopped between the adoption and the phase write
+    // (or a refused adopter that never relaunched) would otherwise leave it pending for good.
     if (record.phase === "provisioning" && record.token !== substrateRunToken(record.runId)) {
+      if (this.now() > record.deadlineAt.getTime()) return this.settle(record, "timed_out");
       return { status: { state: "pending" } };
     }
     if (record.phase === "collect_timeout") {
