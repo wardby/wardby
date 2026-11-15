@@ -71,6 +71,7 @@ import { Readable } from "node:stream";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
 import { isMcpToken } from "../../../coding/mcp-token.js";
 import { MAX_CODING_TIMEOUT_SEC } from "../../../coding/profile.js";
+import { MAX_PARK_TTL_SEC } from "../../../config/providers.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -226,11 +227,13 @@ export const DEFAULT_TEMPLATE_TTL_MS = 7 * 24 * 3_600_000;
 
 /**
  * The shortest template TTL the launcher uses: the longest coding run (MAX_CODING_TIMEOUT_SEC,
- * src/coding/profile.ts), plus the park TTL with warm rounds on, plus an hour. Launch, park and
+ * src/coding/profile.ts), plus the longest park TTL the setting allows (MAX_PARK_TTL_SEC, never
+ * the configured one: lowering it, or turning warm rounds off, across a restart must not sweep a
+ * template an older, longer park can still adopt), plus an hour. Launch, park and
  * adoption all bump a template, so none is removed while a run or a park from it can exist.
  */
-export function templateTtlFloorMs(parkTtlMs: number | undefined): number {
-  return MAX_CODING_TIMEOUT_SEC * 1000 + (parkTtlMs ?? 0) + 3_600_000;
+export function templateTtlFloorMs(): number {
+  return MAX_CODING_TIMEOUT_SEC * 1000 + MAX_PARK_TTL_SEC * 1000 + 3_600_000;
 }
 
 /** A run's template cannot start an actor (see ensureTemplate and neverReady): the run fails, never requeues. */
@@ -582,10 +585,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.templates = options.templates;
     this.templateReadyMs = options.templateReadyMs ?? DEFAULT_TEMPLATE_READY_MS;
     this.templateRetryMs = options.templateRetryMs ?? DEFAULT_TEMPLATE_RETRY_MS;
-    this.templateTtlMs = Math.max(
-      options.templateTtlMs ?? DEFAULT_TEMPLATE_TTL_MS,
-      templateTtlFloorMs(this.warm?.parkTtlMs),
-    );
+    this.templateTtlMs = Math.max(options.templateTtlMs ?? DEFAULT_TEMPLATE_TTL_MS, templateTtlFloorMs());
   }
 
   /** Phase A: no coding-run services on Substrate. */
@@ -863,11 +863,19 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const agent = agentActorName(token);
     const tool = toolActorName(token);
     // Each Substrate call is named when it fails, so a refusal is diagnosable from wardby's log.
-    const call = async <T>(name: SubstrateCall, fn: () => Promise<T>): Promise<T> => {
+    // An error `recoverable` names is rethrown without a report: the caller recovers from it, and
+    // reports only if that fails.
+    const call = async <T>(
+      name: SubstrateCall,
+      fn: () => Promise<T>,
+      recoverable?: (error: unknown) => boolean,
+    ): Promise<T> => {
       try {
         return await fn();
       } catch (error) {
-        this.reportCallFailure({ runId: spec.runId, substrateCall: name, errorCode: substrateErrorCode(error) });
+        if (!recoverable?.(error)) {
+          this.reportCallFailure({ runId: spec.runId, substrateCall: name, errorCode: substrateErrorCode(error) });
+        }
         throw error;
       }
     };
@@ -897,30 +905,35 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // launch fails (substrate_already_exists) and nothing ever resumes it.
       const templateOf = (name: string): ActorTemplateSpec =>
         name !== agent && templates.shape === "pair" ? templates.tool : templates.agent;
-      const createActor = (name: string, template: ActorTemplateSpec) =>
-        call("createActor", async () => {
-          try {
-            await this.api.createActor(atespace, name, template.name);
-          } catch (error) {
-            if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
+      const createActor = (name: string, template: ActorTemplateSpec, retriable = false) =>
+        call(
+          "createActor",
+          async () => {
             try {
-              await this.api.deleteEgressPolicy(atespace, name);
-              await this.api.deleteActor(atespace, name);
-            } catch {
-              throw error;
+              await this.api.createActor(atespace, name, template.name);
+            } catch (error) {
+              if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
+              try {
+                await this.api.deleteEgressPolicy(atespace, name);
+                await this.api.deleteActor(atespace, name);
+              } catch {
+                throw error;
+              }
+              await this.api.createActor(atespace, name, template.name);
             }
-            await this.api.createActor(atespace, name, template.name);
-          }
-        });
+          },
+          retriable ? (error) => error instanceof SubstrateNotFoundError : undefined,
+        );
       for (const name of actorNamesFor(token, shape)) {
         const template = templateOf(name);
         try {
-          await createActor(name, template);
+          await createActor(name, template, true);
         } catch (error) {
           // The cleanup sweep removed the template between its ensure and here (its row went just
           // before a concurrent bump): ensure it once more (recorded again) and retry, once. A second
           // NotFound fails the launch.
           if (!(error instanceof SubstrateNotFoundError)) throw error;
+          // Not reported above: only a failed retry is a failed Substrate call.
           await this.ensureTemplate(template, call);
           await createActor(name, template);
         }

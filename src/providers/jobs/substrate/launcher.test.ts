@@ -2745,13 +2745,13 @@ describe("template record and readiness", () => {
     });
 
     it("never goes below the floor", async () => {
-      expect(templateTtlFloorMs(undefined)).toBe(3 * HOUR);
-      expect(templateTtlFloorMs(HOUR)).toBe(4 * HOUR);
+      // Based on the longest park TTL the setting allows (86400 s), whatever is configured: lowering
+      // SUBSTRATE_PARK_TTL_SEC (or turning warm rounds off) across a restart never sweeps a
+      // template an older, longer park can still adopt.
+      const floor = 2 * HOUR + DAY + HOUR;
+      expect(templateTtlFloorMs()).toBe(floor);
       expect(DEFAULT_TEMPLATE_TTL_MS).toBe(7 * DAY);
-      for (const [warmRounds, floor] of [
-        [undefined, 3 * HOUR],
-        [{ parkTtlMs: HOUR, parkMax: 10 }, 4 * HOUR],
-      ] as const) {
+      for (const warmRounds of [undefined, { parkTtlMs: 60_000, parkMax: 10 }] as const) {
         const h = await makeHarness({ templateTtlMs: 60_000, ...(warmRounds ? { warmRounds } : {}) });
         const config = warmRounds ? { ...CONFIG, warmRounds: true } : CONFIG;
         const custom = toolTemplate({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE }, config);
@@ -2768,24 +2768,14 @@ describe("template record and readiness", () => {
         expect(inSubstrate(h, custom.name)).toBe(false);
         expect(await h.templates.get(custom.name)).toBeUndefined();
       }
-      // Without warm rounds, exactly past the 3 h floor (7200 s + 3600 s).
-      const h = await makeHarness({ templateTtlMs: 60_000 });
-      const custom = customTool(h.spec);
-      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
-      later(h, T0 + 3 * HOUR);
-      await h.launcher.launch(await secondRun(h, "run-2"));
-      expect(inSubstrate(h, custom.name)).toBe(true);
-      later(h, T0 + 4 * HOUR);
-      await h.launcher.launch(await secondRun(h, "run-3"));
-      expect(inSubstrate(h, custom.name)).toBe(false);
       // A TTL above the floor is used as configured.
-      const day = await makeHarness({ templateTtlMs: DAY });
+      const day = await makeHarness({ templateTtlMs: 3 * DAY });
       const dayCustom = customTool(day.spec);
       await day.launcher.launch({ ...day.spec, toolImage: CUSTOM_TOOL_IMAGE });
-      later(day, T0 + DAY);
+      later(day, T0 + 3 * DAY);
       await day.launcher.launch(await secondRun(day, "run-2"));
       expect(inSubstrate(day, dayCustom.name)).toBe(true);
-      later(day, T0 + DAY + HOUR);
+      later(day, T0 + 3 * DAY + HOUR);
       await day.launcher.launch(await secondRun(day, "run-3"));
       expect(inSubstrate(day, dayCustom.name)).toBe(false);
     });
@@ -2797,7 +2787,7 @@ describe("template record and readiness", () => {
       later(h, T0 + 2 * HOUR);
       await h.launcher.launch(await secondRun(h, "run-2"));
       expect(inSubstrate(h, custom.name)).toBe(true);
-      later(h, T0 + 3 * HOUR + 1000);
+      later(h, T0 + 27 * HOUR + 1000);
       await h.launcher.launch(await secondRun(h, "run-3"));
       expect(inSubstrate(h, custom.name)).toBe(false);
     });
@@ -2940,6 +2930,8 @@ describe("template record and readiness", () => {
       expect(inSubstrate(h, tool.name)).toBe(true);
       expect(ensured.filter((name) => name === tool.name)).toHaveLength(2);
       expect(await h.templates.get(tool.name)).toBeDefined();
+      // A NotFound the retry recovers from is not a failed Substrate call.
+      expect(h.callFailures).toEqual([]);
 
       // Gone again before the retry: the launch fails, with nothing left behind.
       const g = await makeHarness();
@@ -2954,6 +2946,10 @@ describe("template record and readiness", () => {
       await expect(g.launcher.launch(g.spec)).rejects.toBeInstanceOf(SubstrateNotFoundError);
       // The agent's, the tool's, and the tool's one retry.
       expect(creates).toBe(3);
+      // Only the failed retry is reported.
+      expect(g.callFailures).toEqual([
+        expect.objectContaining({ substrateCall: "createActor", errorCode: "substrate_not_found" }),
+      ]);
       expect((await g.runs.get(g.spec.runId))?.phase).toBe("provisioning_failed");
       await noTraceOf(g, g.spec.runId);
     });

@@ -94,7 +94,7 @@ export interface SubstrateApi {
   getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined>;
   /** A missing template is success. */
   deleteActorTemplate(atespace: string, name: string): Promise<void>;
-  /** Throws SubstrateAlreadyExistsError. */
+  /** Throws SubstrateAlreadyExistsError, or SubstrateNotFoundError when the template is gone. */
   createActor(atespace: string, name: string, template: string): Promise<void>;
   getActor(atespace: string, name: string): Promise<ActorInfo | undefined>;
   /** Throws SubstrateExhaustedError when no worker has room. */

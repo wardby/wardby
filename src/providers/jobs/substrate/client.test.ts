@@ -25,6 +25,7 @@ import {
 import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
+  SubstrateNotFoundError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -109,6 +110,18 @@ describe("createSubstrateApi (Connect adapter)", () => {
       },
     });
     await expect(api.resumeActor("s", "a")).rejects.toBeInstanceOf(SubstrateExhaustedError);
+  });
+
+  it("maps NOT_FOUND on createActor to SubstrateNotFoundError with the fixed message", async () => {
+    const api = control({
+      createActor: () => {
+        throw new ConnectError(`template ${SECRET} missing`, Code.NotFound);
+      },
+    });
+    const error = await api.createActor("s", "a", "t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SubstrateNotFoundError);
+    expect((error as Error).message).toBe("substrate_not_found");
+    expect(String((error as Error).message)).not.toContain(SECRET);
   });
 
   it("never surfaces the server's message on UNAVAILABLE", async () => {

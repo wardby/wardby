@@ -798,6 +798,9 @@ export function substrateProxyPort(env: NodeJS.ProcessEnv = process.env): number
   return proxyPort;
 }
 
+/** The longest SUBSTRATE_PARK_TTL_SEC accepts; the template sweep floor is based on it. */
+export const MAX_PARK_TTL_SEC = 86_400;
+
 export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
   const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL");
   try {
@@ -867,8 +870,12 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   }
   if (warm === "true") {
     const parkTtlSec =
-      optionalBoundedInteger(env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined, "SUBSTRATE_PARK_TTL_SEC", 60, 86_400) ??
-      3_600;
+      optionalBoundedInteger(
+        env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined,
+        "SUBSTRATE_PARK_TTL_SEC",
+        60,
+        MAX_PARK_TTL_SEC,
+      ) ?? 3_600;
     const parkMax =
       optionalBoundedInteger(env.SUBSTRATE_PARK_MAX?.trim() || undefined, "SUBSTRATE_PARK_MAX", 0, 1_000) ?? 10;
     config.warmRounds = { parkTtlSec, parkMax };

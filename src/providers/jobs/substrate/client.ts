@@ -296,6 +296,10 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.AlreadyExists]: () => {
           throw new SubstrateAlreadyExistsError("substrate_already_exists");
         },
+        // The actor's template is gone (a sweep removed it): the launcher ensures it again.
+        [Code.NotFound]: () => {
+          throw new SubstrateNotFoundError("substrate_not_found");
+        },
       },
     );
   }
