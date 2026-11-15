@@ -407,6 +407,12 @@ describe("Substrate multi-repository help", () => {
     for (const query of ["read-only repository substrate", "substrate read-only repository"]) {
       expect(top3(query), query).toContain("multi-repository-runs");
     }
+    expect(top3("repositories")).toContain("multi-repository-runs");
+    for (const query of ["multi-repository", "extra repositories"]) {
+      const ids = searchHelp(catalog, query).map((r) => r.page.id);
+      expect(ids.indexOf("multi-repository-runs"), query).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf("multi-repository-runs"), query).toBeLessThanOrEqual(ids.indexOf("job-launcher-substrate"));
+    }
   });
 });
 

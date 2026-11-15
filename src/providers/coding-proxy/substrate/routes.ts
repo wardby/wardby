@@ -174,8 +174,6 @@ const DEFAULT_LAYOUT: SubstrateRunLayout = { shape: "pair" };
 const RUN_PATH = /^\/substrate\/runs\/(wr-[0-9a-f]{20})\/(.+)$/;
 const CHANNEL_PATH = /^channels\/(c[0-9]{1,9})\/(lines|from-tool)$/;
 const REPO_PATH = /^repos\/([^/]+)\/(seed|workspace)$/;
-/** A `.` or `..` segment, plain or percent-encoded, in the raw request path: URL parsing would resolve it. */
-const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
 
 function match(method: string, rest: string): Matched | undefined {
   const repo = REPO_PATH.exec(rest);
@@ -551,9 +549,9 @@ export function createSubstrateRoutes(
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
     // URL parsing resolves dot segments (`repos/%2e%2e/workspace` → `workspace`), turns `\` into `/`
     // and re-encodes characters, so a path it changed in any way could reach a route the caller did not
-    // name: such a request is unmatched (404, no layout lookup). The dot-segment check stays as well.
+    // name: such a request is unmatched (404, no layout lookup). URL parsing resolves a plain or percent-encoded `.`/`..` segment, so the comparison covers it.
     const rawPath = (request.url ?? "/").split(/[?#]/, 1)[0];
-    const found = rawPath !== url.pathname || DOT_SEGMENT.test(rawPath) ? null : RUN_PATH.exec(url.pathname);
+    const found = rawPath !== url.pathname ? null : RUN_PATH.exec(url.pathname);
     const matched = found ? match(request.method ?? "", found[2]) : undefined;
     const token = found?.[1] ?? "unknown";
     const route = matched?.name ?? "unmatched";

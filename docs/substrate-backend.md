@@ -72,9 +72,15 @@ Docker and Kubernetes ones.
   proxy accepts the `x-api-key` header on the Responses route only when no
   `Authorization` header is present, and serves the routes the Codex actor
   uses to hold the workspace. An older proxy refuses those requests.
-- **The `20261121000000_substrate_codex_shape` migration**, applied with
-  `prisma migrate deploy` (`npm run prisma:migrate`) before the new control
-  plane and proxy start, as for any upgrade that ships a migration.
+- **This release's migrations**, applied with `prisma migrate deploy`
+  (`npm run prisma:migrate`) before the new coding proxy and control plane
+  start. Upgrade in this order:
+  1. Apply `20261121000000_substrate_codex_shape` and
+     `20261122000000_substrate_repositories`. The new proxy reads the
+     `repositories` column on every Substrate request, with or without extra
+     repositories, so a proxy started before it exists fails every run.
+  2. Start the new coding proxy.
+  3. Start the new control plane.
 
 ### Images
 
@@ -258,9 +264,15 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
 - **Warm rounds.** A run with extra repositories never keeps or resumes a warm
   round: every round starts fresh (see
   [When a round starts fresh](#when-a-round-starts-fresh)).
-- **Upgrade the coding proxy first.** These runs need this release's coding
+- **Upgrade the coding proxy before the control plane.** These runs need this release's coding
   proxy and Substrate bridge images. An older proxy has no per-repository
   routes, so such a run fails at start with `substrate_collect_failed`.
+- **Bridge images.** The bridge images must also be this release or later. An
+  older bridge ignores `repositories`: read extras are missing, and write
+  extras end `failed(workspace)`.
+- **First start.** A run with extra repositories uses its own actor template
+  per image and size, so the first such run builds that template's golden
+  snapshot and starts more slowly.
 - **Cleanup.** If a run's stored repository list cannot be read when the run is
   removed, the control plane logs the warning
   `substrate_run_repositories_unreadable` (the run id only) and the extras'

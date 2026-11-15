@@ -22,7 +22,7 @@ export interface HolderSetupRepository {
 
 /**
  * The spec's extras in spec order, or undefined for a spec without any. `historyPaths` are the
- * staged input's gitHistory.repositories paths (inputHistoryPaths); only a write extra collects a
+ * staged input's gitHistory.repositories paths (inputGitHistory); only a write extra collects a
  * result bundle, since a read one is never collected.
  */
 export function holderSetupRepositories(

@@ -3,7 +3,7 @@ id: multi-repository-runs
 title: Several repositories in one coding run (read-only and writable)
 summary: Give one coding agent a default set of extra repositories, writable or read-only, mounted at /repos/<name>; choose them per run with repositories, and see how pull requests, follow-ups and failures work.
 audience: operator
-tags: [substrate, coding-agents, multiple repositories, read-only repository, link_repository, inDefaultSet]
+tags: [substrate, multi-repository, multiple repositories, extra repositories, link_repository, repositories]
 appliesTo: ">=0.9.13"
 ---
 

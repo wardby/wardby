@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp, repositories, multi-repository]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images, mcp, repositories, multi repository]
 appliesTo: ">=0.9.15"
 ---
 
@@ -62,9 +62,15 @@ run that needs a feature the Substrate backend lacks fails with
    `NODE_EXTRA_CA_CERTS` on the proxy to the CA bundle from the
    `servicedns.podcert.ate.dev` ClusterTrustBundle.
 
-Run the coding proxy of the same release before sending Codex runs, and apply
-the `20261121000000_substrate_codex_shape` migration (`prisma migrate deploy`)
-before the new control plane and proxy start.
+Run the coding proxy of the same release before sending Codex runs. When you
+upgrade, go in this order:
+
+1. Apply the `20261121000000_substrate_codex_shape` and
+   `20261122000000_substrate_repositories` migrations
+   (`prisma migrate deploy`). The new proxy reads the `repositories` column on
+   every Substrate request, so it must exist before the proxy starts.
+2. Start the new coding proxy.
+3. Start the new control plane.
 
 ## MCP tools
 
